@@ -28,6 +28,10 @@ _Avoid_: Clone(来源不止 git), Copy
 状态:Library 条目存在,但其目标不可用 —— Link 来源的 skill 源目录被删除/移动,或 Activation 指向已消失的 Library 条目。
 _Avoid_: Missing, Dangling, 失效(叙述可用,命名用 Broken)
 
+**Modified**:
+状态:Install 来源的 skill 在安装或最近一次更新后被本地改动,当前内容不再等同于已记录的安装内容。长期开发中的 skill 应使用 Link,而不是维持 Modified。
+_Avoid_: Dirty, Locally Modified
+
 **Remove**:
 把一个 Managed skill 从 Library 里拿掉的动作。对 Link 来源的 skill 只是断开引用(原地实体不动);对 Install 来源的 skill 是否删除实体,由「符号链接策略与冲突规则」决策。
 _Avoid_: Delete(不暗示物理删除), Eject, Uninstall
