@@ -9,7 +9,7 @@
 | **Claude Code** | 个人 `~/.claude/skills/<name>/`;项目 `.claude/skills/<name>/`(含父目录上溯与嵌套 monorepo 发现);plugin `<plugin>/skills/`;另有 enterprise(managed settings)与 bundled | `SKILL.md`(YAML frontmatter + Markdown) | 启动扫描 + 目录 watch 热加载(新增顶层 skills 目录需重启);嵌套 `.claude/skills` 按需发现 | frontmatter `disable-model-invocation` / `user-invocable`;settings `skillOverrides`;权限规则 `Skill(name)` | enterprise > personal > project > bundled;plugin 用 `plugin:skill` 命名空间隔离;skill 与 command 同名时 skill 优先 | **条目级软链官方明确支持并去重**;历史上有整目录软链回归(#38051)与自动更新删软链(#50052,未修复确认);嵌套/dangling 行为无官方说明 | 官方文档 + CHANGELOG + 多个 issue + 本机观察(闭源,无源码) |
 | **Codex (OpenAI)** | 用户 `~/.agents/skills`(新)+ `$CODEX_HOME/skills`(即 `~/.codex/skills`,deprecated 但兼容);项目 `$CWD` 至仓库根每级 `.agents/skills`;管理员 `/etc/codex/skills`;内建 `~/.codex/skills/.system`(启动时自动安装) | `SKILL.md`(name/description 必需)+ 可选 `agents/openai.yaml` | 启动时遍历各 root:深度 ≤6、≤2000 目录、≤20000 条目;progressive disclosure | `config.toml` 中 `[[skills.config]] path=… enabled=false`;`openai.yaml` 的 `allow_implicit_invocation` | 按 canonicalize 后路径做身份去重(同一目标多处可达只加载一次) | **跟随:User/Repo/Admin 作用域 `DirectorySymlinkPolicy::Follow`,System 作用域 Ignore**;遍历错误(含 dangling)收集为 warning 不中断;官方文档明示支持软链 skill 目录;嵌套链未单独验证 | **官方源码**(loader.rs/discovery.rs)+ 官方文档 + issue #8369/#8943 |
 | **Gemini CLI** | 用户 `~/.gemini/skills/` 或别名 `~/.agents/skills/`;工作区 `.gemini/skills/` 或别名 `.agents/skills/`(需信任文件夹);extension 附带;builtin(包内) | `SKILL.md`(name/description) | 会话开始扫描;glob 模式 `['SKILL.md','*/SKILL.md']`,即**只下钻一层**(深度 ≤2) | `/skills disable\|enable`(默认 user scope,`--scope workspace`)、`/skills list`、`/skills reload`;CLI `gemini skills install/uninstall`;激活时有 consent 弹窗 | builtin < extension < user < workspace;同 tier 内 `.agents` 别名优先于 `.gemini` | **跟随(事实支持)**:官方 `/skills link` 命令本身就是往 skills 目录建 `fs.symlink(dir)`;本地实验(glob 13.0.6)证实条目软链、嵌套链、指向树外目标均可发现,dangling 静默跳过,skills 根目录本身可为软链 | 官方源码(skillLoader/skillUtils)+ 本地库行为实验(嵌套/dangling 为实验结论,非官方承诺) |
-| **Cursor** | 项目 `.cursor/skills/`、`.agents/skills/`;用户 `~/.cursor/skills/`、`~/.agents/skills/`;并兼容加载 `.claude/skills/`、`.codex/skills/`(含用户级) | `SKILL.md`(name 须与父目录同名,description 必填;可选 `paths`、`disable-model-invocation`、`metadata`) | 启动时自动发现;**递归** walk skills root,任意深度的 `SKILL.md` 都会拾取;嵌套 skill 自动限定作用范围 | frontmatter `disable-model-invocation`(退化为显式 `/skill-name`);`paths` 限定触发文件 | 文档未明确跨目录同名优先级 | **未验证**:官方文档未提软链,Cursor 闭源,无一手证据 | 仅官方文档(目录/格式);软链行为无一手证据 |
+| **Cursor** | 项目 `.cursor/skills/`、`.agents/skills/`;用户 `~/.cursor/skills/`、`~/.agents/skills/`;并兼容加载 `.claude/skills/`、`.codex/skills/`(含用户级) | `SKILL.md`(name 须与父目录同名,description 必填;可选 `paths`、`disable-model-invocation`、`metadata`) | 启动时自动发现;**递归** walk skills root,任意深度的 `SKILL.md` 都会拾取;嵌套 skill 自动限定作用范围 | frontmatter `disable-model-invocation`(退化为显式 `/skill-name`);`paths` 限定触发文件 | 文档未明确跨目录同名优先级 | **实证跟随**:项目级条目软链、嵌套链与 skills 根目录软链均加载;dangling 静默跳过;名称错配时以 frontmatter `name` 注册 | 官方文档 + Cursor 3.12.17 本机 UI 实验(ticket #13) |
 | **opencode** | 项目 `.opencode/skill(s)/<name>/`;全局 `~/.config/opencode/skill(s)/<name>/`;**外部自动加载** `~/.claude/skills`、`~/.agents/skills`(全局)及从 cwd 上溯至 worktree 的项目级 `.claude/skills`、`.agents/skills`;config `skills.paths` 自定义目录、`skills.urls` 远程 | `SKILL.md`(name/description 必填 + license/compatibility/metadata;name 须匹配目录名) | `Glob.scan`(npm glob);external 模式 `skills/**/SKILL.md`,opencode 模式 `{skill,skills}/**/SKILL.md`,自定义 `**/SKILL.md` | runtime flags 可禁用 external/claude skills;未发现 per-skill 开关 | 同名记 warning,**后扫描者覆盖先扫描者**(扫描顺序:external → opencode config → 自定义 paths) | **意图上跟随**(源码恒传 `follow: true`);但 issue #18848(截至调研日 open 未修复)报告 git worktree sandbox 下 `.claude/skills` 为软链时项目级 skills 不发现(根因:glob 不下钻 + 沙盒会话状态隔离) | **官方源码**(index.ts/glob.ts)+ 未修复 issue + 本地库行为实验 |
 
 补充说明:`~/.agents/skills/` 已成为跨 agent 事实标准共享层 —— Codex(用户层主目录)、Gemini CLI(别名)、Cursor(原生目录)、opencode(外部自动加载)均读取它(见各节引用)。本机该目录同时存在真实目录与指向各仓库的软链(见「本机只读观察」)。
@@ -93,7 +93,7 @@
 
 **清单格式.** 目录 + `SKILL.md`,YAML frontmatter:`name`(必须与父文件夹同名)与 `description` 必填;可选 `paths`、`disable-model-invocation`、`metadata`。([Cursor 文档](https://cursor.com/docs/context/skills))
 
-**软链行为(硬指标)**:**无一手证据,未验证。** 官方文档未提软链;Cursor 闭源无法查源码;未找到可信的官方 issue/CHANGELOG 一手记录。对 Skill Man 的含义见第 3 节。
+**软链行为(硬指标).** 官方文档仍未提软链,Cursor 闭源也无源码证据;但已在 **Cursor 3.12.17(arm64)** 上用项目级 `.cursor/skills` 夹具完成 UI 实证(ticket [#13](https://github.com/RookieZoe/skill-man/issues/13),详见 §6.5):条目级软链与嵌套链均能出现在 `/` 技能列表并成功调用;`.cursor/skills` 根目录本身为软链时也能加载;dangling 条目静默跳过且不影响控制组;软链条目目录名与 frontmatter `name` 错配时,以 **frontmatter `name`** 注册。该结论是特定版本实测,不是 Cursor 的稳定 API 承诺。
 
 ### 2.5 opencode(开源 TypeScript,仓库 anomalyco/opencode)
 
@@ -127,8 +127,8 @@
 2. `skillsDirs`:目录列表,每项含 `scope`(personal / project / builtin / admin)、`path`(支持 `~` 与 per-project 相对路径)、`enabled`。注意多家有**别名双目录**(如 `.gemini/skills` 与 `.agents/skills`)与**多层共存**,单字段单目录不够。
 3. `manifestFile`:清单文件名(本调研中全部为 `SKILL.md`)+ frontmatter 约束(`name` 是否必须与目录同名:Cursor、opencode 要求;Claude/Gemini 不强制)。
 4. `discovery` 语义:启动扫描 or 文件 watch(影响「改完是否要提示重启」);**扫描深度**(Codex ≤6 层、Gemini 仅 1 层子目录、Cursor 递归、Claude 直接子目录 + 嵌套按需)—— 决定 Skill Man 应把 skill 放在第几层。
-5. `symlinkPolicy` 枚举:`follows`(官方支持)/ `not-followed`(确认不跟随)/ `unknown`(未验证),并附**证据等级**(源码/文档/issue/实验/无)与**嵌套链、dangling 行为**两个子项。
-6. `installMethod` 能力:`symlink` | `copy` —— 由 5 推导:`unknown` 或 `not-followed` 时只能拷贝安装,并在 UI 标注「该 agent 以拷贝方式安装,源更新需同步」。
+5. `symlinkPolicy` 枚举:`follows`(官方支持或实证跟随)/ `not-followed`(确认不跟随)/ `unknown`(未验证),并附**证据等级**(源码/文档/issue/实验/无)与**嵌套链、dangling 行为**两个子项。
+6. `installMethod` 能力:`symlink` | `copy` —— 由 5 推导:`unknown` 或 `not-followed` 时只能拷贝安装;实证但无官方承诺(当前 Cursor)可默认软链,同时通过 Activation 健康检查兜底并在适配器中保留版本证据。
 7. `conflictRule`:同名覆盖方向(层级优先级/后扫描覆盖/命名空间隔离),用于预测安装后果。
 8. `nativeToggle`:agent 原生启用/禁用机制(Codex `config.toml [[skills.config]] enabled`、Gemini `/skills disable`、Claude `skillOverrides`)—— 有原生开关时,Skill Man 的「禁用」应优先写原生配置而非删软链。
 
@@ -137,9 +137,9 @@
 - **Claude Code:软链可用但有运维风险。** 条目级软链是官方文档支持的能力且本机实测工作;但 [#50052](https://github.com/anthropics/claude-code/issues/50052) 报告**自动更新会静默删除 `~/.claude/skills/` 下的软链**(未修复确认,closed as not planned)。Skill Man 需要「软链健康检查 + 一键重建」兜底,且**不要**把 `~/.claude/skills` 整目录做成软链([#38051](https://github.com/anthropics/claude-code/issues/38051) 整目录软链回归史),只建条目级软链。
 - **Codex:软链友好。** 源码明确 User/Repo/Admin 跟随软链、按 canonicalize 去重、dangling 只告警;可直接用软链方案。注意 `~/.codex/skills/.system` 是 Codex 每次启动自动重装的内建缓存,**不要往里装东西**;用户层应优先装 `~/.agents/skills`(新主位置)。
 - **Gemini CLI:软链即官方安装方式。** `/skills link` 本身就建 `fs.symlink`,软链方案最稳妥;但发现**只下钻一层**,软链必须直接放在 skills 根目录下(不要嵌套到子目录里);workspace 层有 trust 门槛。
-- **Cursor:软链未验证 → 默认拷贝安装。** 在拿到一手证据前,对 Cursor 目录使用拷贝(或提供「实验性软链」开关并自检发现结果);它同时读 `.cursor/skills` 与 `.agents/skills` 及 `.claude`/`.codex` 兼容目录,拷贝目标的选择会影响多 agent 共享策略。
+- **Cursor:3.12.17 实证软链可用。** 项目级条目软链、嵌套链与根目录软链均加载,dangling 静默跳过;因此 Skill Man 可对 Cursor 使用与其他 Agent 一致的条目级 Activation,无需默认拷贝。注意 Cursor 以 frontmatter `name` 注册,软链条目名不能重命名 Skill;且结论无官方承诺,仍需 Activation 健康检查与适配器版本证据兜底。
 - **opencode:软链跟随,但 worktree sandbox 场景有未修复缺陷。** 常规场景可软链;若用户项目用 git worktree + 提交到仓库的 `.claude/skills` 软链,需提示 [#18848](https://github.com/anomalyco/opencode/issues/18848) 风险。
-- **通用建议:** `~/.agents/skills/` 已被 Codex/Gemini/Cursor/opencode 共同读取,是「一次安装、多 agent 可见」的天然共享层;但 Claude Code **不读** `~/.agents/skills`(需往 `~/.claude/skills` 建条目软链),且各 agent 对 `~/.agents/skills` 内软链的容忍度不同(Codex 跟随、Gemini 实验可发现、Cursor 未验证),Skill Man 把真源放在何处(如 `~/.agents/skills` 自身还是应用私有目录再分发)需要按上表逐 agent 决策。
+- **通用建议:** `~/.agents/skills/` 已被 Codex/Gemini/Cursor/opencode 共同读取,是「一次安装、多 agent 可见」的天然共享层;但 Claude Code **不读** `~/.agents/skills`(需往 `~/.claude/skills` 建条目软链)。四家对该层条目软链均有源码/官方命令/本机实验支持;但为了按 Agent 独立 Enable / Disable,ADR-0005 仍把共享层仅作为 legacy 扫描源,受管 Activation 分别落在各 Agent 私有目录。
 
 ## 4. 本机只读观察(2026-07-20,未做任何修改)
 
@@ -157,7 +157,7 @@
 
 1. ~~Claude Code 嵌套软链链与 dangling 软链行为~~ → **已实证(§6.2)**:嵌套链跟随;dangling 静默跳过。
 2. **Claude Code #38051(整目录软链回归)与 #50052(自动更新删软链)的最终修复状态** —— 项目级整目录软链已实证**可加载**(§6.2,#38051 形状在项目级不复现);**用户级 `~/.claude/skills` 整目录软链未实测**(实验约束:不动用户真实目录);#50052 自动更新删软链只能长时间观察,仍开。
-3. **Cursor 的一切软链行为** —— 本机未安装 Cursor,无法实测;已产出**给人类的验证清单**(§6.5),待有 Cursor 的环境执行。
+3. ~~Cursor 的一切软链行为~~ → **已由人类实证(§6.5,ticket #13)**:Cursor 3.12.17 的项目级条目软链、嵌套链和 skills 根目录软链均加载;dangling 静默跳过;名称错配时按 frontmatter `name` 注册。用户级目录未单独实测,且行为没有官方承诺。
 4. ~~Codex 嵌套软链链的精确行为、dangling 的 warning 文案~~ → **已实证(§6.3)**:嵌套链跟随;**dangling 静默跳过,headless 下未观察到 warning**(与源码推断的 warning 不一致,或仅 TUI 展示)。
 5. **Gemini CLI 的 dangling/嵌套软链结论来自本地 glob 13.0.6 实验** —— gemini-cli 实际依赖的 glob 版本未逐一核对(其 `package.json` 未在本调研中锁定),实验结论非官方承诺;`/skills link` 建软链这一事实为源码证据。
 6. ~~opencode 在 Bun 运行时下 npm glob 的实际行为~~ → **已实证(§6.4)**:本机 opencode 1.18.3 条目软链/嵌套链/根目录软链均跟随;**#18848 的 worktree 场景在该版本手工复现未命中**(issue 所述 opencode 自建沙盒会话隔离场景未单独验证)。
@@ -179,6 +179,7 @@
 | Claude Code 2.1.215 | ✅ 加载 | ✅ 加载(中间环在 skills 根内外均可) | ✅ 加载 | 静默跳过;调用报 Unknown command;不影响其他条目 | ✅ 加载(**项目级**;用户级未测) | 按 canonical 目标去重,**字典序靠前的条目名保留**(2/2 观察),其余报 Unknown command |
 | Codex 0.136.0-alpha.2 | ✅ 跟随 | ✅ 跟随 | (未单测) | 静默跳过;headless 未见任何 warning(stderr 0 行) | (未单测) | 按 canonical 目标去重;**展示名取自 frontmatter `name`,条目(软链)名无关紧要**;清单中路径显示为解析后真实路径 |
 | opencode 1.18.3 | ✅ 跟随(外部 `.claude/skills` 与原生 `.opencode/skills` 均) | ✅ 跟随(内容被读取,撞名 WARN 佐证) | (未单测) | 静默跳过 | ✅ 跟随(主仓与手工 git worktree 均正常,**#18848 不复现**) | 按 **frontmatter `name`** 去重,后扫描者覆盖,WARN `duplicate skill name`;**name≠目录名被静默容忍** |
+| Cursor 3.12.17 | ✅ 加载 | ✅ 加载 | (未单测) | 静默跳过;不影响其他条目 | ✅ 加载(项目级) | 名称错配时以 **frontmatter `name`** 注册;跨目录同名赢家未测 |
 
 ### 6.2 Claude Code 详录(项目级,临时目录)
 
@@ -218,19 +219,25 @@
 - **dangling:静默跳过**,无 WARN。
 - **skills 根目录软链 + git worktree(#18848 场景):不复现。** 主仓与 `git worktree` 中 `wf-wt` 均正常发现(location 在各自检出路径下)。#18848 所述「opencode 自建沙盒 worktree 会话」变体未单独验证 —— 保守做法:对依赖该场景的用户仍提示该 issue 未关闭,但常规 worktree 使用在 1.18.3 已无障碍。
 
-### 6.5 Cursor:给人类的验证清单(本机未安装,HITL)
+### 6.5 Cursor 详录(3.12.17,人类 UI 实证,ticket [#13](https://github.com/RookieZoe/skill-man/issues/13))
 
-在装有 Cursor 的机器上执行(全程在临时目录与新开窗口内进行,结束后清理):
+环境:Cursor **3.12.17**,commit `0fb762053c34788bb7760d5673f8a6d4c8589d50`,arm64。夹具全部位于 `/tmp/cursor-skill-exp/`,使用项目级 `.cursor/skills`,未改动用户目录。观测方式:用 Cursor 打开临时项目,在 Agent 聊天输入 `/` 检查技能列表,再显式调用并确认唯一 token。
 
-1. **夹具**:`mkdir -p /tmp/cursor-skill-exp/real-skill`,写入 `SKILL.md` —— frontmatter `name: real-skill`、`description: cursor symlink probe`,正文 `Reply with exactly: CURSOR_TGT_OK`。
-2. **项目级条目软链**(首选,不碰用户目录):新建空项目 `/tmp/cursor-skill-exp/proj`,`mkdir -p .cursor/skills`,然后 `ln -s /tmp/cursor-skill-exp/real-skill .cursor/skills/probe-link`。**注意 Cursor 要求 frontmatter `name` 与父目录同名**:软链条目可见名是 `probe-link` 而 name 是 `real-skill` —— 错配本身就是要测的点;另做对照组 `ln -s /tmp/cursor-skill-exp/real-skill .cursor/skills/real-skill`(可见名与 name 一致)。
-3. **观测**:用 Cursor 打开 `proj`,重启后开 Agent 聊天,输入 `/` 看技能列表有无 `real-skill`(或 `probe-link`);再直接让它「use the real-skill skill」看是否执行(返回 `CURSOR_TGT_OK` 即加载)。
-4. **边界组**:嵌套链(`probe-chain` → `probe-link` → 目标)、dangling(指向不存在目标)、`.cursor/skills` 整目录软链 —— 逐一观察「列表是否出现 / 调用是否执行 / 有无报错」。
-5. **记录**:把每组结果(版本号 + 出现/未出现 + 报错原文)贴到 issue [#11](https://github.com/RookieZoe/skill-man/issues/11) 或后续 Cursor 验证 ticket;清理 `/tmp/cursor-skill-exp`。
+- **控制组:**真实目录 `wf-control` 正常出现在列表并返回 `CURSOR_CONTROL_OK`。
+- **条目级软链:**`wf-entry` → 树外真实目录,正常出现在列表并返回 `CURSOR_ENTRY_OK`。结论:Cursor 跟随项目级条目软链。
+- **嵌套链:**`wf-chain` → `mid-chain` → 树外真实目录,正常出现并返回 `CURSOR_CHAIN_OK`。结论:Cursor 跟随 `link → link → real`。
+- **名称错配:**软链条目名 `wf-visible`,目标 frontmatter `name: wf-target`。列表显示 **`wf-target`**,调用返回 `CURSOR_MISMATCH_OK`;`wf-visible` 不作为技能名。结论:Cursor 的注册身份取 frontmatter `name`,而非软链条目目录名。
+- **dangling:**`wf-dangling` 指向不存在目标,列表中不出现、无可见报错,控制组仍正常。结论:dangling 静默跳过且不影响其他 Skill。
+- **skills 根目录软链:**另一个临时项目的 `.cursor/skills` 整体指向树外 `root-skills`,其中 `wf-rooted` 正常出现并返回 `CURSOR_ROOT_OK`。结论:Cursor 3.12.17 跟随项目级 skills 根目录软链。
+
+**边界:**本实验未改 `~/.cursor/skills` 或 `~/.agents/skills`,因此用户级行为未单独验证;未测试相对软链、循环链及跨作用域同名优先级。Cursor 闭源且官方文档未承诺软链行为,升级后仍应靠 Skill Man 的 Activation 健康检查发现回归。
+
+**对 Skill Man 的含义:**Cursor 适配器可由“默认拷贝”改为**条目级 Activation 软链**;名称校验必须同时检查目录名与 frontmatter `name`,不能试图仅靠软链条目名重命名 Skill;Broken Activation 仍需 Skill Man 自检,Cursor 不会主动报错。
 
 ### 6.6 对 §3 风险清单的修订点
 
 - **Claude Code 去重按目标、赢家按名字典序** → §3「软链健康检查」之外,Conflict 检测必须按 canonical 目标判重。
-- **Codex 身份=canonical 路径 + frontmatter name**;**opencode 身份=frontmatter name(目录名校验未强制)**;**Claude Code 身份=条目目录名** —— 三家「skill 身份」语义不同,CONTEXT.md 的「身份=目录名」在映射到各 agent 时需按本表翻译。
+- **Codex 身份=canonical 路径 + frontmatter name**;**opencode/Cursor 身份=frontmatter name**;**Claude Code 身份=条目目录名** —— 各家「skill 身份」语义不同,CONTEXT.md 的「身份=目录名」在映射到 agent 时需按本表翻译,并对 Cursor/opencode 的 name 错配给兼容性警告。
+- **Cursor 软链风险下调**:3.12.17 实证条目/嵌套/根目录软链可用,可由默认拷贝改为条目级 Activation;因无官方承诺,保留版本证据与健康检查。
 - **opencode worktree 风险下调**:1.18.3 常规 worktree 可用,仅沙盒会话变体存疑。
-- **dangling 三家全部静默** → Broken 检测与「一键重建」只能由 Skill Man 自检,无 agent 侧信号可依赖。
+- **dangling 四家(Claude Code/Codex/opencode/Cursor)全部静默** → Broken 检测与「一键重建」只能由 Skill Man 自检,无 agent 侧信号可依赖。
