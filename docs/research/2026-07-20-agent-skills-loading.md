@@ -153,13 +153,84 @@
 
 **信息时效.** 全部内容截至 2026-07-20。源码证据取自当日各仓库 `main` HEAD:openai/codex `3dd3c5d`,google-gemini/gemini-cli `acae712`,anomalyco/opencode `67caf89`。Claude Code 文档引用 code.claude.com 当日版本(文中特性标注至 v2.1.20x)。npm `glob` 实验版本 13.0.6(Node v22.20.0,macOS)。
 
-**未验证/存疑清单:**
+**未验证/存疑清单(2026-07-20 晚更新:第 1、2、4、6 项已由 §6 实证覆盖,第 3 项产出人类验证清单):**
 
-1. **Claude Code 嵌套软链链与 dangling 软链行为** —— 无官方一手说明(闭源);仅有 issue 侧面信息。
-2. **Claude Code #38051(整目录软链回归)与 #50052(自动更新删软链)的最终修复状态** —— 两个 issue 均 closed 但无官方回应记录,无法确认是否已修;本机当前版本条目级软链正常,但整目录软链未实测(只读约束)。
-3. **Cursor 的一切软链行为** —— 无一手证据,未验证。
-4. **Codex 嵌套软链链的精确行为、dangling 的 warning 文案** —— 源码推断(错误收集为 warning),未实跑验证。
+1. ~~Claude Code 嵌套软链链与 dangling 软链行为~~ → **已实证(§6.2)**:嵌套链跟随;dangling 静默跳过。
+2. **Claude Code #38051(整目录软链回归)与 #50052(自动更新删软链)的最终修复状态** —— 项目级整目录软链已实证**可加载**(§6.2,#38051 形状在项目级不复现);**用户级 `~/.claude/skills` 整目录软链未实测**(实验约束:不动用户真实目录);#50052 自动更新删软链只能长时间观察,仍开。
+3. **Cursor 的一切软链行为** —— 本机未安装 Cursor,无法实测;已产出**给人类的验证清单**(§6.5),待有 Cursor 的环境执行。
+4. ~~Codex 嵌套软链链的精确行为、dangling 的 warning 文案~~ → **已实证(§6.3)**:嵌套链跟随;**dangling 静默跳过,headless 下未观察到 warning**(与源码推断的 warning 不一致,或仅 TUI 展示)。
 5. **Gemini CLI 的 dangling/嵌套软链结论来自本地 glob 13.0.6 实验** —— gemini-cli 实际依赖的 glob 版本未逐一核对(其 `package.json` 未在本调研中锁定),实验结论非官方承诺;`/skills link` 建软链这一事实为源码证据。
-6. **opencode 在 Bun 运行时下 npm glob 的实际行为** —— 本地实验基于 Node;#18848 显示至少在某些环境/版本下 `follow: true` 未能下钻目录软链(或受沙盒隔离影响),该 issue 截至调研日未修复。
+6. ~~opencode 在 Bun 运行时下 npm glob 的实际行为~~ → **已实证(§6.4)**:本机 opencode 1.18.3 条目软链/嵌套链/根目录软链均跟随;**#18848 的 worktree 场景在该版本手工复现未命中**(issue 所述 opencode 自建沙盒会话隔离场景未单独验证)。
 7. **各 agent 同名冲突的完整优先级矩阵**(如 Claude Code enterprise 层细节、Codex 多 root 同名展示规则)—— 只验证了主要规则。
 8. **Amp / Windsurf / Aider 的 skills 机制** —— 无可靠一手来源,未纳入。
+
+## 6. 实证实验记录(2026-07-20,验证 ticket [#11](https://github.com/RookieZoe/skill-man/issues/11))
+
+> 对第 5 节未验证清单的第 1、2、4、6 项做实证补齐。全部实验在 `/tmp` 临时目录进行,**未改动** `~/.claude/skills`、`~/.codex`。实验脚本与原始输出当日存于 `/tmp/wf-symlink-exp/`(临时目录,重启即失;本节为结论性记录)。
+
+**环境.** macOS(Darwin 25.5.0);Claude Code **2.1.215**;codex-cli **0.136.0-alpha.2**(取自 `/Applications/Codex.app/Contents/Resources/codex`);opencode **1.18.3**(homebrew)。Cursor 未安装(本机无 .app / CLI)。
+
+**观测方法.** Claude Code:在临时项目 `.claude/skills` 下布置夹具,`claude -p "/<skill>"` 直接调用,skill 内容为「只回复唯一 token」,以 token/「Unknown command」判定加载与否。Codex:临时 `CODEX_HOME` + `codex debug prompt-input`,读模型可见 `<skills_instructions>` 的 Available skills 清单。opencode:`opencode debug skill` 列全部可用 skill(name + location),配 `--print-logs` 看 WARN。
+
+### 6.1 结果总表
+
+| Agent | 条目软链 | 嵌套链(link→link→real) | 相对软链 | dangling | skills 根目录整目录软链 | 同目标去重规则 |
+|---|---|---|---|---|---|---|
+| Claude Code 2.1.215 | ✅ 加载 | ✅ 加载(中间环在 skills 根内外均可) | ✅ 加载 | 静默跳过;调用报 Unknown command;不影响其他条目 | ✅ 加载(**项目级**;用户级未测) | 按 canonical 目标去重,**字典序靠前的条目名保留**(2/2 观察),其余报 Unknown command |
+| Codex 0.136.0-alpha.2 | ✅ 跟随 | ✅ 跟随 | (未单测) | 静默跳过;headless 未见任何 warning(stderr 0 行) | (未单测) | 按 canonical 目标去重;**展示名取自 frontmatter `name`,条目(软链)名无关紧要**;清单中路径显示为解析后真实路径 |
+| opencode 1.18.3 | ✅ 跟随(外部 `.claude/skills` 与原生 `.opencode/skills` 均) | ✅ 跟随(内容被读取,撞名 WARN 佐证) | (未单测) | 静默跳过 | ✅ 跟随(主仓与手工 git worktree 均正常,**#18848 不复现**) | 按 **frontmatter `name`** 去重,后扫描者覆盖,WARN `duplicate skill name`;**name≠目录名被静默容忍** |
+
+### 6.2 Claude Code 详录(项目级,临时目录)
+
+夹具:临时项目 `proj/.claude/skills/` 下 —— `wf-real`(真实目录,控制组)、`wf-entry`→树外真实目录、`wf-chain`→`wf-entry`(嵌套链)、`wf-dangling`→不存在目标;另设 `proj2/.claude/skills` 本身为软链(内含 `wf-rooted`);`proj3` 复测干净目标与去重对(`wf-aaa`/`wf-zzz` 同指一个目标)、相对软链 `wf-rel`。
+
+- **A1 控制组**:`/wf-real` → 返回 token,加载正常;同目录存在 dangling 条目不碍事。
+- **A2/A3(撞上去重的意外发现)**:`/wf-entry` → `Unknown command`,`/wf-chain` → 返回目标 token。同目标两个条目只保留一个 —— 官方文档原话「if the same target is reachable from more than one location, Claude Code loads the skill once」在此命中。
+- **C3 去重方向复测**:`wf-aaa`/`wf-zzz` 同指一个目标 → 仅 `wf-aaa` 可用。两次观察(另一次 wf-chain 胜 wf-entry)均为**字典序靠前者保留**(小样本经验法则,非官方承诺)。被去重的条目调用表现为 `Unknown command`,与「不存在」无法区分。
+- **C1/C2 干净复测**:条目软链(独占目标)、嵌套链(中间环在 skills 根之外,`wf-chain2`→`mid-link`→目标)均加载 ✅。
+- **C4 相对软链**:加载 ✅。
+- **B1 dangling**:`/wf-dangling` → `Unknown command`,无报错、无崩溃,扫描不中断(同项目其他 skill 正常)。
+- **B2 skills 根目录整目录软链(项目级)**:`proj2/.claude/skills` → 真实目录,`/wf-rooted` 正常加载 —— **#38051 的形状在项目级于 2.1.215 不复现**。注意:#38051 原报是**用户级** `~/.claude/skills`;用户级受实验约束未测,Skill Man 仍不应把任何 agent 的 skills 根目录做成软链(条目级足矣,且规避回归史)。
+
+**对 Skill Man 的含义(更新 §3)**:
+- Activation 建条目级软链即可,嵌套链/相对软链都能被跟随 —— 但按 ADR-0001 直指实体,不主动造链。
+- **去重规则是新风险**:若同一目标经两个条目名可达(如 Skill Man 的 Activation 与既有 Untracked 软链同指一源),保留的未必是 Skill Man 建的那个名 —— **Conflict 检测要按 canonical 目标判重,不能只看条目名**;且被去重者「Unknown command」,用户感知为「启用失败」。
+- dangling 无害但静默:Broken 的 Activation 在 Claude Code 里只是「叫不出来」,不会报错 —— 健康检查要靠 Skill Man 自检,不能指望 agent 提醒。
+
+### 6.3 Codex 详录(临时 CODEX_HOME,headless)
+
+夹具:`$CODEX_HOME/skills/` 下 `wf-real`(控制)、`wf-entry`→树外目标、`wf-chain`→`wf-entry`、`wf-dangling`;补充 `wf-chain2`→中间环→独占目标;去重对 `wf-aaa`/`wf-zzz` 同指目标(其 frontmatter name=wf-dup)。
+
+- **条目软链:跟随。** Available skills 列出 `wf-entry`,路径显示为**解析后真实路径**(`holding/wf-entry/SKILL.md`)。
+- **嵌套链:跟随。** 首轮 `wf-chain` 未列出,但与 `wf-entry` 同目标 —— 补独占目标的 `wf-chain2` 后正常列出,确认缺席原因是**去重**而非不跟随链。
+- **去重:按 canonical 目标路径,与源码一致;展示名取自 frontmatter `name`。** 去重对只产出一个 skill,名字是 `wf-dup`(目标 frontmatter),条目名 `wf-aaa`/`wf-zzz` 均不出现于清单 —— **软链条目名对 Codex 的技能身份无影响**。
+- **dangling:静默跳过。** `RUST_LOG=debug` 下 stderr 0 行,无 warning 落盘 —— 与源码推断(遍历错误收集为 warning)在 headless 观测面上不一致;warning 可能仅 TUI 会话内展示。**对 Skill Man:Broken Activation 在 Codex 同样无感知,需自检。**
+- 附带验证:全新 `CODEX_HOME` 首跑自动安装 `.system` 内建 skills,与源码/§2.2 一致;`~/.agents/skills` 用户层照常扫描(本机存量 skill 全部列出,软链条目显示解析后路径)。
+
+### 6.4 opencode 详录(1.18.3)
+
+夹具:`proj/.claude/skills/`(外部目录)控制/条目/嵌套链/dangling/**name≠目录名**错配;`proj2/.opencode/skills/`(原生目录)控制/条目;git 仓库提交 `.claude/skills` 为软链(mode 120000)并 `git worktree add` 出独立工作树。
+
+- **条目软链:跟随**(外部与原生目录均),location 显示为**未解析的条目路径**。
+- **嵌套链:跟随。** `wf-chain` 内容被读取 —— WARN `duplicate skill name ... existing=.../wf-chain/SKILL.md duplicate=.../wf-entry/SKILL.md` 直接佐证;撞名后「后扫描者覆盖」,`wf-entry` 保留。
+- **去重按 frontmatter `name`**:同 name 即 WARN + 覆盖,与路径无关 —— 本机全局环境实测大量此类 WARN(`~/.claude/skills` 与 `~/.agents/skills` 同指造成的「同名不同路径」),同时佐证**全局层软链也被跟随**。
+- **name≠目录名:静默容忍。** `wf-mismatch`(条目名)→ 目标(frontmatter name=real-other)以 `real-other` 注册,无警告 —— 文档「name 须匹配目录名」在 1.18.3 加载期未强制执行。**对 Skill Man:以软链条目名重命名 skill(如 Adopt 改名)对 opencode 无效 —— 它以 frontmatter name 为准。**
+- **dangling:静默跳过**,无 WARN。
+- **skills 根目录软链 + git worktree(#18848 场景):不复现。** 主仓与 `git worktree` 中 `wf-wt` 均正常发现(location 在各自检出路径下)。#18848 所述「opencode 自建沙盒 worktree 会话」变体未单独验证 —— 保守做法:对依赖该场景的用户仍提示该 issue 未关闭,但常规 worktree 使用在 1.18.3 已无障碍。
+
+### 6.5 Cursor:给人类的验证清单(本机未安装,HITL)
+
+在装有 Cursor 的机器上执行(全程在临时目录与新开窗口内进行,结束后清理):
+
+1. **夹具**:`mkdir -p /tmp/cursor-skill-exp/real-skill`,写入 `SKILL.md` —— frontmatter `name: real-skill`、`description: cursor symlink probe`,正文 `Reply with exactly: CURSOR_TGT_OK`。
+2. **项目级条目软链**(首选,不碰用户目录):新建空项目 `/tmp/cursor-skill-exp/proj`,`mkdir -p .cursor/skills`,然后 `ln -s /tmp/cursor-skill-exp/real-skill .cursor/skills/probe-link`。**注意 Cursor 要求 frontmatter `name` 与父目录同名**:软链条目可见名是 `probe-link` 而 name 是 `real-skill` —— 错配本身就是要测的点;另做对照组 `ln -s /tmp/cursor-skill-exp/real-skill .cursor/skills/real-skill`(可见名与 name 一致)。
+3. **观测**:用 Cursor 打开 `proj`,重启后开 Agent 聊天,输入 `/` 看技能列表有无 `real-skill`(或 `probe-link`);再直接让它「use the real-skill skill」看是否执行(返回 `CURSOR_TGT_OK` 即加载)。
+4. **边界组**:嵌套链(`probe-chain` → `probe-link` → 目标)、dangling(指向不存在目标)、`.cursor/skills` 整目录软链 —— 逐一观察「列表是否出现 / 调用是否执行 / 有无报错」。
+5. **记录**:把每组结果(版本号 + 出现/未出现 + 报错原文)贴到 issue [#11](https://github.com/RookieZoe/skill-man/issues/11) 或后续 Cursor 验证 ticket;清理 `/tmp/cursor-skill-exp`。
+
+### 6.6 对 §3 风险清单的修订点
+
+- **Claude Code 去重按目标、赢家按名字典序** → §3「软链健康检查」之外,Conflict 检测必须按 canonical 目标判重。
+- **Codex 身份=canonical 路径 + frontmatter name**;**opencode 身份=frontmatter name(目录名校验未强制)**;**Claude Code 身份=条目目录名** —— 三家「skill 身份」语义不同,CONTEXT.md 的「身份=目录名」在映射到各 agent 时需按本表翻译。
+- **opencode worktree 风险下调**:1.18.3 常规 worktree 可用,仅沙盒会话变体存疑。
+- **dangling 三家全部静默** → Broken 检测与「一键重建」只能由 Skill Man 自检,无 agent 侧信号可依赖。
