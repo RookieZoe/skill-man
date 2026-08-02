@@ -1,0 +1,73 @@
+{
+  "snapshotVersion": 7,
+  "skills": [
+    {
+      "id": "skill-authoring",
+      "directoryName": "skill-authoring",
+      "displayName": "Skill authoring",
+      "description": "A precise workflow for building maintainable Agent Skills.",
+      "sourceKind": "link",
+      "health": "healthy",
+      "finalEntityPath": "/Users/zoe/Codes/AI/skills/skill-authoring",
+      "sourceLabel": "Linked local folder · ~/Codes/AI/skills/skill-authoring",
+      "frontmatterName": "skill-authoring",
+      "lastActivityAt": "2026-07-20T10:42:00Z",
+      "skillMarkdown": "# Skill authoring\n\nBuild focused Agent Skills with explicit triggers, boundaries, and verification.\n\n## Workflow\n\n1. Define the outcome.\n2. Keep the interface narrow.\n3. Verify the artifact.\n"
+    },
+    {
+      "id": "media-xray",
+      "directoryName": "media-xray",
+      "displayName": "Media X-ray",
+      "description": "Transcribes and inspects local audio and video.",
+      "sourceKind": "remote_install",
+      "health": "modified",
+      "finalEntityPath": "/Users/zoe/Library/Application Support/skill-man/skills/media-xray",
+      "sourceLabel": "Installed from Git · RookieZoe/media-xray",
+      "frontmatterName": "media-xray",
+      "lastActivityAt": "2026-07-19T14:08:00Z",
+      "skillMarkdown": "# Media X-ray\n\nTranscribe local audio or video and return source-grounded notes.\n"
+    },
+    {
+      "id": "legacy-audit",
+      "directoryName": "legacy-audit",
+      "displayName": "Legacy audit",
+      "description": "Checks an existing skills directory before Adopt.",
+      "sourceKind": "file_install",
+      "health": "broken",
+      "finalEntityPath": "/Users/zoe/Library/Application Support/skill-man/skills/legacy-audit",
+      "sourceLabel": "Installed from archive · legacy-audit.zip",
+      "frontmatterName": "legacy-audit",
+      "lastActivityAt": "2026-07-18T03:16:00Z",
+      "skillMarkdown": "# Legacy audit\n\nInspect an existing skills directory before Adopt.\n"
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "kind": "claude_preset",
+      "skillsPath": "~/.claude/skills",
+      "detected": true,
+      "compatibility": "verified",
+      "enabledSkillIds": ["skill-authoring"]
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "kind": "codex_preset",
+      "skillsPath": "~/.codex/skills",
+      "detected": true,
+      "compatibility": "verified",
+      "enabledSkillIds": ["skill-authoring", "media-xray"]
+    },
+    {
+      "id": "workbench",
+      "name": "Workbench",
+      "kind": "custom",
+      "skillsPath": "~/Library/Application Support/workbench/skills",
+      "detected": true,
+      "compatibility": "unknown",
+      "enabledSkillIds": []
+    }
+  ]
+}

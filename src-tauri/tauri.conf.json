@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Skill Man",
+  "version": "0.1.0",
+  "identifier": "io.github.rookiezoe.skillman",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Skill Man",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost",
+      "capabilities": ["library-browser"]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": ["dmg"],
+    "icon": [],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}
