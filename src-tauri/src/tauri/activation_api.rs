@@ -3,7 +3,8 @@ use crate::core::domain::{AgentId, SkillId};
 use crate::seams::filesystem::FileSystemError;
 use crate::tauri_adapter::dto::{
     ActivationPreviewDto, ActivationResultDto, ApplyActivationRequestDto,
-    CancelActivationRequestDto, CommandErrorDto, PlanActivationRequestDto,
+    CancelActivationRequestDto, CommandErrorDto, PlanActivationRepairRequestDto,
+    PlanActivationRequestDto,
 };
 
 pub struct ActivationApi {
@@ -39,6 +40,16 @@ impl ActivationApi {
             .map_err(command_error)
     }
 
+    pub fn plan_activation_repair(
+        &self,
+        request: PlanActivationRepairRequestDto,
+    ) -> Result<ActivationPreviewDto, CommandErrorDto> {
+        self.activation
+            .plan_repair(SkillId(request.skill_id), AgentId(request.agent_id))
+            .map(ActivationPreviewDto::from)
+            .map_err(command_error)
+    }
+
     pub fn cancel_activation(
         &self,
         request: CancelActivationRequestDto,
@@ -49,12 +60,13 @@ impl ActivationApi {
     }
 }
 
-fn command_error(error: ActivationError) -> CommandErrorDto {
+pub(crate) fn command_error(error: ActivationError) -> CommandErrorDto {
     let code = match &error {
         ActivationError::NotFound => "not_found",
         ActivationError::UnsupportedAgent => "unsupported_agent",
         ActivationError::Validation(_) | ActivationError::PathOverlap => "validation",
         ActivationError::Conflict(_) => "conflict",
+        ActivationError::SourceUnavailable(_) => "source_unavailable",
         ActivationError::TargetMismatch(_) => "target_mismatch",
         ActivationError::PlanStale | ActivationError::PlanNotFound => "plan_stale",
         ActivationError::RecoveryRequired { .. } => "recovery_required",

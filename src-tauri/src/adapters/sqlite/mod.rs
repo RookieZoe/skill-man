@@ -11,7 +11,8 @@ use crate::core::domain::{
     SourceKind,
 };
 use crate::seams::activation_store::{
-    ActivationContext, ActivationRecord, ActivationStore, ActivationStoreError, ConfiguredAgentPath,
+    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
+    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use crate::seams::catalog_store::{
     StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
@@ -390,6 +391,115 @@ impl ActivationStore for SqliteCatalogStore {
                     record.expected_target_path.to_string_lossy(),
                     observed_state_value(record.observed_state),
                     unix_timestamp(),
+                ],
+            )
+            .map_err(sqlite_activation_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_activation_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_activation_error)?;
+        transaction.commit().map_err(sqlite_activation_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT skill_id, agent_id, expected_entry_path, expected_target_path
+                 FROM activations
+                 WHERE desired_enabled = 1
+                 ORDER BY skill_id, agent_id",
+            )
+            .map_err(sqlite_activation_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(DesiredActivation {
+                    skill_id: SkillId(row.get(0)?),
+                    agent_id: AgentId(row.get(1)?),
+                    expected_entry_path: PathBuf::from(row.get::<_, String>(2)?),
+                    expected_target_path: PathBuf::from(row.get::<_, String>(3)?),
+                })
+            })
+            .map_err(sqlite_activation_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_activation_error)
+    }
+
+    fn record_observations(
+        &self,
+        observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_activation_error)?;
+        let checked_at = unix_timestamp();
+        for observation in observations {
+            transaction
+                .execute(
+                    "UPDATE activations
+                     SET observed_state = ?1, last_checked_at = ?2
+                     WHERE skill_id = ?3 AND agent_id = ?4 AND desired_enabled = 1",
+                    params![
+                        observed_state_value(observation.observed_state),
+                        checked_at,
+                        observation.skill_id.0,
+                        observation.agent_id.0,
+                    ],
+                )
+                .map_err(sqlite_activation_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta
+                 SET snapshot_version = snapshot_version + 1, last_startup_check_at = ?1
+                 WHERE singleton = 1",
+                [checked_at],
+            )
+            .map_err(sqlite_activation_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_activation_error)?;
+        transaction.commit().map_err(sqlite_activation_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn record_observation(
+        &self,
+        observation: &ActivationObservation,
+    ) -> Result<u64, ActivationStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_activation_error)?;
+        transaction
+            .execute(
+                "UPDATE activations
+                 SET observed_state = ?1, last_checked_at = ?2
+                 WHERE skill_id = ?3 AND agent_id = ?4 AND desired_enabled = 1",
+                params![
+                    observed_state_value(observation.observed_state),
+                    unix_timestamp(),
+                    observation.skill_id.0,
+                    observation.agent_id.0,
                 ],
             )
             .map_err(sqlite_activation_error)?;

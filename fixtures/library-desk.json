@@ -49,7 +49,10 @@
       "skillsPath": "~/.claude/skills",
       "detected": true,
       "compatibility": "verified",
-      "enabledSkillIds": ["skill-authoring"]
+      "enabledSkillIds": ["skill-authoring"],
+      "observedSkillStates": {
+        "skill-authoring": "missing"
+      }
     },
     {
       "id": "codex",

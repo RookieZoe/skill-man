@@ -15,13 +15,15 @@ pub fn run() {
     use crate::adapters::sqlite::SqliteCatalogStore;
     use crate::core::activation::ActivationService;
     use crate::core::catalog::CatalogService;
+    use crate::core::maintenance::MaintenanceService;
     use crate::seams::catalog_store::StartupAccess;
     use crate::tauri_adapter::activation_api::ActivationApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
         apply_activation, cancel_activation, inspect_skill, list_agents, list_skills,
-        plan_activation,
+        plan_activation, plan_activation_repair, run_activation_health_check,
     };
+    use crate::tauri_adapter::health_api::HealthApi;
 
     ::tauri::Builder::default()
         .setup(|app| {
@@ -49,10 +51,14 @@ pub fn run() {
                 Arc::new(FixtureCatalogStore::library_desk())
             };
             let runtime_store = Arc::new(RuntimeCatalogStore::new(fixture_store, sqlite_store));
+            let filesystem = Arc::new(MacOsFileSystem::new(home_directory));
             app.manage(CatalogApi::new(CatalogService::new(runtime_store.clone())));
+            app.manage(HealthApi::new(
+                MaintenanceService::new(runtime_store.clone(), filesystem.clone()).begin_startup(),
+            ));
             app.manage(ActivationApi::new(ActivationService::new(
                 runtime_store,
-                Arc::new(MacOsFileSystem::new(home_directory)),
+                filesystem,
                 library_root,
             )));
             Ok(())
@@ -61,7 +67,9 @@ pub fn run() {
             list_skills,
             inspect_skill,
             list_agents,
+            run_activation_health_check,
             plan_activation,
+            plan_activation_repair,
             apply_activation,
             cancel_activation
         ])

@@ -43,6 +43,8 @@ pub trait FileSystem: Send + Sync {
         entry_path: &Path,
     ) -> Result<ActivationEntrySnapshot, FileSystemError>;
 
+    fn skill_directory_is_readable(&self, path: &Path) -> Result<bool, FileSystemError>;
+
     fn create_activation(
         &self,
         target_path: &Path,

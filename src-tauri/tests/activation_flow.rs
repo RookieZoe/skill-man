@@ -3,10 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
-use skill_man_lib::core::activation::{ActivationError, ActivationService, SetActivation};
+use skill_man_lib::core::activation::{
+    ActivationError, ActivationPlanKind, ActivationService, SetActivation,
+};
 use skill_man_lib::core::domain::{ActivationObservedState, AgentId, AgentKind, SkillId};
 use skill_man_lib::seams::activation_store::{
-    ActivationContext, ActivationRecord, ActivationStore, ActivationStoreError, ConfiguredAgentPath,
+    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
+    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use skill_man_lib::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError,
@@ -544,6 +547,352 @@ fn tauri_adapter_exposes_typed_plan_and_apply_results() {
     assert_eq!(result.snapshot_version, 8);
 }
 
+#[test]
+fn repair_recreates_a_missing_desired_activation() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(
+            &skill_root,
+            &claude_root,
+            true,
+            Some(expected_target.clone()),
+        ),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root.clone(),
+        }],
+    ));
+    let service = ActivationService::new(
+        store,
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+
+    let preview = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect("plan Repair");
+    assert_eq!(preview.kind, ActivationPlanKind::Repair);
+    let result = service.apply(&preview.plan_token).expect("apply Repair");
+
+    assert_eq!(result.observed_state, ActivationObservedState::Present);
+    assert_eq!(
+        std::fs::read_link(claude_root.join("skill-authoring"))
+            .expect("repaired Activation symlink"),
+        expected_target
+    );
+}
+
+#[test]
+fn repair_reports_conflict_and_never_overwrites_an_occupied_entry() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    let occupied = claude_root.join("skill-authoring");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&occupied).expect("occupy Activation entry");
+    std::fs::write(occupied.join("keep.txt"), "user content").expect("write protected content");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root,
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+
+    let error = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect_err("occupied entry is a Conflict");
+
+    assert!(matches!(error, ActivationError::Conflict(_)));
+    assert_eq!(
+        std::fs::read_to_string(occupied.join("keep.txt")).expect("protected content remains"),
+        "user content"
+    );
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Occupied
+    );
+}
+
+#[test]
+fn repair_records_present_when_the_activation_was_externally_restored() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    std::os::unix::fs::symlink(&expected_target, claude_root.join("skill-authoring"))
+        .expect("externally restore Activation");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root,
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+
+    let error = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect_err("restored Activation does not need Repair");
+
+    assert!(matches!(error, ActivationError::Validation(_)));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Present
+    );
+}
+
+#[test]
+fn repair_records_target_mismatch_without_replacing_the_external_symlink() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let other_root = library_root.join("skills/other");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&other_root).expect("create external target");
+    std::fs::write(other_root.join("SKILL.md"), "# Other\n").expect("write other SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let external_target = other_root
+        .canonicalize()
+        .expect("canonical external target");
+    let activation_path = claude_root.join("skill-authoring");
+    std::os::unix::fs::symlink(&external_target, &activation_path)
+        .expect("create wrong-target symlink");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root,
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+
+    let error = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect_err("wrong-target Activation cannot be repaired as missing");
+
+    assert!(matches!(error, ActivationError::TargetMismatch(_)));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::TargetMismatch
+    );
+    assert_eq!(
+        std::fs::read_link(activation_path).expect("external symlink remains"),
+        external_target
+    );
+}
+
+#[test]
+fn repair_rejects_an_entity_without_a_readable_skill_document() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create entity without SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root.clone(),
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+
+    let error = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect_err("Repair requires a readable SKILL.md");
+
+    assert!(matches!(error, ActivationError::SourceUnavailable(_)));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Dangling
+    );
+    assert!(!claude_root.join("skill-authoring").exists());
+}
+
+#[test]
+fn repair_apply_stops_when_the_skill_document_disappears_after_preview() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root.clone(),
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+    let preview = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect("plan Repair");
+    std::fs::remove_file(skill_root.join("SKILL.md")).expect("remove SKILL.md after preview");
+
+    let error = service
+        .apply(&preview.plan_token)
+        .expect_err("Repair must revalidate SKILL.md");
+
+    assert!(matches!(error, ActivationError::PlanStale));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Dangling
+    );
+    assert!(!claude_root.join("skill-authoring").exists());
+}
+
+#[test]
+fn repair_apply_records_dangling_when_the_entity_disappears_after_preview() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root.clone(),
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+    let preview = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect("plan Repair");
+    std::fs::remove_dir_all(&skill_root).expect("remove entity after preview");
+
+    let error = service
+        .apply(&preview.plan_token)
+        .expect_err("Repair must revalidate the entity");
+
+    assert!(matches!(error, ActivationError::PlanStale));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Dangling
+    );
+    assert!(!claude_root.join("skill-authoring").exists());
+}
+
+#[test]
+fn repair_apply_reports_conflict_when_the_entry_becomes_occupied_after_preview() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let skill_root = library_root.join("skills/skill-authoring");
+    let claude_root = home.path().join(".claude/skills");
+    std::fs::create_dir_all(&skill_root).expect("create Managed Skill");
+    std::fs::write(skill_root.join("SKILL.md"), "# Skill authoring\n").expect("write SKILL.md");
+    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
+    let expected_target = skill_root.canonicalize().expect("canonical Skill target");
+    let store = Arc::new(TestActivationStore::new(
+        activation_context(&skill_root, &claude_root, true, Some(expected_target)),
+        vec![ConfiguredAgentPath {
+            agent_id: AgentId("claude-code".into()),
+            skills_path: claude_root.clone(),
+        }],
+    ));
+    let service = ActivationService::new(
+        store.clone(),
+        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        library_root,
+    );
+    let preview = service
+        .plan_repair(
+            SkillId("skill-authoring".into()),
+            AgentId("claude-code".into()),
+        )
+        .expect("plan Repair");
+    let occupied_path = claude_root.join("skill-authoring");
+    std::fs::create_dir(&occupied_path).expect("occupy entry after preview");
+    std::fs::write(occupied_path.join("keep.txt"), "user content")
+        .expect("write protected content");
+
+    let error = service
+        .apply(&preview.plan_token)
+        .expect_err("Apply-time occupancy is a Conflict");
+
+    assert!(matches!(error, ActivationError::Conflict(_)));
+    assert_eq!(
+        store.recorded().observed_state,
+        ActivationObservedState::Occupied
+    );
+    assert_eq!(
+        std::fs::read_to_string(occupied_path.join("keep.txt")).expect("protected content remains"),
+        "user content"
+    );
+}
+
 struct TestActivationStore {
     context: Mutex<ActivationContext>,
     agent_paths: Vec<ConfiguredAgentPath>,
@@ -590,6 +939,48 @@ impl ActivationStore for TestActivationStore {
         let mut context = self.context.lock().expect("context lock");
         context.desired_enabled = record.desired_enabled;
         context.expected_target_path = Some(record.expected_target_path);
+        Ok(8)
+    }
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+        let context = self.context.lock().expect("context lock");
+        if !context.desired_enabled {
+            return Ok(Vec::new());
+        }
+        Ok(vec![DesiredActivation {
+            skill_id: context.skill_id.clone(),
+            agent_id: context.agent_id.clone(),
+            expected_entry_path: context.agent_skills_path.join(&context.directory_name),
+            expected_target_path: context
+                .expected_target_path
+                .clone()
+                .expect("desired test Activation target"),
+        }])
+    }
+
+    fn record_observations(
+        &self,
+        _observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError> {
+        Ok(8)
+    }
+
+    fn record_observation(
+        &self,
+        observation: &ActivationObservation,
+    ) -> Result<u64, ActivationStoreError> {
+        let context = self.context.lock().expect("context lock");
+        *self.record.lock().expect("record lock") = Some(ActivationRecord {
+            skill_id: observation.skill_id.clone(),
+            agent_id: observation.agent_id.clone(),
+            desired_enabled: context.desired_enabled,
+            expected_entry_path: context.agent_skills_path.join(&context.directory_name),
+            expected_target_path: context
+                .expected_target_path
+                .clone()
+                .expect("desired test Activation target"),
+            observed_state: observation.observed_state,
+        });
         Ok(8)
     }
 }
@@ -644,6 +1035,21 @@ impl ActivationStore for FailingActivationStore {
             "injected state failure".into(),
         ))
     }
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+        Err(ActivationStoreError::Unavailable(
+            "injected state failure".into(),
+        ))
+    }
+
+    fn record_observations(
+        &self,
+        _observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError> {
+        Err(ActivationStoreError::Unavailable(
+            "injected state failure".into(),
+        ))
+    }
 }
 
 struct FailingCompensationFileSystem {
@@ -674,6 +1080,10 @@ impl FileSystem for FailingCompensationFileSystem {
         entry_path: &std::path::Path,
     ) -> Result<ActivationEntrySnapshot, FileSystemError> {
         self.delegate.activation_snapshot(entry_path)
+    }
+
+    fn skill_directory_is_readable(&self, path: &std::path::Path) -> Result<bool, FileSystemError> {
+        self.delegate.skill_directory_is_readable(path)
     }
 
     fn create_activation(

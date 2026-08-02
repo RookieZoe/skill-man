@@ -27,15 +27,19 @@ interface LibraryDeskProps {
   agents: AgentActivation[];
   error: string | null;
   activationError: string | null;
+  activationConflict: string | null;
   activationPreview: ActivationPreview | null;
-  activationTriggerAgentId: string | null;
+  activationTriggerControlId: string | null;
   pendingAgentId: string | null;
   isApplyingActivation: boolean;
+  isCheckingActivations: boolean;
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
   onRequestActivation: (agentId: string, enabled: boolean) => void;
+  onRequestActivationRepair: (agentId: string) => void;
   onApplyActivation: () => void;
   onCancelActivation: () => void;
+  onCloseActivationConflict: () => void;
 }
 
 export function LibraryDesk({
@@ -46,38 +50,45 @@ export function LibraryDesk({
   agents,
   error,
   activationError,
+  activationConflict,
   activationPreview,
-  activationTriggerAgentId,
+  activationTriggerControlId,
   pendingAgentId,
   isApplyingActivation,
+  isCheckingActivations,
   onFilter,
   onSelect,
   onRequestActivation,
+  onRequestActivationRepair,
   onApplyActivation,
   onCancelActivation,
+  onCloseActivationConflict,
 }: LibraryDeskProps) {
   const activationWasOpen = useRef(false);
-  const activationReturnFocusId =
-    detail && activationTriggerAgentId
-      ? activationControlId(detail.id, activationTriggerAgentId)
-      : null;
-
+  const hasActivationOverlay = Boolean(activationPreview || activationConflict);
   useLayoutEffect(() => {
-    if (activationPreview) {
+    if (hasActivationOverlay) {
       activationWasOpen.current = true;
     } else if (activationWasOpen.current) {
-      if (activationReturnFocusId) {
-        document.getElementById(activationReturnFocusId)?.focus();
+      if (activationTriggerControlId) {
+        const trigger = document.getElementById(activationTriggerControlId);
+        const fallback = document.getElementById(
+          activationTriggerControlId.replace(
+            "activation-repair-",
+            "activation-",
+          ),
+        );
+        (trigger ?? fallback)?.focus();
       }
       activationWasOpen.current = false;
     }
-  }, [activationPreview, activationReturnFocusId]);
+  }, [activationTriggerControlId, hasActivationOverlay]);
 
   return (
     <div className="app-shell">
       <div
         className="app-background"
-        inert={activationPreview ? true : undefined}
+        inert={hasActivationOverlay ? true : undefined}
       >
         <a className="skip-link" href="#skill-detail">
           Skip to Skill detail
@@ -104,7 +115,9 @@ export function LibraryDesk({
             error={activationError}
             pendingAgentId={pendingAgentId}
             isApplying={isApplyingActivation}
+            isChecking={isCheckingActivations}
             onRequest={onRequestActivation}
+            onRepair={onRequestActivationRepair}
           />
         </div>
       </div>
@@ -114,6 +127,12 @@ export function LibraryDesk({
           isApplying={isApplyingActivation}
           onApply={onApplyActivation}
           onCancel={onCancelActivation}
+        />
+      ) : null}
+      {activationConflict ? (
+        <ActivationConflictSheet
+          detail={activationConflict}
+          onClose={onCloseActivationConflict}
         />
       ) : null}
     </div>
@@ -298,14 +317,18 @@ function AgentInspector({
   error,
   pendingAgentId,
   isApplying,
+  isChecking,
   onRequest,
+  onRepair,
 }: {
   detail: SkillDetail | null;
   agents: AgentActivation[];
   error: string | null;
   pendingAgentId: string | null;
   isApplying: boolean;
+  isChecking: boolean;
   onRequest: (agentId: string, enabled: boolean) => void;
+  onRepair: (agentId: string) => void;
 }) {
   return (
     <aside className="agent-inspector" aria-label="Enable by Agent">
@@ -325,66 +348,85 @@ function AgentInspector({
         </div>
       ) : null}
       <div className="agent-list">
-        {detail
-          ? agents.map((agent) => {
-              const isPending = pendingAgentId === agent.id;
-              const isSupported = agent.kind === "claude_preset";
-              return (
-                <div
-                  className={`agent-row${isPending || isApplying ? " agent-row--busy" : ""}`}
-                  key={agent.id}
-                >
-                  <div className="agent-row-top">
-                    <span className="agent-monogram" aria-hidden="true">
-                      {agent.name.slice(0, 1)}
-                    </span>
-                    <span className="agent-copy">
-                      <strong>{agent.name}</strong>
-                      <small>{agent.skillsPath}</small>
-                    </span>
-                    <label
-                      className={`switch-control${isSupported ? " switch-control--interactive" : ""}`}
-                    >
-                      <input
-                        id={activationControlId(detail.id, agent.id)}
-                        type="checkbox"
-                        role="switch"
-                        aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
-                        checked={agent.desiredEnabled}
-                        disabled={
-                          !isSupported ||
-                          !agent.detected ||
-                          isPending ||
-                          isApplying
-                        }
-                        onChange={(event) =>
-                          onRequest(agent.id, event.currentTarget.checked)
-                        }
-                      />
-                      <span aria-hidden="true" />
-                    </label>
-                  </div>
-                  <div className="agent-status">
-                    <span
-                      className={`agent-state agent-state--${activationTone(agent)}`}
-                    >
-                      {isPending ? "Preparing preview" : activationLabel(agent)}
-                    </span>
-                    {!isSupported ? (
-                      <span className="compatibility-note">
-                        Later milestone
-                      </span>
-                    ) : null}
-                    {agent.compatibility === "unknown" ? (
-                      <span className="compatibility-note">
-                        Compatibility unknown
-                      </span>
-                    ) : null}
-                  </div>
+        {detail && isChecking ? (
+          <div className="activation-checking" role="status">
+            Checking desired Activations…
+          </div>
+        ) : detail ? (
+          agents.map((agent) => {
+            const isPending = pendingAgentId === agent.id;
+            const isSupported = agent.kind === "claude_preset";
+            return (
+              <div
+                className={`agent-row${isPending || isApplying ? " agent-row--busy" : ""}`}
+                key={agent.id}
+              >
+                <div className="agent-row-top">
+                  <span className="agent-monogram" aria-hidden="true">
+                    {agent.name.slice(0, 1)}
+                  </span>
+                  <span className="agent-copy">
+                    <strong>{agent.name}</strong>
+                    <small>{agent.skillsPath}</small>
+                  </span>
+                  <label
+                    className={`switch-control${isSupported ? " switch-control--interactive" : ""}`}
+                  >
+                    <input
+                      id={activationControlId(detail.id, agent.id)}
+                      type="checkbox"
+                      role="switch"
+                      aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
+                      checked={agent.desiredEnabled}
+                      disabled={
+                        !isSupported ||
+                        !agent.detected ||
+                        isPending ||
+                        isApplying
+                      }
+                      onChange={(event) =>
+                        onRequest(agent.id, event.currentTarget.checked)
+                      }
+                    />
+                    <span aria-hidden="true" />
+                  </label>
                 </div>
-              );
-            })
-          : null}
+                <div className="agent-status">
+                  <span
+                    className={`agent-state agent-state--${activationTone(agent)}`}
+                  >
+                    {isPending ? "Preparing preview" : activationLabel(agent)}
+                  </span>
+                  {!isSupported ? (
+                    <span className="compatibility-note">Later milestone</span>
+                  ) : null}
+                  {agent.compatibility === "unknown" ? (
+                    <span className="compatibility-note">
+                      Compatibility unknown
+                    </span>
+                  ) : null}
+                  {isSupported &&
+                  agent.detected &&
+                  agent.desiredEnabled &&
+                  (agent.observedState === "missing" ||
+                    agent.observedState === "occupied") ? (
+                    <button
+                      id={activationRepairControlId(detail.id, agent.id)}
+                      type="button"
+                      className="repair-button"
+                      disabled={isPending || isApplying}
+                      onClick={() => onRepair(agent.id)}
+                    >
+                      {agent.observedState === "occupied"
+                        ? "Conflict"
+                        : "Repair"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })
+        ) : null}
       </div>
       <div className="inspector-footnote">
         <LockIcon />
@@ -405,7 +447,7 @@ function ActivationPreviewSheet({
   onApply: () => void;
   onCancel: () => void;
 }) {
-  const action = preview.enabled ? "Enable" : "Disable";
+  const action = capitalize(preview.kind);
   const cancelButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
 
@@ -455,7 +497,9 @@ function ActivationPreviewSheet({
             {action} {preview.skillDirectoryName}
           </h2>
           <p>
-            {preview.enabled ? "Create" : "Remove"} one managed Activation in{" "}
+            {preview.kind === "repair"
+              ? "Recreate one missing managed Activation in"
+              : `${preview.enabled ? "Create" : "Remove"} one managed Activation in`}{" "}
             {preview.agentName}.
           </p>
         </div>
@@ -486,6 +530,68 @@ function ActivationPreviewSheet({
             onClick={onApply}
           >
             {isApplying ? "Applying" : `${action} in ${preview.agentName}`}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ActivationConflictSheet({
+  detail,
+  onClose,
+}: {
+  detail: string;
+  onClose: () => void;
+}) {
+  const closeButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    closeButton.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "Tab") {
+        event.preventDefault();
+        closeButton.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet activation-conflict-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Activation conflict"
+      >
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Conflict</span>
+          <h2>Activation path is occupied</h2>
+          <p>
+            Skill Man found existing content at the expected Agent entry and
+            left it unchanged.
+          </p>
+        </div>
+        <p className="activation-conflict-detail">{detail}</p>
+        <div className="activation-sheet-actions">
+          <button
+            ref={closeButton}
+            type="button"
+            className="activation-confirm-button"
+            onClick={onClose}
+          >
+            Keep existing content
           </button>
         </div>
       </section>
@@ -545,6 +651,10 @@ function activationTone(agent: AgentActivation) {
 
 function activationControlId(skillId: string, agentId: string) {
   return `activation-${skillId}-${agentId}`;
+}
+
+function activationRepairControlId(skillId: string, agentId: string) {
+  return `activation-repair-${skillId}-${agentId}`;
 }
 
 function activationLabel(agent: AgentActivation) {

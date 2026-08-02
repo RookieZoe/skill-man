@@ -3,10 +3,11 @@ use tauri::State;
 use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    ActivationPreviewDto, ActivationResultDto, AgentActivationDto, ApplyActivationRequestDto,
-    CancelActivationRequestDto, CatalogListDto, CommandErrorDto, ListSkillsRequestDto,
-    PlanActivationRequestDto, SkillDetailDto,
+    ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AgentActivationDto,
+    ApplyActivationRequestDto, CancelActivationRequestDto, CatalogListDto, CommandErrorDto,
+    ListSkillsRequestDto, PlanActivationRepairRequestDto, PlanActivationRequestDto, SkillDetailDto,
 };
+use crate::tauri_adapter::health_api::HealthApi;
 
 #[tauri::command]
 pub fn plan_activation(
@@ -14,6 +15,21 @@ pub fn plan_activation(
     request: PlanActivationRequestDto,
 ) -> Result<ActivationPreviewDto, CommandErrorDto> {
     state.plan_activation(request)
+}
+
+#[tauri::command]
+pub fn plan_activation_repair(
+    state: State<'_, ActivationApi>,
+    request: PlanActivationRepairRequestDto,
+) -> Result<ActivationPreviewDto, CommandErrorDto> {
+    state.plan_activation_repair(request)
+}
+
+#[tauri::command]
+pub async fn run_activation_health_check(
+    state: State<'_, HealthApi>,
+) -> Result<ActivationHealthReportDto, CommandErrorDto> {
+    state.run_activation_health_check()
 }
 
 #[tauri::command]

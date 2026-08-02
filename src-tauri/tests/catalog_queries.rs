@@ -59,7 +59,7 @@ fn the_catalog_adapter_returns_each_agents_observed_activation() {
     assert!(agents[0].desired_enabled);
     assert_eq!(
         agents[0].observed_state,
-        ActivationObservedStateDto::Present
+        ActivationObservedStateDto::Missing
     );
     assert_eq!(agents[1].name, "Codex");
     assert!(agents[1].desired_enabled);

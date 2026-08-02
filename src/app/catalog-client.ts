@@ -49,8 +49,14 @@ export interface ActivationPreview {
   skillDirectoryName: string;
   agentName: string;
   enabled: boolean;
+  kind: "enable" | "disable" | "repair";
   entryPath: string;
   targetPath: string;
+}
+
+export interface ActivationHealthReport {
+  checked: number;
+  snapshotVersion: number;
 }
 
 export interface ActivationResult {
@@ -70,9 +76,16 @@ export interface CatalogClient {
     agentId: string,
     enabled: boolean,
   ): Promise<ActivationPreview>;
+  planActivationRepair(
+    skillId: string,
+    agentId: string,
+  ): Promise<ActivationPreview>;
+  runActivationHealthCheck(): Promise<ActivationHealthReport>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
 }
+
+let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
 
 const tauriCatalogClient: CatalogClient = {
   listSkills(filter) {
@@ -88,6 +101,19 @@ const tauriCatalogClient: CatalogClient = {
     return invoke<ActivationPreview>("plan_activation", {
       request: { skillId, agentId, enabled },
     });
+  },
+  planActivationRepair(skillId, agentId) {
+    return invoke<ActivationPreview>("plan_activation_repair", {
+      request: { skillId, agentId },
+    });
+  },
+  runActivationHealthCheck() {
+    startupHealthCheck ??= invoke<ActivationHealthReport>(
+      "run_activation_health_check",
+    ).finally(() => {
+      startupHealthCheck = null;
+    });
+    return startupHealthCheck;
   },
   applyActivation(planToken) {
     return invoke<ActivationResult>("apply_activation", {

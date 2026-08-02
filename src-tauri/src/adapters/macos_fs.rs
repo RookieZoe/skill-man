@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::seams::filesystem::{
@@ -108,6 +108,79 @@ impl FileSystem for MacOsFileSystem {
             Err(source) => Err(FileSystemError::Io {
                 operation: "inspect Activation",
                 path: entry_path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn skill_directory_is_readable(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect Skill entity",
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        if !metadata.is_dir() {
+            return Ok(false);
+        }
+
+        let skill_document = path.join("SKILL.md");
+        match fs::symlink_metadata(&skill_document) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect SKILL.md",
+                    path: skill_document,
+                    source,
+                });
+            }
+        }
+
+        match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(&skill_document)
+        {
+            Ok(file) => file
+                .metadata()
+                .map(|metadata| metadata.is_file())
+                .map_err(|source| FileSystemError::Io {
+                    operation: "inspect SKILL.md",
+                    path: skill_document,
+                    source,
+                }),
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(source) => Err(FileSystemError::Io {
+                operation: "read SKILL.md",
+                path: skill_document,
                 source,
             }),
         }

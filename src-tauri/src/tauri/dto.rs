@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::activation::{ActivationPreview, ActivationResult};
+use crate::core::activation::{ActivationPlanKind, ActivationPreview, ActivationResult};
 use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
 };
+use crate::core::maintenance::ActivationHealthReport;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +243,13 @@ pub struct PlanActivationRequestDto {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlanActivationRepairRequestDto {
+    pub skill_id: String,
+    pub agent_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyActivationRequestDto {
     pub plan_token: String,
 }
@@ -259,8 +267,27 @@ pub struct ActivationPreviewDto {
     pub skill_directory_name: String,
     pub agent_name: String,
     pub enabled: bool,
+    pub kind: ActivationPlanKindDto,
     pub entry_path: String,
     pub target_path: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationPlanKindDto {
+    Enable,
+    Disable,
+    Repair,
+}
+
+impl From<ActivationPlanKind> for ActivationPlanKindDto {
+    fn from(value: ActivationPlanKind) -> Self {
+        match value {
+            ActivationPlanKind::Enable => Self::Enable,
+            ActivationPlanKind::Disable => Self::Disable,
+            ActivationPlanKind::Repair => Self::Repair,
+        }
+    }
 }
 
 impl From<ActivationPreview> for ActivationPreviewDto {
@@ -270,8 +297,25 @@ impl From<ActivationPreview> for ActivationPreviewDto {
             skill_directory_name: value.skill_directory_name,
             agent_name: value.agent_name,
             enabled: value.enabled,
+            kind: value.kind.into(),
             entry_path: value.entry_path.to_string_lossy().into_owned(),
             target_path: value.target_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationHealthReportDto {
+    pub checked: u32,
+    pub snapshot_version: u64,
+}
+
+impl From<ActivationHealthReport> for ActivationHealthReportDto {
+    fn from(value: ActivationHealthReport) -> Self {
+        Self {
+            checked: value.checked,
+            snapshot_version: value.snapshot_version,
         }
     }
 }

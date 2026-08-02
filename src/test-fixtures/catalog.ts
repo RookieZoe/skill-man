@@ -10,6 +10,7 @@ import type {
   Health,
   SkillDetail,
   SourceKind,
+  ActivationObservedState,
 } from "../app/catalog-client";
 
 type FixtureSkill = Omit<SkillDetail, "enabledAgentCount">;
@@ -22,6 +23,7 @@ interface FixtureAgent {
   detected: boolean;
   compatibility: Compatibility;
   enabledSkillIds: string[];
+  observedSkillStates?: Record<string, ActivationObservedState>;
 }
 
 interface FixtureFile {
@@ -43,6 +45,17 @@ export function createFixtureCatalogClient(): CatalogClient {
   const enabledSkillIds = new Map(
     fixture.agents.map((agent) => [agent.id, [...agent.enabledSkillIds]]),
   );
+  const observedStates = new Map(
+    fixture.agents.flatMap((agent) =>
+      agent.enabledSkillIds.map(
+        (skillId) =>
+          [
+            `${agent.id}:${skillId}`,
+            agent.observedSkillStates?.[skillId] ?? "present",
+          ] as const,
+      ),
+    ),
+  );
   const plans = new Map<string, PlannedFixtureActivation>();
 
   function activationFor(
@@ -59,7 +72,9 @@ export function createFixtureCatalogClient(): CatalogClient {
       detected: agent.detected,
       compatibility: agent.compatibility,
       desiredEnabled,
-      observedState: desiredEnabled ? "present" : "missing",
+      observedState: desiredEnabled
+        ? (observedStates.get(`${agent.id}:${skillId}`) ?? "missing")
+        : "missing",
     };
   }
 
@@ -105,11 +120,46 @@ export function createFixtureCatalogClient(): CatalogClient {
         skillDirectoryName: skill.directoryName,
         agentName: agent.name,
         enabled,
+        kind: enabled ? "enable" : "disable",
         entryPath: `${agent.skillsPath}/${skill.directoryName}`,
         targetPath: skill.finalEntityPath,
       };
       plans.set(planToken, preview);
       return preview;
+    },
+    async planActivationRepair(skillId, agentId) {
+      const skill = fixture.skills.find(({ id }) => id === skillId);
+      const agent = fixture.agents.find(({ id }) => id === agentId);
+      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
+      if (agent.kind !== "claude_preset") {
+        throw new Error("This milestone only supports Claude Code");
+      }
+      if (!enabledSkillIds.get(agent.id)?.includes(skillId)) {
+        throw new Error("Repair requires a desired Activation");
+      }
+      const planToken = `fixture-activation-plan-${nextPlanId++}`;
+      const preview: PlannedFixtureActivation = {
+        planToken,
+        skillId,
+        agentId,
+        skillDirectoryName: skill.directoryName,
+        agentName: agent.name,
+        enabled: true,
+        kind: "repair",
+        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
+        targetPath: skill.finalEntityPath,
+      };
+      plans.set(planToken, preview);
+      return preview;
+    },
+    async runActivationHealthCheck() {
+      return {
+        checked: Array.from(enabledSkillIds.values()).reduce(
+          (count, skillIds) => count + skillIds.length,
+          0,
+        ),
+        snapshotVersion,
+      };
     },
     async applyActivation(planToken) {
       const plan = plans.get(planToken);
@@ -121,6 +171,10 @@ export function createFixtureCatalogClient(): CatalogClient {
         plan.enabled
           ? Array.from(new Set([...current, plan.skillId]))
           : current.filter((skillId) => skillId !== plan.skillId),
+      );
+      observedStates.set(
+        `${plan.agentId}:${plan.skillId}`,
+        plan.enabled ? "present" : "missing",
       );
       snapshotVersion += 1;
       return {

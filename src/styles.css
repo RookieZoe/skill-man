@@ -768,6 +768,25 @@ button:active:not(:disabled) {
   gap: var(--space-2);
   margin-top: 10px;
   padding-left: 37px;
+  flex-wrap: wrap;
+}
+
+.repair-button {
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--accent);
+  background: var(--surface-raised);
+  border: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in oklch, var(--accent) 24%, transparent);
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.repair-button:disabled {
+  cursor: progress;
+  opacity: 0.56;
 }
 
 .agent-state,
@@ -825,6 +844,15 @@ button:active:not(:disabled) {
 
 .activation-error strong {
   font-size: 11px;
+}
+
+.activation-checking {
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  background: oklch(99% 0.003 250 / 0.76);
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .activation-sheet-backdrop {
@@ -894,6 +922,17 @@ button:active:not(:disabled) {
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
   font-size: 11px;
   line-height: 1.5;
+}
+
+.activation-conflict-detail {
+  margin: 0 var(--space-6);
+  padding: var(--space-3);
+  color: oklch(39% 0.14 27);
+  background: oklch(95% 0.04 27);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .activation-sheet-actions {

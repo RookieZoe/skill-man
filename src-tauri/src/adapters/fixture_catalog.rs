@@ -10,7 +10,8 @@ use crate::core::domain::{
     CatalogSeedAgent, Compatibility, Health, SkillDetail, SkillId, SkillSummary, SourceKind,
 };
 use crate::seams::activation_store::{
-    ActivationContext, ActivationRecord, ActivationStore, ActivationStoreError, ConfiguredAgentPath,
+    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
+    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 
@@ -46,7 +47,15 @@ impl FixtureCatalogStore {
                 if agent.enabled_skill_ids.contains(&skill.summary.id.0) {
                     let key = (skill.summary.id.0.clone(), agent.id.clone());
                     expected_targets.insert(key.clone(), PathBuf::from(&skill.final_entity_path));
-                    observed_states.insert(key, ActivationObservedState::Present);
+                    observed_states.insert(
+                        key,
+                        agent
+                            .observed_skill_states
+                            .get(&skill.summary.id.0)
+                            .copied()
+                            .map(ActivationObservedState::from)
+                            .unwrap_or(ActivationObservedState::Present),
+                    );
                 }
             }
         }
@@ -265,6 +274,53 @@ impl ActivationStore for FixtureCatalogStore {
         state.snapshot_version += 1;
         Ok(state.snapshot_version)
     }
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        let mut desired = Vec::new();
+        for skill in &state.skills {
+            for agent in &state.agents {
+                let key = (skill.summary.id.0.clone(), agent.id.clone());
+                if !agent.enabled_skill_ids.contains(&skill.summary.id.0) {
+                    continue;
+                }
+                if let Some(expected_target_path) = state.expected_targets.get(&key) {
+                    desired.push(DesiredActivation {
+                        skill_id: skill.summary.id.clone(),
+                        agent_id: AgentId(agent.id.clone()),
+                        expected_entry_path: PathBuf::from(&agent.skills_path)
+                            .join(&skill.summary.directory_name),
+                        expected_target_path: expected_target_path.clone(),
+                    });
+                }
+            }
+        }
+        Ok(desired)
+    }
+
+    fn record_observations(
+        &self,
+        observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        for observation in observations {
+            state.observed_states.insert(
+                (
+                    observation.skill_id.0.clone(),
+                    observation.agent_id.0.clone(),
+                ),
+                observation.observed_state,
+            );
+        }
+        state.snapshot_version += 1;
+        Ok(state.snapshot_version)
+    }
 }
 
 fn summary_with_count(state: &FixtureState, detail: &SkillDetail) -> SkillSummary {
@@ -374,6 +430,30 @@ struct FixtureAgent {
     detected: bool,
     compatibility: FixtureCompatibility,
     enabled_skill_ids: Vec<String>,
+    #[serde(default)]
+    observed_skill_states: HashMap<String, FixtureActivationObservedState>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FixtureActivationObservedState {
+    Present,
+    Missing,
+    TargetMismatch,
+    Dangling,
+    Occupied,
+}
+
+impl From<FixtureActivationObservedState> for ActivationObservedState {
+    fn from(value: FixtureActivationObservedState) -> Self {
+        match value {
+            FixtureActivationObservedState::Present => Self::Present,
+            FixtureActivationObservedState::Missing => Self::Missing,
+            FixtureActivationObservedState::TargetMismatch => Self::TargetMismatch,
+            FixtureActivationObservedState::Dangling => Self::Dangling,
+            FixtureActivationObservedState::Occupied => Self::Occupied,
+        }
+    }
 }
 
 impl FixtureAgent {

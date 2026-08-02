@@ -4,7 +4,8 @@ use crate::adapters::fixture_catalog::FixtureCatalogStore;
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::domain::{AgentActivation, CatalogFilter, SkillDetail, SkillId, SkillSummary};
 use crate::seams::activation_store::{
-    ActivationContext, ActivationRecord, ActivationStore, ActivationStoreError, ConfiguredAgentPath,
+    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
+    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
@@ -128,5 +129,38 @@ impl ActivationStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.record(record)
+    }
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+        if !self.is_writable() {
+            return Err(ActivationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.desired_activations()
+    }
+
+    fn record_observations(
+        &self,
+        observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError> {
+        if !self.is_writable() {
+            return Err(ActivationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.record_observations(observations)
+    }
+
+    fn record_observation(
+        &self,
+        observation: &ActivationObservation,
+    ) -> Result<u64, ActivationStoreError> {
+        if !self.is_writable() {
+            return Err(ActivationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.record_observation(observation)
     }
 }

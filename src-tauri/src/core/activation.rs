@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::core::domain::{ActivationObservedState, AgentId, AgentKind, SkillId};
-use crate::seams::activation_store::{ActivationRecord, ActivationStore, ActivationStoreError};
+use crate::seams::activation_store::{
+    ActivationObservation, ActivationRecord, ActivationStore, ActivationStoreError,
+};
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError,
 };
@@ -27,8 +29,16 @@ pub struct ActivationPreview {
     pub skill_directory_name: String,
     pub agent_name: String,
     pub enabled: bool,
+    pub kind: ActivationPlanKind,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationPlanKind {
+    Enable,
+    Disable,
+    Repair,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +53,7 @@ pub struct ActivationResult {
 #[derive(Clone)]
 struct PlannedActivation {
     request: SetActivation,
+    kind: ActivationPlanKind,
     action: PlannedAction,
     agent_fingerprint: DirectoryFingerprint,
     library_fingerprint: DirectoryFingerprint,
@@ -90,12 +101,45 @@ impl ActivationService {
     }
 
     pub fn plan(&self, request: SetActivation) -> Result<ActivationPreview, ActivationError> {
+        let kind = if request.enabled {
+            ActivationPlanKind::Enable
+        } else {
+            ActivationPlanKind::Disable
+        };
+        self.plan_with_kind(request, kind)
+    }
+
+    pub fn plan_repair(
+        &self,
+        skill_id: SkillId,
+        agent_id: AgentId,
+    ) -> Result<ActivationPreview, ActivationError> {
+        self.plan_with_kind(
+            SetActivation {
+                skill_id,
+                agent_id,
+                enabled: true,
+            },
+            ActivationPlanKind::Repair,
+        )
+    }
+
+    fn plan_with_kind(
+        &self,
+        request: SetActivation,
+        kind: ActivationPlanKind,
+    ) -> Result<ActivationPreview, ActivationError> {
         let context = self
             .store
             .load(&request.skill_id, &request.agent_id)?
             .ok_or(ActivationError::NotFound)?;
         if context.agent_kind != AgentKind::ClaudePreset {
             return Err(ActivationError::UnsupportedAgent);
+        }
+        if kind == ActivationPlanKind::Repair && !context.desired_enabled {
+            return Err(ActivationError::Validation(
+                "Repair requires a desired Activation".into(),
+            ));
         }
         validate_directory_name(&context.directory_name)?;
         let agent_root = self
@@ -106,6 +150,56 @@ impl ActivationService {
         let library_fingerprint = self.filesystem.directory_fingerprint(&library_root)?;
         let entry_path = agent_root.join(&context.directory_name);
         let initial_entry = self.filesystem.activation_snapshot(&entry_path)?;
+        if kind == ActivationPlanKind::Repair {
+            let expected_target_path = context.expected_target_path.clone().ok_or_else(|| {
+                ActivationError::Validation(
+                    "Repair requires a recorded expected Activation target".into(),
+                )
+            })?;
+            match &initial_entry {
+                ActivationEntrySnapshot::Missing => {
+                    if !self
+                        .filesystem
+                        .skill_directory_is_readable(&expected_target_path)?
+                    {
+                        self.record_repair_observation(
+                            &request,
+                            ActivationObservedState::Dangling,
+                        )?;
+                        return Err(ActivationError::SourceUnavailable(expected_target_path));
+                    }
+                }
+                ActivationEntrySnapshot::Other => {
+                    self.record_repair_observation(&request, ActivationObservedState::Occupied)?;
+                    return Err(ActivationError::Conflict(entry_path));
+                }
+                ActivationEntrySnapshot::Symlink { target } if target != &expected_target_path => {
+                    self.record_repair_observation(
+                        &request,
+                        ActivationObservedState::TargetMismatch,
+                    )?;
+                    return Err(ActivationError::TargetMismatch(entry_path));
+                }
+                ActivationEntrySnapshot::Symlink { .. } => {
+                    let observed_state = if self
+                        .filesystem
+                        .skill_directory_is_readable(&expected_target_path)?
+                    {
+                        ActivationObservedState::Present
+                    } else {
+                        ActivationObservedState::Dangling
+                    };
+                    self.record_repair_observation(&request, observed_state)?;
+                    return if observed_state == ActivationObservedState::Present {
+                        Err(ActivationError::Validation(
+                            "Repair is no longer required".into(),
+                        ))
+                    } else {
+                        Err(ActivationError::SourceUnavailable(expected_target_path))
+                    };
+                }
+            }
+        }
         let (action, target_path, target_fingerprint) = if request.enabled {
             let target_path = self
                 .filesystem
@@ -152,6 +246,7 @@ impl ActivationService {
             plan_token.clone(),
             PlannedActivation {
                 request: request.clone(),
+                kind,
                 action,
                 agent_fingerprint,
                 library_fingerprint,
@@ -168,6 +263,7 @@ impl ActivationService {
             skill_directory_name: context.directory_name,
             agent_name: context.agent_name,
             enabled: request.enabled,
+            kind,
             entry_path,
             target_path,
         })
@@ -207,6 +303,16 @@ impl ActivationService {
         {
             return Err(ActivationError::PlanStale);
         }
+        self.ensure_activation_entry_unchanged(&plan)?;
+        if plan.kind == ActivationPlanKind::Repair
+            && !self
+                .filesystem
+                .skill_directory_is_readable(&plan.target_path)
+                .map_err(|_| ActivationError::PlanStale)?
+        {
+            self.record_repair_observation(&plan.request, ActivationObservedState::Dangling)?;
+            return Err(ActivationError::PlanStale);
+        }
         if let Some(target_fingerprint) = &plan.target_fingerprint {
             let current_target = self
                 .filesystem
@@ -216,15 +322,26 @@ impl ActivationService {
                 return Err(ActivationError::PlanStale);
             }
         }
-        let current_entry = self.filesystem.activation_snapshot(&plan.entry_path)?;
-        if current_entry != plan.initial_entry {
-            return Err(ActivationError::PlanStale);
-        }
+        self.ensure_activation_entry_unchanged(&plan)?;
 
         match plan.action {
-            PlannedAction::Create => self
-                .filesystem
-                .create_activation(&plan.target_path, &plan.entry_path)?,
+            PlannedAction::Create => {
+                if let Err(error) = self
+                    .filesystem
+                    .create_activation(&plan.target_path, &plan.entry_path)
+                {
+                    if plan.kind == ActivationPlanKind::Repair
+                        && matches!(
+                            &error,
+                            FileSystemError::Io { source, .. }
+                                if source.kind() == std::io::ErrorKind::AlreadyExists
+                        )
+                    {
+                        self.ensure_activation_entry_unchanged(&plan)?;
+                    }
+                    return Err(error.into());
+                }
+            }
             PlannedAction::Remove => self.filesystem.remove_activation(&plan.entry_path)?,
         }
         let observed_state = if plan.request.enabled {
@@ -275,6 +392,65 @@ impl ActivationService {
             .map_err(|_| ActivationError::Internal("Activation plan lock poisoned".into()))?;
         plans.retain(|_, plan| plan.created_at.elapsed() < self.plan_ttl);
         Ok(plans.remove(plan_token).is_some())
+    }
+
+    fn record_repair_observation(
+        &self,
+        request: &SetActivation,
+        observed_state: ActivationObservedState,
+    ) -> Result<(), ActivationError> {
+        self.store.record_observation(&ActivationObservation {
+            skill_id: request.skill_id.clone(),
+            agent_id: request.agent_id.clone(),
+            observed_state,
+        })?;
+        Ok(())
+    }
+
+    fn ensure_activation_entry_unchanged(
+        &self,
+        plan: &PlannedActivation,
+    ) -> Result<(), ActivationError> {
+        let current_entry = self.filesystem.activation_snapshot(&plan.entry_path)?;
+        if current_entry == plan.initial_entry {
+            return Ok(());
+        }
+        if plan.kind != ActivationPlanKind::Repair {
+            return Err(ActivationError::PlanStale);
+        }
+
+        match current_entry {
+            ActivationEntrySnapshot::Other => {
+                self.record_repair_observation(&plan.request, ActivationObservedState::Occupied)?;
+                Err(ActivationError::Conflict(plan.entry_path.clone()))
+            }
+            ActivationEntrySnapshot::Symlink { target } if target != plan.target_path => {
+                self.record_repair_observation(
+                    &plan.request,
+                    ActivationObservedState::TargetMismatch,
+                )?;
+                Err(ActivationError::TargetMismatch(plan.entry_path.clone()))
+            }
+            ActivationEntrySnapshot::Symlink { .. } => {
+                let observed_state = if self
+                    .filesystem
+                    .skill_directory_is_readable(&plan.target_path)?
+                {
+                    ActivationObservedState::Present
+                } else {
+                    ActivationObservedState::Dangling
+                };
+                self.record_repair_observation(&plan.request, observed_state)?;
+                if observed_state == ActivationObservedState::Present {
+                    Err(ActivationError::Validation(
+                        "Repair is no longer required".into(),
+                    ))
+                } else {
+                    Err(ActivationError::SourceUnavailable(plan.target_path.clone()))
+                }
+            }
+            ActivationEntrySnapshot::Missing => Err(ActivationError::PlanStale),
+        }
     }
 
     fn validate_agent_path(
@@ -329,6 +505,8 @@ pub enum ActivationError {
     Validation(String),
     #[error("the Activation path conflicts with existing content: {}", .0.display())]
     Conflict(PathBuf),
+    #[error("the Skill entity is unreadable or does not contain SKILL.md: {}", .0.display())]
+    SourceUnavailable(PathBuf),
     #[error("the Activation no longer matches its recorded target: {}", .0.display())]
     TargetMismatch(PathBuf),
     #[error("the Agent path overlaps the Library or another Agent path")]

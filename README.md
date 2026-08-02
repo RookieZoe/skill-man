@@ -2,13 +2,14 @@
 
 Skill Man is a macOS desktop app for browsing and managing a local Library of AI Agent Skills. The MVP uses Tauri v2 with a UI-independent Rust core and a React/TypeScript Library Desk.
 
-Issues #18 and #19 establish the first browse-and-activate vertical slice:
+Issues #18 through #20 establish the first browse-and-activate vertical slice:
 
 - SQLite startup and transactional schema migration with read-only lockout on failure or unsupported future schemas;
 - typed Catalog queries across the Rust core and Tauri DTO boundary;
 - a fixture-backed, three-column Library Desk for the Skill list, read-only detail, and Enable by Agent inspector;
 - previewed Claude Preset Enable/Disable through a typed Tauri boundary, with entry-level Activation symlinks created and removed by the Rust core;
 - path-overlap, stale-plan, occupied-entry, and Disable target-mismatch guards before filesystem writes;
+- startup health checks for every desired Activation, with persisted drift states and previewed Repair/Conflict handling;
 - CI gates for formatting, lint, typechecking, tests, capability boundaries, and builds.
 
 ## Develop
@@ -40,6 +41,6 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-The current tracer bullet keeps catalog content fixture-backed while SQLite remains authoritative for native desired and observed Activation state across restarts. Codex/Custom Activation, Import, Adopt, non-fixture catalog population, startup health repair, Preferences, and menu bar behavior belong to later implementation tickets.
+The current tracer bullet keeps catalog content fixture-backed while SQLite remains authoritative for native desired and observed Activation state across restarts. Codex/Custom Activation, Import, Adopt, non-fixture catalog population, Preferences, and menu bar behavior belong to later implementation tickets.
 
 Architecture and product language are defined in [the MVP implementation spec](docs/mvp-implementation-spec.md) and [CONTEXT.md](CONTEXT.md).

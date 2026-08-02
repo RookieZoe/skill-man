@@ -33,6 +33,21 @@ pub struct ActivationRecord {
     pub observed_state: ActivationObservedState,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesiredActivation {
+    pub skill_id: SkillId,
+    pub agent_id: AgentId,
+    pub expected_entry_path: PathBuf,
+    pub expected_target_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivationObservation {
+    pub skill_id: SkillId,
+    pub agent_id: AgentId,
+    pub observed_state: ActivationObservedState,
+}
+
 #[derive(Debug, Error)]
 pub enum ActivationStoreError {
     #[error("the Activation state could not be read or written: {0}")]
@@ -49,4 +64,18 @@ pub trait ActivationStore: Send + Sync {
     fn configured_agent_paths(&self) -> Result<Vec<ConfiguredAgentPath>, ActivationStoreError>;
 
     fn record(&self, record: ActivationRecord) -> Result<u64, ActivationStoreError>;
+
+    fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError>;
+
+    fn record_observations(
+        &self,
+        observations: &[ActivationObservation],
+    ) -> Result<u64, ActivationStoreError>;
+
+    fn record_observation(
+        &self,
+        observation: &ActivationObservation,
+    ) -> Result<u64, ActivationStoreError> {
+        self.record_observations(std::slice::from_ref(observation))
+    }
 }
