@@ -1,17 +1,31 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
 use serde::Deserialize;
 
 use crate::core::domain::{
-    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, Compatibility,
-    Health, SkillDetail, SkillId, SkillSummary, SourceKind,
+    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, CatalogSeed,
+    CatalogSeedAgent, Compatibility, Health, SkillDetail, SkillId, SkillSummary, SourceKind,
+};
+use crate::seams::activation_store::{
+    ActivationContext, ActivationRecord, ActivationStore, ActivationStoreError, ConfiguredAgentPath,
 };
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 
 const LIBRARY_DESK_FIXTURE: &str = include_str!("../../../fixtures/library-desk.json");
 
 pub struct FixtureCatalogStore {
+    state: RwLock<FixtureState>,
+}
+
+struct FixtureState {
     snapshot_version: u64,
     skills: Vec<SkillDetail>,
     agents: Vec<FixtureAgent>,
+    expected_targets: HashMap<(String, String), PathBuf>,
+    observed_states: HashMap<(String, String), ActivationObservedState>,
 }
 
 impl FixtureCatalogStore {
@@ -21,48 +35,139 @@ impl FixtureCatalogStore {
         let agents = fixture.agents;
         let mut skills: Vec<SkillDetail> =
             fixture.skills.into_iter().map(SkillDetail::from).collect();
+        let mut expected_targets = HashMap::new();
+        let mut observed_states = HashMap::new();
         for skill in &mut skills {
             skill.summary.enabled_agent_count = agents
                 .iter()
                 .filter(|agent| agent.enabled_skill_ids.contains(&skill.summary.id.0))
                 .count() as u32;
+            for agent in &agents {
+                if agent.enabled_skill_ids.contains(&skill.summary.id.0) {
+                    let key = (skill.summary.id.0.clone(), agent.id.clone());
+                    expected_targets.insert(key.clone(), PathBuf::from(&skill.final_entity_path));
+                    observed_states.insert(key, ActivationObservedState::Present);
+                }
+            }
         }
         Self {
-            snapshot_version: fixture.snapshot_version,
-            skills,
-            agents,
+            state: RwLock::new(FixtureState {
+                snapshot_version: fixture.snapshot_version,
+                skills,
+                agents,
+                expected_targets,
+                observed_states,
+            }),
         }
+    }
+
+    pub fn runtime(library_root: &Path) -> std::io::Result<Self> {
+        let store = Self::library_desk();
+        let mut state = store
+            .state
+            .write()
+            .map_err(|_| std::io::Error::other("fixture lock poisoned"))?;
+        let fixture_root = library_root.join("fixture-entities");
+        for skill in &mut state.skills {
+            let final_entity = fixture_root.join(&skill.summary.directory_name);
+            skill.final_entity_path = final_entity.to_string_lossy().into_owned();
+            if skill.summary.health == Health::Broken {
+                continue;
+            }
+            fs::create_dir_all(&final_entity)?;
+            let skill_document = final_entity.join("SKILL.md");
+            if !skill_document.exists() {
+                fs::write(skill_document, &skill.skill_markdown)?;
+            }
+        }
+        state.expected_targets.clear();
+        let expected_targets = state
+            .skills
+            .iter()
+            .flat_map(|skill| {
+                state.agents.iter().filter_map(move |agent| {
+                    if agent.enabled_skill_ids.contains(&skill.summary.id.0) {
+                        Some((
+                            (skill.summary.id.0.clone(), agent.id.clone()),
+                            PathBuf::from(&skill.final_entity_path),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        state.expected_targets = expected_targets;
+        drop(state);
+        Ok(store)
+    }
+
+    pub fn catalog_seed(&self) -> Result<CatalogSeed, ActivationStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        Ok(CatalogSeed {
+            snapshot_version: state.snapshot_version,
+            skills: state.skills.clone(),
+            agents: state
+                .agents
+                .iter()
+                .map(|agent| CatalogSeedAgent {
+                    id: AgentId(agent.id.clone()),
+                    name: agent.name.clone(),
+                    kind: agent.kind.into(),
+                    skills_path: agent.skills_path.clone(),
+                    detected: agent.detected,
+                    compatibility: agent.compatibility.into(),
+                })
+                .collect(),
+        })
     }
 }
 
 impl CatalogStore for FixtureCatalogStore {
     fn snapshot_version(&self) -> u64 {
-        self.snapshot_version
+        self.state
+            .read()
+            .map(|state| state.snapshot_version)
+            .unwrap_or_default()
     }
 
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError> {
-        Ok(self
+        let state = self
+            .state
+            .read()
+            .map_err(|_| CatalogStoreError::Unavailable("fixture lock poisoned".into()))?;
+        Ok(state
             .skills
             .iter()
-            .map(|detail| &detail.summary)
+            .map(|detail| summary_with_count(&state, detail))
             .filter(|skill| filter.includes(skill))
-            .cloned()
             .collect())
     }
 
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
-        Ok(self
+        let state = self
+            .state
+            .read()
+            .map_err(|_| CatalogStoreError::Unavailable("fixture lock poisoned".into()))?;
+        Ok(state
             .skills
             .iter()
             .find(|detail| detail.summary.id == *skill_id)
-            .cloned())
+            .map(|detail| detail_with_count(&state, detail)))
     }
 
     fn list_agents(
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError> {
-        if !self
+        let state = self
+            .state
+            .read()
+            .map_err(|_| CatalogStoreError::Unavailable("fixture lock poisoned".into()))?;
+        if !state
             .skills
             .iter()
             .any(|detail| detail.summary.id == *skill_id)
@@ -71,12 +176,111 @@ impl CatalogStore for FixtureCatalogStore {
         }
 
         Ok(Some(
-            self.agents
+            state
+                .agents
                 .iter()
-                .map(|agent| agent.activation_for(skill_id))
+                .map(|agent| agent.activation_for(&state, skill_id))
                 .collect(),
         ))
     }
+}
+
+impl ActivationStore for FixtureCatalogStore {
+    fn load(
+        &self,
+        skill_id: &SkillId,
+        agent_id: &AgentId,
+    ) -> Result<Option<ActivationContext>, ActivationStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        let Some(skill) = state
+            .skills
+            .iter()
+            .find(|skill| skill.summary.id == *skill_id)
+        else {
+            return Ok(None);
+        };
+        let Some(agent) = state.agents.iter().find(|agent| agent.id == agent_id.0) else {
+            return Ok(None);
+        };
+        let key = (skill_id.0.clone(), agent_id.0.clone());
+        Ok(Some(ActivationContext {
+            skill_id: skill_id.clone(),
+            directory_name: skill.summary.directory_name.clone(),
+            final_entity_path: PathBuf::from(&skill.final_entity_path),
+            agent_id: agent_id.clone(),
+            agent_name: agent.name.clone(),
+            agent_kind: agent.kind.into(),
+            agent_skills_path: PathBuf::from(&agent.skills_path),
+            desired_enabled: agent.enabled_skill_ids.contains(&skill_id.0),
+            expected_target_path: state.expected_targets.get(&key).cloned(),
+        }))
+    }
+
+    fn configured_agent_paths(&self) -> Result<Vec<ConfiguredAgentPath>, ActivationStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        Ok(state
+            .agents
+            .iter()
+            .map(|agent| ConfiguredAgentPath {
+                agent_id: AgentId(agent.id.clone()),
+                skills_path: PathBuf::from(&agent.skills_path),
+            })
+            .collect())
+    }
+
+    fn record(&self, record: ActivationRecord) -> Result<u64, ActivationStoreError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
+        let Some(agent) = state
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == record.agent_id.0)
+        else {
+            return Err(ActivationStoreError::Unavailable(
+                "fixture Agent was not found".into(),
+            ));
+        };
+        if record.desired_enabled {
+            if !agent.enabled_skill_ids.contains(&record.skill_id.0) {
+                agent.enabled_skill_ids.push(record.skill_id.0.clone());
+            }
+        } else {
+            agent
+                .enabled_skill_ids
+                .retain(|skill_id| skill_id != &record.skill_id.0);
+        }
+        let key = (record.skill_id.0, record.agent_id.0);
+        state
+            .expected_targets
+            .insert(key.clone(), record.expected_target_path);
+        state.observed_states.insert(key, record.observed_state);
+        state.snapshot_version += 1;
+        Ok(state.snapshot_version)
+    }
+}
+
+fn summary_with_count(state: &FixtureState, detail: &SkillDetail) -> SkillSummary {
+    let mut summary = detail.summary.clone();
+    summary.enabled_agent_count = state
+        .agents
+        .iter()
+        .filter(|agent| agent.enabled_skill_ids.contains(&summary.id.0))
+        .count() as u32;
+    summary
+}
+
+fn detail_with_count(state: &FixtureState, detail: &SkillDetail) -> SkillDetail {
+    let mut detail = detail.clone();
+    detail.summary = summary_with_count(state, &detail);
+    detail
 }
 
 #[derive(Deserialize)]
@@ -173,8 +377,9 @@ struct FixtureAgent {
 }
 
 impl FixtureAgent {
-    fn activation_for(&self, skill_id: &SkillId) -> AgentActivation {
+    fn activation_for(&self, state: &FixtureState, skill_id: &SkillId) -> AgentActivation {
         let desired_enabled = self.enabled_skill_ids.contains(&skill_id.0);
+        let key = (skill_id.0.clone(), self.id.clone());
         AgentActivation {
             id: AgentId(self.id.clone()),
             name: self.name.clone(),
@@ -183,11 +388,13 @@ impl FixtureAgent {
             detected: self.detected,
             compatibility: self.compatibility.into(),
             desired_enabled,
-            observed_state: if desired_enabled {
-                ActivationObservedState::Present
-            } else {
-                ActivationObservedState::Missing
-            },
+            observed_state: state.observed_states.get(&key).copied().unwrap_or(
+                if desired_enabled {
+                    ActivationObservedState::Present
+                } else {
+                    ActivationObservedState::Missing
+                },
+            ),
         }
     }
 }

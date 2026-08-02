@@ -106,3 +106,20 @@ pub struct CatalogSnapshot<T> {
     pub snapshot_version: u64,
     pub items: Vec<T>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogSeedAgent {
+    pub id: AgentId,
+    pub name: String,
+    pub kind: AgentKind,
+    pub skills_path: String,
+    pub detected: bool,
+    pub compatibility: Compatibility,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogSeed {
+    pub snapshot_version: u64,
+    pub skills: Vec<SkillDetail>,
+    pub agents: Vec<CatalogSeedAgent>,
+}

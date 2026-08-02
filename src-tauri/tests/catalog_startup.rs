@@ -1,6 +1,15 @@
+use std::sync::Arc;
+
 use rusqlite::Connection;
+use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
+use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::sqlite::{CURRENT_SCHEMA_VERSION, SqliteCatalogStore};
+use skill_man_lib::core::catalog::CatalogService;
+use skill_man_lib::core::domain::{AgentId, SkillId};
+use skill_man_lib::seams::activation_store::ActivationStore;
 use skill_man_lib::seams::catalog_store::{StartupAccess, StartupDiagnosticCode};
+use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
+use skill_man_lib::tauri_adapter::dto::{CatalogFilterDto, ListSkillsRequestDto};
 
 #[test]
 fn a_new_catalog_opens_writable_at_the_current_schema() {
@@ -41,6 +50,7 @@ fn an_unsupported_future_schema_opens_read_only_with_a_diagnostic() {
         status.diagnostic.expect("diagnostic").code,
         StartupDiagnosticCode::UnsupportedSchema
     );
+    assert_read_only_runtime_browses_fixture(home.path(), store);
 }
 
 #[test]
@@ -67,6 +77,7 @@ fn a_failed_migration_restores_the_original_catalog_and_locks_writes() {
             .is_some_and(|path| std::path::Path::new(path).is_file()),
         "an existing catalog is backed up before migration"
     );
+    assert_read_only_runtime_browses_fixture(home.path(), store);
 }
 
 #[test]
@@ -102,4 +113,37 @@ fn a_migration_backup_includes_committed_wal_content() {
         .expect("read committed WAL content from backup");
 
     assert_eq!(legacy_name, "committed-in-wal");
+}
+
+fn assert_read_only_runtime_browses_fixture(
+    library_root: &std::path::Path,
+    sqlite: SqliteCatalogStore,
+) {
+    let runtime = Arc::new(RuntimeCatalogStore::new(
+        Arc::new(FixtureCatalogStore::library_desk()),
+        Arc::new(sqlite),
+    ));
+    let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
+
+    let result = catalog
+        .list_skills(ListSkillsRequestDto {
+            filter: CatalogFilterDto::All,
+        })
+        .expect("read-only runtime keeps fixture browsing available");
+
+    assert_eq!(result.items.len(), 3);
+    assert_eq!(result.snapshot_version, 7);
+    assert!(
+        runtime
+            .load(
+                &SkillId("skill-authoring".into()),
+                &AgentId("claude-code".into())
+            )
+            .is_err(),
+        "Activation writes remain unavailable in read-only startup"
+    );
+    assert!(
+        !library_root.join("fixture-entities").exists(),
+        "read-only startup does not materialize fixture entities"
+    );
 }

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import { fixtureCatalogClient } from "../test-fixtures/catalog";
+import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 
 export type CatalogFilter = "all" | "broken" | "modified" | "link" | "install";
 export type SourceKind = "link" | "remote_install" | "file_install";
@@ -44,10 +44,34 @@ export interface AgentActivation {
   observedState: ActivationObservedState;
 }
 
+export interface ActivationPreview {
+  planToken: string;
+  skillDirectoryName: string;
+  agentName: string;
+  enabled: boolean;
+  entryPath: string;
+  targetPath: string;
+}
+
+export interface ActivationResult {
+  skillId: string;
+  agentId: string;
+  desiredEnabled: boolean;
+  observedState: ActivationObservedState;
+  snapshotVersion: number;
+}
+
 export interface CatalogClient {
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
   listAgents(skillId: string): Promise<AgentActivation[]>;
+  planActivation(
+    skillId: string,
+    agentId: string,
+    enabled: boolean,
+  ): Promise<ActivationPreview>;
+  applyActivation(planToken: string): Promise<ActivationResult>;
+  cancelActivation(planToken: string): Promise<boolean>;
 }
 
 const tauriCatalogClient: CatalogClient = {
@@ -60,10 +84,25 @@ const tauriCatalogClient: CatalogClient = {
   listAgents(skillId) {
     return invoke<AgentActivation[]>("list_agents", { skillId });
   },
+  planActivation(skillId, agentId, enabled) {
+    return invoke<ActivationPreview>("plan_activation", {
+      request: { skillId, agentId, enabled },
+    });
+  },
+  applyActivation(planToken) {
+    return invoke<ActivationResult>("apply_activation", {
+      request: { planToken },
+    });
+  },
+  cancelActivation(planToken) {
+    return invoke<boolean>("cancel_activation", {
+      request: { planToken },
+    });
+  },
 };
 
 export function createCatalogClient(): CatalogClient {
   return "__TAURI_INTERNALS__" in window
     ? tauriCatalogClient
-    : fixtureCatalogClient;
+    : createFixtureCatalogClient();
 }

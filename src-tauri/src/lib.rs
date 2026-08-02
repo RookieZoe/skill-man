@@ -10,32 +10,60 @@ pub fn run() {
     use ::tauri::Manager;
 
     use crate::adapters::fixture_catalog::FixtureCatalogStore;
+    use crate::adapters::macos_fs::MacOsFileSystem;
+    use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::sqlite::SqliteCatalogStore;
+    use crate::core::activation::ActivationService;
     use crate::core::catalog::CatalogService;
+    use crate::seams::catalog_store::StartupAccess;
+    use crate::tauri_adapter::activation_api::ActivationApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
-    use crate::tauri_adapter::commands::{inspect_skill, list_agents, list_skills};
-
-    let catalog = CatalogApi::new(CatalogService::new(Arc::new(
-        FixtureCatalogStore::library_desk(),
-    )));
+    use crate::tauri_adapter::commands::{
+        apply_activation, cancel_activation, inspect_skill, list_agents, list_skills,
+        plan_activation,
+    };
 
     ::tauri::Builder::default()
-        .manage(catalog)
         .setup(|app| {
-            let library_root = app
-                .path()
-                .home_dir()
-                .map_err(|error| error.to_string())?
-                .join("Library/Application Support/skill-man");
-            let store = SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3"))
-                .map_err(|error| error.to_string())?;
-            app.manage(store);
+            let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
+            let library_root = home_directory.join("Library/Application Support/skill-man");
+            let sqlite_store = Arc::new(
+                SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3"))
+                    .map_err(|error| error.to_string())?,
+            );
+            let fixture_store = if sqlite_store.startup_status().access == StartupAccess::ReadWrite
+            {
+                let fixture_store = Arc::new(
+                    FixtureCatalogStore::runtime(&library_root)
+                        .map_err(|error| error.to_string())?,
+                );
+                sqlite_store
+                    .seed_catalog_if_empty(
+                        &fixture_store
+                            .catalog_seed()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                fixture_store
+            } else {
+                Arc::new(FixtureCatalogStore::library_desk())
+            };
+            let runtime_store = Arc::new(RuntimeCatalogStore::new(fixture_store, sqlite_store));
+            app.manage(CatalogApi::new(CatalogService::new(runtime_store.clone())));
+            app.manage(ActivationApi::new(ActivationService::new(
+                runtime_store,
+                Arc::new(MacOsFileSystem::new(home_directory)),
+                library_root,
+            )));
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
             list_skills,
             inspect_skill,
-            list_agents
+            list_agents,
+            plan_activation,
+            apply_activation,
+            cancel_activation
         ])
         .run(::tauri::generate_context!())
         .expect("Skill Man runtime failed");

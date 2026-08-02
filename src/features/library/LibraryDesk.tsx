@@ -1,4 +1,7 @@
+import { useEffect, useLayoutEffect, useRef } from "react";
+
 import type {
+  ActivationPreview,
   AgentActivation,
   CatalogFilter,
   Health,
@@ -23,8 +26,16 @@ interface LibraryDeskProps {
   detail: SkillDetail | null;
   agents: AgentActivation[];
   error: string | null;
+  activationError: string | null;
+  activationPreview: ActivationPreview | null;
+  activationTriggerAgentId: string | null;
+  pendingAgentId: string | null;
+  isApplyingActivation: boolean;
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
+  onRequestActivation: (agentId: string, enabled: boolean) => void;
+  onApplyActivation: () => void;
+  onCancelActivation: () => void;
 }
 
 export function LibraryDesk({
@@ -34,32 +45,77 @@ export function LibraryDesk({
   detail,
   agents,
   error,
+  activationError,
+  activationPreview,
+  activationTriggerAgentId,
+  pendingAgentId,
+  isApplyingActivation,
   onFilter,
   onSelect,
+  onRequestActivation,
+  onApplyActivation,
+  onCancelActivation,
 }: LibraryDeskProps) {
+  const activationWasOpen = useRef(false);
+  const activationReturnFocusId =
+    detail && activationTriggerAgentId
+      ? activationControlId(detail.id, activationTriggerAgentId)
+      : null;
+
+  useLayoutEffect(() => {
+    if (activationPreview) {
+      activationWasOpen.current = true;
+    } else if (activationWasOpen.current) {
+      if (activationReturnFocusId) {
+        document.getElementById(activationReturnFocusId)?.focus();
+      }
+      activationWasOpen.current = false;
+    }
+  }, [activationPreview, activationReturnFocusId]);
+
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#skill-detail">
-        Skip to Skill detail
-      </a>
-      <Toolbar />
-      {error ? (
-        <div className="global-notice" role="alert">
-          <strong>Library unavailable</strong>
-          <span>{error}</span>
+      <div
+        className="app-background"
+        inert={activationPreview ? true : undefined}
+      >
+        <a className="skip-link" href="#skill-detail">
+          Skip to Skill detail
+        </a>
+        <Toolbar />
+        {error ? (
+          <div className="global-notice" role="alert">
+            <strong>Library unavailable</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
+        <div className="library-desk">
+          <LibrarySidebar
+            filter={filter}
+            skills={skills}
+            selectedId={selectedId}
+            onFilter={onFilter}
+            onSelect={onSelect}
+          />
+          <SkillDetailPanel detail={detail} />
+          <AgentInspector
+            detail={detail}
+            agents={agents}
+            error={activationError}
+            pendingAgentId={pendingAgentId}
+            isApplying={isApplyingActivation}
+            onRequest={onRequestActivation}
+          />
         </div>
-      ) : null}
-      <div className="library-desk">
-        <LibrarySidebar
-          filter={filter}
-          skills={skills}
-          selectedId={selectedId}
-          onFilter={onFilter}
-          onSelect={onSelect}
-        />
-        <SkillDetailPanel detail={detail} />
-        <AgentInspector detail={detail} agents={agents} />
       </div>
+      {activationPreview ? (
+        <ActivationPreviewSheet
+          preview={activationPreview}
+          isApplying={isApplyingActivation}
+          onApply={onApplyActivation}
+          onCancel={onCancelActivation}
+        />
+      ) : null}
     </div>
   );
 }
@@ -239,9 +295,17 @@ function SkillDetailPanel({ detail }: { detail: SkillDetail | null }) {
 function AgentInspector({
   detail,
   agents,
+  error,
+  pendingAgentId,
+  isApplying,
+  onRequest,
 }: {
   detail: SkillDetail | null;
   agents: AgentActivation[];
+  error: string | null;
+  pendingAgentId: string | null;
+  isApplying: boolean;
+  onRequest: (agentId: string, enabled: boolean) => void;
 }) {
   return (
     <aside className="agent-inspector" aria-label="Enable by Agent">
@@ -252,54 +316,180 @@ function AgentInspector({
         </div>
       </div>
       <p className="inspector-intro">
-        Observed state from the fixture. Changes arrive in the next
-        implementation slice.
+        Preview each change before Skill Man updates the Agent directory.
       </p>
+      {error ? (
+        <div className="activation-error" role="alert">
+          <strong>Activation unchanged</strong>
+          <span>{error}</span>
+        </div>
+      ) : null}
       <div className="agent-list">
         {detail
-          ? agents.map((agent) => (
-              <div className="agent-row" key={agent.id}>
-                <div className="agent-row-top">
-                  <span className="agent-monogram" aria-hidden="true">
-                    {agent.name.slice(0, 1)}
-                  </span>
-                  <span className="agent-copy">
-                    <strong>{agent.name}</strong>
-                    <small>{agent.skillsPath}</small>
-                  </span>
-                  <label className="switch-control">
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
-                      checked={agent.desiredEnabled}
-                      disabled
-                      readOnly
-                    />
-                    <span aria-hidden="true" />
-                  </label>
-                </div>
-                <div className="agent-status">
-                  <span
-                    className={`agent-state agent-state--${activationTone(agent)}`}
-                  >
-                    {activationLabel(agent)}
-                  </span>
-                  {agent.compatibility === "unknown" ? (
-                    <span className="compatibility-note">
-                      Compatibility unknown
+          ? agents.map((agent) => {
+              const isPending = pendingAgentId === agent.id;
+              const isSupported = agent.kind === "claude_preset";
+              return (
+                <div
+                  className={`agent-row${isPending || isApplying ? " agent-row--busy" : ""}`}
+                  key={agent.id}
+                >
+                  <div className="agent-row-top">
+                    <span className="agent-monogram" aria-hidden="true">
+                      {agent.name.slice(0, 1)}
                     </span>
-                  ) : null}
+                    <span className="agent-copy">
+                      <strong>{agent.name}</strong>
+                      <small>{agent.skillsPath}</small>
+                    </span>
+                    <label
+                      className={`switch-control${isSupported ? " switch-control--interactive" : ""}`}
+                    >
+                      <input
+                        id={activationControlId(detail.id, agent.id)}
+                        type="checkbox"
+                        role="switch"
+                        aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
+                        checked={agent.desiredEnabled}
+                        disabled={
+                          !isSupported ||
+                          !agent.detected ||
+                          isPending ||
+                          isApplying
+                        }
+                        onChange={(event) =>
+                          onRequest(agent.id, event.currentTarget.checked)
+                        }
+                      />
+                      <span aria-hidden="true" />
+                    </label>
+                  </div>
+                  <div className="agent-status">
+                    <span
+                      className={`agent-state agent-state--${activationTone(agent)}`}
+                    >
+                      {isPending ? "Preparing preview" : activationLabel(agent)}
+                    </span>
+                    {!isSupported ? (
+                      <span className="compatibility-note">
+                        Later milestone
+                      </span>
+                    ) : null}
+                    {agent.compatibility === "unknown" ? (
+                      <span className="compatibility-note">
+                        Compatibility unknown
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           : null}
       </div>
       <div className="inspector-footnote">
         <LockIcon />
-        <span>This milestone is intentionally read only.</span>
+        <span>Every Activation change requires a preview.</span>
       </div>
     </aside>
+  );
+}
+
+function ActivationPreviewSheet({
+  preview,
+  isApplying,
+  onApply,
+  onCancel,
+}: {
+  preview: ActivationPreview;
+  isApplying: boolean;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  const action = preview.enabled ? "Enable" : "Disable";
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    confirmButton.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isApplying) onCancel();
+      if (
+        event.key === "Tab" &&
+        !event.shiftKey &&
+        document.activeElement === confirmButton.current
+      ) {
+        event.preventDefault();
+        cancelButton.current?.focus();
+      } else if (
+        event.key === "Tab" &&
+        event.shiftKey &&
+        document.activeElement === cancelButton.current
+      ) {
+        event.preventDefault();
+        confirmButton.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isApplying, onCancel]);
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isApplying) onCancel();
+      }}
+    >
+      <section
+        className="activation-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Preview ${action}`}
+      >
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Activation preview</span>
+          <h2>
+            {action} {preview.skillDirectoryName}
+          </h2>
+          <p>
+            {preview.enabled ? "Create" : "Remove"} one managed Activation in{" "}
+            {preview.agentName}.
+          </p>
+        </div>
+        <dl className="activation-paths">
+          <div>
+            <dt>Agent entry</dt>
+            <dd>{preview.entryPath}</dd>
+          </div>
+          <div>
+            <dt>Final entity</dt>
+            <dd>{preview.targetPath}</dd>
+          </div>
+        </dl>
+        <div className="activation-sheet-actions">
+          <button
+            ref={cancelButton}
+            type="button"
+            disabled={isApplying}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            ref={confirmButton}
+            type="button"
+            className="activation-confirm-button"
+            disabled={isApplying}
+            onClick={onApply}
+          >
+            {isApplying ? "Applying" : `${action} in ${preview.agentName}`}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -351,6 +541,10 @@ function sourceKindLabel(sourceKind: SourceKind) {
 function activationTone(agent: AgentActivation) {
   if (!agent.desiredEnabled) return "neutral";
   return agent.observedState === "present" ? "healthy" : "warning";
+}
+
+function activationControlId(skillId: string, agentId: string) {
+  return `activation-${skillId}-${agentId}`;
 }
 
 function activationLabel(agent: AgentActivation) {

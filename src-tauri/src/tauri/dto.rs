@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::activation::{ActivationPreview, ActivationResult};
 use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
@@ -229,4 +230,70 @@ impl From<AgentActivation> for AgentActivationDto {
 pub struct CommandErrorDto {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanActivationRequestDto {
+    pub skill_id: String,
+    pub agent_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyActivationRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelActivationRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationPreviewDto {
+    pub plan_token: String,
+    pub skill_directory_name: String,
+    pub agent_name: String,
+    pub enabled: bool,
+    pub entry_path: String,
+    pub target_path: String,
+}
+
+impl From<ActivationPreview> for ActivationPreviewDto {
+    fn from(value: ActivationPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            skill_directory_name: value.skill_directory_name,
+            agent_name: value.agent_name,
+            enabled: value.enabled,
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            target_path: value.target_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationResultDto {
+    pub skill_id: String,
+    pub agent_id: String,
+    pub desired_enabled: bool,
+    pub observed_state: ActivationObservedStateDto,
+    pub snapshot_version: u64,
+}
+
+impl From<ActivationResult> for ActivationResultDto {
+    fn from(value: ActivationResult) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            agent_id: value.agent_id.0,
+            desired_enabled: value.desired_enabled,
+            observed_state: value.observed_state.into(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
 }

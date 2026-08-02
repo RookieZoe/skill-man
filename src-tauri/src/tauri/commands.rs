@@ -1,9 +1,36 @@
 use tauri::State;
 
+use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    AgentActivationDto, CatalogListDto, CommandErrorDto, ListSkillsRequestDto, SkillDetailDto,
+    ActivationPreviewDto, ActivationResultDto, AgentActivationDto, ApplyActivationRequestDto,
+    CancelActivationRequestDto, CatalogListDto, CommandErrorDto, ListSkillsRequestDto,
+    PlanActivationRequestDto, SkillDetailDto,
 };
+
+#[tauri::command]
+pub fn plan_activation(
+    state: State<'_, ActivationApi>,
+    request: PlanActivationRequestDto,
+) -> Result<ActivationPreviewDto, CommandErrorDto> {
+    state.plan_activation(request)
+}
+
+#[tauri::command]
+pub fn apply_activation(
+    state: State<'_, ActivationApi>,
+    request: ApplyActivationRequestDto,
+) -> Result<ActivationResultDto, CommandErrorDto> {
+    state.apply_activation(request)
+}
+
+#[::tauri::command]
+pub fn cancel_activation(
+    state: State<'_, ActivationApi>,
+    request: CancelActivationRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_activation(request)
+}
 
 #[tauri::command]
 pub fn list_skills(
