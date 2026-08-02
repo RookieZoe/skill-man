@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "library-browser",
+  "description": "Read-only Library Desk window with no filesystem or shell plugin access.",
+  "windows": ["main"],
+  "platforms": ["macOS"],
+  "permissions": ["core:default"]
+}
