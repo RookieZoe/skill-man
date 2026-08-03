@@ -1,5 +1,45 @@
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SkillId(pub String);
+
+pub fn skill_identity_key(directory_name: &str) -> String {
+    let normalized: String = directory_name.nfc().collect();
+    normalized.as_str().case_fold().collect()
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SkillMetadata {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+pub fn parse_skill_metadata(skill_markdown: &str) -> SkillMetadata {
+    let mut lines = skill_markdown.lines();
+    if lines.next() != Some("---") {
+        return SkillMetadata::default();
+    }
+    let mut metadata = SkillMetadata::default();
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(['\'', '"']);
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim() {
+            "name" => metadata.name = Some(value.to_owned()),
+            "description" => metadata.description = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    metadata
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AgentId(pub String);
@@ -122,4 +162,18 @@ pub struct CatalogSeed {
     pub snapshot_version: u64,
     pub skills: Vec<SkillDetail>,
     pub agents: Vec<CatalogSeedAgent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skill_identity_key;
+
+    #[test]
+    fn identity_key_uses_unicode_case_folding_after_nfc() {
+        assert_eq!(skill_identity_key("Straße"), skill_identity_key("STRASSE"));
+        assert_eq!(
+            skill_identity_key("Édit"),
+            skill_identity_key("E\u{301}DIT")
+        );
+    }
 }

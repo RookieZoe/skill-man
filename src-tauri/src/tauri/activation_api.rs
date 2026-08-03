@@ -63,8 +63,9 @@ impl ActivationApi {
 pub(crate) fn command_error(error: ActivationError) -> CommandErrorDto {
     let code = match &error {
         ActivationError::NotFound => "not_found",
-        ActivationError::UnsupportedAgent => "unsupported_agent",
-        ActivationError::Validation(_) | ActivationError::PathOverlap => "validation",
+        ActivationError::Validation(_)
+        | ActivationError::AgentAdapter(_)
+        | ActivationError::PathOverlap => "validation",
         ActivationError::Conflict(_) => "conflict",
         ActivationError::SourceUnavailable(_) => "source_unavailable",
         ActivationError::TargetMismatch(_) => "target_mismatch",

@@ -5,6 +5,9 @@ use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
 };
+use crate::core::import::{
+    LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
+};
 use crate::core::maintenance::ActivationHealthReport;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -270,6 +273,7 @@ pub struct ActivationPreviewDto {
     pub kind: ActivationPlanKindDto,
     pub entry_path: String,
     pub target_path: String,
+    pub compatibility_warning: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -300,6 +304,7 @@ impl From<ActivationPreview> for ActivationPreviewDto {
             kind: value.kind.into(),
             entry_path: value.entry_path.to_string_lossy().into_owned(),
             target_path: value.target_path.to_string_lossy().into_owned(),
+            compatibility_warning: value.compatibility_warning,
         }
     }
 }
@@ -337,6 +342,124 @@ impl From<ActivationResult> for ActivationResultDto {
             agent_id: value.agent_id.0,
             desired_enabled: value.desired_enabled,
             observed_state: value.observed_state.into(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverLinkImportRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanLinkImportRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyLinkImportRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelLinkImportRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkImportCandidateDto {
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub frontmatter_name: Option<String>,
+    pub source_entry_path: String,
+    pub final_entity_path: String,
+}
+
+impl From<LinkImportCandidate> for LinkImportCandidateDto {
+    fn from(value: LinkImportCandidate) -> Self {
+        Self {
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            frontmatter_name: value.frontmatter_name,
+            source_entry_path: value.source_entry_path.to_string_lossy().into_owned(),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryConflictDto {
+    pub existing_skill_id: String,
+    pub directory_name: String,
+}
+
+impl From<LibraryConflict> for LibraryConflictDto {
+    fn from(value: LibraryConflict) -> Self {
+        Self {
+            existing_skill_id: value.existing_skill_id.0,
+            directory_name: value.directory_name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkImportPreviewDto {
+    pub plan_token: String,
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub source_entry_path: String,
+    pub final_entity_path: String,
+    pub library_entry_path: Option<String>,
+    pub conflict: Option<LibraryConflictDto>,
+    pub can_apply: bool,
+}
+
+impl From<LinkImportPreview> for LinkImportPreviewDto {
+    fn from(value: LinkImportPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            source_entry_path: value.source_entry_path.to_string_lossy().into_owned(),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            library_entry_path: None,
+            conflict: value.conflict.map(LibraryConflictDto::from),
+            can_apply: value.can_apply,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkImportResultDto {
+    pub operation_id: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub final_entity_path: String,
+    pub library_entry_path: Option<String>,
+    pub snapshot_version: u64,
+}
+
+impl From<LinkImportResult> for LinkImportResultDto {
+    fn from(value: LinkImportResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            library_entry_path: None,
             snapshot_version: value.snapshot_version,
         }
     }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import type {
@@ -6,6 +6,8 @@ import type {
   AgentActivation,
   CatalogClient,
   CatalogFilter,
+  LinkImportPreview,
+  LinkImportResult,
   SkillDetail,
   SkillSummary,
 } from "./catalog-client";
@@ -36,6 +38,16 @@ export function App({ client }: AppProps) {
   const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
   const [isApplyingActivation, setIsApplyingActivation] = useState(false);
   const [startupHealthComplete, setStartupHealthComplete] = useState(false);
+  const [isLinkImportOpen, setIsLinkImportOpen] = useState(false);
+  const [linkImportPreview, setLinkImportPreview] =
+    useState<LinkImportPreview | null>(null);
+  const [linkImportResult, setLinkImportResult] =
+    useState<LinkImportResult | null>(null);
+  const [linkImportError, setLinkImportError] = useState<string | null>(null);
+  const [linkImportActivity, setLinkImportActivity] = useState<
+    "idle" | "discovering" | "applying"
+  >("idle");
+  const linkImportRunId = useRef(0);
 
   useEffect(() => {
     let current = true;
@@ -216,6 +228,82 @@ export function App({ client }: AppProps) {
     }
   }
 
+  function openLinkImport() {
+    linkImportRunId.current += 1;
+    setLinkImportPreview(null);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+    setIsLinkImportOpen(true);
+  }
+
+  async function previewLinkImport(sourcePath: string) {
+    const runId = ++linkImportRunId.current;
+    setLinkImportActivity("discovering");
+    setLinkImportError(null);
+    try {
+      await client.discoverLinkImport(sourcePath);
+      if (runId !== linkImportRunId.current) return;
+      const preview = await client.planLinkImport(sourcePath);
+      if (runId !== linkImportRunId.current) {
+        await client.cancelLinkImport(preview.planToken).catch(() => undefined);
+        return;
+      }
+      setLinkImportPreview(preview);
+    } catch (reason) {
+      if (runId === linkImportRunId.current) {
+        setLinkImportPreview(null);
+        setLinkImportError(readError(reason));
+      }
+    } finally {
+      if (runId === linkImportRunId.current) setLinkImportActivity("idle");
+    }
+  }
+
+  async function applyLinkImport() {
+    if (!linkImportPreview?.canApply) return;
+    const runId = ++linkImportRunId.current;
+    setLinkImportActivity("applying");
+    setLinkImportError(null);
+    try {
+      const result = await client.applyLinkImport(linkImportPreview.planToken);
+      const snapshot = await client.listSkills(filter);
+      setSkills(snapshot.items);
+      setLinkImportPreview(null);
+      setLinkImportResult(result);
+    } catch (reason) {
+      setLinkImportPreview(null);
+      setLinkImportError(readError(reason));
+    } finally {
+      if (runId === linkImportRunId.current) setLinkImportActivity("idle");
+    }
+  }
+
+  async function closeLinkImport() {
+    if (linkImportActivity === "applying") return;
+    linkImportRunId.current += 1;
+    const planToken = linkImportPreview?.planToken;
+    setIsLinkImportOpen(false);
+    setLinkImportPreview(null);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+    setLinkImportActivity("idle");
+    if (!planToken) return;
+    try {
+      await client.cancelLinkImport(planToken);
+    } catch (reason) {
+      setError(readError(reason));
+    }
+  }
+
+  function openImportedSkill() {
+    if (!linkImportResult) return;
+    setFilter("all");
+    setSelectedId(linkImportResult.skillId);
+    setIsLinkImportOpen(false);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+  }
+
   return (
     <LibraryDesk
       filter={filter}
@@ -233,6 +321,11 @@ export function App({ client }: AppProps) {
       isCheckingActivations={
         !startupHealthComplete || agentsReadyForSkillId !== selectedId
       }
+      isLinkImportOpen={isLinkImportOpen}
+      linkImportPreview={linkImportPreview}
+      linkImportResult={linkImportResult}
+      linkImportError={linkImportError}
+      linkImportActivity={linkImportActivity}
       onFilter={setFilter}
       onSelect={setSelectedId}
       onRequestActivation={requestActivation}
@@ -240,6 +333,11 @@ export function App({ client }: AppProps) {
       onApplyActivation={applyActivation}
       onCancelActivation={cancelActivation}
       onCloseActivationConflict={() => setActivationConflict(null)}
+      onOpenLinkImport={openLinkImport}
+      onPreviewLinkImport={previewLinkImport}
+      onApplyLinkImport={applyLinkImport}
+      onCloseLinkImport={closeLinkImport}
+      onOpenImportedSkill={openImportedSkill}
     />
   );
 }

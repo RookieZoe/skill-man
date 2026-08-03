@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 
@@ -173,6 +173,7 @@ test("shows startup Activation drift and repairs only a missing Activation", asy
     enabled: true,
     entryPath: "~/.claude/skills/skill-authoring",
     targetPath: "/Library/skills/skill-authoring",
+    compatibilityWarning: null,
   });
   client.applyActivation = async () => {
     repaired = true;
@@ -388,4 +389,140 @@ test("keeps persisted Agent state hidden until startup health completes", async 
 
   expect(await screen.findByText("Enabled · Missing")).toBeInTheDocument();
   expect(listAgentsCalls).toBe(1);
+});
+
+test("imports a linked local folder and continues to its Agent inspector", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  const progress = screen.getByRole("list", { name: "Import progress" });
+  expect(within(progress).getByText("Source")).toHaveAttribute(
+    "aria-current",
+    "step",
+  );
+  const source = "/Users/zoe/Codes/AI/skills/linked-workflow";
+  await user.type(
+    screen.getByRole("textbox", { name: "Local folder path" }),
+    source,
+  );
+  await user.click(screen.getByRole("button", { name: "Preview Link" }));
+
+  expect(
+    await screen.findByRole("heading", { name: "Preview linked-workflow" }),
+  ).toBeInTheDocument();
+  expect(within(progress).getByText("Preview")).toHaveAttribute(
+    "aria-current",
+    "step",
+  );
+  expect(screen.getAllByText(source)).toHaveLength(2);
+  expect(screen.getByText("SQLite pointer only")).toBeInTheDocument();
+  expect(screen.getByText("Review imported instructions")).toBeInTheDocument();
+  expect(screen.getByText(/can become instructions/)).toBeInTheDocument();
+
+  await user.click(
+    screen.getByRole("button", { name: "Import linked-workflow" }),
+  );
+  expect(
+    await screen.findByRole("dialog", { name: "Link Import result" }),
+  ).toHaveTextContent("linked-workflow is Managed");
+  expect(within(progress).getByText("Result")).toHaveAttribute(
+    "aria-current",
+    "step",
+  );
+  await user.click(screen.getByRole("button", { name: "Enable by Agent" }));
+
+  expect(
+    await screen.findByRole("heading", { name: "linked-workflow" }),
+  ).toBeInTheDocument();
+  const codexActivation = await screen.findByRole("switch", {
+    name: "Enable linked-workflow for Codex",
+  });
+  expect(codexActivation).not.toBeChecked();
+  expect(codexActivation).toBeEnabled();
+  expect(
+    screen.getByRole("switch", {
+      name: "Enable linked-workflow for Workbench",
+    }),
+  ).toBeEnabled();
+  await user.click(codexActivation);
+  expect(
+    await screen.findByRole("dialog", { name: "Preview Enable" }),
+  ).toHaveTextContent(source);
+});
+
+test("cancels Link discovery without creating a stale Preview", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  let finishDiscovery:
+    | ((
+        candidate: Awaited<ReturnType<typeof client.discoverLinkImport>>,
+      ) => void)
+    | undefined;
+  let planCalls = 0;
+  client.discoverLinkImport = () =>
+    new Promise((resolve) => {
+      finishDiscovery = resolve;
+    });
+  const planLinkImport = client.planLinkImport.bind(client);
+  client.planLinkImport = async (sourcePath) => {
+    planCalls += 1;
+    return planLinkImport(sourcePath);
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Local folder path" }),
+    "/tmp/cancellable-skill",
+  );
+  await user.click(screen.getByRole("button", { name: "Preview Link" }));
+
+  expect(
+    within(screen.getByRole("list", { name: "Import progress" })).getByText(
+      "Discover",
+    ),
+  ).toHaveAttribute("aria-current", "step");
+  const cancel = screen.getByRole("button", { name: "Cancel" });
+  expect(cancel).toBeEnabled();
+  await user.click(cancel);
+  expect(screen.queryByRole("dialog", { name: "Import Link" })).toBeNull();
+
+  await act(async () => {
+    finishDiscovery?.({
+      directoryName: "cancellable-skill",
+      displayName: "cancellable-skill",
+      description: "",
+      frontmatterName: null,
+      sourceEntryPath: "/tmp/cancellable-skill",
+      finalEntityPath: "/tmp/cancellable-skill",
+    });
+  });
+  await waitFor(() => expect(planCalls).toBe(0));
+});
+
+test("shows Library Conflict in Link preview and blocks Import", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Local folder path" }),
+    "/tmp/skill-authoring",
+  );
+  await user.click(screen.getByRole("button", { name: "Preview Link" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Library Conflict",
+  );
+  expect(screen.getByText(/Rename the source/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Import skill-authoring" }),
+  ).toBeDisabled();
+  expect(
+    screen.queryByRole("dialog", { name: "Link Import result" }),
+  ).not.toBeInTheDocument();
 });

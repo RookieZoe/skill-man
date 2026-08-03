@@ -9,21 +9,26 @@ pub fn run() {
 
     use ::tauri::Manager;
 
+    use crate::adapters::agent_adapters::BuiltInAgentAdapters;
     use crate::adapters::fixture_catalog::FixtureCatalogStore;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::sqlite::SqliteCatalogStore;
+    use crate::adapters::system_clock::SystemClock;
     use crate::core::activation::ActivationService;
     use crate::core::catalog::CatalogService;
+    use crate::core::import::ImportService;
     use crate::core::maintenance::MaintenanceService;
     use crate::seams::catalog_store::StartupAccess;
     use crate::tauri_adapter::activation_api::ActivationApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
-        apply_activation, cancel_activation, inspect_skill, list_agents, list_skills,
-        plan_activation, plan_activation_repair, run_activation_health_check,
+        apply_activation, apply_link_import, cancel_activation, cancel_link_import,
+        discover_link_import, inspect_skill, list_agents, list_skills, plan_activation,
+        plan_activation_repair, plan_link_import, run_activation_health_check,
     };
     use crate::tauri_adapter::health_api::HealthApi;
+    use crate::tauri_adapter::import_api::ImportApi;
 
     ::tauri::Builder::default()
         .setup(|app| {
@@ -50,17 +55,26 @@ pub fn run() {
             } else {
                 Arc::new(FixtureCatalogStore::library_desk())
             };
-            let runtime_store = Arc::new(RuntimeCatalogStore::new(fixture_store, sqlite_store));
             let filesystem = Arc::new(MacOsFileSystem::new(home_directory));
+            let runtime_store = Arc::new(RuntimeCatalogStore::new(
+                fixture_store,
+                sqlite_store,
+                filesystem.clone(),
+            ));
             app.manage(CatalogApi::new(CatalogService::new(runtime_store.clone())));
             app.manage(HealthApi::new(
                 MaintenanceService::new(runtime_store.clone(), filesystem.clone()).begin_startup(),
             ));
-            app.manage(ActivationApi::new(ActivationService::new(
-                runtime_store,
-                filesystem,
-                library_root,
+            app.manage(ImportApi::new(ImportService::new(
+                runtime_store.clone(),
+                filesystem.clone(),
+                Arc::new(SystemClock::new()),
+                library_root.clone(),
             )));
+            app.manage(ActivationApi::new(
+                ActivationService::new(runtime_store, filesystem, library_root)
+                    .with_agent_adapters(Arc::new(BuiltInAgentAdapters)),
+            ));
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
@@ -71,7 +85,11 @@ pub fn run() {
             plan_activation,
             plan_activation_repair,
             apply_activation,
-            cancel_activation
+            cancel_activation,
+            discover_link_import,
+            plan_link_import,
+            apply_link_import,
+            cancel_link_import
         ])
         .run(::tauri::generate_context!())
         .expect("Skill Man runtime failed");

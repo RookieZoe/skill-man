@@ -12,7 +12,7 @@ use skill_man_lib::seams::activation_store::{
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use skill_man_lib::seams::filesystem::{
-    ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError,
+    ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError, SkillFingerprint,
 };
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::dto::{ApplyActivationRequestDto, PlanActivationRequestDto};
@@ -1057,6 +1057,13 @@ struct FailingCompensationFileSystem {
 }
 
 impl FileSystem for FailingCompensationFileSystem {
+    fn inspect_link_source(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<skill_man_lib::seams::filesystem::LinkSourceSnapshot, FileSystemError> {
+        self.delegate.inspect_link_source(path)
+    }
+
     fn canonical_directory(&self, path: &std::path::Path) -> Result<PathBuf, FileSystemError> {
         self.delegate.canonical_directory(path)
     }
@@ -1084,6 +1091,17 @@ impl FileSystem for FailingCompensationFileSystem {
 
     fn skill_directory_is_readable(&self, path: &std::path::Path) -> Result<bool, FileSystemError> {
         self.delegate.skill_directory_is_readable(path)
+    }
+
+    fn skill_fingerprint(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<SkillFingerprint, FileSystemError> {
+        self.delegate.skill_fingerprint(path)
+    }
+
+    fn read_skill_document(&self, path: &std::path::Path) -> Result<String, FileSystemError> {
+        self.delegate.read_skill_document(path)
     }
 
     fn create_activation(

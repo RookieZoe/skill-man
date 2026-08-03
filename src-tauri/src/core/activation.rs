@@ -6,9 +6,14 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::core::domain::{ActivationObservedState, AgentId, AgentKind, SkillId};
+use crate::core::domain::{
+    ActivationObservedState, AgentId, AgentKind, SkillId, parse_skill_metadata,
+};
 use crate::seams::activation_store::{
     ActivationObservation, ActivationRecord, ActivationStore, ActivationStoreError,
+};
+use crate::seams::agent_adapter::{
+    AgentAdapterError, AgentAdapterRegistry, AgentEnableContext, AgentEnablePolicy,
 };
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError,
@@ -32,6 +37,7 @@ pub struct ActivationPreview {
     pub kind: ActivationPlanKind,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
+    pub compatibility_warning: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +80,7 @@ pub struct ActivationService {
     store: Arc<dyn ActivationStore>,
     filesystem: Arc<dyn FileSystem>,
     library_root: PathBuf,
+    agent_adapters: Arc<dyn AgentAdapterRegistry>,
     plans: Mutex<HashMap<String, PlannedActivation>>,
     next_plan_id: AtomicU64,
     plan_ttl: Duration,
@@ -89,10 +96,16 @@ impl ActivationService {
             store,
             filesystem,
             library_root,
+            agent_adapters: Arc::new(ClaudeOnlyAgentAdapter),
             plans: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
         }
+    }
+
+    pub fn with_agent_adapters(mut self, agent_adapters: Arc<dyn AgentAdapterRegistry>) -> Self {
+        self.agent_adapters = agent_adapters;
+        self
     }
 
     pub fn with_plan_ttl(mut self, plan_ttl: Duration) -> Self {
@@ -133,15 +146,34 @@ impl ActivationService {
             .store
             .load(&request.skill_id, &request.agent_id)?
             .ok_or(ActivationError::NotFound)?;
-        if context.agent_kind != AgentKind::ClaudePreset {
-            return Err(ActivationError::UnsupportedAgent);
-        }
         if kind == ActivationPlanKind::Repair && !context.desired_enabled {
             return Err(ActivationError::Validation(
                 "Repair requires a desired Activation".into(),
             ));
         }
         validate_directory_name(&context.directory_name)?;
+        let compatibility_warning = if request.enabled {
+            let metadata = if context.agent_kind == AgentKind::ClaudePreset {
+                None
+            } else {
+                Some(parse_skill_metadata(
+                    &self
+                        .filesystem
+                        .read_skill_document(&context.final_entity_path)?,
+                ))
+            };
+            self.agent_adapters
+                .validate_enable(AgentEnableContext {
+                    agent_kind: context.agent_kind,
+                    directory_name: &context.directory_name,
+                    frontmatter_name: metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.name.as_deref()),
+                })?
+                .compatibility_warning
+        } else {
+            None
+        };
         let agent_root = self
             .filesystem
             .canonical_directory(&context.agent_skills_path)?;
@@ -266,6 +298,7 @@ impl ActivationService {
             kind,
             entry_path,
             target_path,
+            compatibility_warning,
         })
     }
 
@@ -478,6 +511,23 @@ impl ActivationService {
     }
 }
 
+struct ClaudeOnlyAgentAdapter;
+
+impl AgentAdapterRegistry for ClaudeOnlyAgentAdapter {
+    fn validate_enable(
+        &self,
+        context: AgentEnableContext<'_>,
+    ) -> Result<AgentEnablePolicy, AgentAdapterError> {
+        if context.agent_kind == AgentKind::ClaudePreset {
+            Ok(AgentEnablePolicy::default())
+        } else {
+            Err(AgentAdapterError(
+                "this ActivationService requires an AgentAdapter for non-Claude Agents".into(),
+            ))
+        }
+    }
+}
+
 fn validate_directory_name(directory_name: &str) -> Result<(), ActivationError> {
     let mut components = Path::new(directory_name).components();
     if directory_name.is_empty()
@@ -499,8 +549,6 @@ fn paths_overlap(first: &Path, second: &Path) -> bool {
 pub enum ActivationError {
     #[error("the Managed Skill or Agent was not found")]
     NotFound,
-    #[error("this milestone only supports the Claude Code Agent Preset")]
-    UnsupportedAgent,
     #[error("Activation validation failed: {0}")]
     Validation(String),
     #[error("the Activation path conflicts with existing content: {}", .0.display())]
@@ -526,6 +574,8 @@ pub enum ActivationError {
     FileSystem(#[from] FileSystemError),
     #[error(transparent)]
     Store(#[from] ActivationStoreError),
+    #[error(transparent)]
+    AgentAdapter(#[from] AgentAdapterError),
     #[error("internal Activation error: {0}")]
     Internal(String),
 }

@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
   ActivationPreview,
   AgentActivation,
   CatalogFilter,
   Health,
+  LinkImportPreview,
+  LinkImportResult,
   SkillDetail,
   SkillSummary,
   SourceKind,
@@ -33,6 +35,11 @@ interface LibraryDeskProps {
   pendingAgentId: string | null;
   isApplyingActivation: boolean;
   isCheckingActivations: boolean;
+  isLinkImportOpen: boolean;
+  linkImportPreview: LinkImportPreview | null;
+  linkImportResult: LinkImportResult | null;
+  linkImportError: string | null;
+  linkImportActivity: "idle" | "discovering" | "applying";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
   onRequestActivation: (agentId: string, enabled: boolean) => void;
@@ -40,6 +47,11 @@ interface LibraryDeskProps {
   onApplyActivation: () => void;
   onCancelActivation: () => void;
   onCloseActivationConflict: () => void;
+  onOpenLinkImport: () => void;
+  onPreviewLinkImport: (sourcePath: string) => void;
+  onApplyLinkImport: () => void;
+  onCloseLinkImport: () => void;
+  onOpenImportedSkill: () => void;
 }
 
 export function LibraryDesk({
@@ -56,6 +68,11 @@ export function LibraryDesk({
   pendingAgentId,
   isApplyingActivation,
   isCheckingActivations,
+  isLinkImportOpen,
+  linkImportPreview,
+  linkImportResult,
+  linkImportError,
+  linkImportActivity,
   onFilter,
   onSelect,
   onRequestActivation,
@@ -63,14 +80,22 @@ export function LibraryDesk({
   onApplyActivation,
   onCancelActivation,
   onCloseActivationConflict,
+  onOpenLinkImport,
+  onPreviewLinkImport,
+  onApplyLinkImport,
+  onCloseLinkImport,
+  onOpenImportedSkill,
 }: LibraryDeskProps) {
-  const activationWasOpen = useRef(false);
+  const lastOverlay = useRef<"activation" | "import" | null>(null);
   const hasActivationOverlay = Boolean(activationPreview || activationConflict);
+  const hasOverlay = hasActivationOverlay || isLinkImportOpen;
   useLayoutEffect(() => {
     if (hasActivationOverlay) {
-      activationWasOpen.current = true;
-    } else if (activationWasOpen.current) {
-      if (activationTriggerControlId) {
+      lastOverlay.current = "activation";
+    } else if (isLinkImportOpen) {
+      lastOverlay.current = "import";
+    } else if (lastOverlay.current) {
+      if (lastOverlay.current === "activation" && activationTriggerControlId) {
         const trigger = document.getElementById(activationTriggerControlId);
         const fallback = document.getElementById(
           activationTriggerControlId.replace(
@@ -79,21 +104,20 @@ export function LibraryDesk({
           ),
         );
         (trigger ?? fallback)?.focus();
+      } else if (lastOverlay.current === "import") {
+        document.getElementById("link-import-trigger")?.focus();
       }
-      activationWasOpen.current = false;
+      lastOverlay.current = null;
     }
-  }, [activationTriggerControlId, hasActivationOverlay]);
+  }, [activationTriggerControlId, hasActivationOverlay, isLinkImportOpen]);
 
   return (
     <div className="app-shell">
-      <div
-        className="app-background"
-        inert={hasActivationOverlay ? true : undefined}
-      >
+      <div className="app-background" inert={hasOverlay ? true : undefined}>
         <a className="skip-link" href="#skill-detail">
           Skip to Skill detail
         </a>
-        <Toolbar />
+        <Toolbar onImport={onOpenLinkImport} />
         {error ? (
           <div className="global-notice" role="alert">
             <strong>Library unavailable</strong>
@@ -135,11 +159,23 @@ export function LibraryDesk({
           onClose={onCloseActivationConflict}
         />
       ) : null}
+      {isLinkImportOpen ? (
+        <LinkImportSheet
+          preview={linkImportPreview}
+          result={linkImportResult}
+          error={linkImportError}
+          activity={linkImportActivity}
+          onPreview={onPreviewLinkImport}
+          onApply={onApplyLinkImport}
+          onClose={onCloseLinkImport}
+          onOpenImportedSkill={onOpenImportedSkill}
+        />
+      ) : null}
     </div>
   );
 }
 
-function Toolbar() {
+function Toolbar({ onImport }: { onImport: () => void }) {
   return (
     <header className="toolbar">
       <div className="product-mark" aria-hidden="true">
@@ -158,7 +194,12 @@ function Toolbar() {
         <button type="button" className="toolbar-button" disabled>
           Adopt
         </button>
-        <button type="button" className="primary-button" disabled>
+        <button
+          id="link-import-trigger"
+          type="button"
+          className="primary-button"
+          onClick={onImport}
+        >
           Import
         </button>
         <button
@@ -355,7 +396,6 @@ function AgentInspector({
         ) : detail ? (
           agents.map((agent) => {
             const isPending = pendingAgentId === agent.id;
-            const isSupported = agent.kind === "claude_preset";
             return (
               <div
                 className={`agent-row${isPending || isApplying ? " agent-row--busy" : ""}`}
@@ -370,7 +410,7 @@ function AgentInspector({
                     <small>{agent.skillsPath}</small>
                   </span>
                   <label
-                    className={`switch-control${isSupported ? " switch-control--interactive" : ""}`}
+                    className={`switch-control${agent.detected ? " switch-control--interactive" : ""}`}
                   >
                     <input
                       id={activationControlId(detail.id, agent.id)}
@@ -378,12 +418,7 @@ function AgentInspector({
                       role="switch"
                       aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
                       checked={agent.desiredEnabled}
-                      disabled={
-                        !isSupported ||
-                        !agent.detected ||
-                        isPending ||
-                        isApplying
-                      }
+                      disabled={!agent.detected || isPending || isApplying}
                       onChange={(event) =>
                         onRequest(agent.id, event.currentTarget.checked)
                       }
@@ -397,16 +432,12 @@ function AgentInspector({
                   >
                     {isPending ? "Preparing preview" : activationLabel(agent)}
                   </span>
-                  {!isSupported ? (
-                    <span className="compatibility-note">Later milestone</span>
-                  ) : null}
                   {agent.compatibility === "unknown" ? (
                     <span className="compatibility-note">
                       Compatibility unknown
                     </span>
                   ) : null}
-                  {isSupported &&
-                  agent.detected &&
+                  {agent.detected &&
                   agent.desiredEnabled &&
                   (agent.observedState === "missing" ||
                     agent.observedState === "occupied") ? (
@@ -433,6 +464,224 @@ function AgentInspector({
         <span>Every Activation change requires a preview.</span>
       </div>
     </aside>
+  );
+}
+
+function LinkImportSheet({
+  preview,
+  result,
+  error,
+  activity,
+  onPreview,
+  onApply,
+  onClose,
+  onOpenImportedSkill,
+}: {
+  preview: LinkImportPreview | null;
+  result: LinkImportResult | null;
+  error: string | null;
+  activity: "idle" | "discovering" | "applying";
+  onPreview: (sourcePath: string) => void;
+  onApply: () => void;
+  onClose: () => void;
+  onOpenImportedSkill: () => void;
+}) {
+  const [sourcePath, setSourcePath] = useState("");
+  const sourceInput = useRef<HTMLInputElement>(null);
+  const primaryButton = useRef<HTMLButtonElement>(null);
+  const isDiscovering = activity === "discovering";
+  const isApplying = activity === "applying";
+  const isRunning = activity !== "idle";
+  const currentStep = result
+    ? "result"
+    : preview
+      ? "preview"
+      : isDiscovering
+        ? "discover"
+        : "source";
+
+  useLayoutEffect(() => {
+    if (result || preview) primaryButton.current?.focus();
+    else sourceInput.current?.focus();
+  }, [preview, result]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isApplying) onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isApplying, onClose]);
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isApplying) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet import-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={result ? "Link Import result" : "Import Link"}
+      >
+        <ol className="import-progress" aria-label="Import progress">
+          {(["source", "discover", "preview", "result"] as const).map(
+            (step) => (
+              <li
+                key={step}
+                aria-current={currentStep === step ? "step" : undefined}
+              >
+                {capitalize(step)}
+              </li>
+            ),
+          )}
+        </ol>
+        {result ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Import complete</span>
+              <h2>{result.directoryName} is Managed</h2>
+              <p>
+                The source remains in place. Library stores its Link as a SQLite
+                pointer.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>Final entity</dt>
+                <dd>{result.finalEntityPath}</dd>
+              </div>
+              <div>
+                <dt>Library storage</dt>
+                <dd>SQLite pointer only</dd>
+              </div>
+            </dl>
+            <div className="activation-sheet-actions import-result-actions">
+              <button type="button" disabled={isApplying} onClick={onClose}>
+                Close
+              </button>
+              <button type="button" onClick={onOpenImportedSkill}>
+                View in Library
+              </button>
+              <button
+                ref={primaryButton}
+                type="button"
+                className="activation-confirm-button"
+                onClick={onOpenImportedSkill}
+              >
+                Enable by Agent
+              </button>
+            </div>
+          </>
+        ) : preview ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Link preview</span>
+              <h2>Preview {preview.directoryName}</h2>
+              <p>
+                Import this folder by reference. No Skill files will be copied
+                into Library.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>Selected source</dt>
+                <dd>{preview.sourceEntryPath}</dd>
+              </div>
+              <div>
+                <dt>Final entity</dt>
+                <dd>{preview.finalEntityPath}</dd>
+              </div>
+              <div>
+                <dt>Library storage</dt>
+                <dd>SQLite pointer only</dd>
+              </div>
+            </dl>
+            <div className="activation-warning import-risk" role="status">
+              <strong>Review imported instructions</strong>
+              <span>
+                This source&apos;s SKILL.md can become instructions for every
+                Agent you enable.
+              </span>
+            </div>
+            {preview.conflict ? (
+              <div className="import-conflict" role="alert">
+                <strong>Library Conflict</strong>
+                <span>
+                  Managed Skill “{preview.conflict.directoryName}” already uses
+                  this directory identity. Rename the source, Remove the
+                  existing Skill, or cancel.
+                </span>
+              </div>
+            ) : null}
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Import unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isApplying} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                ref={primaryButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={!preview.canApply || isRunning}
+                onClick={onApply}
+              >
+                {isRunning ? "Importing" : `Import ${preview.directoryName}`}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Import · Link</span>
+              <h2>Link a local Skill</h2>
+              <p>
+                Choose a development folder containing a readable SKILL.md. The
+                folder stays at its source.
+              </p>
+            </div>
+            <label className="import-source-field">
+              <span>Local folder path</span>
+              <input
+                ref={sourceInput}
+                type="text"
+                value={sourcePath}
+                disabled={isRunning}
+                placeholder="~/Projects/my-skill"
+                onChange={(event) => setSourcePath(event.currentTarget.value)}
+              />
+            </label>
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Source unavailable</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isApplying} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                ref={primaryButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={!sourcePath.trim() || isRunning}
+                onClick={() => onPreview(sourcePath)}
+              >
+                {isDiscovering ? "Checking source" : "Preview Link"}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -513,6 +762,12 @@ function ActivationPreviewSheet({
             <dd>{preview.targetPath}</dd>
           </div>
         </dl>
+        {preview.compatibilityWarning ? (
+          <div className="activation-warning" role="status">
+            <strong>Compatibility confirmation</strong>
+            <span>{preview.compatibilityWarning}</span>
+          </div>
+        ) : null}
         <div className="activation-sheet-actions">
           <button
             ref={cancelButton}

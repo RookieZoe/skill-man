@@ -8,6 +8,8 @@ import type {
   CatalogFilter,
   Compatibility,
   Health,
+  LinkImportCandidate,
+  LinkImportPreview,
   SkillDetail,
   SourceKind,
   ActivationObservedState,
@@ -37,11 +39,16 @@ interface PlannedFixtureActivation extends ActivationPreview {
   agentId: string;
 }
 
+interface PlannedFixtureLinkImport extends LinkImportPreview {
+  skillId: string;
+}
+
 const fixture = fixtureJson as FixtureFile;
 
 export function createFixtureCatalogClient(): CatalogClient {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
+  const skills = fixture.skills.map((skill) => ({ ...skill }));
   const enabledSkillIds = new Map(
     fixture.agents.map((agent) => [agent.id, [...agent.enabledSkillIds]]),
   );
@@ -57,6 +64,23 @@ export function createFixtureCatalogClient(): CatalogClient {
     ),
   );
   const plans = new Map<string, PlannedFixtureActivation>();
+  const linkImportPlans = new Map<string, PlannedFixtureLinkImport>();
+
+  function discoverLink(sourcePath: string): LinkImportCandidate {
+    const finalEntityPath = sourcePath.replace(/\/+$/, "");
+    const directoryName = finalEntityPath.split("/").at(-1) ?? "";
+    if (!directoryName) {
+      throw { code: "validation", message: "Choose a Skill folder." };
+    }
+    return {
+      directoryName,
+      displayName: directoryName,
+      description: "Linked local Skill.",
+      frontmatterName: directoryName,
+      sourceEntryPath: finalEntityPath,
+      finalEntityPath,
+    };
+  }
 
   function activationFor(
     skillId: string,
@@ -89,7 +113,7 @@ export function createFixtureCatalogClient(): CatalogClient {
     async listSkills(filter) {
       return {
         snapshotVersion,
-        items: fixture.skills
+        items: skills
           .map(toDetail)
           .filter((skill) =>
             includesFilter(filter, skill.health, skill.sourceKind),
@@ -98,7 +122,7 @@ export function createFixtureCatalogClient(): CatalogClient {
       };
     },
     async inspectSkill(skillId) {
-      const skill = fixture.skills.find(({ id }) => id === skillId);
+      const skill = skills.find(({ id }) => id === skillId);
       if (!skill) throw new Error(`Managed Skill '${skillId}' was not found`);
       return toDetail(skill);
     },
@@ -106,12 +130,9 @@ export function createFixtureCatalogClient(): CatalogClient {
       return fixture.agents.map((agent) => activationFor(skillId, agent));
     },
     async planActivation(skillId, agentId, enabled) {
-      const skill = fixture.skills.find(({ id }) => id === skillId);
+      const skill = skills.find(({ id }) => id === skillId);
       const agent = fixture.agents.find(({ id }) => id === agentId);
       if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      if (agent.kind !== "claude_preset") {
-        throw new Error("This milestone only supports Claude Code");
-      }
       const planToken = `fixture-activation-plan-${nextPlanId++}`;
       const preview: PlannedFixtureActivation = {
         planToken,
@@ -123,17 +144,18 @@ export function createFixtureCatalogClient(): CatalogClient {
         kind: enabled ? "enable" : "disable",
         entryPath: `${agent.skillsPath}/${skill.directoryName}`,
         targetPath: skill.finalEntityPath,
+        compatibilityWarning:
+          agent.kind === "custom"
+            ? "Custom Agent compatibility is unknown. Confirm this Activation explicitly."
+            : null,
       };
       plans.set(planToken, preview);
       return preview;
     },
     async planActivationRepair(skillId, agentId) {
-      const skill = fixture.skills.find(({ id }) => id === skillId);
+      const skill = skills.find(({ id }) => id === skillId);
       const agent = fixture.agents.find(({ id }) => id === agentId);
       if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      if (agent.kind !== "claude_preset") {
-        throw new Error("This milestone only supports Claude Code");
-      }
       if (!enabledSkillIds.get(agent.id)?.includes(skillId)) {
         throw new Error("Repair requires a desired Activation");
       }
@@ -148,6 +170,10 @@ export function createFixtureCatalogClient(): CatalogClient {
         kind: "repair",
         entryPath: `${agent.skillsPath}/${skill.directoryName}`,
         targetPath: skill.finalEntityPath,
+        compatibilityWarning:
+          agent.kind === "custom"
+            ? "Custom Agent compatibility is unknown. Confirm this Activation explicitly."
+            : null,
       };
       plans.set(planToken, preview);
       return preview;
@@ -187,6 +213,76 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async cancelActivation(planToken) {
       return plans.delete(planToken);
+    },
+    async discoverLinkImport(sourcePath) {
+      return discoverLink(sourcePath);
+    },
+    async planLinkImport(sourcePath) {
+      const candidate = discoverLink(sourcePath);
+      const existing = skills.find(
+        ({ directoryName }) =>
+          directoryName.toLocaleLowerCase() ===
+          candidate.directoryName.toLocaleLowerCase(),
+      );
+      const planToken = `fixture-link-import-plan-${nextPlanId++}`;
+      const preview: PlannedFixtureLinkImport = {
+        ...candidate,
+        planToken,
+        skillId: `fixture-link-${nextPlanId}`,
+        libraryEntryPath: null,
+        conflict: existing
+          ? {
+              existingSkillId: existing.id,
+              directoryName: existing.directoryName,
+            }
+          : null,
+        canApply: !existing,
+      };
+      linkImportPlans.set(planToken, preview);
+      return preview;
+    },
+    async applyLinkImport(planToken) {
+      const plan = linkImportPlans.get(planToken);
+      if (!plan) {
+        throw { code: "plan_stale", message: "Import preview expired." };
+      }
+      linkImportPlans.delete(planToken);
+      const existing = skills.find(
+        ({ directoryName }) =>
+          directoryName.toLocaleLowerCase() ===
+          plan.directoryName.toLocaleLowerCase(),
+      );
+      if (existing) {
+        throw {
+          code: "conflict",
+          message: `The Library already contains Managed Skill '${existing.directoryName}'.`,
+        };
+      }
+      skills.unshift({
+        id: plan.skillId,
+        directoryName: plan.directoryName,
+        displayName: plan.displayName,
+        description: plan.description,
+        sourceKind: "link",
+        health: "healthy",
+        finalEntityPath: plan.finalEntityPath,
+        sourceLabel: `Linked local folder · ${plan.finalEntityPath}`,
+        frontmatterName: plan.directoryName,
+        lastActivityAt: "2026-08-03T00:00:00Z",
+        skillMarkdown: `# ${plan.displayName}\n\nLinked local Skill.\n`,
+      });
+      snapshotVersion += 1;
+      return {
+        operationId: `fixture-${plan.skillId}`,
+        skillId: plan.skillId,
+        directoryName: plan.directoryName,
+        finalEntityPath: plan.finalEntityPath,
+        libraryEntryPath: null,
+        snapshotVersion,
+      };
+    },
+    async cancelLinkImport(planToken) {
+      return linkImportPlans.delete(planToken);
     },
   };
 }

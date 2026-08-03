@@ -1,3 +1,6 @@
 pub mod activation_store;
+pub mod agent_adapter;
 pub mod catalog_store;
+pub mod clock;
 pub mod filesystem;
+pub mod import_store;

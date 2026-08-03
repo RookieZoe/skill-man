@@ -52,6 +52,7 @@ export interface ActivationPreview {
   kind: "enable" | "disable" | "repair";
   entryPath: string;
   targetPath: string;
+  compatibilityWarning: string | null;
 }
 
 export interface ActivationHealthReport {
@@ -64,6 +65,41 @@ export interface ActivationResult {
   agentId: string;
   desiredEnabled: boolean;
   observedState: ActivationObservedState;
+  snapshotVersion: number;
+}
+
+export interface LinkImportCandidate {
+  directoryName: string;
+  displayName: string;
+  description: string;
+  frontmatterName: string | null;
+  sourceEntryPath: string;
+  finalEntityPath: string;
+}
+
+export interface LibraryConflict {
+  existingSkillId: string;
+  directoryName: string;
+}
+
+export interface LinkImportPreview {
+  planToken: string;
+  directoryName: string;
+  displayName: string;
+  description: string;
+  sourceEntryPath: string;
+  finalEntityPath: string;
+  libraryEntryPath: string | null;
+  conflict: LibraryConflict | null;
+  canApply: boolean;
+}
+
+export interface LinkImportResult {
+  operationId: string;
+  skillId: string;
+  directoryName: string;
+  finalEntityPath: string;
+  libraryEntryPath: string | null;
   snapshotVersion: number;
 }
 
@@ -83,6 +119,10 @@ export interface CatalogClient {
   runActivationHealthCheck(): Promise<ActivationHealthReport>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
+  discoverLinkImport(sourcePath: string): Promise<LinkImportCandidate>;
+  planLinkImport(sourcePath: string): Promise<LinkImportPreview>;
+  applyLinkImport(planToken: string): Promise<LinkImportResult>;
+  cancelLinkImport(planToken: string): Promise<boolean>;
 }
 
 let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
@@ -122,6 +162,26 @@ const tauriCatalogClient: CatalogClient = {
   },
   cancelActivation(planToken) {
     return invoke<boolean>("cancel_activation", {
+      request: { planToken },
+    });
+  },
+  discoverLinkImport(sourcePath) {
+    return invoke<LinkImportCandidate>("discover_link_import", {
+      request: { sourcePath },
+    });
+  },
+  planLinkImport(sourcePath) {
+    return invoke<LinkImportPreview>("plan_link_import", {
+      request: { sourcePath },
+    });
+  },
+  applyLinkImport(planToken) {
+    return invoke<LinkImportResult>("apply_link_import", {
+      request: { planToken },
+    });
+  },
+  cancelLinkImport(planToken) {
+    return invoke<boolean>("cancel_link_import", {
       request: { planToken },
     });
   },

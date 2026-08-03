@@ -122,6 +122,9 @@ fn assert_read_only_runtime_browses_fixture(
     let runtime = Arc::new(RuntimeCatalogStore::new(
         Arc::new(FixtureCatalogStore::library_desk()),
         Arc::new(sqlite),
+        Arc::new(skill_man_lib::adapters::macos_fs::MacOsFileSystem::new(
+            library_root.to_path_buf(),
+        )),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
 

@@ -7,15 +7,18 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use thiserror::Error;
 
 use crate::core::domain::{
-    ActivationObservedState, AgentId, AgentKind, CatalogSeed, Compatibility, Health, SkillId,
-    SourceKind,
+    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, CatalogSeed,
+    Compatibility, Health, SkillId, SkillSummary, SourceKind, skill_identity_key,
 };
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use crate::seams::catalog_store::{
-    StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
+    CatalogStoreError, StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
+};
+use crate::seams::import_store::{
+    ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -204,7 +207,7 @@ impl SqliteCatalogStore {
                     params![
                         summary.id.0,
                         summary.directory_name,
-                        summary.directory_name.to_lowercase(),
+                        skill_identity_key(&summary.directory_name),
                         summary.display_name,
                         summary.description,
                         source_kind_value(summary.source_kind),
@@ -295,6 +298,132 @@ impl SqliteCatalogStore {
             .map_err(sqlite_activation_error)
     }
 
+    pub fn list_skill_summaries(
+        &self,
+        filter: CatalogFilter,
+    ) -> Result<Vec<SkillSummary>, CatalogStoreError> {
+        let connection = self
+            .connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    skills.id, skills.directory_name, skills.display_name,
+                    skills.description, skills.source_kind, skills.health,
+                    COALESCE(SUM(CASE WHEN activations.desired_enabled = 1 THEN 1 ELSE 0 END), 0)
+                 FROM skills
+                 LEFT JOIN activations ON activations.skill_id = skills.id
+                 GROUP BY skills.id
+                 ORDER BY skills.updated_at DESC, skills.directory_name COLLATE NOCASE, skills.id",
+            )
+            .map_err(sqlite_catalog_error)?;
+        let skills = statement
+            .query_map([], |row| {
+                Ok(SkillSummary {
+                    id: SkillId(row.get(0)?),
+                    directory_name: row.get(1)?,
+                    display_name: row.get(2)?,
+                    description: row.get(3)?,
+                    source_kind: parse_source_kind(&row.get::<_, String>(4)?)?,
+                    health: parse_health(&row.get::<_, String>(5)?)?,
+                    enabled_agent_count: row.get(6)?,
+                })
+            })
+            .map_err(sqlite_catalog_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_catalog_error)?;
+        Ok(skills
+            .into_iter()
+            .filter(|skill| filter.includes(skill))
+            .collect())
+    }
+
+    pub fn persisted_skill_detail(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<PersistedSkillDetail>, CatalogStoreError> {
+        self.connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?
+            .query_row(
+                "SELECT
+                    skills.id, skills.directory_name, skills.display_name,
+                    skills.description, skills.source_kind, skills.health,
+                    skills.final_entity_path, skills.updated_at,
+                    (SELECT COUNT(*) FROM activations
+                     WHERE activations.skill_id = skills.id
+                       AND activations.desired_enabled = 1)
+                 FROM skills
+                 WHERE skills.id = ?1",
+                [&skill_id.0],
+                |row| {
+                    Ok(PersistedSkillDetail {
+                        summary: SkillSummary {
+                            id: SkillId(row.get(0)?),
+                            directory_name: row.get(1)?,
+                            display_name: row.get(2)?,
+                            description: row.get(3)?,
+                            source_kind: parse_source_kind(&row.get::<_, String>(4)?)?,
+                            health: parse_health(&row.get::<_, String>(5)?)?,
+                            enabled_agent_count: row.get(8)?,
+                        },
+                        final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_catalog_error)
+    }
+
+    pub fn list_agent_activations(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError> {
+        let connection = self
+            .connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        let skill_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM skills WHERE id = ?1)",
+                [&skill_id.0],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_catalog_error)?;
+        if !skill_exists {
+            return Ok(None);
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    agents.id, agents.name, agents.kind, agents.skills_path,
+                    agents.detected, agents.compatibility,
+                    COALESCE(activations.desired_enabled, 0),
+                    COALESCE(activations.observed_state, 'missing')
+                 FROM agents
+                 LEFT JOIN activations
+                    ON activations.agent_id = agents.id AND activations.skill_id = ?1
+                 ORDER BY agents.rowid",
+            )
+            .map_err(sqlite_catalog_error)?;
+        statement
+            .query_map([&skill_id.0], |row| {
+                Ok(AgentActivation {
+                    id: AgentId(row.get(0)?),
+                    name: row.get(1)?,
+                    kind: parse_agent_kind(&row.get::<_, String>(2)?)?,
+                    skills_path: row.get(3)?,
+                    detected: row.get(4)?,
+                    compatibility: parse_compatibility(&row.get::<_, String>(5)?)?,
+                    desired_enabled: row.get(6)?,
+                    observed_state: parse_observed_state(&row.get::<_, String>(7)?)?,
+                })
+            })
+            .map_err(sqlite_catalog_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map(Some)
+            .map_err(sqlite_catalog_error)
+    }
+
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, ActivationStoreError> {
         self.connection
             .lock()
@@ -306,6 +435,94 @@ impl SqliteCatalogStore {
 pub struct PersistedActivation {
     pub desired_enabled: bool,
     pub observed_state: ActivationObservedState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedSkillDetail {
+    pub summary: SkillSummary,
+    pub final_entity_path: PathBuf,
+    pub updated_at: String,
+}
+
+impl ImportStore for SqliteCatalogStore {
+    fn find_library_conflict(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<LibraryConflict>, ImportStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT id, directory_name FROM skills WHERE identity_key = ?1",
+                [identity_key],
+                |row| {
+                    Ok(LibraryConflict {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_import_error)
+    }
+
+    fn insert_link(&self, record: LinkImportRecord) -> Result<u64, ImportStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_import_error)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                [&record.identity_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_import_error)?;
+        if let Some(directory_name) = existing {
+            return Err(ImportStoreError::Conflict(directory_name));
+        }
+        transaction
+            .execute(
+                "INSERT INTO skills (
+                    id, directory_name, identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path, health,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, 'link', NULL, ?6, 'healthy',
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.skill_id.0,
+                    record.directory_name,
+                    record.identity_key,
+                    record.display_name,
+                    record.description,
+                    record.final_entity_path.to_string_lossy(),
+                ],
+            )
+            .map_err(sqlite_import_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_import_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_import_error)?;
+        transaction.commit().map_err(sqlite_import_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| ImportStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
 }
 
 impl ActivationStore for SqliteCatalogStore {
@@ -613,6 +830,14 @@ fn sqlite_activation_error(error: rusqlite::Error) -> ActivationStoreError {
     ActivationStoreError::Unavailable(error.to_string())
 }
 
+fn sqlite_catalog_error(error: rusqlite::Error) -> CatalogStoreError {
+    CatalogStoreError::Unavailable(error.to_string())
+}
+
+fn sqlite_import_error(error: rusqlite::Error) -> ImportStoreError {
+    ImportStoreError::Unavailable(error.to_string())
+}
+
 fn source_kind_value(value: SourceKind) -> &'static str {
     match value {
         SourceKind::Link => "link",
@@ -621,11 +846,29 @@ fn source_kind_value(value: SourceKind) -> &'static str {
     }
 }
 
+fn parse_source_kind(value: &str) -> rusqlite::Result<SourceKind> {
+    match value {
+        "link" => Ok(SourceKind::Link),
+        "remote_install" => Ok(SourceKind::RemoteInstall),
+        "file_install" => Ok(SourceKind::FileInstall),
+        value => Err(invalid_enum_value(4, value)),
+    }
+}
+
 fn health_value(value: Health) -> &'static str {
     match value {
         Health::Healthy => "healthy",
         Health::Broken => "broken",
         Health::Modified => "modified",
+    }
+}
+
+fn parse_health(value: &str) -> rusqlite::Result<Health> {
+    match value {
+        "healthy" => Ok(Health::Healthy),
+        "broken" => Ok(Health::Broken),
+        "modified" => Ok(Health::Modified),
+        value => Err(invalid_enum_value(5, value)),
     }
 }
 
@@ -650,6 +893,14 @@ fn compatibility_value(value: Compatibility) -> &'static str {
     match value {
         Compatibility::Verified => "verified",
         Compatibility::Unknown => "unknown",
+    }
+}
+
+fn parse_compatibility(value: &str) -> rusqlite::Result<Compatibility> {
+    match value {
+        "verified" => Ok(Compatibility::Verified),
+        "unknown" => Ok(Compatibility::Unknown),
+        value => Err(invalid_enum_value(5, value)),
     }
 }
 

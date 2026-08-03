@@ -2,26 +2,38 @@ use std::sync::Arc;
 
 use crate::adapters::fixture_catalog::FixtureCatalogStore;
 use crate::adapters::sqlite::SqliteCatalogStore;
-use crate::core::domain::{AgentActivation, CatalogFilter, SkillDetail, SkillId, SkillSummary};
+use crate::core::domain::{
+    AgentActivation, CatalogFilter, SkillDetail, SkillId, SkillSummary, SourceKind,
+    parse_skill_metadata,
+};
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
+use crate::seams::filesystem::FileSystem;
+use crate::seams::import_store::{
+    ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+};
 
 pub struct RuntimeCatalogStore {
     fixture: Arc<FixtureCatalogStore>,
     sqlite: Arc<SqliteCatalogStore>,
+    filesystem: Arc<dyn FileSystem>,
 }
 
 impl RuntimeCatalogStore {
-    pub fn new(fixture: Arc<FixtureCatalogStore>, sqlite: Arc<SqliteCatalogStore>) -> Self {
-        Self { fixture, sqlite }
-    }
-
-    fn catalog_error(error: ActivationStoreError) -> CatalogStoreError {
-        CatalogStoreError::Unavailable(error.to_string())
+    pub fn new(
+        fixture: Arc<FixtureCatalogStore>,
+        sqlite: Arc<SqliteCatalogStore>,
+        filesystem: Arc<dyn FileSystem>,
+    ) -> Self {
+        Self {
+            fixture,
+            sqlite,
+            filesystem,
+        }
     }
 
     fn is_writable(&self) -> bool {
@@ -43,31 +55,41 @@ impl CatalogStore for RuntimeCatalogStore {
         if !self.is_writable() {
             return self.fixture.list(filter);
         }
-        self.fixture
-            .list(filter)?
-            .into_iter()
-            .map(|mut skill| {
-                skill.enabled_agent_count = self
-                    .sqlite
-                    .enabled_count(&skill.id)
-                    .map_err(Self::catalog_error)?;
-                Ok(skill)
-            })
-            .collect()
+        self.sqlite.list_skill_summaries(filter)
     }
 
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
         if !self.is_writable() {
             return self.fixture.inspect(skill_id);
         }
-        let Some(mut detail) = self.fixture.inspect(skill_id)? else {
+        let Some(persisted) = self.sqlite.persisted_skill_detail(skill_id)? else {
             return Ok(None);
         };
-        detail.summary.enabled_agent_count = self
-            .sqlite
-            .enabled_count(skill_id)
-            .map_err(Self::catalog_error)?;
-        Ok(Some(detail))
+        if let Some(mut detail) = self.fixture.inspect(skill_id)? {
+            detail.summary = persisted.summary;
+            return Ok(Some(detail));
+        }
+        let skill_markdown = self
+            .filesystem
+            .read_skill_document(&persisted.final_entity_path)
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        let metadata = parse_skill_metadata(&skill_markdown);
+        let source_label = match persisted.summary.source_kind {
+            SourceKind::Link => format!(
+                "Linked local folder · {}",
+                persisted.final_entity_path.display()
+            ),
+            SourceKind::RemoteInstall => "Installed from Git".into(),
+            SourceKind::FileInstall => "Installed from file".into(),
+        };
+        Ok(Some(SkillDetail {
+            summary: persisted.summary,
+            final_entity_path: persisted.final_entity_path.to_string_lossy().into_owned(),
+            source_label,
+            frontmatter_name: metadata.name,
+            last_activity_at: persisted.updated_at,
+            skill_markdown,
+        }))
     }
 
     fn list_agents(
@@ -77,25 +99,30 @@ impl CatalogStore for RuntimeCatalogStore {
         if !self.is_writable() {
             return self.fixture.list_agents(skill_id);
         }
-        let Some(agents) = self.fixture.list_agents(skill_id)? else {
-            return Ok(None);
-        };
-        agents
-            .into_iter()
-            .map(|mut agent| {
-                let persisted = self
-                    .sqlite
-                    .persisted_activation(skill_id, &agent.id)
-                    .map_err(Self::catalog_error)?;
-                agent.desired_enabled = persisted.is_some_and(|state| state.desired_enabled);
-                agent.observed_state = persisted.map_or(
-                    crate::core::domain::ActivationObservedState::Missing,
-                    |state| state.observed_state,
-                );
-                Ok(agent)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+        self.sqlite.list_agent_activations(skill_id)
+    }
+}
+
+impl ImportStore for RuntimeCatalogStore {
+    fn find_library_conflict(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<LibraryConflict>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.find_library_conflict(identity_key)
+    }
+
+    fn insert_link(&self, record: LinkImportRecord) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.insert_link(record)
     }
 }
 

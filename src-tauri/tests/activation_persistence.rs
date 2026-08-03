@@ -31,8 +31,12 @@ fn tauri_activation_round_trip_persists_and_reads_back_real_filesystem_state() {
         sqlite
             .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
             .expect("seed catalog metadata");
-        let runtime = Arc::new(RuntimeCatalogStore::new(fixture, sqlite));
         let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
+        let runtime = Arc::new(RuntimeCatalogStore::new(
+            fixture,
+            sqlite,
+            filesystem.clone(),
+        ));
         let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
         let activation = ActivationApi::new(ActivationService::new(
             runtime.clone(),
@@ -140,13 +144,14 @@ fn tauri_activation_round_trip_persists_and_reads_back_real_filesystem_state() {
     sqlite
         .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
         .expect("preserve existing catalog metadata");
-    let runtime = Arc::new(RuntimeCatalogStore::new(fixture, sqlite));
-    let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
-    let activation = ActivationApi::new(ActivationService::new(
-        runtime,
-        Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
-        library_root,
+    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
+    let runtime = Arc::new(RuntimeCatalogStore::new(
+        fixture,
+        sqlite,
+        filesystem.clone(),
     ));
+    let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
+    let activation = ActivationApi::new(ActivationService::new(runtime, filesystem, library_root));
 
     let restored = catalog
         .list_agents("skill-authoring".into())
