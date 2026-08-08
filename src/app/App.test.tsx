@@ -1111,3 +1111,61 @@ test("Modified Install update offers only abandon-and-update or cancel", async (
   expect(await screen.findByText("Update applied.")).toBeInTheDocument();
   expect(abandoned).toBe(true);
 });
+
+test("removes a Managed Skill after preview confirmation", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("button", { name: "Remove…" }));
+
+  expect(
+    await screen.findByRole("dialog", { name: "Remove Managed Skill" }),
+  ).toBeInTheDocument();
+  expect(
+    await screen.findByText("The external Link entity is kept in place"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Activations to disable")).toBeInTheDocument();
+
+  await user.click(
+    screen.getByRole("button", { name: "Remove skill-authoring" }),
+  );
+  expect(
+    await screen.findByRole("heading", {
+      name: "skill-authoring left the Library",
+    }),
+  ).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  expect(
+    screen.queryByRole("heading", { name: "skill-authoring" }),
+  ).not.toBeInTheDocument();
+});
+
+test("shows the recovery-required lock notice with retry", async () => {
+  const client = createFixtureCatalogClient();
+  let attempts = 0;
+  client.runActivationHealthCheck = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw {
+        code: "recovery_required",
+        message: "interrupted Remove could not be recovered",
+      };
+    }
+    return { checked: 1, snapshotVersion: 1 };
+  };
+  const user = userEvent.setup();
+  render(<App client={client} />);
+
+  const notice = await screen.findByRole("alert", { hidden: false });
+  expect(notice).toHaveTextContent("Recovery required — writes locked");
+  expect(notice).toHaveTextContent("interrupted Remove could not be recovered");
+
+  await user.click(screen.getByRole("button", { name: "Retry recovery" }));
+  await waitFor(() => {
+    expect(
+      screen.queryByText("Recovery required — writes locked"),
+    ).not.toBeInTheDocument();
+  });
+});

@@ -1533,3 +1533,29 @@ button:active:not(:disabled) {
   font-size: 10px;
   line-height: 1.45;
 }
+
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 var(--space-4);
+}
+
+.danger-button {
+  color: oklch(45% 0.19 27);
+  border-color: oklch(72% 0.12 27);
+}
+
+.activation-confirm-button.danger-button {
+  background: oklch(50% 0.19 27);
+  border-color: oklch(50% 0.19 27);
+  color: #fff;
+}
+
+.activation-confirm-button.danger-button:disabled {
+  opacity: 0.55;
+}
+
+.global-notice--locked {
+  flex-wrap: wrap;
+  align-items: center;
+}

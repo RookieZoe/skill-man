@@ -10,13 +10,14 @@ use crate::tauri_adapter::dto::{
     AgentActivationDto, AppPreferencesDto, ApplyActivationReplaceRequestDto,
     ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
     ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
-    ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplySkillUpdatesRequestDto,
-    CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
-    CancelFileImportRequestDto, CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto,
-    CancelRelocateLinkRequestDto, CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
-    CreateAgentDirectoryRequestDto, DiscoverFileImportCollectionRequestDto,
-    DiscoverFileImportRequestDto, DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto,
-    FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
+    ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
+    ApplySkillUpdatesRequestDto, CancelActivationReplaceRequestDto, CancelActivationRequestDto,
+    CancelAdoptRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
+    CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
+    CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto, CreateAgentDirectoryRequestDto,
+    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
+    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
     FileImportSelectionPreviewDto, FileImportSelectionResultDto,
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, GitImportDiscoveryDto,
     GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
@@ -24,10 +25,11 @@ use crate::tauri_adapter::dto::{
     PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
-    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, RelocateLinkPreviewDto,
-    RelocateLinkRequestDto, RelocateLinkResultDto, SkillDetailDto, StartupInfoDto,
-    UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto,
-    UpdatePreferencesResultDto, UpdateResultDto,
+    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
+    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
+    RemoveSkillResultDto, SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto,
+    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
+    UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
@@ -86,6 +88,33 @@ pub fn cancel_relocate_link(
     request: CancelRelocateLinkRequestDto,
 ) -> Result<bool, CommandErrorDto> {
     state.cancel_relocate_link(request)
+}
+
+#[tauri::command]
+pub fn plan_remove_skill(
+    state: State<'_, HealthApi>,
+    request: PlanRemoveSkillRequestDto,
+) -> Result<RemoveSkillPreviewDto, CommandErrorDto> {
+    state.plan_remove_skill(request)
+}
+
+#[tauri::command]
+pub fn apply_remove_skill(
+    app: AppHandle,
+    state: State<'_, HealthApi>,
+    request: ApplyRemoveSkillRequestDto,
+) -> Result<RemoveSkillResultDto, CommandErrorDto> {
+    let result = state.apply_remove_skill(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn cancel_remove_skill(
+    state: State<'_, HealthApi>,
+    request: CancelRemoveSkillRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_remove_skill(request)
 }
 
 #[tauri::command]

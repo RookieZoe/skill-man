@@ -12,13 +12,15 @@ use crate::core::domain::{
 };
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
 use crate::seams::filesystem::{
-    ActivationEntrySnapshot, FileImportRecoveryBaseline, FileSystem, FileSystemError,
-    LinkSourceSnapshot, RelocateActivationStep, RelocateInitialEntry, RelocateJournal,
-    RelocateJournalPhase, RelocateRecoveryBaseline, SkillFingerprint,
+    ActivationEntrySnapshot, DirectoryFingerprint, FileImportRecoveryBaseline, FileSystem,
+    FileSystemError, LinkSourceSnapshot, RelocateActivationStep, RelocateInitialEntry,
+    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoveActivationStep,
+    RemoveInitialEntry, RemoveJournal, RemoveJournalPhase, RemoveRecoveryBaseline,
+    RemoveSourceKind, SkillFingerprint,
 };
 use crate::seams::maintenance_store::{
     LinkSkillRecord, MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline,
-    RelocateActivationBaseline, SkillHealthObservation,
+    RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
 use crate::seams::recovery::RecoveryGate;
 
@@ -38,6 +40,8 @@ pub enum MaintenanceError {
     Store(#[from] ActivationStoreError),
     #[error(transparent)]
     MaintenanceStore(#[from] MaintenanceStoreError),
+    #[error("the Managed Skill was not found: {0}")]
+    SkillNotFound(String),
     #[error("the Skill is not a Link and cannot be relocated: {0}")]
     NotLink(String),
     #[error("relocation validation failed: {0}")]
@@ -93,6 +97,33 @@ struct PlannedRelocate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovePreview {
+    pub plan_token: String,
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub source_kind: SourceKind,
+    pub final_entity_path: PathBuf,
+    pub activation_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveResult {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone)]
+struct PlannedRemove {
+    target: RemoveTarget,
+    activations: Vec<RelocateActivationBaseline>,
+    /// Install entity fingerprint at plan time; `None` when the entity is
+    /// already gone (Broken Install).
+    entity_fingerprint: Option<DirectoryFingerprint>,
+    created_at: Instant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RelocateCandidate {
     directory_name: String,
     display_name: String,
@@ -107,6 +138,7 @@ pub struct MaintenanceService {
     library_root: Option<PathBuf>,
     recovery_gate: Arc<RecoveryGate>,
     relocate_plans: Arc<Mutex<HashMap<String, PlannedRelocate>>>,
+    remove_plans: Arc<Mutex<HashMap<String, PlannedRemove>>>,
     next_plan_id: Arc<AtomicU64>,
     plan_ttl: Duration,
 }
@@ -119,6 +151,7 @@ impl Clone for MaintenanceService {
             library_root: self.library_root.clone(),
             recovery_gate: self.recovery_gate.clone(),
             relocate_plans: self.relocate_plans.clone(),
+            remove_plans: self.remove_plans.clone(),
             next_plan_id: self.next_plan_id.clone(),
             plan_ttl: self.plan_ttl,
         }
@@ -133,6 +166,7 @@ impl MaintenanceService {
             library_root: None,
             recovery_gate: Arc::new(RecoveryGate::ready()),
             relocate_plans: Arc::new(Mutex::new(HashMap::new())),
+            remove_plans: Arc::new(Mutex::new(HashMap::new())),
             next_plan_id: Arc::new(AtomicU64::new(1)),
             plan_ttl: DEFAULT_PLAN_TTL,
         }
@@ -208,6 +242,16 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_relocate_journals(library_root, &relocate_baselines)?;
+            let remove_baselines = self
+                .store
+                .managed_skill_baselines()?
+                .into_iter()
+                .map(|baseline| RemoveRecoveryBaseline {
+                    skill_id: baseline.skill_id.0,
+                })
+                .collect::<Vec<_>>();
+            self.filesystem
+                .recover_remove_journals(library_root, &remove_baselines)?;
         }
         Ok(())
     }
@@ -324,7 +368,7 @@ impl MaintenanceService {
         let fingerprint = self
             .filesystem
             .skill_fingerprint(&candidate.final_entity_path)?;
-        let activations = self.store.relocate_activations_for_skill(skill_id)?;
+        let activations = self.store.activation_baselines_for_skill(skill_id)?;
         let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
         let plan_token = format!("relocate-plan-{plan_number}");
         let mut plans = self
@@ -407,7 +451,7 @@ impl MaintenanceService {
         }
         let current_activations = self
             .store
-            .relocate_activations_for_skill(&plan.skill.skill_id)?;
+            .activation_baselines_for_skill(&plan.skill.skill_id)?;
         if current_activations != plan.activations {
             return Err(MaintenanceError::PlanStale);
         }
@@ -692,6 +736,7 @@ impl MaintenanceService {
             }
         }
         if !compensation_errors.is_empty() {
+            self.recovery_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: compensation_errors.join("; "),
@@ -701,6 +746,359 @@ impl MaintenanceService {
             .filesystem
             .finish_relocate_journal(library_root, &journal.operation_id)
         {
+            self.recovery_gate.mark_blocked();
+            return Err(MaintenanceError::RecoveryRequired {
+                state_error: original.to_string(),
+                compensation_error: format!(
+                    "compensation succeeded but the journal could not be archived: {error}"
+                ),
+            });
+        }
+        Err(original)
+    }
+
+    /// Plan a Remove (§8.6): every desired Activation entry must currently
+    /// be absent or a symlink to its recorded target, so the apply can
+    /// verify before deleting. Links keep their external entity; Installs
+    /// are fingerprinted so apply re-preflights the entity (a Broken
+    /// Install has no entity and is fingerprinted as absent).
+    pub fn plan_remove(&self, skill_id: &SkillId) -> Result<RemovePreview, MaintenanceError> {
+        self.ensure_writes_ready()?;
+        let Some(target) = self.store.remove_target(skill_id)? else {
+            return Err(MaintenanceError::SkillNotFound(skill_id.0.clone()));
+        };
+        let activations = self.store.activation_baselines_for_skill(skill_id)?;
+        for activation in &activations {
+            match self
+                .filesystem
+                .activation_snapshot(&activation.expected_entry_path)?
+            {
+                ActivationEntrySnapshot::Missing => {}
+                ActivationEntrySnapshot::Symlink { target }
+                    if target == activation.expected_target_path => {}
+                ActivationEntrySnapshot::Symlink { .. } => {
+                    return Err(MaintenanceError::Validation(format!(
+                        "the Activation entry '{}' no longer matches its recorded target",
+                        activation.expected_entry_path.display()
+                    )));
+                }
+                ActivationEntrySnapshot::Other => {
+                    return Err(MaintenanceError::Validation(format!(
+                        "the Activation entry '{}' is occupied by external content",
+                        activation.expected_entry_path.display()
+                    )));
+                }
+            }
+        }
+        let entity_fingerprint = if target.source_kind.is_install() {
+            self.filesystem
+                .directory_fingerprint(&target.final_entity_path)
+                .ok()
+        } else {
+            None
+        };
+        let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
+        let plan_token = format!("remove-plan-{plan_number}");
+        let mut plans = self
+            .remove_plans
+            .lock()
+            .map_err(|_| MaintenanceError::Internal("Remove plan lock poisoned".into()))?;
+        plans.retain(|_, plan| plan.created_at.elapsed() < self.plan_ttl);
+        plans.insert(
+            plan_token.clone(),
+            PlannedRemove {
+                target: target.clone(),
+                activations: activations.clone(),
+                entity_fingerprint,
+                created_at: Instant::now(),
+            },
+        );
+        Ok(RemovePreview {
+            plan_token,
+            skill_id: skill_id.clone(),
+            directory_name: target.directory_name,
+            source_kind: target.source_kind,
+            final_entity_path: target.final_entity_path,
+            activation_count: u32::try_from(activations.len()).map_err(|_| {
+                MaintenanceError::Internal("Remove Activation count exceeds u32".into())
+            })?,
+        })
+    }
+
+    /// Apply a planned Remove (§8.6): disable every Activation first, back
+    /// up an Install entity, then delete the catalog row (activations and
+    /// source tables cascade; the journal archives the audit). A failure
+    /// compensates in reverse — restore the entity, recreate the removed
+    /// symlinks — and a failed compensation locks writes for recovery.
+    pub fn apply_remove(&self, plan_token: &str) -> Result<RemoveResult, MaintenanceError> {
+        self.ensure_writes_ready()?;
+        let mut plans = self
+            .remove_plans
+            .lock()
+            .map_err(|_| MaintenanceError::Internal("Remove plan lock poisoned".into()))?;
+        plans.retain(|_, plan| plan.created_at.elapsed() < self.plan_ttl);
+        let plan = plans
+            .remove(plan_token)
+            .ok_or(MaintenanceError::PlanNotFound)?;
+        drop(plans);
+
+        // Re-preflight: the row, every Activation entry and the Install
+        // entity must still match the plan.
+        let current_target = self
+            .store
+            .remove_target(&plan.target.skill_id)?
+            .ok_or(MaintenanceError::PlanStale)?;
+        if current_target != plan.target {
+            return Err(MaintenanceError::PlanStale);
+        }
+        let current_activations = self
+            .store
+            .activation_baselines_for_skill(&plan.target.skill_id)?;
+        if current_activations != plan.activations {
+            return Err(MaintenanceError::PlanStale);
+        }
+        for activation in &plan.activations {
+            match self
+                .filesystem
+                .activation_snapshot(&activation.expected_entry_path)?
+            {
+                ActivationEntrySnapshot::Missing => {}
+                ActivationEntrySnapshot::Symlink { target }
+                    if target == activation.expected_target_path => {}
+                _ => return Err(MaintenanceError::PlanStale),
+            }
+        }
+        if plan.target.source_kind.is_install() {
+            match (
+                &plan.entity_fingerprint,
+                self.filesystem
+                    .directory_fingerprint(&plan.target.final_entity_path),
+            ) {
+                (Some(expected), Ok(current)) if &current == expected => {}
+                (None, Err(_)) => {}
+                _ => return Err(MaintenanceError::PlanStale),
+            }
+        }
+
+        let library_root = self.library_root.clone().ok_or_else(|| {
+            MaintenanceError::Internal("Maintenance library root is not configured".into())
+        })?;
+        let operation_id = format!(
+            "remove-{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0),
+            plan.target.skill_id.0
+        );
+        let source_kind = if plan.target.source_kind == SourceKind::Link {
+            RemoveSourceKind::Link
+        } else {
+            RemoveSourceKind::Install
+        };
+        let steps = plan
+            .activations
+            .iter()
+            .map(|activation| {
+                let initial_entry = self
+                    .filesystem
+                    .activation_snapshot(&activation.expected_entry_path)
+                    .map_err(|_| MaintenanceError::PlanStale)?;
+                Ok(RemoveActivationStep {
+                    agent_id: activation.agent_id.0.clone(),
+                    entry_path: activation.expected_entry_path.clone(),
+                    target_path: activation.expected_target_path.clone(),
+                    initial_entry: if initial_entry == ActivationEntrySnapshot::Missing {
+                        RemoveInitialEntry::Missing
+                    } else {
+                        RemoveInitialEntry::Symlink
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, MaintenanceError>>()?;
+        let mut journal = RemoveJournal {
+            version: 1,
+            operation_id: operation_id.clone(),
+            phase: RemoveJournalPhase::Applying,
+            skill_id: plan.target.skill_id.0.clone(),
+            source_kind,
+            final_entity_path: plan.target.final_entity_path.clone(),
+            backup_path: None,
+            backup_fingerprint: None,
+            activations: steps,
+        };
+        self.filesystem
+            .write_remove_journal(&library_root, &journal)?;
+
+        // Step 1: disable every Activation (§6.2 — verify, then remove; never
+        // delete anything that is not the recorded symlink).
+        for step in &journal.activations {
+            let outcome = match self.filesystem.activation_snapshot(&step.entry_path) {
+                Ok(ActivationEntrySnapshot::Missing) => Ok(()),
+                Ok(ActivationEntrySnapshot::Symlink { target }) if target == step.target_path => {
+                    self.filesystem.remove_activation(&step.entry_path)
+                }
+                _ => Err(FileSystemError::PlanStale {
+                    path: step.entry_path.clone(),
+                }),
+            };
+            if let Err(error) = outcome {
+                return self.fail_remove(&library_root, &journal, error.into());
+            }
+        }
+
+        // Step 2: Install entities move to the operation backup before the
+        // catalog commit; Link entities stay at their external source.
+        if source_kind == RemoveSourceKind::Install {
+            let backup_path = library_root
+                .join("operations")
+                .join(&operation_id)
+                .join("backup")
+                .join(&plan.target.directory_name);
+            match self.filesystem.backup_library_entity(
+                &journal.final_entity_path,
+                &backup_path,
+                &library_root,
+            ) {
+                Ok(fingerprint) => {
+                    journal.backup_path = Some(backup_path);
+                    journal.backup_fingerprint = Some(fingerprint);
+                }
+                Err(FileSystemError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    // A Broken Install's entity is already gone; the catalog
+                    // row is the only thing left to delete.
+                }
+                Err(error) => return self.fail_remove(&library_root, &journal, error.into()),
+            }
+            if let Err(error) = self
+                .filesystem
+                .write_remove_journal(&library_root, &journal)
+            {
+                return self.fail_remove(&library_root, &journal, error.into());
+            }
+        }
+
+        // Step 3: catalog delete; activations, file_sources and
+        // remote_sources cascade with the row (§5.4).
+        let snapshot_version = match self.store.delete_skill(&plan.target.skill_id) {
+            Ok(version) => version,
+            Err(error) => return self.fail_remove(&library_root, &journal, error.into()),
+        };
+        journal.phase = RemoveJournalPhase::Committed;
+        if let Err(error) = self
+            .filesystem
+            .write_remove_journal(&library_root, &journal)
+        {
+            self.recovery_gate.mark_blocked();
+            return Err(MaintenanceError::RecoveryRequired {
+                state_error: "the Remove catalog delete committed".into(),
+                compensation_error: format!(
+                    "the committed journal could not be persisted: {error}"
+                ),
+            });
+        }
+
+        // Step 4: discard the backup and archive the journal audit.
+        if let (Some(backup_path), Some(fingerprint)) =
+            (&journal.backup_path, &journal.backup_fingerprint)
+        {
+            if let Err(error) = self.filesystem.discard_library_entity_backup(
+                backup_path,
+                &library_root,
+                Some(fingerprint),
+            ) {
+                self.recovery_gate.mark_blocked();
+                return Err(MaintenanceError::RecoveryRequired {
+                    state_error: "the Remove catalog delete committed".into(),
+                    compensation_error: format!(
+                        "the entity backup could not be discarded: {error}"
+                    ),
+                });
+            }
+        }
+        if let Err(error) = self
+            .filesystem
+            .finish_remove_journal(&library_root, &operation_id)
+        {
+            self.recovery_gate.mark_blocked();
+            return Err(MaintenanceError::RecoveryRequired {
+                state_error: "the Remove catalog delete committed".into(),
+                compensation_error: format!("the completed journal could not be archived: {error}"),
+            });
+        }
+        Ok(RemoveResult {
+            skill_id: plan.target.skill_id,
+            directory_name: plan.target.directory_name,
+            snapshot_version,
+        })
+    }
+
+    pub fn cancel_remove(&self, plan_token: &str) -> Result<bool, MaintenanceError> {
+        let mut plans = self
+            .remove_plans
+            .lock()
+            .map_err(|_| MaintenanceError::Internal("Remove plan lock poisoned".into()))?;
+        plans.retain(|_, plan| plan.created_at.elapsed() < self.plan_ttl);
+        Ok(plans.remove(plan_token).is_some())
+    }
+
+    /// Compensate a failed Remove in reverse: restore the backed-up entity,
+    /// then recreate the removed Activation symlinks (only entries that were
+    /// symlinks at plan time). Success archives the journal and returns the
+    /// original error; failure locks writes for startup recovery.
+    fn fail_remove(
+        &self,
+        library_root: &Path,
+        journal: &RemoveJournal,
+        original: MaintenanceError,
+    ) -> Result<RemoveResult, MaintenanceError> {
+        let mut compensation_errors = Vec::new();
+        if let (Some(backup_path), Some(fingerprint)) =
+            (&journal.backup_path, &journal.backup_fingerprint)
+        {
+            if let Err(error) = self.filesystem.restore_library_entity(
+                backup_path,
+                &journal.final_entity_path,
+                library_root,
+                fingerprint,
+            ) {
+                compensation_errors.push(error.to_string());
+            }
+        }
+        for step in journal.activations.iter().rev() {
+            let outcome = match self.filesystem.activation_snapshot(&step.entry_path) {
+                Ok(ActivationEntrySnapshot::Symlink { target }) if target == step.target_path => {
+                    Ok(())
+                }
+                Ok(ActivationEntrySnapshot::Missing)
+                    if step.initial_entry == RemoveInitialEntry::Symlink =>
+                {
+                    self.filesystem
+                        .create_activation(&step.target_path, &step.entry_path)
+                }
+                Ok(ActivationEntrySnapshot::Missing) => Ok(()),
+                _ => Err(FileSystemError::PlanStale {
+                    path: step.entry_path.clone(),
+                }),
+            };
+            if let Err(error) = outcome {
+                compensation_errors.push(error.to_string());
+            }
+        }
+        if !compensation_errors.is_empty() {
+            self.recovery_gate.mark_blocked();
+            return Err(MaintenanceError::RecoveryRequired {
+                state_error: original.to_string(),
+                compensation_error: compensation_errors.join("; "),
+            });
+        }
+        if let Err(error) = self
+            .filesystem
+            .finish_remove_journal(library_root, &journal.operation_id)
+        {
+            self.recovery_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: format!(
@@ -739,7 +1137,14 @@ impl StartupMaintenance {
             })?;
         }
         drop(startup_worker);
-        self.maintenance.run_health_check()
+        // §10.4: a retry after a failed startup recovery must re-run the
+        // journal recovery itself, not just a read-only scan — otherwise the
+        // lock notice clears while writes stay refused.
+        if self.maintenance.recovery_gate.writes_are_ready() {
+            self.maintenance.run_health_check()
+        } else {
+            self.maintenance.startup_check()
+        }
     }
 
     pub fn relocate(
@@ -756,5 +1161,17 @@ impl StartupMaintenance {
 
     pub fn cancel_relocate(&self, plan_token: &str) -> Result<bool, MaintenanceError> {
         self.maintenance.cancel_relocate(plan_token)
+    }
+
+    pub fn plan_remove(&self, skill_id: &SkillId) -> Result<RemovePreview, MaintenanceError> {
+        self.maintenance.plan_remove(skill_id)
+    }
+
+    pub fn apply_remove(&self, plan_token: &str) -> Result<RemoveResult, MaintenanceError> {
+        self.maintenance.apply_remove(plan_token)
+    }
+
+    pub fn cancel_remove(&self, plan_token: &str) -> Result<bool, MaintenanceError> {
+        self.maintenance.cancel_remove(plan_token)
     }
 }

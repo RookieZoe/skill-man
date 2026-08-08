@@ -4,8 +4,10 @@ use crate::core::domain::SkillId;
 use crate::core::maintenance::{MaintenanceError, StartupMaintenance};
 use crate::seams::filesystem::FileSystemError;
 use crate::tauri_adapter::dto::{
-    ActivationHealthReportDto, ApplyRelocateLinkRequestDto, CancelRelocateLinkRequestDto,
-    CommandErrorDto, RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto,
+    ActivationHealthReportDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
+    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CommandErrorDto,
+    PlanRemoveSkillRequestDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
+    RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
 };
 
 pub struct HealthApi {
@@ -57,6 +59,35 @@ impl HealthApi {
             .cancel_relocate(&request.plan_token)
             .map_err(maintenance_error)
     }
+
+    pub fn plan_remove_skill(
+        &self,
+        request: PlanRemoveSkillRequestDto,
+    ) -> Result<RemoveSkillPreviewDto, CommandErrorDto> {
+        self.maintenance
+            .plan_remove(&SkillId(request.skill_id))
+            .map(RemoveSkillPreviewDto::from)
+            .map_err(maintenance_error)
+    }
+
+    pub fn apply_remove_skill(
+        &self,
+        request: ApplyRemoveSkillRequestDto,
+    ) -> Result<RemoveSkillResultDto, CommandErrorDto> {
+        self.maintenance
+            .apply_remove(&request.plan_token)
+            .map(RemoveSkillResultDto::from)
+            .map_err(maintenance_error)
+    }
+
+    pub fn cancel_remove_skill(
+        &self,
+        request: CancelRemoveSkillRequestDto,
+    ) -> Result<bool, CommandErrorDto> {
+        self.maintenance
+            .cancel_remove(&request.plan_token)
+            .map_err(maintenance_error)
+    }
 }
 
 fn maintenance_error(error: MaintenanceError) -> CommandErrorDto {
@@ -71,6 +102,7 @@ fn maintenance_error(error: MaintenanceError) -> CommandErrorDto {
             "permission_denied"
         }
         MaintenanceError::NotLink(_) | MaintenanceError::Validation(_) => "validation",
+        MaintenanceError::SkillNotFound(_) => "not_found",
         MaintenanceError::RecoveryInProgress => "recovery_required",
         MaintenanceError::PlanNotFound => "plan_stale",
         MaintenanceError::Store(_) | MaintenanceError::MaintenanceStore(_) => "state_unavailable",

@@ -23,7 +23,7 @@ use crate::seams::import_store::{
 };
 use crate::seams::maintenance_store::{
     AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
-    MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline,
+    MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget,
     SkillHealthObservation,
 };
 
@@ -464,7 +464,7 @@ impl MaintenanceStore for RuntimeCatalogStore {
         self.sqlite.link_skill(skill_id)
     }
 
-    fn relocate_activations_for_skill(
+    fn activation_baselines_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
@@ -473,7 +473,7 @@ impl MaintenanceStore for RuntimeCatalogStore {
                 "catalog startup is read-only".into(),
             ));
         }
-        self.sqlite.relocate_activations_for_skill(skill_id)
+        self.sqlite.activation_baselines_for_skill(skill_id)
     }
 
     fn commit_relocate(
@@ -498,6 +498,27 @@ impl MaintenanceStore for RuntimeCatalogStore {
             new_target_path,
             activations,
         )
+    }
+
+    fn remove_target(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<RemoveTarget>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.remove_target(skill_id)
+    }
+
+    fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.delete_skill(skill_id)
     }
 
     fn desired_activation_baselines(

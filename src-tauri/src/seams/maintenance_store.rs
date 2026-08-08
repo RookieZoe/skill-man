@@ -35,12 +35,22 @@ pub struct LinkSkillRecord {
     pub final_entity_path: PathBuf,
 }
 
-/// One desired Activation that must be rewritten when a Link is relocated.
+/// One desired Activation that must be rewritten when a Link is relocated
+/// or removed when its Skill leaves the Library.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelocateActivationBaseline {
     pub agent_id: AgentId,
     pub expected_entry_path: PathBuf,
     pub expected_target_path: PathBuf,
+}
+
+/// The persisted identity of a Managed Skill targeted by Remove.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveTarget {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub source_kind: SourceKind,
+    pub final_entity_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,8 +102,8 @@ pub trait MaintenanceStore: ActivationStore {
     ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError>;
 
     /// Desired Activations of one Skill; the Relocate flow rewrites their
-    /// symlinks to the new final entity.
-    fn relocate_activations_for_skill(
+    /// symlinks to the new final entity, and Remove deletes them.
+    fn activation_baselines_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
@@ -123,6 +133,17 @@ pub trait MaintenanceStore: ActivationStore {
         new_target_path: PathBuf,
         activations: &[RelocateActivationBaseline],
     ) -> Result<u64, MaintenanceStoreError>;
+
+    /// The persisted identity of a Managed Skill targeted by Remove; `None`
+    /// when the Skill does not exist.
+    fn remove_target(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<RemoveTarget>, MaintenanceStoreError>;
+
+    /// Delete the Skill row in one transaction; activations and source
+    /// tables cascade with the row. Returns the new snapshot version.
+    fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError>;
 
     fn record_skill_health(
         &self,

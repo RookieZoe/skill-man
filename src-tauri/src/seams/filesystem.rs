@@ -166,6 +166,69 @@ pub struct RelocateRecoveryBaseline {
     pub final_entity_path: PathBuf,
 }
 
+/// What the Activation entry was when the Remove was planned: entries that
+/// were already missing are never recreated by rollback/compensation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveInitialEntry {
+    Missing,
+    Symlink,
+}
+
+/// One desired Activation removed while removing a Skill from the Library.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RemoveActivationStep {
+    pub agent_id: String,
+    pub entry_path: PathBuf,
+    pub target_path: PathBuf,
+    pub initial_entry: RemoveInitialEntry,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveSourceKind {
+    /// The entity lives outside the Library; removal never touches it.
+    Link,
+    /// The entity is owned by the Library; removal backs it up, then
+    /// discards the backup after the catalog commit.
+    Install,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveJournalPhase {
+    /// Activations may already be removed and the entity may already be
+    /// backed up; the catalog delete decides whether recovery rolls forward
+    /// or back.
+    Applying,
+    /// The catalog row is gone; only filesystem cleanup remains.
+    Committed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RemoveJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: RemoveJournalPhase,
+    pub skill_id: String,
+    pub source_kind: RemoveSourceKind,
+    pub final_entity_path: PathBuf,
+    /// Install entities are moved here before the catalog commit so an
+    /// interrupted Remove can roll back; `None` for Links.
+    pub backup_path: Option<PathBuf>,
+    pub backup_fingerprint: Option<DirectoryFingerprint>,
+    pub activations: Vec<RemoveActivationStep>,
+}
+
+/// Catalog row existence decides whether an interrupted Remove had
+/// committed: a surviving row rolls back, a vanished row rolls forward.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveRecoveryBaseline {
+    pub skill_id: String,
+}
+
 /// A single desired Activation as it exists when a Link relocation is
 /// planned: the entry to rewrite, the old (Broken) target and the new one.
 /// `initial_entry` records what the entry was at plan time (Missing or a
@@ -767,6 +830,121 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "relocation journal recovery is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Persist a Remove journal before the first filesystem step; the entity
+    /// backup path and fingerprint are recorded before the catalog commit,
+    /// and the journal is archived once the removal completes or is
+    /// compensated.
+    fn write_remove_journal(
+        &self,
+        library_root: &Path,
+        journal: &RemoveJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "write Remove journal",
+            path: PathBuf::from(&journal.operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Remove journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    fn finish_remove_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "finish Remove journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Remove journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Replay interrupted Removes at startup: a surviving catalog row rolls
+    /// back (restore the backed-up entity, recreate removed Activations);
+    /// a vanished row rolls forward (finish entity cleanup).
+    fn recover_remove_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[RemoveRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let _ = (library_root, baselines);
+        Err(FileSystemError::Io {
+            operation: "recover Remove journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Remove journal recovery is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Move an owned Install entity into the operation backup so an
+    /// interrupted Remove can roll back. Same-volume rename; the destination
+    /// must not exist. Returns the backup fingerprint for later verification.
+    fn backup_library_entity(
+        &self,
+        final_entity_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = (final_entity_path, backup_path, library_root);
+        Err(FileSystemError::Io {
+            operation: "back up Library entity",
+            path: final_entity_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Library entity backups are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Restore a backed-up Install entity to its stable Library path during
+    /// rollback; the destination must be absent and the backup must still
+    /// match `expected`.
+    fn restore_library_entity(
+        &self,
+        backup_path: &Path,
+        final_entity_path: &Path,
+        library_root: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let _ = (backup_path, final_entity_path, library_root, expected);
+        Err(FileSystemError::Io {
+            operation: "restore Library entity",
+            path: backup_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Library entity restores are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Discard a committed entity backup; verifies identity when `expected`
+    /// is present. Never used while a rollback may still need the backup.
+    fn discard_library_entity_backup(
+        &self,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: Option<&DirectoryFingerprint>,
+    ) -> Result<(), FileSystemError> {
+        let _ = (backup_path, library_root, expected);
+        Err(FileSystemError::Io {
+            operation: "discard Library entity backup",
+            path: backup_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Library entity backups are not supported by this filesystem",
             ),
         })
     }

@@ -25,6 +25,8 @@ import type {
   PreferenceUpdates,
   RelocateLinkPreview,
   RelocateLinkResult,
+  RemoveSkillPreview,
+  RemoveSkillResult,
   SkillDetail,
   SkillSummary,
   StartupAgent,
@@ -53,6 +55,14 @@ export interface RelocatePanelState {
   sourcePath: string;
   preview: RelocateLinkPreview | null;
   result: RelocateLinkResult | null;
+  error: string | null;
+}
+
+export interface RemovePanelState {
+  isOpen: boolean;
+  activity: "idle" | "planning" | "applying";
+  preview: RemoveSkillPreview | null;
+  result: RemoveSkillResult | null;
   error: string | null;
 }
 
@@ -139,6 +149,14 @@ export function App({ client }: AppProps) {
     result: null,
     error: null,
   });
+  const [removePanel, setRemovePanel] = useState<RemovePanelState>({
+    isOpen: false,
+    activity: "idle",
+    preview: null,
+    result: null,
+    error: null,
+  });
+  const [lockNotice, setLockNotice] = useState<string | null>(null);
   const [reselectPath, setReselectPath] = useState("");
   const [isAdoptOpen, setIsAdoptOpen] = useState(false);
   const [adoptReport, setAdoptReport] = useState<AdoptScanReport | null>(null);
@@ -165,8 +183,13 @@ export function App({ client }: AppProps) {
     let current = true;
     client
       .runActivationHealthCheck()
-      .catch(() => {
-        // Startup maintenance is best effort and must not block Library browsing.
+      .catch((reason) => {
+        // §10.4: a recovery_required startup is a read-only lock; browsing
+        // stays available but every write is refused until recovery runs.
+        const failure = readCommandError(reason);
+        if (current && failure.code === "recovery_required") {
+          setLockNotice(failure.message);
+        }
       })
       .finally(() => {
         if (current) setStartupHealthComplete(true);
@@ -930,6 +953,86 @@ export function App({ client }: AppProps) {
     }
   }
 
+  function openRemove() {
+    if (!selectedId) return;
+    setRemovePanel({
+      isOpen: true,
+      activity: "planning",
+      preview: null,
+      result: null,
+      error: null,
+    });
+    const skillId = selectedId;
+    client
+      .planRemoveSkill(skillId)
+      .then((preview) => {
+        setRemovePanel((state) =>
+          state.isOpen ? { ...state, activity: "idle", preview } : state,
+        );
+      })
+      .catch((reason) => {
+        setRemovePanel((state) =>
+          state.isOpen
+            ? { ...state, activity: "idle", error: readError(reason) }
+            : state,
+        );
+      });
+  }
+
+  function closeRemove() {
+    const { preview, result } = removePanel;
+    setRemovePanel({
+      isOpen: false,
+      activity: "idle",
+      preview: null,
+      result: null,
+      error: null,
+    });
+    if (!result && preview) {
+      void client.cancelRemoveSkill(preview.planToken).catch(() => undefined);
+    }
+  }
+
+  async function applyRemove() {
+    const { preview } = removePanel;
+    if (!selectedId || !preview) return;
+    setRemovePanel((state) => ({
+      ...state,
+      activity: "applying",
+      error: null,
+    }));
+    try {
+      const result = await client.applyRemoveSkill(preview.planToken);
+      const snapshot = await client.listSkills(filter);
+      setSkills(snapshot.items);
+      setSelectedId(null);
+      setDetail(null);
+      setAgents([]);
+      setAgentsReadyForSkillId(null);
+      setRemovePanel((state) => ({
+        ...state,
+        activity: "idle",
+        preview: null,
+        result,
+      }));
+    } catch (reason) {
+      setRemovePanel((state) => ({
+        ...state,
+        activity: "idle",
+        error: readError(reason),
+      }));
+    }
+  }
+
+  async function retryRecovery() {
+    try {
+      await client.runActivationHealthCheck();
+      setLockNotice(null);
+    } catch (reason) {
+      setLockNotice(readCommandError(reason).message);
+    }
+  }
+
   async function openAdopt() {
     adoptRunId.current += 1;
     setIsAdoptOpen(true);
@@ -1213,6 +1316,12 @@ export function App({ client }: AppProps) {
       }
       onPreviewRelocate={previewRelocate}
       onApplyRelocate={applyRelocate}
+      removePanel={removePanel}
+      onOpenRemove={openRemove}
+      onCloseRemove={closeRemove}
+      onApplyRemove={applyRemove}
+      lockNotice={lockNotice}
+      onRetryRecovery={retryRecovery}
       isAdoptOpen={isAdoptOpen}
       adoptReport={adoptReport}
       adoptSelected={adoptSelected}

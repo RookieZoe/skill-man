@@ -15,7 +15,7 @@ use skill_man_lib::seams::activation_store::{
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::maintenance_store::{
     AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
-    MaintenanceStoreError, RelocateActivationBaseline, SkillHealthObservation,
+    MaintenanceStoreError, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
 
 #[test]
@@ -235,6 +235,19 @@ impl MaintenanceStore for HealthStore {
     ) -> Result<u64, MaintenanceStoreError> {
         Err(MaintenanceStoreError::Unavailable(
             "relocation is not supported by this test store".into(),
+        ))
+    }
+
+    fn remove_target(
+        &self,
+        _skill_id: &SkillId,
+    ) -> Result<Option<RemoveTarget>, MaintenanceStoreError> {
+        Ok(None)
+    }
+
+    fn delete_skill(&self, _skill_id: &SkillId) -> Result<u64, MaintenanceStoreError> {
+        Err(MaintenanceStoreError::Unavailable(
+            "Remove is not supported by this test store".into(),
         ))
     }
 }

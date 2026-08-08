@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   ImportKind,
   RelocatePanelState,
+  RemovePanelState,
   UpdatePanelState,
 } from "../../app/App";
 import type {
@@ -85,6 +86,12 @@ interface LibraryDeskProps {
   onRelocateSourcePathChange: (sourcePath: string) => void;
   onPreviewRelocate: (sourcePath: string) => void;
   onApplyRelocate: () => void;
+  removePanel: RemovePanelState;
+  onOpenRemove: () => void;
+  onCloseRemove: () => void;
+  onApplyRemove: () => void;
+  lockNotice: string | null;
+  onRetryRecovery: () => void;
   isAdoptOpen: boolean;
   adoptReport: AdoptScanReport | null;
   adoptSelected: string[];
@@ -190,6 +197,12 @@ export function LibraryDesk({
   onRelocateSourcePathChange,
   onPreviewRelocate,
   onApplyRelocate,
+  removePanel,
+  onOpenRemove,
+  onCloseRemove,
+  onApplyRemove,
+  lockNotice,
+  onRetryRecovery,
   onFilter,
   onSelect,
   onRequestActivation,
@@ -293,6 +306,24 @@ export function LibraryDesk({
             <span>{error}</span>
           </div>
         ) : null}
+        {lockNotice ? (
+          <div className="global-notice global-notice--locked" role="alert">
+            <strong>Recovery required — writes locked</strong>
+            <span>{lockNotice}</span>
+            <span>
+              Browsing stays available. Repair the cause (permissions or the
+              interrupted operation), then retry recovery; check the app logs
+              for the failing operation id.
+            </span>
+            <button
+              type="button"
+              className="repair-button"
+              onClick={onRetryRecovery}
+            >
+              Retry recovery
+            </button>
+          </div>
+        ) : null}
         <div className="library-desk">
           <LibrarySidebar
             filter={filter}
@@ -312,6 +343,8 @@ export function LibraryDesk({
             onPinUpdate={onPinSkillUpdate}
             onReselectPathChange={onReselectPathChange}
             onOpenRelocate={onOpenRelocate}
+            removePanel={removePanel}
+            onOpenRemove={onOpenRemove}
           />
           <AgentInspector
             detail={detail}
@@ -357,6 +390,13 @@ export function LibraryDesk({
           onPreview={onPreviewRelocate}
           onApply={onApplyRelocate}
           onClose={onCloseRelocate}
+        />
+      ) : null}
+      {removePanel.isOpen ? (
+        <RemoveSheet
+          panel={removePanel}
+          onApply={onApplyRemove}
+          onClose={onCloseRemove}
         />
       ) : null}
       {isAdoptOpen ? (
@@ -566,6 +606,8 @@ function SkillDetailPanel({
   onPinUpdate,
   onReselectPathChange,
   onOpenRelocate,
+  removePanel,
+  onOpenRemove,
 }: {
   detail: SkillDetail | null;
   updatePanel: UpdatePanelState;
@@ -577,6 +619,8 @@ function SkillDetailPanel({
   onPinUpdate: () => void;
   onReselectPathChange: (path: string) => void;
   onOpenRelocate: () => void;
+  removePanel: RemovePanelState;
+  onOpenRemove: () => void;
 }) {
   return (
     <main id="skill-detail" className="skill-detail" aria-label="Skill detail">
@@ -599,6 +643,18 @@ function SkillDetailPanel({
               onOpenRelocate={onOpenRelocate}
             />
           ) : null}
+          <div className="detail-actions">
+            <button
+              type="button"
+              className="toolbar-button danger-button"
+              disabled={
+                removePanel.isOpen || removePanel.activity === "planning"
+              }
+              onClick={onOpenRemove}
+            >
+              Remove…
+            </button>
+          </div>
           <dl className="metadata-grid">
             <div>
               <dt>Source</dt>
@@ -2550,6 +2606,141 @@ function PreferencesSheet({
             Done
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function RemoveSheet({
+  panel,
+  onApply,
+  onClose,
+}: {
+  panel: RemovePanelState;
+  onApply: () => void;
+  onClose: () => void;
+}) {
+  const isBusy = panel.activity !== "idle";
+  const confirmButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    if (panel.preview || panel.result) {
+      confirmButton.current?.focus();
+    }
+  }, [panel.preview, panel.result]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isBusy) onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isBusy, onClose]);
+
+  const preview = panel.preview;
+  const isInstall =
+    preview?.sourceKind === "remote_install" ||
+    preview?.sourceKind === "file_install";
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isBusy) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet import-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Remove Managed Skill"
+      >
+        {panel.result ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Remove complete</span>
+              <h2>{panel.result.directoryName} left the Library</h2>
+              <p>The catalog entry and every Activation are gone.</p>
+            </div>
+            <div className="activation-sheet-actions">
+              <button ref={confirmButton} type="button" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
+        ) : panel.activity === "planning" ? (
+          <LoadingPanel label="Preparing Remove preview" />
+        ) : preview ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Remove preview</span>
+              <h2>Remove {preview.directoryName}</h2>
+              <p>
+                Every Activation is disabled first, then the Library entry is
+                deleted.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>Final entity</dt>
+                <dd>{preview.finalEntityPath}</dd>
+              </div>
+              <div>
+                <dt>Entity handling</dt>
+                <dd>
+                  {isInstall
+                    ? "The Install entity inside Library is deleted"
+                    : "The external Link entity is kept in place"}
+                </dd>
+              </div>
+              <div>
+                <dt>Activations to disable</dt>
+                <dd>{preview.activationCount}</dd>
+              </div>
+            </dl>
+            <div className="activation-warning" role="status">
+              <strong>This cannot be undone from the result window</strong>
+              <span>
+                The operation audit is archived, but the Skill leaves the
+                Library once removed.
+              </span>
+            </div>
+            {panel.error ? (
+              <div className="activation-error" role="alert">
+                <strong>Remove unchanged</strong>
+                <span>{panel.error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                ref={confirmButton}
+                type="button"
+                className="activation-confirm-button danger-button"
+                disabled={isBusy}
+                onClick={onApply}
+              >
+                {isBusy ? "Removing" : `Remove ${preview.directoryName}`}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            {panel.error ? (
+              <div className="activation-error" role="alert">
+                <strong>Remove unavailable</strong>
+                <span>{panel.error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button ref={confirmButton} type="button" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
+        )}
       </section>
     </div>
   );

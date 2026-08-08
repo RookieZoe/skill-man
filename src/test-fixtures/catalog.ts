@@ -84,6 +84,7 @@ export function createFixtureCatalogClient(): CatalogClient {
     string,
     { skillId: string; finalEntityPath: string }
   >();
+  const removePlans = new Map<string, { skillId: string }>();
   let planCounter = 1;
   const replacePlans = new Map<string, PlannedFixtureReplace>();
   const appliedReplaces = new Map<string, PlannedFixtureReplace>();
@@ -391,6 +392,47 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async cancelRelocateLink() {
       return true;
+    },
+    async planRemoveSkill(skillId) {
+      const skill = skills.find((item) => item.id === skillId);
+      if (!skill) {
+        throw { code: "not_found", message: "Managed Skill not found" };
+      }
+      const planToken = `remove-plan-${planCounter++}`;
+      removePlans.set(planToken, { skillId });
+      return {
+        planToken,
+        skillId,
+        directoryName: skill.directoryName,
+        sourceKind: skill.sourceKind,
+        finalEntityPath: skill.finalEntityPath,
+        activationCount: Array.from(enabledSkillIds.values()).filter((ids) =>
+          ids.includes(skillId),
+        ).length,
+      };
+    },
+    async applyRemoveSkill(planToken) {
+      const plan = removePlans.get(planToken);
+      if (!plan) throw new Error("Remove preview expired");
+      removePlans.delete(planToken);
+      const index = skills.findIndex((item) => item.id === plan.skillId);
+      if (index === -1) throw new Error("Skill not found");
+      const [skill] = skills.splice(index, 1);
+      for (const [agentId, ids] of enabledSkillIds) {
+        enabledSkillIds.set(
+          agentId,
+          ids.filter((id) => id !== plan.skillId),
+        );
+      }
+      snapshotVersion += 1;
+      return {
+        skillId: plan.skillId,
+        directoryName: skill.directoryName,
+        snapshotVersion,
+      };
+    },
+    async cancelRemoveSkill(planToken) {
+      return removePlans.delete(planToken);
     },
     async applyActivation(planToken) {
       const plan = plans.get(planToken);

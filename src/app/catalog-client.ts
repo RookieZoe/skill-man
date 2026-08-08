@@ -151,6 +151,21 @@ export interface RelocateLinkResult {
   snapshotVersion: number;
 }
 
+export interface RemoveSkillPreview {
+  planToken: string;
+  skillId: string;
+  directoryName: string;
+  sourceKind: SourceKind;
+  finalEntityPath: string;
+  activationCount: number;
+}
+
+export interface RemoveSkillResult {
+  skillId: string;
+  directoryName: string;
+  snapshotVersion: number;
+}
+
 export interface ActivationResult {
   skillId: string;
   agentId: string;
@@ -424,6 +439,9 @@ export interface CatalogClient {
   ): Promise<RelocateLinkPreview>;
   applyRelocateLink(planToken: string): Promise<RelocateLinkResult>;
   cancelRelocateLink(planToken: string): Promise<boolean>;
+  planRemoveSkill(skillId: string): Promise<RemoveSkillPreview>;
+  applyRemoveSkill(planToken: string): Promise<RemoveSkillResult>;
+  cancelRemoveSkill(planToken: string): Promise<boolean>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
   discoverLinkImport(sourcePath: string): Promise<LinkImportCandidate>;
@@ -474,6 +492,21 @@ const tauriCatalogClient: CatalogClient = {
   },
   cancelRelocateLink(planToken) {
     return invoke<boolean>("cancel_relocate_link", {
+      request: { planToken },
+    });
+  },
+  planRemoveSkill(skillId) {
+    return invoke<RemoveSkillPreview>("plan_remove_skill", {
+      request: { skillId },
+    });
+  },
+  applyRemoveSkill(planToken) {
+    return invoke<RemoveSkillResult>("apply_remove_skill", {
+      request: { planToken },
+    });
+  },
+  cancelRemoveSkill(planToken) {
+    return invoke<boolean>("cancel_remove_skill", {
       request: { planToken },
     });
   },

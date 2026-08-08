@@ -16,8 +16,9 @@ use crate::seams::filesystem::{
     DirectoryFingerprint, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
     FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
     LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry, RelocateJournal,
-    RelocateJournalPhase, RelocateRecoveryBaseline, ScannedSkillEntry, SkillFingerprint,
-    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
+    RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry, RemoveJournal,
+    RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, SkillFingerprint, StagedEntryKind,
+    StagedTreeEntry, StagedTreeSnapshot,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -1637,6 +1638,258 @@ impl FileSystem for MacOsFileSystem {
         Ok(recovered)
     }
 
+    fn write_remove_journal(
+        &self,
+        library_root: &Path,
+        journal: &RemoveJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(&journal.operation_id)?;
+        let operations_root = library_root.join("operations");
+        let operation_root = operations_root.join(&journal.operation_id);
+        fs::create_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "create Remove operation directory",
+            path: operation_root.clone(),
+            source,
+        })?;
+        sync_directory(&operations_root, "sync Remove operations directory")?;
+        let journal_path = operation_root.join("remove-journal.json");
+        let temporary_path = operation_root.join("remove-journal.tmp");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize Remove journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary Remove journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write Remove journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync Remove journal",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish Remove journal",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(&operation_root, "sync Remove operation directory")
+    }
+
+    fn finish_remove_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(operation_id)?;
+        let operation_root = library_root.join("operations").join(operation_id);
+        let journal_path = operation_root.join("remove-journal.json");
+        if journal_path.is_file() {
+            let journal_bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read completed Remove journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let history_root = library_root.join("operation-history");
+            fs::create_dir_all(&history_root).map_err(|source| FileSystemError::Io {
+                operation: "create Remove operation history",
+                path: history_root.clone(),
+                source,
+            })?;
+            let archive_path = history_root.join(format!("{operation_id}.remove.json"));
+            let archive_temporary = history_root.join(format!(".{operation_id}.remove.tmp"));
+            let mut archive = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&archive_temporary)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "open temporary Remove history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive
+                .write_all(&journal_bytes)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "write Remove history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive.sync_all().map_err(|source| FileSystemError::Io {
+                operation: "sync Remove history",
+                path: archive_temporary.clone(),
+                source,
+            })?;
+            fs::rename(&archive_temporary, &archive_path).map_err(|source| {
+                FileSystemError::Io {
+                    operation: "publish Remove history",
+                    path: archive_path,
+                    source,
+                }
+            })?;
+        }
+        fs::remove_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "discard Remove operation directory",
+            path: operation_root,
+            source,
+        })
+    }
+
+    /// Replay interrupted Removes: a surviving catalog row rolls back
+    /// (restore the backed-up entity, recreate removed Activation symlinks
+    /// that were symlinks at plan time); a vanished row rolls forward
+    /// (finish deleting the entity and its backup). The journal is archived
+    /// either way, preserving the operation audit.
+    fn recover_remove_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[RemoveRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        let entries = match fs::read_dir(&operations_root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Remove recovery journals",
+                    path: operations_root,
+                    source,
+                });
+            }
+        };
+        let mut recovered = 0_u32;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Remove recovery journals",
+                path: operations_root.clone(),
+                source,
+            })?;
+            let operation_root = entry.path();
+            let journal_path = operation_root.join("remove-journal.json");
+            if !journal_path.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read Remove recovery journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let journal: RemoveJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Remove recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            validate_operation_id(&journal.operation_id)?;
+            if operation_root.file_name().and_then(|name| name.to_str())
+                != Some(journal.operation_id.as_str())
+            {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_root,
+                });
+            }
+            let committed = !baselines
+                .iter()
+                .any(|baseline| baseline.skill_id == journal.skill_id);
+            if committed {
+                complete_remove(&journal, &library_root)?;
+            } else {
+                rollback_remove(&journal)?;
+            }
+            self.finish_remove_journal(&library_root, &journal.operation_id)?;
+            recovered = recovered.saturating_add(1);
+        }
+        Ok(recovered)
+    }
+
+    fn backup_library_entity(
+        &self,
+        final_entity_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let final_entity_path = self.normalize_configured_path(final_entity_path)?;
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        let skills_root = library_root.join("skills");
+        if final_entity_path.parent() != Some(skills_root.as_path()) {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: final_entity_path,
+            });
+        }
+        if !backup_path.starts_with(&library_root.join("operations")) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
+        }
+        if fs::symlink_metadata(&backup_path).is_ok() {
+            return Err(FileSystemError::PlanStale { path: backup_path });
+        }
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| FileSystemError::Io {
+                operation: "create Library entity backup directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        move_directory_verified(&final_entity_path, &backup_path)?;
+        self.directory_fingerprint(&backup_path)
+    }
+
+    fn restore_library_entity(
+        &self,
+        backup_path: &Path,
+        final_entity_path: &Path,
+        library_root: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let final_entity_path = self.normalize_configured_path(final_entity_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        if final_entity_path.parent() != Some(library_root.join("skills").as_path()) {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: final_entity_path,
+            });
+        }
+        if fs::symlink_metadata(&final_entity_path).is_ok() {
+            return Err(FileSystemError::PlanStale {
+                path: final_entity_path,
+            });
+        }
+        let current = self.directory_fingerprint(&backup_path)?;
+        if current != *expected {
+            return Err(FileSystemError::PlanStale { path: backup_path });
+        }
+        move_directory_verified(&backup_path, &final_entity_path)
+    }
+
+    fn discard_library_entity_backup(
+        &self,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: Option<&DirectoryFingerprint>,
+    ) -> Result<(), FileSystemError> {
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        if !backup_path.starts_with(&library_root.join("operations")) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
+        }
+        remove_owned_directory_if_present(&backup_path, expected, "discard Library entity backup")
+    }
+
     fn scan_skills_directory(
         &self,
         path: &Path,
@@ -2922,6 +3175,64 @@ fn create_relocate_entry(
         path: entry.to_path_buf(),
         source,
     })
+}
+
+/// Roll an interrupted Remove back: restore the backed-up Install entity,
+/// then recreate every Activation symlink that existed at plan time. Entries
+/// that changed externally stop recovery with `RecoveryRequired`.
+fn rollback_remove(journal: &RemoveJournal) -> Result<(), FileSystemError> {
+    if let Some(backup_path) = &journal.backup_path {
+        if fs::symlink_metadata(backup_path).is_ok() {
+            if fs::symlink_metadata(&journal.final_entity_path).is_ok() {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "roll back Remove",
+                    path: journal.final_entity_path.clone(),
+                    message: "the Library entity path changed while the Remove was interrupted"
+                        .into(),
+                });
+            }
+            move_directory_verified(backup_path, &journal.final_entity_path)?;
+        }
+    }
+    for step in &journal.activations {
+        match activation_entry_snapshot_at(&step.entry_path)? {
+            ActivationEntrySnapshot::Symlink { target } if target == step.target_path => {}
+            ActivationEntrySnapshot::Missing
+                if step.initial_entry == RemoveInitialEntry::Symlink =>
+            {
+                create_relocate_entry(&step.target_path, &step.entry_path, "roll back Remove")?;
+            }
+            ActivationEntrySnapshot::Missing => {}
+            _ => {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "roll back Remove",
+                    path: step.entry_path.clone(),
+                    message: "the Activation entry changed while the Remove was interrupted".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Roll an interrupted Remove forward after the catalog commit: delete any
+/// entity still at its owned Library path and discard the backup. Link
+/// entities are external and never touched.
+fn complete_remove(journal: &RemoveJournal, library_root: &Path) -> Result<(), FileSystemError> {
+    if journal.source_kind == RemoveSourceKind::Install {
+        let skills_root = library_root.join("skills");
+        if journal.final_entity_path.parent() == Some(skills_root.as_path()) {
+            remove_owned_directory_if_present(
+                &journal.final_entity_path,
+                None,
+                "recover Remove entity",
+            )?;
+        }
+    }
+    if let Some(backup_path) = &journal.backup_path {
+        remove_owned_directory_if_present(backup_path, None, "recover Remove backup")?;
+    }
+    Ok(())
 }
 
 fn restore_occupant_verified(journal: &ActivationReplaceJournal) -> Result<(), FileSystemError> {

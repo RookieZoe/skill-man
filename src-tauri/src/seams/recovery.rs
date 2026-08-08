@@ -24,4 +24,11 @@ impl RecoveryGate {
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
+
+    /// Lock writes for the rest of the session (spec §10.4): used when an
+    /// operation fails and cannot compensate, leaving recovery to the next
+    /// startup.
+    pub fn mark_blocked(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
 }

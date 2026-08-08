@@ -27,7 +27,7 @@ use crate::seams::import_store::{
 };
 use crate::seams::maintenance_store::{
     AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStoreError,
-    ManagedSkillBaseline, RelocateActivationBaseline, SkillHealthObservation,
+    ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
 use crate::seams::preferences_store::PreferencesStoreError;
 
@@ -685,7 +685,7 @@ impl SqliteCatalogStore {
 
     /// Desired Activations of one Skill (only `desired_enabled = 1`, the
     /// records whose symlinks must be rewritten by a relocation).
-    pub fn relocate_activations_for_skill(
+    pub fn activation_baselines_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
@@ -771,6 +771,71 @@ impl SqliteCatalogStore {
                     ],
                 )
                 .map_err(sqlite_maintenance_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_maintenance_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_maintenance_error)?;
+        transaction.commit().map_err(sqlite_maintenance_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            MaintenanceStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    /// The persisted identity of a Managed Skill targeted by Remove.
+    pub fn remove_target(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<RemoveTarget>, MaintenanceStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT id, directory_name, source_kind, final_entity_path
+                 FROM skills
+                 WHERE id = ?1",
+                [&skill_id.0],
+                |row| {
+                    Ok(RemoveTarget {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                        source_kind: parse_source_kind(&row.get::<_, String>(2)?)?,
+                        final_entity_path: PathBuf::from(row.get::<_, String>(3)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    /// Delete the Skill row; activations, file_sources and remote_sources
+    /// cascade with the row (§5.4), and the operation audit lives in the
+    /// archived Remove journal instead.
+    pub fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_maintenance_error)?;
+        let deleted = transaction
+            .execute("DELETE FROM skills WHERE id = ?1", [&skill_id.0])
+            .map_err(sqlite_maintenance_error)?;
+        if deleted == 0 {
+            return Err(MaintenanceStoreError::Unavailable(format!(
+                "the Managed Skill '{}' disappeared before its Remove committed",
+                skill_id.0
+            )));
         }
         transaction
             .execute(

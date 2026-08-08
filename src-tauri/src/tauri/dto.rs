@@ -15,7 +15,9 @@ use crate::core::import::{
     GitImportPreview, GitImportResult, GitImportSelectionPreview, GitImportSelectionResult,
     LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
 };
-use crate::core::maintenance::{ActivationHealthReport, RelocatePreview, RelocateResult};
+use crate::core::maintenance::{
+    ActivationHealthReport, RelocatePreview, RelocateResult, RemovePreview, RemoveResult,
+};
 use crate::core::startup::{StartupAgent, StartupInfo};
 use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
@@ -410,6 +412,66 @@ impl From<RelocateResult> for RelocateLinkResultDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelRelocateLinkRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRemoveSkillRequestDto {
+    pub skill_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSkillPreviewDto {
+    pub plan_token: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub source_kind: SourceKindDto,
+    pub final_entity_path: String,
+    pub activation_count: u32,
+}
+
+impl From<RemovePreview> for RemoveSkillPreviewDto {
+    fn from(value: RemovePreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            source_kind: SourceKindDto::from(value.source_kind),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            activation_count: value.activation_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRemoveSkillRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSkillResultDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub snapshot_version: u64,
+}
+
+impl From<RemoveResult> for RemoveSkillResultDto {
+    fn from(value: RemoveResult) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRemoveSkillRequestDto {
     pub plan_token: String,
 }
 

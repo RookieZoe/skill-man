@@ -466,7 +466,7 @@ fn interrupted_relocation_rolls_forward_at_startup_when_the_catalog_committed() 
     // Activation was rewritten.
     let activations = harness
         .runtime
-        .relocate_activations_for_skill(&skill_id)
+        .activation_baselines_for_skill(&skill_id)
         .expect("desired Activations");
     harness
         .runtime
