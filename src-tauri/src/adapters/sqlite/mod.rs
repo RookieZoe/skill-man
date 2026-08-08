@@ -28,14 +28,16 @@ use crate::seams::import_store::{
 use crate::seams::maintenance_store::{
     AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStoreError, SkillHealthObservation,
 };
+use crate::seams::preferences_store::PreferencesStoreError;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE catalog_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version INTEGER NOT NULL,
     snapshot_version INTEGER NOT NULL DEFAULT 0,
+    first_run_completed_at TEXT,
     last_startup_check_at TEXT
 );
 
@@ -112,7 +114,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 3, 0);
+VALUES (1, 4, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -361,6 +363,73 @@ impl SqliteCatalogStore {
             .into_iter()
             .filter(|skill| filter.includes(skill))
             .collect())
+    }
+
+    pub fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {
+        self.connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?
+            .query_row(
+                "SELECT first_run_completed_at FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_catalog_error)
+    }
+
+    pub fn mark_first_run_completed(&self) -> Result<(), CatalogStoreError> {
+        self.connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?
+            .execute(
+                "UPDATE catalog_meta SET first_run_completed_at = ?1 WHERE singleton = 1",
+                [unix_timestamp()],
+            )
+            .map_err(sqlite_catalog_error)?;
+        Ok(())
+    }
+
+    /// Recently-enabled Skills for the tray quick view, newest enable first.
+    /// Only Skills with at least one currently desired Activation appear
+    /// (`desired_enabled = 1`); `last_enabled_at` is an epoch-seconds string,
+    /// so it is compared as an integer; ties fall back to the stable
+    /// directory-name order.
+    pub fn recently_enabled_skills(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SkillSummary>, CatalogStoreError> {
+        let connection = self
+            .connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    skills.id, skills.directory_name, skills.display_name,
+                    skills.description, skills.source_kind, skills.health,
+                    COALESCE(SUM(CASE WHEN activations.desired_enabled = 1 THEN 1 ELSE 0 END), 0)
+                 FROM skills
+                 JOIN activations ON activations.skill_id = skills.id
+                 WHERE activations.last_enabled_at IS NOT NULL
+                   AND activations.desired_enabled = 1
+                 GROUP BY skills.id
+                 ORDER BY MAX(CAST(activations.last_enabled_at AS INTEGER)) DESC,
+                          skills.directory_name COLLATE NOCASE, skills.id
+                 LIMIT ?1",
+            )
+            .map_err(sqlite_catalog_error)?;
+        statement
+            .query_map([limit], |row| {
+                Ok(SkillSummary {
+                    id: SkillId(row.get(0)?),
+                    directory_name: row.get(1)?,
+                    display_name: row.get(2)?,
+                    description: row.get(3)?,
+                    source_kind: parse_source_kind(&row.get::<_, String>(4)?)?,
+                    health: parse_health(&row.get::<_, String>(5)?)?,
+                    enabled_agent_count: row.get(6)?,
+                })
+            })
+            .map_err(sqlite_catalog_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_catalog_error)
     }
 
     pub fn persisted_skill_detail(
@@ -1162,6 +1231,18 @@ impl ImportStore for SqliteCatalogStore {
 }
 
 impl AdoptStore for SqliteCatalogStore {
+    fn mark_agent_detected(&self, agent_id: &AgentId) -> Result<(), AdoptStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .execute(
+                "UPDATE agents SET detected = 1, updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![unix_timestamp(), agent_id.0],
+            )
+            .map_err(sqlite_adopt_error)?;
+        Ok(())
+    }
+
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
         self.connection
             .lock()
@@ -1334,6 +1415,83 @@ impl AdoptStore for SqliteCatalogStore {
             )
             .optional()
             .map_err(sqlite_adopt_error)
+    }
+}
+
+impl crate::seams::preferences_store::PreferencesStore for SqliteCatalogStore {
+    fn load_preferences(
+        &self,
+    ) -> Result<crate::seams::preferences_store::AppPreferences, PreferencesStoreError> {
+        let connection = self
+            .connection()
+            .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+        connection
+            .query_row(
+                "SELECT launch_at_login, show_in_dock, check_app_updates, check_skill_updates
+                 FROM preferences WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(crate::seams::preferences_store::AppPreferences {
+                        launch_at_login: row.get(0)?,
+                        show_in_dock: row.get(1)?,
+                        check_app_updates: row.get(2)?,
+                        check_skill_updates: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))
+    }
+
+    fn update_preferences(
+        &self,
+        updates: crate::seams::preferences_store::PreferenceUpdates,
+    ) -> Result<crate::seams::preferences_store::AppPreferences, PreferencesStoreError> {
+        {
+            let mut connection = self
+                .connection()
+                .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            if let Some(value) = updates.launch_at_login {
+                transaction
+                    .execute(
+                        "UPDATE preferences SET launch_at_login = ?1 WHERE singleton = 1",
+                        [value],
+                    )
+                    .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            }
+            if let Some(value) = updates.show_in_dock {
+                transaction
+                    .execute(
+                        "UPDATE preferences SET show_in_dock = ?1 WHERE singleton = 1",
+                        [value],
+                    )
+                    .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            }
+            if let Some(value) = updates.check_app_updates {
+                transaction
+                    .execute(
+                        "UPDATE preferences SET check_app_updates = ?1 WHERE singleton = 1",
+                        [value],
+                    )
+                    .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            }
+            if let Some(value) = updates.check_skill_updates {
+                transaction
+                    .execute(
+                        "UPDATE preferences SET check_skill_updates = ?1 WHERE singleton = 1",
+                        [value],
+                    )
+                    .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+        }
+        // The connection guard is released before reloading, or the reload
+        // would deadlock on the same mutex.
+        Self::load_preferences(self)
     }
 }
 
@@ -1635,6 +1793,12 @@ fn migrate_to_current(
                 last_updated_at INTEGER
              );
              UPDATE catalog_meta SET schema_version = 3 WHERE singleton = 1;",
+        )?;
+    }
+    if existing_schema_version == 3 {
+        transaction.execute_batch(
+            "ALTER TABLE catalog_meta ADD COLUMN first_run_completed_at TEXT;
+             UPDATE catalog_meta SET schema_version = 4 WHERE singleton = 1;",
         )?;
     }
     transaction.commit()

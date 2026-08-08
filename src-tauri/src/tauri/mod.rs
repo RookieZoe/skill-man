@@ -5,4 +5,7 @@ pub mod commands;
 pub mod dto;
 pub mod health_api;
 pub mod import_api;
+pub mod lifecycle;
+pub mod startup_api;
+pub mod tray;
 pub mod update_api;

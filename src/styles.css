@@ -1445,3 +1445,91 @@ button:active:not(:disabled) {
 .adopt-sheet .git-import-candidates {
   max-height: 300px;
 }
+
+/* -- First-run onboarding & Preferences sheets (spec §8.7, §10.2) -- */
+
+.onboarding-sheet,
+.preferences-sheet {
+  width: min(100%, 480px);
+}
+
+.onboarding-progress {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6) 0;
+}
+
+.onboarding-progress span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 640;
+}
+
+.onboarding-progress span.onboarding-progress-dot--active {
+  background: var(--accent);
+  color: white;
+}
+
+.onboarding-agent-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0 var(--space-6);
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-agent-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+}
+
+.onboarding-scan {
+  margin: 0 var(--space-6);
+}
+
+.onboarding-scan .git-import-candidates {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.preference-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0 var(--space-6);
+}
+
+.preference-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+}
+
+.preference-row > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.preference-row strong {
+  font-size: 12px;
+  font-weight: 640;
+}
+
+.preference-row small {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.45;
+}

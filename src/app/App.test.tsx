@@ -803,3 +803,190 @@ test("opens the Adopt sheet and reports a fixture rejection", async () => {
     screen.queryByRole("dialog", { name: "Adopt untracked Skills" }),
   ).not.toBeInTheDocument();
 });
+
+test("shows the three-step onboarding on first run and Skip records completion", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  let completed = 0;
+  client.startupInfo = async () => ({
+    firstRun: true,
+    agents: [
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        kind: "claude_preset",
+        skillsPath: "~/.claude/skills",
+        detected: true,
+      },
+      {
+        id: "codex",
+        name: "Codex",
+        kind: "codex_preset",
+        skillsPath: "~/.codex/skills",
+        detected: false,
+      },
+    ],
+  });
+  client.completeOnboarding = async () => {
+    completed += 1;
+  };
+  render(<App client={client} />);
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Welcome to Skill Man",
+  });
+  expect(dialog).toHaveTextContent("Create the Library");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(await screen.findByText("Check Agent Presets")).toBeInTheDocument();
+  expect(screen.getByText("Not detected")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Skip setup" }));
+
+  expect(completed).toBe(1);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    await screen.findByRole("main", { name: "Skill detail" }),
+  ).toBeInTheDocument();
+});
+
+test("onboarding full scan hands off to Adopt with candidates selected", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.startupInfo = async () => ({
+    firstRun: true,
+    agents: [],
+  });
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity: "~/.claude/skills/prompt-linter",
+        directoryName: "prompt-linter",
+        directoryNames: ["prompt-linter"],
+        appearances: [
+          {
+            entryPath: "~/.claude/skills/prompt-linter",
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        risk: "none",
+        riskReason: null,
+        conflict: null,
+        adoptable: true,
+        suggestedAgentIds: [],
+      },
+    ],
+  });
+  render(<App client={client} />);
+
+  await screen.findByRole("dialog", { name: "Welcome to Skill Man" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+
+  expect(
+    await screen.findByText(/1 Untracked Skill found/),
+  ).toBeInTheDocument();
+  await user.click(
+    screen.getByRole("button", { name: "Review Adopt candidates" }),
+  );
+
+  expect(
+    await screen.findByRole("dialog", { name: "Adopt untracked Skills" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("checkbox", { name: /prompt-linter/ })).toBeChecked();
+});
+
+test("Preferences sheet shows exactly four switches with defaults", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "Preferences" });
+  expect(dialog).toHaveTextContent("Exactly four switches");
+  const launch = screen.getByRole("switch", { name: "Launch at login" });
+  expect(launch).not.toBeChecked();
+  expect(screen.getByRole("switch", { name: "Show in Dock" })).toBeChecked();
+  expect(
+    screen.getByRole("switch", { name: "Check for app updates" }),
+  ).toBeChecked();
+  expect(
+    screen.getByRole("switch", { name: "Check for Skill updates" }),
+  ).toBeChecked();
+  expect(dialog.querySelectorAll('input[type="checkbox"]')).toHaveLength(4);
+
+  await user.click(launch);
+  expect(launch).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Done" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("Preferences warning from the backend is shown inline", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.updatePreferences = async (updates) => ({
+    preferences: {
+      launchAtLogin: updates.launchAtLogin ?? false,
+      showInDock: true,
+      checkAppUpdates: true,
+      checkSkillUpdates: true,
+    },
+    warning: "登录时启动设置失败：login item unavailable in dev build",
+  });
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await screen.findByRole("dialog", { name: "Preferences" });
+  await user.click(screen.getByRole("switch", { name: "Launch at login" }));
+
+  expect(await screen.findByText(/login item unavailable/)).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Launch at login" })).toBeChecked();
+});
+
+test("onboarding creates a missing Agent directory with explicit confirmation", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.startupInfo = async () => ({
+    firstRun: true,
+    agents: [
+      {
+        id: "custom-workbench",
+        name: "Custom Workbench",
+        kind: "custom",
+        skillsPath: "~/.custom-tools/skills",
+        detected: false,
+      },
+    ],
+  });
+  client.createAgentDirectory = async () => ({
+    firstRun: true,
+    agents: [
+      {
+        id: "custom-workbench",
+        name: "Custom Workbench",
+        kind: "custom",
+        skillsPath: "~/.custom-tools/skills",
+        detected: true,
+      },
+    ],
+  });
+  render(<App client={client} />);
+
+  await screen.findByRole("dialog", { name: "Welcome to Skill Man" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+
+  expect(await screen.findByText("Not detected")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Create directory" }));
+
+  expect(await screen.findByText("Detected")).toBeInTheDocument();
+  await waitFor(() => {
+    expect(
+      screen.queryByRole("button", { name: "Create directory" }),
+    ).not.toBeInTheDocument();
+  });
+});

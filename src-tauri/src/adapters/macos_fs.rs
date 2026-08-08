@@ -1057,6 +1057,25 @@ impl FileSystem for MacOsFileSystem {
         })
     }
 
+    fn create_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "create Agent skills directory",
+                path: path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the Agent skills directory already exists",
+                ),
+            });
+        }
+        fs::create_dir_all(&path).map_err(|source| FileSystemError::Io {
+            operation: "create Agent skills directory",
+            path,
+            source,
+        })
+    }
+
     fn remove_activation(&self, entry_path: &Path) -> Result<(), FileSystemError> {
         fs::remove_file(entry_path).map_err(|source| FileSystemError::Io {
             operation: "remove Activation",

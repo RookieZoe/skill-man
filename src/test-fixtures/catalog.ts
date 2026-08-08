@@ -5,6 +5,7 @@ import type {
   ActivationReplacePreview,
   AgentActivation,
   AgentKind,
+  AppPreferences,
   CatalogClient,
   CatalogFilter,
   Compatibility,
@@ -54,6 +55,14 @@ const fixture = fixtureJson as FixtureFile;
 export function createFixtureCatalogClient(): CatalogClient {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
+  let firstRunCompleted = true;
+  const detectedOverrides = new Set<string>();
+  let preferences: AppPreferences = {
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: true,
+    checkSkillUpdates: true,
+  };
   const skills = fixture.skills.map((skill) => ({ ...skill }));
   const enabledSkillIds = new Map(
     fixture.agents.map((agent) => [agent.id, [...agent.enabledSkillIds]]),
@@ -271,6 +280,55 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async finalizeActivationReplace(operationId) {
       appliedReplaces.delete(operationId);
+    },
+    async loadPreferences() {
+      return { ...preferences };
+    },
+    async updatePreferences(updates) {
+      preferences = {
+        ...preferences,
+        ...(updates.launchAtLogin !== undefined
+          ? { launchAtLogin: updates.launchAtLogin }
+          : {}),
+        ...(updates.showInDock !== undefined
+          ? { showInDock: updates.showInDock }
+          : {}),
+        ...(updates.checkAppUpdates !== undefined
+          ? { checkAppUpdates: updates.checkAppUpdates }
+          : {}),
+        ...(updates.checkSkillUpdates !== undefined
+          ? { checkSkillUpdates: updates.checkSkillUpdates }
+          : {}),
+      };
+      return { preferences: { ...preferences }, warning: null };
+    },
+    async startupInfo() {
+      return {
+        firstRun: !firstRunCompleted,
+        agents: fixture.agents.map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          kind: agent.kind,
+          skillsPath: agent.skillsPath,
+          detected: agent.detected || detectedOverrides.has(agent.id),
+        })),
+      };
+    },
+    async completeOnboarding() {
+      firstRunCompleted = true;
+    },
+    async createAgentDirectory(agentId) {
+      detectedOverrides.add(agentId);
+      return {
+        firstRun: !firstRunCompleted,
+        agents: fixture.agents.map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          kind: agent.kind,
+          skillsPath: agent.skillsPath,
+          detected: agent.detected || detectedOverrides.has(agent.id),
+        })),
+      };
     },
     async runActivationHealthCheck() {
       return {

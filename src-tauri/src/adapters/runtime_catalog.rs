@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::adapters::fixture_catalog::FixtureCatalogStore;
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::domain::{
-    AgentActivation, CatalogFilter, SkillDetail, SkillId, SkillSummary, SourceKind,
+    AgentActivation, AgentId, CatalogFilter, SkillDetail, SkillId, SkillSummary, SourceKind,
     parse_skill_metadata,
 };
 use crate::seams::activation_store::{
@@ -111,6 +111,33 @@ impl CatalogStore for RuntimeCatalogStore {
             return self.fixture.list_agents(skill_id);
         }
         self.sqlite.list_agent_activations(skill_id)
+    }
+
+    fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {
+        if !self.is_writable() {
+            // A read-only catalog must not masquerade as a first run: the
+            // locked state is an error surfaced elsewhere, not onboarding.
+            return Err(CatalogStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.first_run_completed_at()
+    }
+
+    fn mark_first_run_completed(&self) -> Result<(), CatalogStoreError> {
+        if !self.is_writable() {
+            return Err(CatalogStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.mark_first_run_completed()
+    }
+
+    fn recently_enabled(&self, limit: u32) -> Result<Vec<SkillSummary>, CatalogStoreError> {
+        if !self.is_writable() {
+            return Ok(Vec::new());
+        }
+        self.sqlite.recently_enabled_skills(limit)
     }
 }
 
@@ -261,6 +288,15 @@ impl AdoptStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.list_agents()
+    }
+
+    fn mark_agent_detected(&self, agent_id: &AgentId) -> Result<(), AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.mark_agent_detected(agent_id)
     }
 
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
@@ -418,6 +454,41 @@ impl MaintenanceStore for RuntimeCatalogStore {
                     .collect()
             })
             .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
+    }
+}
+
+impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
+    fn load_preferences(
+        &self,
+    ) -> Result<
+        crate::seams::preferences_store::AppPreferences,
+        crate::seams::preferences_store::PreferencesStoreError,
+    > {
+        if !self.is_writable() {
+            return Err(
+                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                    "catalog startup is read-only".into(),
+                ),
+            );
+        }
+        self.sqlite.load_preferences()
+    }
+
+    fn update_preferences(
+        &self,
+        updates: crate::seams::preferences_store::PreferenceUpdates,
+    ) -> Result<
+        crate::seams::preferences_store::AppPreferences,
+        crate::seams::preferences_store::PreferencesStoreError,
+    > {
+        if !self.is_writable() {
+            return Err(
+                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                    "catalog startup is read-only".into(),
+                ),
+            );
+        }
+        self.sqlite.update_preferences(updates)
     }
 }
 

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { listen } from "@tauri-apps/api/event";
+
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import type {
   ActivationConflictDetails,
@@ -12,6 +14,7 @@ import type {
   AdoptScanReport,
   AdoptUndoResult,
   AgentActivation,
+  AppPreferences,
   CatalogClient,
   CatalogFilter,
   GitImportDiscovery,
@@ -19,8 +22,10 @@ import type {
   GitImportSelectionResult,
   LinkImportPreview,
   LinkImportResult,
+  PreferenceUpdates,
   SkillDetail,
   SkillSummary,
+  StartupAgent,
   UpdateCheckReport,
   UpdatePlan,
   UpdateResult,
@@ -51,6 +56,21 @@ export function App({ client }: AppProps) {
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [activationError, setActivationError] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<AppPreferences | null>(null);
+  const [preferencesWarning, setPreferencesWarning] = useState<string | null>(
+    null,
+  );
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
+  const [startupAgents, setStartupAgents] = useState<StartupAgent[]>([]);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [onboardingReport, setOnboardingReport] =
+    useState<AdoptScanReport | null>(null);
+  const [onboardingActivity, setOnboardingActivity] = useState<
+    "idle" | "scanning"
+  >("idle");
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [activationConflict, setActivationConflict] =
     useState<ActivationConflictDetails | null>(null);
   const [activationConflictMessage, setActivationConflictMessage] = useState<
@@ -138,9 +158,57 @@ export function App({ client }: AppProps) {
   }, [client]);
 
   useEffect(() => {
-    // Spec §10.1: background Skill update check at startup, at most once per
-    // 24h (the cooldown lives in the backend). Failing silently is fine; the
-    // per-Skill "Check for updates" button always forces a fresh check.
+    let current = true;
+    client
+      .startupInfo()
+      .then((info) => {
+        if (!current) return;
+        setStartupAgents(info.agents);
+        if (info.firstRun) {
+          // Spec §8.7: the three-step onboarding runs on the first launch;
+          // skipping still records completion so later launches light-scan.
+          setIsOnboardingOpen(true);
+          setOnboardingStep(0);
+        }
+      })
+      .catch(() => {
+        // Read-only locked state surfaces elsewhere; onboarding stays closed.
+      });
+    client
+      .loadPreferences()
+      .then((loaded) => {
+        if (current) setPreferences(loaded);
+      })
+      .catch(() => {
+        // Preferences stay null; the sheet shows an inline error on open.
+      });
+    return () => {
+      current = false;
+    };
+  }, [client]);
+
+  // Tray quick view: clicking a recently enabled Skill opens its detail
+  // (spec §9.4). Native-only; the preview fixture has no event bus.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ skillId: string }>("tray-open-skill", (event) => {
+      setFilter("all");
+      setSelectedId(event.payload.skillId);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    // Spec §10.1 + §10.2: the background Skill update check runs at startup
+    // only when the preference is on (the cooldown lives in the backend).
+    // Failing silently is fine; the per-Skill button always forces a check.
+    if (preferences === null) return;
+    if (!preferences.checkSkillUpdates) return;
     let current = true;
     client
       .checkSkillUpdates(false)
@@ -153,7 +221,7 @@ export function App({ client }: AppProps) {
     return () => {
       current = false;
     };
-  }, [client]);
+  }, [client, preferences]);
 
   useEffect(() => {
     let current = true;
@@ -880,6 +948,91 @@ export function App({ client }: AppProps) {
     }
   }
 
+  // -- Preferences (spec §10.2, strictly four) --
+
+  async function togglePreference(updates: PreferenceUpdates) {
+    setPreferencesError(null);
+    setPreferencesWarning(null);
+    try {
+      const result = await client.updatePreferences(updates);
+      setPreferences(result.preferences);
+      setPreferencesWarning(result.warning);
+    } catch (reason) {
+      setPreferencesError(readError(reason));
+    }
+  }
+
+  // -- First-run onboarding (spec §8.7, three skippable steps) --
+
+  async function completeOnboarding() {
+    setOnboardingError(null);
+    try {
+      await client.completeOnboarding();
+      setIsOnboardingOpen(false);
+      setOnboardingStep(0);
+      setOnboardingReport(null);
+    } catch (reason) {
+      setOnboardingError(readError(reason));
+    }
+  }
+
+  async function advanceOnboarding() {
+    if (onboardingStep === 1) {
+      // Step 3: the first-run full scan is read-only and never adopts.
+      setOnboardingActivity("scanning");
+      setOnboardingError(null);
+      try {
+        const report = await client.scanAdopt();
+        setOnboardingReport(report);
+        setOnboardingStep(2);
+      } catch (reason) {
+        setOnboardingError(readError(reason));
+      } finally {
+        setOnboardingActivity("idle");
+      }
+      return;
+    }
+    setOnboardingStep((step) => Math.min(step + 1, 2));
+  }
+
+  async function createOnboardingAgentDirectory(agentId: string) {
+    setOnboardingError(null);
+    try {
+      const info = await client.createAgentDirectory(agentId);
+      setStartupAgents(info.agents);
+    } catch (reason) {
+      setOnboardingError(readError(reason));
+    }
+  }
+
+  async function finishOnboardingWithAdopt() {
+    if (!onboardingReport) return;
+    const report = onboardingReport;
+    setOnboardingError(null);
+    try {
+      await client.completeOnboarding();
+    } catch (reason) {
+      setOnboardingError(readError(reason));
+      return;
+    }
+    setIsOnboardingOpen(false);
+    setOnboardingStep(0);
+    // Guide into Adopt with the scan results already loaded (spec §8.7).
+    setAdoptReport(report);
+    setAdoptSelected(
+      report.candidates
+        .filter((candidate) => candidate.adoptable && candidate.risk === "none")
+        .map((candidate) => candidate.canonicalEntity),
+    );
+    setAdoptPlan(null);
+    setAdoptResult(null);
+    setAdoptUndo(null);
+    setAdoptError(null);
+    setAdoptActivity("idle");
+    setIsAdoptOpen(true);
+    setOnboardingReport(null);
+  }
+
   return (
     <LibraryDesk
       filter={filter}
@@ -963,6 +1116,23 @@ export function App({ client }: AppProps) {
       onApplyAdopt={applyAdopt}
       onUndoAdopt={undoAdopt}
       onCloseAdopt={closeAdopt}
+      isPreferencesOpen={isPreferencesOpen}
+      preferences={preferences}
+      preferencesWarning={preferencesWarning}
+      preferencesError={preferencesError}
+      isOnboardingOpen={isOnboardingOpen}
+      onboardingStep={onboardingStep}
+      onboardingAgents={startupAgents}
+      onboardingReport={onboardingReport}
+      onboardingActivity={onboardingActivity}
+      onboardingError={onboardingError}
+      onOpenPreferences={() => setIsPreferencesOpen(true)}
+      onClosePreferences={() => setIsPreferencesOpen(false)}
+      onTogglePreference={togglePreference}
+      onCompleteOnboarding={completeOnboarding}
+      onAdvanceOnboarding={advanceOnboarding}
+      onCreateAgentDirectory={createOnboardingAgentDirectory}
+      onFinishOnboardingWithAdopt={finishOnboardingWithAdopt}
     />
   );
 }

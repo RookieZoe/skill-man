@@ -16,10 +16,12 @@ use crate::core::import::{
     LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
 };
 use crate::core::maintenance::ActivationHealthReport;
+use crate::core::startup::{StartupAgent, StartupInfo};
 use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
     UpdatePlanItem, UpdateResult,
 };
+use crate::seams::preferences_store::{AppPreferences, PreferenceUpdates};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1439,4 +1441,103 @@ pub struct FinalizeAdoptRequestDto {
 #[serde(rename_all = "camelCase")]
 pub struct CancelAdoptRequestDto {
     pub plan_token: String,
+}
+
+// -- Preferences & startup --
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreferencesDto {
+    pub launch_at_login: bool,
+    pub show_in_dock: bool,
+    pub check_app_updates: bool,
+    pub check_skill_updates: bool,
+}
+
+impl From<AppPreferences> for AppPreferencesDto {
+    fn from(value: AppPreferences) -> Self {
+        Self {
+            launch_at_login: value.launch_at_login,
+            show_in_dock: value.show_in_dock,
+            check_app_updates: value.check_app_updates,
+            check_skill_updates: value.check_skill_updates,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferenceUpdatesDto {
+    pub launch_at_login: Option<bool>,
+    pub show_in_dock: Option<bool>,
+    pub check_app_updates: Option<bool>,
+    pub check_skill_updates: Option<bool>,
+}
+
+impl From<PreferenceUpdatesDto> for PreferenceUpdates {
+    fn from(value: PreferenceUpdatesDto) -> Self {
+        Self {
+            launch_at_login: value.launch_at_login,
+            show_in_dock: value.show_in_dock,
+            check_app_updates: value.check_app_updates,
+            check_skill_updates: value.check_skill_updates,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePreferencesResultDto {
+    pub preferences: AppPreferencesDto,
+    /// Runtime side-effect warning (e.g. login item unavailable in a
+    /// non-bundled development build); the persisted value is authoritative.
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupAgentDto {
+    pub id: String,
+    pub name: String,
+    pub kind: AgentKindDto,
+    pub skills_path: String,
+    pub detected: bool,
+}
+
+impl From<StartupAgent> for StartupAgentDto {
+    fn from(value: StartupAgent) -> Self {
+        Self {
+            id: value.agent_id.0,
+            name: value.name,
+            kind: value.kind.into(),
+            skills_path: value.skills_path.to_string_lossy().into_owned(),
+            detected: value.detected,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgentDirectoryRequestDto {
+    pub agent_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupInfoDto {
+    pub first_run: bool,
+    pub agents: Vec<StartupAgentDto>,
+}
+
+impl From<StartupInfo> for StartupInfoDto {
+    fn from(value: StartupInfo) -> Self {
+        Self {
+            first_run: value.first_run,
+            agents: value
+                .agents
+                .into_iter()
+                .map(StartupAgentDto::from)
+                .collect(),
+        }
+    }
 }

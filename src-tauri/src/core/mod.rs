@@ -5,4 +5,6 @@ pub mod domain;
 pub mod git_source;
 pub mod import;
 pub mod maintenance;
+pub mod preferences;
+pub mod startup;
 pub mod update;

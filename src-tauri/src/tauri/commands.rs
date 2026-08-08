@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::adopt_api::AdoptApi;
@@ -7,12 +7,13 @@ use crate::tauri_adapter::dto::{
     ActivationConflictDetailsDto, ActivationConflictRequestDto, ActivationHealthReportDto,
     ActivationPreviewDto, ActivationReplacePreviewDto, ActivationReplaceUndoResultDto,
     ActivationResultDto, AdoptPlanDto, AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto,
-    AgentActivationDto, ApplyActivationReplaceRequestDto, ApplyActivationRequestDto,
-    ApplyAdoptRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto,
-    CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
-    CancelFileImportRequestDto, CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto,
-    CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
+    AgentActivationDto, AppPreferencesDto, ApplyActivationReplaceRequestDto,
+    ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
+    ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
+    ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto, CancelActivationReplaceRequestDto,
+    CancelActivationRequestDto, CancelAdoptRequestDto, CancelFileImportRequestDto,
+    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CatalogListDto,
+    CheckSkillUpdatesRequestDto, CommandErrorDto, CreateAgentDirectoryRequestDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
     FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
@@ -23,12 +24,15 @@ use crate::tauri_adapter::dto::{
     PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
-    PlanSkillUpdatesRequestDto, SkillDetailDto, UndoActivationReplaceRequestDto,
-    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdateResultDto,
+    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, SkillDetailDto, StartupInfoDto,
+    UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto,
+    UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
+use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
+use crate::tauri_adapter::{lifecycle, tray};
 
 #[tauri::command]
 pub fn plan_activation(
@@ -48,17 +52,23 @@ pub fn plan_activation_repair(
 
 #[tauri::command]
 pub async fn run_activation_health_check(
+    app: AppHandle,
     state: State<'_, HealthApi>,
 ) -> Result<ActivationHealthReportDto, CommandErrorDto> {
-    state.run_activation_health_check()
+    let result = state.run_activation_health_check()?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn apply_activation(
+    app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationRequestDto,
 ) -> Result<ActivationResultDto, CommandErrorDto> {
-    state.apply_activation(request)
+    let result = state.apply_activation(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[::tauri::command]
@@ -86,10 +96,13 @@ pub fn plan_activation_replace(
 
 #[tauri::command]
 pub fn apply_activation_replace(
+    app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationReplaceRequestDto,
 ) -> Result<ActivationResultDto, CommandErrorDto> {
-    state.apply_activation_replace(request)
+    let result = state.apply_activation_replace(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -102,10 +115,13 @@ pub fn cancel_activation_replace(
 
 #[tauri::command]
 pub fn undo_activation_replace(
+    app: AppHandle,
     state: State<'_, ActivationApi>,
     request: UndoActivationReplaceRequestDto,
 ) -> Result<ActivationReplaceUndoResultDto, CommandErrorDto> {
-    state.undo_activation_replace(request)
+    let result = state.undo_activation_replace(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -315,18 +331,24 @@ pub fn plan_adopt(
 
 #[tauri::command]
 pub fn apply_adopt(
+    app: AppHandle,
     state: State<'_, AdoptApi>,
     request: ApplyAdoptRequestDto,
 ) -> Result<AdoptResultDto, CommandErrorDto> {
-    state.apply_adopt(request)
+    let result = state.apply_adopt(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn undo_adopt(
+    app: AppHandle,
     state: State<'_, AdoptApi>,
     request: UndoAdoptRequestDto,
 ) -> Result<AdoptUndoResultDto, CommandErrorDto> {
-    state.undo_adopt(request)
+    let result = state.undo_adopt(request)?;
+    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -343,4 +365,57 @@ pub fn cancel_adopt(
     request: CancelAdoptRequestDto,
 ) -> Result<bool, CommandErrorDto> {
     state.cancel_adopt(request)
+}
+
+// -- Preferences & startup --
+
+#[tauri::command]
+pub fn load_preferences(
+    state: State<'_, StartupApi>,
+) -> Result<AppPreferencesDto, CommandErrorDto> {
+    state.load_preferences()
+}
+
+#[tauri::command]
+pub fn update_preferences(
+    app: AppHandle,
+    state: State<'_, StartupApi>,
+    request: PreferenceUpdatesDto,
+) -> Result<UpdatePreferencesResultDto, CommandErrorDto> {
+    let result = state.update_preferences(request.clone())?;
+    // Runtime side effects for the two preferences that touch the OS;
+    // failures surface as a warning, the persisted value stays authoritative.
+    let mut warning = None;
+    if let Some(show_in_dock) = request.show_in_dock {
+        if let Err(error) = lifecycle::apply_show_in_dock(&app, show_in_dock) {
+            warning = Some(format!("Dock 模式切换失败：{error}"));
+        }
+    }
+    if let Some(launch_at_login) = request.launch_at_login {
+        if let Err(error) = lifecycle::apply_launch_at_login(&app, launch_at_login) {
+            warning = Some(format!("登录时启动设置失败：{error}"));
+        }
+    }
+    Ok(UpdatePreferencesResultDto {
+        preferences: result.preferences,
+        warning: warning.or(result.warning),
+    })
+}
+
+#[tauri::command]
+pub fn startup_info(state: State<'_, StartupApi>) -> Result<StartupInfoDto, CommandErrorDto> {
+    state.startup_info()
+}
+
+#[tauri::command]
+pub fn complete_onboarding(state: State<'_, StartupApi>) -> Result<(), CommandErrorDto> {
+    state.complete_onboarding()
+}
+
+#[tauri::command]
+pub fn create_agent_directory(
+    state: State<'_, StartupApi>,
+    request: CreateAgentDirectoryRequestDto,
+) -> Result<StartupInfoDto, CommandErrorDto> {
+    state.create_agent_directory(request)
 }

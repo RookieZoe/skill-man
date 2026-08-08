@@ -94,6 +94,38 @@ export interface ActivationReplaceUndoResult {
   snapshotVersion: number;
 }
 
+export interface AppPreferences {
+  launchAtLogin: boolean;
+  showInDock: boolean;
+  checkAppUpdates: boolean;
+  checkSkillUpdates: boolean;
+}
+
+export interface PreferenceUpdates {
+  launchAtLogin?: boolean;
+  showInDock?: boolean;
+  checkAppUpdates?: boolean;
+  checkSkillUpdates?: boolean;
+}
+
+export interface UpdatePreferencesResult {
+  preferences: AppPreferences;
+  warning: string | null;
+}
+
+export interface StartupAgent {
+  id: string;
+  name: string;
+  kind: AgentKind;
+  skillsPath: string;
+  detected: boolean;
+}
+
+export interface StartupInfo {
+  firstRun: boolean;
+  agents: StartupAgent[];
+}
+
 export interface ActivationHealthReport {
   checked: number;
   snapshotVersion: number;
@@ -358,6 +390,13 @@ export interface CatalogClient {
     operationId: string,
   ): Promise<ActivationReplaceUndoResult>;
   finalizeActivationReplace(operationId: string): Promise<void>;
+  loadPreferences(): Promise<AppPreferences>;
+  updatePreferences(
+    updates: PreferenceUpdates,
+  ): Promise<UpdatePreferencesResult>;
+  startupInfo(): Promise<StartupInfo>;
+  completeOnboarding(): Promise<void>;
+  createAgentDirectory(agentId: string): Promise<StartupInfo>;
   runActivationHealthCheck(): Promise<ActivationHealthReport>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
@@ -441,6 +480,25 @@ const tauriCatalogClient: CatalogClient = {
   finalizeActivationReplace(operationId) {
     return invoke<void>("finalize_activation_replace", {
       request: { operationId },
+    });
+  },
+  loadPreferences() {
+    return invoke<AppPreferences>("load_preferences");
+  },
+  updatePreferences(updates) {
+    return invoke<UpdatePreferencesResult>("update_preferences", {
+      request: updates,
+    });
+  },
+  startupInfo() {
+    return invoke<StartupInfo>("startup_info");
+  },
+  completeOnboarding() {
+    return invoke<void>("complete_onboarding");
+  },
+  createAgentDirectory(agentId) {
+    return invoke<StartupInfo>("create_agent_directory", {
+      request: { agentId },
     });
   },
   runActivationHealthCheck() {

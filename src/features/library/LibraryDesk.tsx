@@ -12,6 +12,7 @@ import type {
   AdoptScanReport,
   AdoptUndoResult,
   AgentActivation,
+  AppPreferences,
   CatalogFilter,
   GitImportDiscovery,
   GitImportSelectionPreview,
@@ -21,9 +22,11 @@ import type {
   LinkImportResult,
   OccupierKind,
   OccupierSummary,
+  PreferenceUpdates,
   SkillDetail,
   SkillSummary,
   SourceKind,
+  StartupAgent,
 } from "../../app/catalog-client";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
 
@@ -115,6 +118,23 @@ interface LibraryDeskProps {
   onApplyAdopt: () => void;
   onUndoAdopt: () => void;
   onCloseAdopt: () => void;
+  isPreferencesOpen: boolean;
+  preferences: AppPreferences | null;
+  preferencesWarning: string | null;
+  preferencesError: string | null;
+  isOnboardingOpen: boolean;
+  onboardingStep: number;
+  onboardingAgents: StartupAgent[];
+  onboardingReport: AdoptScanReport | null;
+  onboardingActivity: "idle" | "scanning";
+  onboardingError: string | null;
+  onOpenPreferences: () => void;
+  onClosePreferences: () => void;
+  onTogglePreference: (updates: PreferenceUpdates) => void;
+  onCompleteOnboarding: () => void;
+  onAdvanceOnboarding: () => void;
+  onCreateAgentDirectory: (agentId: string) => void;
+  onFinishOnboardingWithAdopt: () => void;
 }
 
 export function LibraryDesk({
@@ -197,6 +217,23 @@ export function LibraryDesk({
   onApplyAdopt,
   onUndoAdopt,
   onCloseAdopt,
+  isPreferencesOpen,
+  preferences,
+  preferencesWarning,
+  preferencesError,
+  isOnboardingOpen,
+  onboardingStep,
+  onboardingAgents,
+  onboardingReport,
+  onboardingActivity,
+  onboardingError,
+  onOpenPreferences,
+  onClosePreferences,
+  onTogglePreference,
+  onCompleteOnboarding,
+  onAdvanceOnboarding,
+  onCreateAgentDirectory,
+  onFinishOnboardingWithAdopt,
 }: LibraryDeskProps) {
   const lastOverlay = useRef<"activation" | "import" | "adopt" | null>(null);
   const hasActivationOverlay = Boolean(activationPreview || activationConflict);
@@ -229,7 +266,11 @@ export function LibraryDesk({
         <a className="skip-link" href="#skill-detail">
           Skip to Skill detail
         </a>
-        <Toolbar onImport={onOpenLinkImport} onAdopt={onOpenAdopt} />
+        <Toolbar
+          onImport={onOpenLinkImport}
+          onAdopt={onOpenAdopt}
+          onOpenPreferences={onOpenPreferences}
+        />
         {error ? (
           <div className="global-notice" role="alert">
             <strong>Library unavailable</strong>
@@ -336,6 +377,28 @@ export function LibraryDesk({
           onOpenImportedGitSkill={onOpenImportedGitSkill}
         />
       ) : null}
+      {isOnboardingOpen ? (
+        <OnboardingSheet
+          step={onboardingStep}
+          agents={onboardingAgents}
+          report={onboardingReport}
+          activity={onboardingActivity}
+          error={onboardingError}
+          onSkip={onCompleteOnboarding}
+          onAdvance={onAdvanceOnboarding}
+          onCreateDirectory={onCreateAgentDirectory}
+          onFinishWithAdopt={onFinishOnboardingWithAdopt}
+        />
+      ) : null}
+      {isPreferencesOpen ? (
+        <PreferencesSheet
+          preferences={preferences}
+          warning={preferencesWarning}
+          error={preferencesError}
+          onToggle={onTogglePreference}
+          onClose={onClosePreferences}
+        />
+      ) : null}
     </div>
   );
 }
@@ -343,9 +406,11 @@ export function LibraryDesk({
 function Toolbar({
   onImport,
   onAdopt,
+  onOpenPreferences,
 }: {
   onImport: () => void;
   onAdopt: () => void;
+  onOpenPreferences: () => void;
 }) {
   return (
     <header className="toolbar">
@@ -377,7 +442,7 @@ function Toolbar({
           type="button"
           className="icon-button"
           aria-label="Preferences"
-          disabled
+          onClick={onOpenPreferences}
         >
           <SettingsIcon />
         </button>
@@ -2119,6 +2184,338 @@ function occupierKindLabel(kind: OccupierKind) {
   if (kind === "real_directory") return "real directory";
   if (kind === "symlink") return "symlink";
   return "file";
+}
+
+// -- First-run onboarding (spec §8.7) ---------------------------------------
+
+const onboardingSteps = [
+  {
+    title: "Create the Library",
+    body: "Skill Man keeps every Managed Skill in a fixed app-owned location. It never reuses Agent convention directories.",
+    note: "~/Library/Application Support/skill-man",
+  },
+  {
+    title: "Check Agent Presets",
+    body: "Claude Code and Codex presets always show. Missing directories are only marked; they are never created without your explicit confirmation.",
+  },
+  {
+    title: "Scan existing Skills",
+    body: "A read-only full scan of Agent and shared directories. Nothing is Adopted, moved or overwritten by the scan.",
+  },
+];
+
+function OnboardingSheet({
+  step,
+  agents,
+  report,
+  activity,
+  error,
+  onSkip,
+  onAdvance,
+  onCreateDirectory,
+  onFinishWithAdopt,
+}: {
+  step: number;
+  agents: StartupAgent[];
+  report: AdoptScanReport | null;
+  activity: "idle" | "scanning";
+  error: string | null;
+  onSkip: () => void;
+  onAdvance: () => void;
+  onCreateDirectory: (agentId: string) => void;
+  onFinishWithAdopt: () => void;
+}) {
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const advanceButton = useRef<HTMLButtonElement>(null);
+  const isScanning = activity === "scanning";
+  const candidates = report?.candidates ?? [];
+
+  useLayoutEffect(() => {
+    if (step === 2 && !isScanning) advanceButton.current?.focus();
+    else closeButton.current?.focus();
+  }, [step, isScanning]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isScanning) onSkip();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isScanning, onSkip]);
+
+  const current = onboardingSteps[step];
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isScanning) onSkip();
+      }}
+    >
+      <section
+        className="activation-sheet onboarding-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Welcome to Skill Man"
+      >
+        <div className="onboarding-progress" aria-label="First-run progress">
+          {onboardingSteps.map((item, index) => (
+            <span
+              key={item.title}
+              className={index <= step ? "onboarding-progress-dot--active" : ""}
+            >
+              {index + 1}
+            </span>
+          ))}
+        </div>
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">First run · {step + 1} of 3</span>
+          <h2>{current.title}</h2>
+          <p>{current.body}</p>
+        </div>
+        {step === 0 && current.note ? (
+          <dl className="activation-paths">
+            <div>
+              <dt>Library</dt>
+              <dd>{current.note}</dd>
+            </div>
+          </dl>
+        ) : null}
+        {step === 1 ? (
+          <ul className="onboarding-agent-list">
+            {agents.map((agent) => (
+              <li key={agent.id}>
+                <span className="agent-monogram" aria-hidden="true">
+                  {agent.name.slice(0, 1)}
+                </span>
+                <span className="agent-copy">
+                  <strong>{agent.name}</strong>
+                  <small>{agent.skillsPath}</small>
+                </span>
+                {agent.detected ? (
+                  <span className="candidate-clear">Detected</span>
+                ) : (
+                  <>
+                    <span className="candidate-conflict">Not detected</span>
+                    <button
+                      type="button"
+                      disabled={isScanning}
+                      onClick={() => onCreateDirectory(agent.id)}
+                    >
+                      Create directory
+                    </button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {step === 2 ? (
+          <div className="onboarding-scan">
+            {isScanning ? (
+              <p role="status">Scanning Agent and shared directories…</p>
+            ) : report ? (
+              <>
+                <p role="status">
+                  {candidates.length} Untracked Skill
+                  {candidates.length === 1 ? "" : "s"} found. Nothing changed
+                  yet.
+                </p>
+                <ul className="git-import-candidates">
+                  {candidates.map((candidate) => (
+                    <li key={candidate.canonicalEntity}>
+                      <span>
+                        <strong>{candidate.directoryName}</strong>
+                        <span className="candidate-path">
+                          {candidate.risk === "broken"
+                            ? "Broken · target missing"
+                            : candidate.risk === "external"
+                              ? "External · " +
+                                (candidate.riskReason ?? "outside home")
+                              : candidate.conflict
+                                ? `Conflict with "${candidate.conflict.directoryName}"`
+                                : `${candidate.appearances.length} appearance${
+                                    candidate.appearances.length === 1
+                                      ? ""
+                                      : "s"
+                                  }`}
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {candidates.length === 0 ? (
+                  <p role="status">
+                    No untracked Skills found — nothing to adopt.
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>Onboarding unchanged</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
+        <div className="activation-sheet-actions">
+          <button
+            ref={closeButton}
+            type="button"
+            disabled={isScanning}
+            onClick={onSkip}
+          >
+            Skip setup
+          </button>
+          {step < 2 ? (
+            <button
+              ref={advanceButton}
+              type="button"
+              className="activation-confirm-button"
+              disabled={isScanning}
+              onClick={onAdvance}
+            >
+              {isScanning ? "Scanning" : "Continue"}
+            </button>
+          ) : (
+            <>
+              <button
+                ref={advanceButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={!report || isScanning}
+                onClick={onFinishWithAdopt}
+              >
+                Review Adopt candidates
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// -- Preferences (spec §10.2, strictly four) --------------------------------
+
+const preferenceRows: Array<{
+  key: keyof AppPreferences;
+  title: string;
+  note: string;
+}> = [
+  {
+    key: "launchAtLogin",
+    title: "Launch at login",
+    note: "Starts in the background without opening the main window.",
+  },
+  {
+    key: "showInDock",
+    title: "Show in Dock",
+    note: "Turn off to run as a menu-bar accessory app.",
+  },
+  {
+    key: "checkAppUpdates",
+    title: "Check for app updates",
+    note: "At most once per day; installation always asks first.",
+  },
+  {
+    key: "checkSkillUpdates",
+    title: "Check for Skill updates",
+    note: "Tracked Git installs only; updates are never applied automatically.",
+  },
+];
+
+function PreferencesSheet({
+  preferences,
+  warning,
+  error,
+  onToggle,
+  onClose,
+}: {
+  preferences: AppPreferences | null;
+  warning: string | null;
+  error: string | null;
+  onToggle: (updates: PreferenceUpdates) => void;
+  onClose: () => void;
+}) {
+  const closeButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    closeButton.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet preferences-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Preferences"
+      >
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Preferences</span>
+          <h2>Settings</h2>
+          <p>
+            Exactly four switches. Library path, theme, language and
+            notifications are not configurable in the MVP.
+          </p>
+        </div>
+        <div className="preference-list">
+          {preferenceRows.map((row) => (
+            <label className="preference-row" key={row.key}>
+              <span>
+                <strong>{row.title}</strong>
+                <small>{row.note}</small>
+              </span>
+              <span className="switch-control switch-control--interactive">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-label={row.title}
+                  checked={preferences?.[row.key] ?? false}
+                  disabled={preferences === null}
+                  onChange={(event) =>
+                    onToggle({ [row.key]: event.currentTarget.checked })
+                  }
+                />
+                <span aria-hidden="true" />
+              </span>
+            </label>
+          ))}
+        </div>
+        {warning ? (
+          <div className="activation-warning" role="status">
+            <strong>Applied with a warning</strong>
+            <span>{warning}</span>
+          </div>
+        ) : null}
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>Preferences unchanged</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
+        <div className="activation-sheet-actions">
+          <button ref={closeButton} type="button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function HealthNotice({ detail }: { detail: SkillDetail }) {

@@ -6,5 +6,6 @@ pub mod clock;
 pub mod filesystem;
 pub mod import_store;
 pub mod maintenance_store;
+pub mod preferences_store;
 pub mod recovery;
 pub mod source;

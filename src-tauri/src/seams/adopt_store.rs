@@ -56,6 +56,13 @@ pub enum AdoptStoreError {
 pub trait AdoptStore: Send + Sync {
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError>;
 
+    /// Record that an Agent's skills directory now exists after an explicit
+    /// user-confirmed creation (spec §8.7). Default: no-op for stores that do
+    /// not persist Agent detection.
+    fn mark_agent_detected(&self, _agent_id: &AgentId) -> Result<(), AdoptStoreError> {
+        Ok(())
+    }
+
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError>;
 
     fn remove_adopted_skill(&self, skill_id: &SkillId) -> Result<u64, AdoptStoreError>;

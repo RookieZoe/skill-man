@@ -603,6 +603,20 @@ pub trait FileSystem: Send + Sync {
     fn scan_skills_directory(&self, path: &Path)
     -> Result<Vec<ScannedSkillEntry>, FileSystemError>;
 
+    /// Create an Agent skills directory at a configured path (explicit
+    /// user-confirmed onboarding action, spec §8.7); the path must not exist.
+    fn create_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "create Agent skills directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory creation is not supported by this filesystem",
+            ),
+        })
+    }
+
     /// Move a real (non-symlink) directory from an external scan source into
     /// the staging root: same-volume rename, cross-volume copy with per-file
     /// verification then delete. Returns the staged fingerprint.
