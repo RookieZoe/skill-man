@@ -14,8 +14,8 @@ use skill_man_lib::seams::activation_store::{
 };
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError,
-    SkillHealthObservation,
+    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
+    MaintenanceStoreError, RelocateActivationBaseline, SkillHealthObservation,
 };
 
 #[test]
@@ -215,5 +215,26 @@ impl MaintenanceStore for HealthStore {
 
     fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
         Ok(Vec::new())
+    }
+
+    fn link_skill(
+        &self,
+        _skill_id: &SkillId,
+    ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError> {
+        Ok(None)
+    }
+
+    fn commit_relocate(
+        &self,
+        _skill_id: &SkillId,
+        _final_entity_path: PathBuf,
+        _display_name: String,
+        _description: String,
+        _new_target_path: PathBuf,
+        _activations: &[RelocateActivationBaseline],
+    ) -> Result<u64, MaintenanceStoreError> {
+        Err(MaintenanceStoreError::Unavailable(
+            "relocation is not supported by this test store".into(),
+        ))
     }
 }

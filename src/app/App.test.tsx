@@ -990,3 +990,124 @@ test("onboarding creates a missing Agent directory with explicit confirmation", 
     ).not.toBeInTheDocument();
   });
 });
+
+test("Broken Link detail offers Relocate and restores health after preview confirm", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+
+  await user.click(screen.getByRole("button", { name: "Broken" }));
+  await screen.findByRole("heading", { name: "legacy-audit" });
+  expect(screen.getByText("Source unavailable")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Relocate…" }));
+  expect(
+    screen.getByRole("dialog", { name: "Relocate Broken Link" }),
+  ).toBeInTheDocument();
+
+  await user.type(
+    screen.getByLabelText("New source path"),
+    "~/Projects/moved/legacy-audit",
+  );
+  await user.click(screen.getByRole("button", { name: "Preview Relocate" }));
+
+  expect(
+    await screen.findByRole("heading", { name: "Relocate legacy-audit" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getAllByText("~/Projects/moved/legacy-audit").length,
+  ).toBeGreaterThan(0);
+  expect(screen.getByText("Activations to update")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Relocate" }));
+  expect(
+    await screen.findByRole("heading", {
+      name: "legacy-audit is healthy again",
+    }),
+  ).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.getByText("Healthy")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Relocate…" }),
+  ).not.toBeInTheDocument();
+});
+
+test("Modified Install update offers only abandon-and-update or cancel", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.checkSkillUpdates = async () => ({
+    groups: [
+      {
+        repoUrl: "RookieZoe/media-xray",
+        items: [
+          {
+            skillId: "media-xray",
+            directoryName: "media-xray",
+            sourceUrl: "RookieZoe/media-xray",
+            requestedRef: "HEAD",
+            currentCommit: "1111111111",
+            resolvedCommit: "2222222222",
+            hasUpdate: true,
+            modified: true,
+            upstreamPathGone: false,
+            lastCheckedAt: null,
+          },
+        ],
+      },
+    ],
+    errors: [],
+  });
+  client.planSkillUpdates = async () => ({
+    items: [
+      {
+        skillId: "media-xray",
+        directoryName: "media-xray",
+        planToken: "fixture-update-plan-1",
+        currentCommit: "1111111111",
+        newCommit: "2222222222",
+        modified: true,
+        pathChanged: false,
+        error: null,
+      },
+    ],
+  });
+  let abandoned = false;
+  client.applySkillUpdates = async (requests, abandonChanges) => {
+    abandoned = abandonChanges;
+    return {
+      items: [
+        {
+          skillId: "media-xray",
+          directoryName: "media-xray",
+          updated: true,
+          error: null,
+        },
+      ],
+    };
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "media-xray" }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "Update available",
+  );
+  expect(
+    screen.queryByRole("button", { name: "Keep current version" }),
+  ).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Update" }));
+  expect(
+    await screen.findByRole("button", { name: "Abandon changes and update" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Keep current version" }),
+  ).not.toBeInTheDocument();
+
+  await user.click(
+    screen.getByRole("button", { name: "Abandon changes and update" }),
+  );
+  expect(await screen.findByText("Update applied.")).toBeInTheDocument();
+  expect(abandoned).toBe(true);
+});

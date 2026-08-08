@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::domain::{Health, SkillId};
+use crate::core::domain::{AgentId, Health, SkillId, SourceKind};
 use crate::seams::activation_store::ActivationStore;
 use crate::seams::filesystem::ActivationRecoveryBaseline;
 
@@ -11,6 +11,36 @@ pub struct InstalledSkillBaseline {
     pub skill_id: SkillId,
     pub final_entity_path: PathBuf,
     pub recorded_content_hash: String,
+}
+
+/// Every Managed Skill row used by the health check: Install entities are
+/// compared against their recorded content hash (Modified vs Broken),
+/// Link pointers are probed for readability (Broken).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedSkillBaseline {
+    pub skill_id: SkillId,
+    pub source_kind: SourceKind,
+    pub final_entity_path: PathBuf,
+    pub recorded_content_hash: Option<String>,
+}
+
+/// The persisted pointer of one Link Skill; the Relocate flow validates and
+/// replaces it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkSkillRecord {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub final_entity_path: PathBuf,
+}
+
+/// One desired Activation that must be rewritten when a Link is relocated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelocateActivationBaseline {
+    pub agent_id: AgentId,
+    pub expected_entry_path: PathBuf,
+    pub expected_target_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,6 +66,63 @@ pub trait MaintenanceStore: ActivationStore {
     fn installed_skill_baselines(
         &self,
     ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError>;
+
+    /// Every Managed Skill (Link and Install) with its persisted health
+    /// inputs; the health check recomputes Broken/Modified from the
+    /// filesystem, never trusting the persisted value alone.
+    fn managed_skill_baselines(&self) -> Result<Vec<ManagedSkillBaseline>, MaintenanceStoreError> {
+        self.installed_skill_baselines().map(|installed| {
+            installed
+                .into_iter()
+                .map(|baseline| ManagedSkillBaseline {
+                    skill_id: baseline.skill_id,
+                    source_kind: SourceKind::RemoteInstall,
+                    final_entity_path: baseline.final_entity_path,
+                    recorded_content_hash: Some(baseline.recorded_content_hash),
+                })
+                .collect()
+        })
+    }
+
+    /// The persisted Link pointer to relocate; `None` when the Skill is not
+    /// a Link or does not exist.
+    fn link_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError>;
+
+    /// Desired Activations of one Skill; the Relocate flow rewrites their
+    /// symlinks to the new final entity.
+    fn relocate_activations_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
+        self.desired_activation_baselines().map(|activations| {
+            activations
+                .into_iter()
+                .filter(|activation| activation.skill_id == skill_id.0)
+                .map(|activation| RelocateActivationBaseline {
+                    agent_id: AgentId(activation.agent_id),
+                    expected_entry_path: activation.expected_entry_path,
+                    expected_target_path: activation.expected_target_path,
+                })
+                .collect()
+        })
+    }
+
+    /// Commit a relocation in one transaction: move the Link pointer to the
+    /// new entity, refresh display metadata and health, and repoint every
+    /// desired Activation at the new target (observed Present, because the
+    /// symlinks were already rewritten). Returns the new snapshot version.
+    fn commit_relocate(
+        &self,
+        skill_id: &SkillId,
+        final_entity_path: PathBuf,
+        display_name: String,
+        description: String,
+        new_target_path: PathBuf,
+        activations: &[RelocateActivationBaseline],
+    ) -> Result<u64, MaintenanceStoreError>;
 
     fn record_skill_health(
         &self,

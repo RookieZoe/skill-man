@@ -80,6 +80,11 @@ export function createFixtureCatalogClient(): CatalogClient {
   );
   const plans = new Map<string, PlannedFixtureActivation>();
   const linkImportPlans = new Map<string, PlannedFixtureLinkImport>();
+  const relocatePlans = new Map<
+    string,
+    { skillId: string; finalEntityPath: string }
+  >();
+  let planCounter = 1;
   const replacePlans = new Map<string, PlannedFixtureReplace>();
   const appliedReplaces = new Map<string, PlannedFixtureReplace>();
 
@@ -338,6 +343,54 @@ export function createFixtureCatalogClient(): CatalogClient {
         ),
         snapshotVersion,
       };
+    },
+    async relocateLink(skillId, sourcePath) {
+      const skill = skills.find((item) => item.id === skillId);
+      if (!skill) throw new Error("Skill not found");
+      const directoryName = sourcePath.split("/").filter(Boolean).pop() ?? "";
+      if (directoryName !== skill.directoryName) {
+        throw new Error(
+          `the relocated directory '${directoryName}' must keep the identity '${skill.directoryName}'`,
+        );
+      }
+      const preview = {
+        planToken: `relocate-plan-${planCounter++}`,
+        skillId,
+        directoryName: skill.directoryName,
+        sourceEntryPath: sourcePath,
+        finalEntityPath: sourcePath,
+        displayName: skill.displayName,
+        description: skill.description,
+        frontmatterName: skill.frontmatterName ?? null,
+        activationCount: Array.from(enabledSkillIds.values()).filter((ids) =>
+          ids.includes(skillId),
+        ).length,
+      };
+      relocatePlans.set(preview.planToken, {
+        skillId,
+        finalEntityPath: preview.finalEntityPath,
+      });
+      return preview;
+    },
+    async applyRelocateLink(planToken) {
+      const plan = relocatePlans.get(planToken);
+      if (!plan) throw new Error("Relocate preview expired");
+      relocatePlans.delete(planToken);
+      const skill = skills.find((item) => item.id === plan.skillId);
+      if (!skill) throw new Error("Skill not found");
+      skill.finalEntityPath = plan.finalEntityPath;
+      skill.health = "healthy";
+      snapshotVersion += 1;
+      return {
+        skillId: plan.skillId,
+        directoryName: skill.directoryName,
+        finalEntityPath: plan.finalEntityPath,
+        activationCount: 0,
+        snapshotVersion,
+      };
+    },
+    async cancelRelocateLink() {
+      return true;
     },
     async applyActivation(planToken) {
       const plan = plans.get(planToken);

@@ -23,6 +23,8 @@ import type {
   LinkImportPreview,
   LinkImportResult,
   PreferenceUpdates,
+  RelocateLinkPreview,
+  RelocateLinkResult,
   SkillDetail,
   SkillSummary,
   StartupAgent,
@@ -43,6 +45,15 @@ export interface UpdatePanelState {
   report: UpdateCheckReport | null;
   plan: UpdatePlan | null;
   result: UpdateResult | null;
+}
+
+export interface RelocatePanelState {
+  isOpen: boolean;
+  activity: "idle" | "previewing" | "applying";
+  sourcePath: string;
+  preview: RelocateLinkPreview | null;
+  result: RelocateLinkResult | null;
+  error: string | null;
 }
 
 export function App({ client }: AppProps) {
@@ -119,6 +130,14 @@ export function App({ client }: AppProps) {
     report: null,
     plan: null,
     result: null,
+  });
+  const [relocatePanel, setRelocatePanel] = useState<RelocatePanelState>({
+    isOpen: false,
+    activity: "idle",
+    sourcePath: "",
+    preview: null,
+    result: null,
+    error: null,
   });
   const [reselectPath, setReselectPath] = useState("");
   const [isAdoptOpen, setIsAdoptOpen] = useState(false);
@@ -827,6 +846,90 @@ export function App({ client }: AppProps) {
     }
   }
 
+  function openRelocate() {
+    if (!selectedId) return;
+    setRelocatePanel({
+      isOpen: true,
+      activity: "idle",
+      sourcePath: "",
+      preview: null,
+      result: null,
+      error: null,
+    });
+  }
+
+  function closeRelocate() {
+    const { preview } = relocatePanel;
+    setRelocatePanel((state) => ({
+      ...state,
+      isOpen: false,
+      preview: null,
+      result: null,
+    }));
+    if (preview) {
+      void client.cancelRelocateLink(preview.planToken).catch(() => undefined);
+    }
+  }
+
+  async function previewRelocate(sourcePath: string) {
+    if (!selectedId) return;
+    setRelocatePanel((state) => ({
+      ...state,
+      activity: "previewing",
+      error: null,
+      preview: null,
+    }));
+    try {
+      const preview = await client.relocateLink(selectedId, sourcePath);
+      setRelocatePanel((state) => ({
+        ...state,
+        activity: "idle",
+        sourcePath,
+        preview,
+      }));
+    } catch (reason) {
+      setRelocatePanel((state) => ({
+        ...state,
+        activity: "idle",
+        error: readError(reason),
+      }));
+    }
+  }
+
+  async function applyRelocate() {
+    const { preview } = relocatePanel;
+    if (!selectedId || !preview) return;
+    setRelocatePanel((state) => ({
+      ...state,
+      activity: "applying",
+      error: null,
+    }));
+    try {
+      const result = await client.applyRelocateLink(preview.planToken);
+      const [snapshot, nextDetail, nextAgents] = await Promise.all([
+        client.listSkills(filter),
+        client.inspectSkill(selectedId),
+        client.listAgents(selectedId),
+      ]);
+      setSkills(snapshot.items);
+      setDetail(nextDetail);
+      setAgents(nextAgents);
+      setAgentsReadyForSkillId(selectedId);
+      setRelocatePanel((state) => ({
+        ...state,
+        activity: "idle",
+        preview: null,
+        result,
+      }));
+    } catch (reason) {
+      setRelocatePanel((state) => ({
+        ...state,
+        activity: "idle",
+        error: readError(reason),
+      }));
+    }
+  }
+
   async function openAdopt() {
     adoptRunId.current += 1;
     setIsAdoptOpen(true);
@@ -1102,6 +1205,14 @@ export function App({ client }: AppProps) {
       onApplySkillUpdate={applySkillUpdate}
       onPinSkillUpdate={pinSkillUpdate}
       onReselectPathChange={setReselectPath}
+      relocatePanel={relocatePanel}
+      onOpenRelocate={openRelocate}
+      onCloseRelocate={closeRelocate}
+      onRelocateSourcePathChange={(sourcePath) =>
+        setRelocatePanel((state) => ({ ...state, sourcePath }))
+      }
+      onPreviewRelocate={previewRelocate}
+      onApplyRelocate={applyRelocate}
       isAdoptOpen={isAdoptOpen}
       adoptReport={adoptReport}
       adoptSelected={adoptSelected}

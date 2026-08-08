@@ -15,7 +15,7 @@ use crate::core::import::{
     GitImportPreview, GitImportResult, GitImportSelectionPreview, GitImportSelectionResult,
     LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
 };
-use crate::core::maintenance::ActivationHealthReport;
+use crate::core::maintenance::{ActivationHealthReport, RelocatePreview, RelocateResult};
 use crate::core::startup::{StartupAgent, StartupInfo};
 use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
@@ -340,6 +340,77 @@ impl From<ActivationHealthReport> for ActivationHealthReportDto {
             snapshot_version: value.snapshot_version,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateLinkRequestDto {
+    pub skill_id: String,
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateLinkPreviewDto {
+    pub plan_token: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub source_entry_path: String,
+    pub final_entity_path: String,
+    pub display_name: String,
+    pub description: String,
+    pub frontmatter_name: Option<String>,
+    pub activation_count: u32,
+}
+
+impl From<RelocatePreview> for RelocateLinkPreviewDto {
+    fn from(value: RelocatePreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            source_entry_path: value.source_entry_path.to_string_lossy().into_owned(),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            display_name: value.display_name,
+            description: value.description,
+            frontmatter_name: value.frontmatter_name,
+            activation_count: value.activation_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRelocateLinkRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateLinkResultDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub final_entity_path: String,
+    pub activation_count: u32,
+    pub snapshot_version: u64,
+}
+
+impl From<RelocateResult> for RelocateLinkResultDto {
+    fn from(value: RelocateResult) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            activation_count: value.activation_count,
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRelocateLinkRequestDto {
+    pub plan_token: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

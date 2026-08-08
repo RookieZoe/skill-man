@@ -157,6 +157,60 @@ pub struct FileImportRecoveryBaseline {
     pub recorded_content_hash: String,
 }
 
+/// The persisted Skill pointer at startup; relocation recovery decides
+/// whether the interrupted operation had committed by comparing the recorded
+/// final entity against the journal's new path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelocateRecoveryBaseline {
+    pub skill_id: String,
+    pub final_entity_path: PathBuf,
+}
+
+/// A single desired Activation as it exists when a Link relocation is
+/// planned: the entry to rewrite, the old (Broken) target and the new one.
+/// `initial_entry` records what the entry was at plan time (Missing or a
+/// symlink to the old target) so startup recovery can roll forward or back
+/// deterministically.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelocateInitialEntry {
+    Missing,
+    Symlink { old_target: PathBuf },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RelocateActivationStep {
+    pub agent_id: String,
+    pub entry_path: PathBuf,
+    pub old_target_path: PathBuf,
+    pub new_target_path: PathBuf,
+    pub initial_entry: RelocateInitialEntry,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelocateJournalPhase {
+    /// At least one Activation may already point at the new entity; the
+    /// catalog write decides whether recovery rolls forward or back.
+    Applying,
+    /// The catalog committed the new pointer; only the symlinks remain to
+    /// be verified and the journal archived.
+    Committed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RelocateJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: RelocateJournalPhase,
+    pub skill_id: String,
+    pub old_final_entity_path: PathBuf,
+    pub new_final_entity_path: PathBuf,
+    pub activations: Vec<RelocateActivationStep>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdoptJournalKind {
@@ -662,4 +716,58 @@ pub trait FileSystem: Send + Sync {
         baselines: &[FileImportRecoveryBaseline],
         adopted_entities: &[FileImportRecoveryBaseline],
     ) -> Result<u32, FileSystemError>;
+
+    /// Persist a Link relocation journal before the first filesystem step;
+    /// progress is re-written after every Activation, and the journal is
+    /// archived once the catalog commit succeeds or compensation completes.
+    fn write_relocate_journal(
+        &self,
+        library_root: &Path,
+        journal: &RelocateJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "write Link relocation journal",
+            path: PathBuf::from(&journal.operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "relocation journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    fn finish_relocate_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "finish Link relocation journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "relocation journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Replay interrupted Link relocations at startup: when the catalog
+    /// recorded the new pointer, roll forward (rewrite symlinks to the new
+    /// entity); otherwise roll back to each entry's original state.
+    fn recover_relocate_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[RelocateRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let _ = (library_root, baselines);
+        Err(FileSystemError::Io {
+            operation: "recover Link relocation journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "relocation journal recovery is not supported by this filesystem",
+            ),
+        })
+    }
 }

@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { ImportKind, UpdatePanelState } from "../../app/App";
+import type {
+  ImportKind,
+  RelocatePanelState,
+  UpdatePanelState,
+} from "../../app/App";
 import type {
   ActivationConflictDetails,
   ActivationPreview,
@@ -75,6 +79,12 @@ interface LibraryDeskProps {
   gitImportActivity: "idle" | "discovering" | "planning" | "applying";
   updatePanel: UpdatePanelState;
   reselectPath: string;
+  relocatePanel: RelocatePanelState;
+  onOpenRelocate: () => void;
+  onCloseRelocate: () => void;
+  onRelocateSourcePathChange: (sourcePath: string) => void;
+  onPreviewRelocate: (sourcePath: string) => void;
+  onApplyRelocate: () => void;
   isAdoptOpen: boolean;
   adoptReport: AdoptScanReport | null;
   adoptSelected: string[];
@@ -174,6 +184,12 @@ export function LibraryDesk({
   gitImportActivity,
   updatePanel,
   reselectPath,
+  relocatePanel,
+  onOpenRelocate,
+  onCloseRelocate,
+  onRelocateSourcePathChange,
+  onPreviewRelocate,
+  onApplyRelocate,
   onFilter,
   onSelect,
   onRequestActivation,
@@ -289,11 +305,13 @@ export function LibraryDesk({
             detail={detail}
             updatePanel={updatePanel}
             reselectPath={reselectPath}
+            relocatePanel={relocatePanel}
             onCheckUpdates={onCheckSkillUpdates}
             onPlanUpdate={onPlanSkillUpdate}
             onApplyUpdate={onApplySkillUpdate}
             onPinUpdate={onPinSkillUpdate}
             onReselectPathChange={onReselectPathChange}
+            onOpenRelocate={onOpenRelocate}
           />
           <AgentInspector
             detail={detail}
@@ -330,6 +348,15 @@ export function LibraryDesk({
           onApplyReplace={onApplyReplace}
           onUndoReplace={onUndoReplace}
           onClose={onCloseActivationConflict}
+        />
+      ) : null}
+      {relocatePanel.isOpen ? (
+        <RelocateSheet
+          panel={relocatePanel}
+          onSourcePathChange={onRelocateSourcePathChange}
+          onPreview={onPreviewRelocate}
+          onApply={onApplyRelocate}
+          onClose={onCloseRelocate}
         />
       ) : null}
       {isAdoptOpen ? (
@@ -532,20 +559,24 @@ function SkillDetailPanel({
   detail,
   updatePanel,
   reselectPath,
+  relocatePanel,
   onCheckUpdates,
   onPlanUpdate,
   onApplyUpdate,
   onPinUpdate,
   onReselectPathChange,
+  onOpenRelocate,
 }: {
   detail: SkillDetail | null;
   updatePanel: UpdatePanelState;
   reselectPath: string;
+  relocatePanel: RelocatePanelState;
   onCheckUpdates: () => void;
   onPlanUpdate: (newSkillPath: string | null) => void;
   onApplyUpdate: (abandonChanges: boolean) => void;
   onPinUpdate: () => void;
   onReselectPathChange: (path: string) => void;
+  onOpenRelocate: () => void;
 }) {
   return (
     <main id="skill-detail" className="skill-detail" aria-label="Skill detail">
@@ -562,7 +593,11 @@ function SkillDetailPanel({
             <p>{detail.description}</p>
           </div>
           {detail.health !== "healthy" ? (
-            <HealthNotice detail={detail} />
+            <HealthNotice
+              detail={detail}
+              relocatePanel={relocatePanel}
+              onOpenRelocate={onOpenRelocate}
+            />
           ) : null}
           <dl className="metadata-grid">
             <div>
@@ -760,11 +795,13 @@ function UpdateSection({
               >
                 {updatePanel.activity === "planning" ? "Planning" : "Update"}
               </button>
-              <button type="button" disabled={isBusy} onClick={onPinUpdate}>
-                {updatePanel.activity === "pinning"
-                  ? "Pinning"
-                  : "Keep current version"}
-              </button>
+              {item.modified ? null : (
+                <button type="button" disabled={isBusy} onClick={onPinUpdate}>
+                  {updatePanel.activity === "pinning"
+                    ? "Pinning"
+                    : "Keep current version"}
+                </button>
+              )}
             </div>
           ) : null}
           {resultItem ? (
@@ -2518,8 +2555,17 @@ function PreferencesSheet({
   );
 }
 
-function HealthNotice({ detail }: { detail: SkillDetail }) {
+function HealthNotice({
+  detail,
+  relocatePanel,
+  onOpenRelocate,
+}: {
+  detail: SkillDetail;
+  relocatePanel: RelocatePanelState;
+  onOpenRelocate: () => void;
+}) {
   const broken = detail.health === "broken";
+  const isBrokenLink = broken && detail.sourceKind === "link";
   return (
     <div className={`health-notice health-notice--${detail.health}`}>
       <strong>
@@ -2530,6 +2576,192 @@ function HealthNotice({ detail }: { detail: SkillDetail }) {
           ? "The Library entry remains Managed, but its final entity cannot be read."
           : "This Install no longer matches its recorded content hash."}
       </span>
+      {isBrokenLink ? (
+        <button
+          type="button"
+          className="repair-button"
+          disabled={relocatePanel.isOpen}
+          onClick={onOpenRelocate}
+        >
+          Relocate…
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function RelocateSheet({
+  panel,
+  onSourcePathChange,
+  onPreview,
+  onApply,
+  onClose,
+}: {
+  panel: RelocatePanelState;
+  onSourcePathChange: (sourcePath: string) => void;
+  onPreview: (sourcePath: string) => void;
+  onApply: () => void;
+  onClose: () => void;
+}) {
+  const isBusy = panel.activity !== "idle";
+  const step = panel.result ? "result" : panel.preview ? "preview" : "source";
+  const sourceInput = useRef<HTMLInputElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    if (panel.result || panel.preview) {
+      confirmButton.current?.focus();
+    } else {
+      sourceInput.current?.focus();
+    }
+  }, [panel.preview, panel.result]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isBusy) onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isBusy, onClose]);
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isBusy) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet import-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Relocate Broken Link"
+      >
+        <ol className="import-progress" aria-label="Relocate progress">
+          {(["source", "preview", "result"] as const).map((stepName) => (
+            <li
+              key={stepName}
+              aria-current={step === stepName ? "step" : undefined}
+            >
+              {capitalize(stepName)}
+            </li>
+          ))}
+        </ol>
+        {panel.result ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Relocation complete</span>
+              <h2>{panel.result.directoryName} is healthy again</h2>
+              <p>
+                The Link pointer and {panel.result.activationCount} Activation
+                {panel.result.activationCount === 1 ? "" : "s"} now point at the
+                relocated source.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>Final entity</dt>
+                <dd>{panel.result.finalEntityPath}</dd>
+              </div>
+            </dl>
+            <div className="activation-sheet-actions">
+              <button type="button" onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
+        ) : panel.preview ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Relocate preview</span>
+              <h2>Relocate {panel.preview.directoryName}</h2>
+              <p>
+                The new source must keep the same directory identity and
+                frontmatter name. Activations are repointed to the new entity.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>New source</dt>
+                <dd>{panel.preview.sourceEntryPath}</dd>
+              </div>
+              <div>
+                <dt>Final entity</dt>
+                <dd>{panel.preview.finalEntityPath}</dd>
+              </div>
+              <div>
+                <dt>Activations to update</dt>
+                <dd>{panel.preview.activationCount}</dd>
+              </div>
+            </dl>
+            {panel.error ? (
+              <div className="activation-error" role="alert">
+                <strong>Relocation unchanged</strong>
+                <span>{panel.error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="activation-confirm-button"
+                disabled={isBusy}
+                onClick={onApply}
+              >
+                {isBusy ? "Relocating" : "Relocate"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Relocate · Broken Link</span>
+              <h2>Find the Skill again</h2>
+              <p>
+                Choose the moved source directory. SKILL.md must be readable and
+                the directory identity and frontmatter name must match.
+              </p>
+            </div>
+            <label className="import-source-field">
+              <span>New source path</span>
+              <input
+                ref={sourceInput}
+                type="text"
+                value={panel.sourcePath}
+                disabled={isBusy}
+                placeholder="~/Projects/my-skill"
+                onChange={(event) =>
+                  onSourcePathChange(event.currentTarget.value)
+                }
+              />
+            </label>
+            {panel.error ? (
+              <div className="activation-error" role="alert">
+                <strong>Source rejected</strong>
+                <span>{panel.error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                ref={confirmButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={!panel.sourcePath.trim() || isBusy}
+                onClick={() => onPreview(panel.sourcePath)}
+              >
+                {panel.activity === "previewing"
+                  ? "Checking source"
+                  : "Preview Relocate"}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
     </div>
   );
 }

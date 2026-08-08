@@ -1,10 +1,11 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::adapters::fixture_catalog::FixtureCatalogStore;
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::domain::{
-    AgentActivation, AgentId, CatalogFilter, SkillDetail, SkillId, SkillSummary, SourceKind,
-    parse_skill_metadata,
+    AgentActivation, AgentId, CatalogFilter, Health, SkillDetail, SkillId, SkillSummary,
+    SourceKind, parse_skill_metadata,
 };
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
@@ -21,7 +22,8 @@ use crate::seams::import_store::{
     RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError,
+    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
+    MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline,
     SkillHealthObservation,
 };
 
@@ -77,10 +79,19 @@ impl CatalogStore for RuntimeCatalogStore {
             detail.summary = persisted.summary;
             return Ok(Some(detail));
         }
-        let skill_markdown = self
+        let skill_markdown = match self
             .filesystem
             .read_skill_document(&persisted.final_entity_path)
-            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        {
+            Ok(markdown) => markdown,
+            // A Broken Skill (missing entity or SKILL.md) must stay viewable:
+            // the detail panel presents the notice and repair entry instead of
+            // failing the whole inspection.
+            Err(_) if persisted.summary.health == Health::Broken => String::new(),
+            Err(error) => {
+                return Err(CatalogStoreError::Unavailable(error.to_string()));
+            }
+        };
         let metadata = parse_skill_metadata(&skill_markdown);
         let source_label = match persisted.summary.source_kind {
             SourceKind::Link => format!(
@@ -430,6 +441,63 @@ impl MaintenanceStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.record_skill_health(observations)
+    }
+
+    fn managed_skill_baselines(&self) -> Result<Vec<ManagedSkillBaseline>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only; health baselines are unavailable".into(),
+            ));
+        }
+        self.sqlite.managed_skill_baselines()
+    }
+
+    fn link_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.link_skill(skill_id)
+    }
+
+    fn relocate_activations_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.relocate_activations_for_skill(skill_id)
+    }
+
+    fn commit_relocate(
+        &self,
+        skill_id: &SkillId,
+        final_entity_path: PathBuf,
+        display_name: String,
+        description: String,
+        new_target_path: PathBuf,
+        activations: &[RelocateActivationBaseline],
+    ) -> Result<u64, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.commit_relocate(
+            skill_id,
+            final_entity_path,
+            display_name,
+            description,
+            new_target_path,
+            activations,
+        )
     }
 
     fn desired_activation_baselines(

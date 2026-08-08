@@ -26,7 +26,8 @@ use crate::seams::import_store::{
     RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStoreError, SkillHealthObservation,
+    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStoreError,
+    ManagedSkillBaseline, RelocateActivationBaseline, SkillHealthObservation,
 };
 use crate::seams::preferences_store::PreferencesStoreError;
 
@@ -623,6 +624,171 @@ impl SqliteCatalogStore {
         self.connection
             .lock()
             .map_err(|_| ActivationStoreError::Unavailable("SQLite lock poisoned".into()))
+    }
+
+    /// Every Managed Skill row (Link and Install) with the inputs the health
+    /// check recomputes Broken/Modified from.
+    pub fn managed_skill_baselines(
+        &self,
+    ) -> Result<Vec<ManagedSkillBaseline>, MaintenanceStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, source_kind, final_entity_path, recorded_content_hash
+                 FROM skills
+                 ORDER BY id",
+            )
+            .map_err(sqlite_maintenance_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(ManagedSkillBaseline {
+                    skill_id: SkillId(row.get(0)?),
+                    source_kind: parse_source_kind(&row.get::<_, String>(1)?)?,
+                    final_entity_path: PathBuf::from(row.get::<_, String>(2)?),
+                    recorded_content_hash: row.get(3)?,
+                })
+            })
+            .map_err(sqlite_maintenance_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    /// The persisted Link pointer; `None` for non-Link or unknown Skills.
+    pub fn link_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT id, directory_name, display_name, description, final_entity_path
+                 FROM skills
+                 WHERE id = ?1 AND source_kind = 'link'",
+                [&skill_id.0],
+                |row| {
+                    Ok(LinkSkillRecord {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                        display_name: row.get(2)?,
+                        description: row.get(3)?,
+                        final_entity_path: PathBuf::from(row.get::<_, String>(4)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    /// Desired Activations of one Skill (only `desired_enabled = 1`, the
+    /// records whose symlinks must be rewritten by a relocation).
+    pub fn relocate_activations_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT agent_id, expected_entry_path, expected_target_path
+                 FROM activations
+                 WHERE skill_id = ?1 AND desired_enabled = 1
+                 ORDER BY agent_id",
+            )
+            .map_err(sqlite_maintenance_error)?;
+        statement
+            .query_map([&skill_id.0], |row| {
+                Ok(RelocateActivationBaseline {
+                    agent_id: AgentId(row.get(0)?),
+                    expected_entry_path: PathBuf::from(row.get::<_, String>(1)?),
+                    expected_target_path: PathBuf::from(row.get::<_, String>(2)?),
+                })
+            })
+            .map_err(sqlite_maintenance_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    /// Commit a relocation in one transaction: the Link pointer moves to the
+    /// new entity, display metadata refreshes, health returns to Healthy,
+    /// and every desired Activation repoints at the new target with observed
+    /// state Present (the symlinks were already rewritten by the caller).
+    pub fn commit_relocate(
+        &self,
+        skill_id: &SkillId,
+        final_entity_path: PathBuf,
+        display_name: String,
+        description: String,
+        new_target_path: PathBuf,
+        activations: &[RelocateActivationBaseline],
+    ) -> Result<u64, MaintenanceStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_maintenance_error)?;
+        let updated_skills = transaction
+            .execute(
+                "UPDATE skills
+                 SET final_entity_path = ?2, display_name = ?3, description = ?4,
+                     health = 'healthy',
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND source_kind = 'link'",
+                params![
+                    skill_id.0,
+                    final_entity_path.to_string_lossy(),
+                    display_name,
+                    description,
+                ],
+            )
+            .map_err(sqlite_maintenance_error)?;
+        if updated_skills == 0 {
+            return Err(MaintenanceStoreError::Unavailable(format!(
+                "the Link Skill '{}' disappeared before its relocation committed",
+                skill_id.0
+            )));
+        }
+        let checked_at = unix_timestamp();
+        for activation in activations {
+            transaction
+                .execute(
+                    "UPDATE activations
+                     SET expected_target_path = ?3, observed_state = 'present',
+                         last_checked_at = ?4
+                     WHERE skill_id = ?1 AND agent_id = ?2 AND desired_enabled = 1",
+                    params![
+                        skill_id.0,
+                        activation.agent_id.0,
+                        new_target_path.to_string_lossy(),
+                        checked_at,
+                    ],
+                )
+                .map_err(sqlite_maintenance_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_maintenance_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_maintenance_error)?;
+        transaction.commit().map_err(sqlite_maintenance_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            MaintenanceStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
     }
 }
 

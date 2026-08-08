@@ -32,10 +32,10 @@
       "directoryName": "legacy-audit",
       "displayName": "Legacy audit",
       "description": "Checks an existing skills directory before Adopt.",
-      "sourceKind": "file_install",
+      "sourceKind": "link",
       "health": "broken",
       "finalEntityPath": "/Users/zoe/Library/Application Support/skill-man/skills/legacy-audit",
-      "sourceLabel": "Installed from archive · legacy-audit.zip",
+      "sourceLabel": "Linked local folder · ~/Codes/AI/skills/legacy-audit",
       "frontmatterName": "legacy-audit",
       "lastActivityAt": "2026-07-18T03:16:00Z",
       "skillMarkdown": "# Legacy audit\n\nInspect an existing skills directory before Adopt.\n"
@@ -49,7 +49,9 @@
       "skillsPath": "~/.claude/skills",
       "detected": true,
       "compatibility": "verified",
-      "enabledSkillIds": ["skill-authoring"],
+      "enabledSkillIds": [
+        "skill-authoring"
+      ],
       "observedSkillStates": {
         "skill-authoring": "missing"
       }
@@ -61,7 +63,10 @@
       "skillsPath": "~/.codex/skills",
       "detected": true,
       "compatibility": "verified",
-      "enabledSkillIds": ["skill-authoring", "media-xray"]
+      "enabledSkillIds": [
+        "skill-authoring",
+        "media-xray"
+      ]
     },
     {
       "id": "workbench",

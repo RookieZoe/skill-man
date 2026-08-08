@@ -131,6 +131,26 @@ export interface ActivationHealthReport {
   snapshotVersion: number;
 }
 
+export interface RelocateLinkPreview {
+  planToken: string;
+  skillId: string;
+  directoryName: string;
+  sourceEntryPath: string;
+  finalEntityPath: string;
+  displayName: string;
+  description: string;
+  frontmatterName: string | null;
+  activationCount: number;
+}
+
+export interface RelocateLinkResult {
+  skillId: string;
+  directoryName: string;
+  finalEntityPath: string;
+  activationCount: number;
+  snapshotVersion: number;
+}
+
 export interface ActivationResult {
   skillId: string;
   agentId: string;
@@ -398,6 +418,12 @@ export interface CatalogClient {
   completeOnboarding(): Promise<void>;
   createAgentDirectory(agentId: string): Promise<StartupInfo>;
   runActivationHealthCheck(): Promise<ActivationHealthReport>;
+  relocateLink(
+    skillId: string,
+    sourcePath: string,
+  ): Promise<RelocateLinkPreview>;
+  applyRelocateLink(planToken: string): Promise<RelocateLinkResult>;
+  cancelRelocateLink(planToken: string): Promise<boolean>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
   discoverLinkImport(sourcePath: string): Promise<LinkImportCandidate>;
@@ -435,6 +461,21 @@ let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
 const tauriCatalogClient: CatalogClient = {
   listSkills(filter) {
     return invoke<CatalogList>("list_skills", { request: { filter } });
+  },
+  relocateLink(skillId, sourcePath) {
+    return invoke<RelocateLinkPreview>("relocate_link", {
+      request: { skillId, sourcePath },
+    });
+  },
+  applyRelocateLink(planToken) {
+    return invoke<RelocateLinkResult>("apply_relocate_link", {
+      request: { planToken },
+    });
+  },
+  cancelRelocateLink(planToken) {
+    return invoke<boolean>("cancel_relocate_link", {
+      request: { planToken },
+    });
   },
   inspectSkill(skillId) {
     return invoke<SkillDetail>("inspect_skill", { skillId });
