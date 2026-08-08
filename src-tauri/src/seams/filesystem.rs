@@ -302,8 +302,15 @@ pub trait FileSystem: Send + Sync {
         library_root: &Path,
         baselines: &[FileImportRecoveryBaseline],
     ) -> Result<u32, FileSystemError> {
-        let _ = (library_root, baselines);
-        Ok(0)
+        let _ = baselines;
+        Err(FileSystemError::Io {
+            operation: "recover file Import journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation journal recovery is not supported by this filesystem",
+            ),
+        })
     }
 
     fn create_activation(

@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
-use std::ffi::{CString, OsString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -1498,28 +1499,229 @@ fn remove_owned_directory_if_present(
 
 fn discard_orphaned_staging(library_root: &Path) -> Result<(), FileSystemError> {
     let staging_root = library_root.join("staging");
-    let entries = match fs::read_dir(&staging_root) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(FileSystemError::Io {
-                operation: "enumerate orphaned file Import staging",
-                path: staging_root,
-                source,
-            });
+    let encoded = CString::new(staging_root.as_os_str().as_bytes()).map_err(|source| {
+        FileSystemError::Io {
+            operation: "encode file Import staging root",
+            path: staging_root.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+        }
+    })?;
+    // The descriptor pins the owned staging root and O_NOFOLLOW rejects a root
+    // replaced by a symlink before recovery. All traversal and deletion below is
+    // relative to this descriptor, so an intermediate-path swap cannot escape.
+    let descriptor = unsafe {
+        libc::open(
+            encoded.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        let source = std::io::Error::last_os_error();
+        if source.kind() == std::io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(FileSystemError::Io {
+            operation: "open file Import staging root without following links",
+            path: staging_root,
+            source,
+        });
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let root_metadata = directory_descriptor_metadata(&descriptor, &staging_root)?;
+    remove_directory_contents_at(
+        &descriptor,
+        root_metadata.st_dev,
+        &staging_root,
+        "discard orphaned file Import staging",
+    )?;
+    let status = unsafe { libc::fsync(descriptor.as_raw_fd()) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(FileSystemError::Io {
+            operation: "sync cleaned file Import staging",
+            path: staging_root,
+            source: std::io::Error::last_os_error(),
+        })
+    }
+}
+
+fn remove_directory_contents_at(
+    directory: &OwnedFd,
+    owned_device: libc::dev_t,
+    display_path: &Path,
+    operation: &'static str,
+) -> Result<(), FileSystemError> {
+    let names = directory_entry_names(directory, display_path, operation)?;
+    for name in names {
+        let child_path = display_path.join(&name);
+        let encoded = CString::new(name.as_bytes()).map_err(|source| FileSystemError::Io {
+            operation,
+            path: child_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+        })?;
+        let metadata = metadata_at_nofollow(directory, &encoded, &child_path, operation)?;
+        if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            if metadata.st_dev != owned_device {
+                return Err(FileSystemError::Io {
+                    operation,
+                    path: child_path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "owned staging cleanup refuses to cross a filesystem boundary",
+                    ),
+                });
+            }
+            let child_descriptor = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    encoded.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if child_descriptor < 0 {
+                return Err(FileSystemError::Io {
+                    operation,
+                    path: child_path,
+                    source: std::io::Error::last_os_error(),
+                });
+            }
+            // SAFETY: `openat` returned a new owned descriptor.
+            let child_descriptor = unsafe { OwnedFd::from_raw_fd(child_descriptor) };
+            let opened_metadata = directory_descriptor_metadata(&child_descriptor, &child_path)?;
+            if opened_metadata.st_dev != metadata.st_dev
+                || opened_metadata.st_ino != metadata.st_ino
+            {
+                return Err(FileSystemError::PlanStale { path: child_path });
+            }
+            remove_directory_contents_at(&child_descriptor, owned_device, &child_path, operation)?;
+            let current = metadata_at_nofollow(directory, &encoded, &child_path, operation)?;
+            if current.st_dev != opened_metadata.st_dev || current.st_ino != opened_metadata.st_ino
+            {
+                return Err(FileSystemError::PlanStale { path: child_path });
+            }
+            let status = unsafe {
+                libc::unlinkat(directory.as_raw_fd(), encoded.as_ptr(), libc::AT_REMOVEDIR)
+            };
+            if status != 0 {
+                return Err(FileSystemError::Io {
+                    operation,
+                    path: child_path,
+                    source: std::io::Error::last_os_error(),
+                });
+            }
+        } else {
+            let status = unsafe { libc::unlinkat(directory.as_raw_fd(), encoded.as_ptr(), 0) };
+            if status != 0 {
+                return Err(FileSystemError::Io {
+                    operation,
+                    path: child_path,
+                    source: std::io::Error::last_os_error(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn directory_entry_names(
+    directory: &OwnedFd,
+    path: &Path,
+    operation: &'static str,
+) -> Result<Vec<OsString>, FileSystemError> {
+    let duplicated = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicated < 0 {
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    let stream = unsafe { libc::fdopendir(duplicated) };
+    if stream.is_null() {
+        let source = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(duplicated);
+        }
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    let mut names = Vec::new();
+    let read_error = loop {
+        // SAFETY: macOS exposes thread-local errno through __error.
+        unsafe {
+            *libc::__error() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let source = std::io::Error::last_os_error();
+            break (source.raw_os_error() != Some(0)).then_some(source);
+        }
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes != b"." && bytes != b".." {
+            names.push(OsString::from_vec(bytes.to_vec()));
         }
     };
-    for entry in entries {
-        let path = entry
-            .map_err(|source| FileSystemError::Io {
-                operation: "enumerate orphaned file Import staging",
-                path: staging_root.clone(),
-                source,
-            })?
-            .path();
-        remove_owned_directory_if_present(&path, None, "discard orphaned file Import staging")?;
+    unsafe {
+        libc::closedir(stream);
     }
-    sync_directory(&staging_root, "sync cleaned file Import staging")
+    match read_error {
+        Some(source) => Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }),
+        None => Ok(names),
+    }
+}
+
+fn metadata_at_nofollow(
+    directory: &OwnedFd,
+    name: &CString,
+    path: &Path,
+    operation: &'static str,
+) -> Result<libc::stat, FileSystemError> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 {
+        // SAFETY: a zero return from fstatat initializes the output structure.
+        Ok(unsafe { metadata.assume_init() })
+    } else {
+        Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        })
+    }
+}
+
+fn directory_descriptor_metadata(
+    directory: &OwnedFd,
+    path: &Path,
+) -> Result<libc::stat, FileSystemError> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe { libc::fstat(directory.as_raw_fd(), metadata.as_mut_ptr()) };
+    if status == 0 {
+        // SAFETY: a zero return from fstat initializes the output structure.
+        Ok(unsafe { metadata.assume_init() })
+    } else {
+        Err(FileSystemError::Io {
+            operation: "inspect owned staging directory descriptor",
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        })
+    }
 }
 
 fn ensure_directory_fingerprint(

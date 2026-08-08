@@ -1524,6 +1524,31 @@ fn startup_recovery_removes_staging_left_before_a_journal_was_durable() {
     assert!(!orphan.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn startup_recovery_never_follows_a_symlinked_staging_root() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let library_root = home.path().join("Library/Application Support/skill-man");
+    let victim = home.path().join("must-not-delete");
+    std::fs::create_dir_all(victim.join("valuable-directory")).expect("create victim tree");
+    std::fs::write(victim.join("valuable-directory/important.txt"), "keep me")
+        .expect("write victim file");
+    std::fs::create_dir_all(&library_root).expect("create Library root");
+    std::os::unix::fs::symlink(&victim, library_root.join("staging"))
+        .expect("replace staging root with external symlink");
+    let filesystem = MacOsFileSystem::new(home.path().to_path_buf());
+
+    filesystem
+        .recover_file_import_journals(&library_root, &[])
+        .expect_err("recovery refuses a symlinked staging root");
+
+    assert_eq!(
+        std::fs::read_to_string(victim.join("valuable-directory/important.txt"))
+            .expect("victim survives recovery"),
+        "keep me"
+    );
+}
+
 #[test]
 fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
     let home = tempfile::tempdir().expect("temporary home");
