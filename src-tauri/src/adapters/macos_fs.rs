@@ -10,12 +10,13 @@ use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::seams::filesystem::{
-    ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
+    ActivationEntrySnapshot, ActivationRecoveryBaseline, ActivationReplaceJournal,
+    ActivationReplacePhase, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
     AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
     DirectoryFingerprint, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
     FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
-    LinkSourceSnapshot, ScannedSkillEntry, SkillFingerprint, StagedEntryKind, StagedTreeEntry,
-    StagedTreeSnapshot,
+    LinkSourceSnapshot, OccupantKind, OccupantSnapshot, ScannedSkillEntry, SkillFingerprint,
+    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -1064,6 +1065,371 @@ impl FileSystem for MacOsFileSystem {
         })
     }
 
+    fn occupant_snapshot(&self, path: &Path) -> Result<OccupantSnapshot, FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        occupant_snapshot_at(&path)
+    }
+
+    fn move_occupant_to_backup(
+        &self,
+        entry_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let entry_path = self.normalize_configured_path(entry_path)?;
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        if !backup_path.starts_with(&operations_root) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
+        }
+        if fs::symlink_metadata(&backup_path).is_ok() {
+            return Err(FileSystemError::PlanStale { path: backup_path });
+        }
+        let current = self.occupant_snapshot(&entry_path)?;
+        if current != *expected {
+            return Err(FileSystemError::PlanStale { path: entry_path });
+        }
+        if let Some(parent) = backup_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| FileSystemError::Io {
+                operation: "create Activation backup directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        move_entry_verified(&entry_path, &backup_path, expected)
+    }
+
+    fn restore_occupant_from_backup(
+        &self,
+        backup_path: &Path,
+        entry_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let entry_path = self.normalize_configured_path(entry_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        if !backup_path.starts_with(&operations_root) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
+        }
+        match fs::symlink_metadata(&entry_path) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(FileSystemError::PlanStale { path: entry_path }),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect Activation restore destination",
+                    path: entry_path,
+                    source,
+                });
+            }
+        }
+        let backup = self.occupant_snapshot(&backup_path)?;
+        if !occupant_kind_matches(&expected.kind, &backup.kind) {
+            return Err(FileSystemError::PlanStale {
+                path: backup_path.clone(),
+            });
+        }
+        if let Some(parent) = entry_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| FileSystemError::Io {
+                operation: "create Activation restore parent",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        move_entry_verified(&backup_path, &entry_path, expected)
+    }
+
+    fn discard_replace_backup(
+        &self,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let backup_path = self.normalize_configured_path(backup_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        if !backup_path.starts_with(&operations_root) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
+        }
+        let metadata = match fs::symlink_metadata(&backup_path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect Activation backup",
+                    path: backup_path.clone(),
+                    source,
+                });
+            }
+        };
+        let actual = occupant_snapshot_from_metadata(&backup_path, &metadata)?;
+        if !occupant_kind_matches(&expected.kind, &actual.kind) {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "discard Activation occupant backup",
+                path: backup_path.clone(),
+                message: "the backup content no longer matches the recorded occupant".into(),
+            });
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(&backup_path).map_err(|source| FileSystemError::Io {
+                operation: "discard Activation occupant backup",
+                path: backup_path.clone(),
+                source,
+            })
+        } else {
+            fs::remove_file(&backup_path).map_err(|source| FileSystemError::Io {
+                operation: "discard Activation occupant backup",
+                path: backup_path.clone(),
+                source,
+            })
+        }
+    }
+
+    fn write_activation_replace_journal(
+        &self,
+        library_root: &Path,
+        journal: &ActivationReplaceJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(&journal.operation_id)?;
+        let operations_root = library_root.join("operations");
+        let operation_root = operations_root.join(&journal.operation_id);
+        fs::create_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "create Activation replace operation directory",
+            path: operation_root.clone(),
+            source,
+        })?;
+        sync_directory(
+            &operations_root,
+            "sync Activation replace operations directory",
+        )?;
+        let journal_path = operation_root.join("activation-replace-journal.json");
+        let temporary_path = operation_root.join("activation-replace-journal.tmp");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize Activation replace journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary Activation replace journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write Activation replace journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync Activation replace journal",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish Activation replace journal",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(
+            &operation_root,
+            "sync Activation replace operation directory",
+        )
+    }
+
+    fn finish_activation_replace_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(operation_id)?;
+        let operation_root = library_root.join("operations").join(operation_id);
+        let journal_path = operation_root.join("activation-replace-journal.json");
+        if journal_path.is_file() {
+            let journal_bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read completed Activation replace journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let history_root = library_root.join("operation-history");
+            fs::create_dir_all(&history_root).map_err(|source| FileSystemError::Io {
+                operation: "create Activation replace operation history",
+                path: history_root.clone(),
+                source,
+            })?;
+            let archive_path = history_root.join(format!("{operation_id}.activation-replace.json"));
+            let archive_temporary =
+                history_root.join(format!(".{operation_id}.activation-replace.tmp"));
+            let mut archive = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&archive_temporary)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "open temporary Activation replace history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive
+                .write_all(&journal_bytes)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "write Activation replace history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive.sync_all().map_err(|source| FileSystemError::Io {
+                operation: "sync Activation replace history",
+                path: archive_temporary.clone(),
+                source,
+            })?;
+            fs::rename(&archive_temporary, &archive_path).map_err(|source| {
+                FileSystemError::Io {
+                    operation: "publish Activation replace history",
+                    path: archive_path,
+                    source,
+                }
+            })?;
+            sync_directory(&history_root, "sync Activation replace operation history")?;
+        }
+        match fs::remove_file(&journal_path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove completed Activation replace journal",
+                    path: journal_path,
+                    source,
+                });
+            }
+        }
+        // The backup entry is consumed by Undo/rollback or discarded before
+        // finishing; only an empty backup directory may remain here.
+        let backup_dir = operation_root.join("backup");
+        match fs::remove_dir(&backup_dir) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) if source.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                return Err(FileSystemError::Io {
+                    operation: "remove Activation replace backup directory",
+                    path: backup_dir,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the Activation replace backup still contains content; refusing to remove it",
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove Activation replace backup directory",
+                    path: backup_dir,
+                    source,
+                });
+            }
+        }
+        match fs::remove_dir(&operation_root) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "remove completed Activation replace operation directory",
+                path: operation_root,
+                source,
+            }),
+        }
+    }
+
+    fn recover_activation_replace_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[ActivationRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        let entries = match fs::read_dir(&operations_root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Activation replace recovery journals",
+                    path: operations_root,
+                    source,
+                });
+            }
+        };
+        let mut recovered = 0_u32;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Activation replace recovery journals",
+                path: operations_root.clone(),
+                source,
+            })?;
+            let operation_root = entry.path();
+            let journal_path = operation_root.join("activation-replace-journal.json");
+            if !journal_path.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read Activation replace recovery journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let journal: ActivationReplaceJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Activation replace recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            validate_operation_id(&journal.operation_id)?;
+            if operation_root.file_name().and_then(|name| name.to_str())
+                != Some(journal.operation_id.as_str())
+            {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_root,
+                });
+            }
+            match journal.phase {
+                ActivationReplacePhase::Applying => {
+                    let committed = baselines.iter().any(|baseline| {
+                        baseline.skill_id == journal.skill_id
+                            && baseline.agent_id == journal.agent_id
+                            && baseline.expected_entry_path == journal.entry_path
+                            && baseline.expected_target_path == journal.target_path
+                    });
+                    if committed {
+                        self.discard_replace_backup(
+                            &journal.backup_path,
+                            &library_root,
+                            &journal.occupant,
+                        )?;
+                    } else {
+                        rollback_activation_replace(&journal)?;
+                    }
+                }
+                ActivationReplacePhase::Committed => {
+                    self.discard_replace_backup(
+                        &journal.backup_path,
+                        &library_root,
+                        &journal.occupant,
+                    )?;
+                }
+                ActivationReplacePhase::Undoing => {
+                    complete_activation_replace_undo(&journal)?;
+                }
+            }
+            self.finish_activation_replace_journal(&library_root, &journal.operation_id)?;
+            recovered = recovered.saturating_add(1);
+        }
+        Ok(recovered)
+    }
+
     fn scan_skills_directory(
         &self,
         path: &Path,
@@ -1955,6 +2321,381 @@ fn move_directory_verified(source: &Path, destination: &Path) -> Result<(), File
             operation: "move Adopt source directory",
             path: source.to_path_buf(),
             source: source_error,
+        }),
+    }
+}
+
+fn occupant_snapshot_at(path: &Path) -> Result<OccupantSnapshot, FileSystemError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| FileSystemError::Io {
+        operation: "inspect Activation occupant",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    occupant_snapshot_from_metadata(path, &metadata)
+}
+
+fn occupant_snapshot_from_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<OccupantSnapshot, FileSystemError> {
+    let kind = if metadata.file_type().is_symlink() {
+        OccupantKind::Symlink {
+            target: fs::read_link(path).map_err(|source| FileSystemError::Io {
+                operation: "read Activation occupant symlink target",
+                path: path.to_path_buf(),
+                source,
+            })?,
+        }
+    } else if metadata.is_dir() {
+        OccupantKind::RealDirectory
+    } else if metadata.is_file() {
+        OccupantKind::File {
+            length: metadata.len(),
+        }
+    } else {
+        return Err(FileSystemError::Io {
+            operation: "snapshot Activation occupant",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported Activation occupant entry type",
+            ),
+        });
+    };
+    Ok(OccupantSnapshot {
+        kind,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn occupant_kind_matches(expected: &OccupantKind, actual: &OccupantKind) -> bool {
+    match (expected, actual) {
+        (OccupantKind::RealDirectory, OccupantKind::RealDirectory) => true,
+        (OccupantKind::Symlink { target: left }, OccupantKind::Symlink { target: right }) => {
+            left == right
+        }
+        (OccupantKind::File { length: left }, OccupantKind::File { length: right }) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+fn activation_entry_snapshot_at(path: &Path) -> Result<ActivationEntrySnapshot, FileSystemError> {
+    match fs::symlink_metadata(path) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ActivationEntrySnapshot::Missing)
+        }
+        Err(source) => Err(FileSystemError::Io {
+            operation: "inspect Activation entry",
+            path: path.to_path_buf(),
+            source,
+        }),
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(ActivationEntrySnapshot::Symlink {
+            target: fs::read_link(path).map_err(|source| FileSystemError::Io {
+                operation: "read Activation entry target",
+                path: path.to_path_buf(),
+                source,
+            })?,
+        }),
+        Ok(_) => Ok(ActivationEntrySnapshot::Other),
+    }
+}
+
+/// Move an occupant entry (real directory, symlink or file) between the
+/// Agent entry and its operation backup: same-volume rename (identity is
+/// preserved and re-verified), cross-volume verified copy then delete.
+fn move_entry_verified(
+    source: &Path,
+    destination: &Path,
+    expected: &OccupantSnapshot,
+) -> Result<(), FileSystemError> {
+    match fs::rename(source, destination) {
+        Ok(()) => {
+            let moved = occupant_snapshot_at(destination)?;
+            if &moved != expected {
+                return Err(FileSystemError::PlanStale {
+                    path: destination.to_path_buf(),
+                });
+            }
+            Ok(())
+        }
+        Err(source_error) if source_error.raw_os_error() == Some(libc::EXDEV) => {
+            copy_occupant_verified(source, destination, expected)?;
+            remove_occupant_source(source, expected)?;
+            Ok(())
+        }
+        Err(source_error) => Err(FileSystemError::Io {
+            operation: "move Activation occupant",
+            path: source.to_path_buf(),
+            source: source_error,
+        }),
+    }
+}
+
+fn copy_occupant_verified(
+    source: &Path,
+    destination: &Path,
+    expected: &OccupantSnapshot,
+) -> Result<(), FileSystemError> {
+    match &expected.kind {
+        OccupantKind::RealDirectory => copy_directory_verified(source, destination),
+        OccupantKind::Symlink { target } => {
+            let current = fs::read_link(source).map_err(|source_error| FileSystemError::Io {
+                operation: "read Activation occupant symlink target",
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+            if &current != target {
+                return Err(FileSystemError::PlanStale {
+                    path: source.to_path_buf(),
+                });
+            }
+            std::os::unix::fs::symlink(target, destination).map_err(|source_error| {
+                FileSystemError::Io {
+                    operation: "copy Activation occupant symlink",
+                    path: source.to_path_buf(),
+                    source: source_error,
+                }
+            })
+        }
+        OccupantKind::File { length } => copy_file_verified(source, destination, *length),
+    }
+}
+
+fn copy_file_verified(
+    source: &Path,
+    destination: &Path,
+    expected_length: u64,
+) -> Result<(), FileSystemError> {
+    let metadata = fs::symlink_metadata(source).map_err(|source_error| FileSystemError::Io {
+        operation: "inspect Activation occupant file",
+        path: source.to_path_buf(),
+        source: source_error,
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != expected_length
+    {
+        return Err(FileSystemError::PlanStale {
+            path: source.to_path_buf(),
+        });
+    }
+    let mut input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(source)
+        .map_err(|source_error| FileSystemError::Io {
+            operation: "open Activation occupant file without following links",
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+    let opened = input
+        .metadata()
+        .map_err(|source_error| FileSystemError::Io {
+            operation: "inspect opened Activation occupant file",
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+    if opened.dev() != metadata.dev()
+        || opened.ino() != metadata.ino()
+        || opened.len() != metadata.len()
+    {
+        return Err(FileSystemError::PlanStale {
+            path: source.to_path_buf(),
+        });
+    }
+    let mut output = fs::File::create(destination).map_err(|source_error| FileSystemError::Io {
+        operation: "create Activation occupant copy",
+        path: destination.to_path_buf(),
+        source: source_error,
+    })?;
+    std::io::copy(&mut input, &mut output).map_err(|source_error| FileSystemError::Io {
+        operation: "copy Activation occupant file",
+        path: source.to_path_buf(),
+        source: source_error,
+    })?;
+    let finished = input
+        .metadata()
+        .map_err(|source_error| FileSystemError::Io {
+            operation: "reinspect copied Activation occupant file",
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+    if finished.dev() != metadata.dev()
+        || finished.ino() != metadata.ino()
+        || finished.len() != metadata.len()
+    {
+        return Err(FileSystemError::PlanStale {
+            path: source.to_path_buf(),
+        });
+    }
+    let copied = fs::symlink_metadata(destination).map_err(|source_error| FileSystemError::Io {
+        operation: "inspect Activation occupant copy",
+        path: destination.to_path_buf(),
+        source: source_error,
+    })?;
+    if copied.len() != expected_length {
+        return Err(FileSystemError::Io {
+            operation: "copy Activation occupant file",
+            path: destination.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "copied occupant size mismatch",
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn remove_occupant_source(
+    source: &Path,
+    expected: &OccupantSnapshot,
+) -> Result<(), FileSystemError> {
+    let current = occupant_snapshot_at(source)?;
+    if !occupant_kind_matches(&expected.kind, &current.kind) {
+        return Err(FileSystemError::PlanStale {
+            path: source.to_path_buf(),
+        });
+    }
+    if matches!(expected.kind, OccupantKind::RealDirectory) {
+        remove_owned_directory_if_present(source, None, "remove copied Activation occupant")
+    } else {
+        match fs::remove_file(source) {
+            Ok(()) => Ok(()),
+            Err(source_error) if source_error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source_error) => Err(FileSystemError::Io {
+                operation: "remove copied Activation occupant",
+                path: source.to_path_buf(),
+                source: source_error,
+            }),
+        }
+    }
+}
+
+/// Roll an interrupted (uncommitted) replace back: remove the Activation if
+/// it exists, restore the occupant from backup. When the crash happened
+/// before the occupant moved (backup absent, entry untouched) this is a
+/// no-op that simply closes the journal (§6.4: nothing to compensate).
+fn rollback_activation_replace(journal: &ActivationReplaceJournal) -> Result<(), FileSystemError> {
+    match fs::symlink_metadata(&journal.backup_path) {
+        Ok(_) => {
+            match activation_entry_snapshot_at(&journal.entry_path)? {
+                ActivationEntrySnapshot::Missing => {}
+                ActivationEntrySnapshot::Symlink { target } if target == journal.target_path => {
+                    fs::remove_file(&journal.entry_path).map_err(|source| FileSystemError::Io {
+                        operation: "remove interrupted Activation replace entry",
+                        path: journal.entry_path.clone(),
+                        source,
+                    })?;
+                }
+                _ => {
+                    return Err(FileSystemError::RecoveryRequired {
+                        operation: "roll back Activation replace",
+                        path: journal.entry_path.clone(),
+                        message: "the Activation entry changed while the replace was interrupted"
+                            .into(),
+                    });
+                }
+            }
+            restore_occupant_verified(journal)
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            // The occupant never moved; verify the entry is still it and
+            // finish the journal without touching anything.
+            let current = occupant_snapshot_at(&journal.entry_path)?;
+            if current == journal.occupant {
+                Ok(())
+            } else {
+                Err(FileSystemError::RecoveryRequired {
+                    operation: "roll back Activation replace",
+                    path: journal.entry_path.clone(),
+                    message: "the entry changed before the replace had applied anything".into(),
+                })
+            }
+        }
+        Err(source) => Err(FileSystemError::Io {
+            operation: "inspect Activation replace rollback backup",
+            path: journal.backup_path.clone(),
+            source,
+        }),
+    }
+}
+
+fn restore_occupant_verified(journal: &ActivationReplaceJournal) -> Result<(), FileSystemError> {
+    let backup = occupant_snapshot_at(&journal.backup_path)?;
+    if !occupant_kind_matches(&journal.occupant.kind, &backup.kind) {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "restore Activation occupant",
+            path: journal.backup_path.clone(),
+            message: "the occupant backup no longer matches the journal".into(),
+        });
+    }
+    match fs::symlink_metadata(&journal.entry_path) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore Activation occupant",
+                path: journal.entry_path.clone(),
+                message: "the Activation entry is occupied".into(),
+            });
+        }
+        Err(source) => {
+            return Err(FileSystemError::Io {
+                operation: "inspect Activation restore entry",
+                path: journal.entry_path.clone(),
+                source,
+            });
+        }
+    }
+    move_entry_verified(&journal.backup_path, &journal.entry_path, &journal.occupant)
+}
+
+/// Finish an interrupted Undo: the backup either still holds the occupant
+/// (restore it) or was already consumed (verify the restored entry).
+/// Undo recovery never discards the backup.
+fn complete_activation_replace_undo(
+    journal: &ActivationReplaceJournal,
+) -> Result<(), FileSystemError> {
+    match fs::symlink_metadata(&journal.backup_path) {
+        Ok(_) => {
+            match activation_entry_snapshot_at(&journal.entry_path)? {
+                ActivationEntrySnapshot::Missing => {}
+                ActivationEntrySnapshot::Symlink { target } if target == journal.target_path => {
+                    fs::remove_file(&journal.entry_path).map_err(|source| FileSystemError::Io {
+                        operation: "remove interrupted Activation replace Undo entry",
+                        path: journal.entry_path.clone(),
+                        source,
+                    })?;
+                }
+                _ => {
+                    return Err(FileSystemError::RecoveryRequired {
+                        operation: "complete Activation replace Undo",
+                        path: journal.entry_path.clone(),
+                        message: "the entry was externally occupied while Undo was interrupted; the backup is retained"
+                            .into(),
+                    });
+                }
+            }
+            restore_occupant_verified(journal)
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            let current = occupant_snapshot_at(&journal.entry_path)?;
+            if current == journal.occupant {
+                Ok(())
+            } else {
+                Err(FileSystemError::RecoveryRequired {
+                    operation: "complete Activation replace Undo",
+                    path: journal.entry_path.clone(),
+                    message:
+                        "the restored occupant cannot be re-identified after Undo was interrupted"
+                            .into(),
+                })
+            }
+        }
+        Err(source) => Err(FileSystemError::Io {
+            operation: "inspect Activation replace Undo backup",
+            path: journal.backup_path.clone(),
+            source,
         }),
     }
 }

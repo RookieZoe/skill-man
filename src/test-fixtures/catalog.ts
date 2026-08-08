@@ -2,6 +2,7 @@ import fixtureJson from "../../fixtures/library-desk.json";
 
 import type {
   ActivationPreview,
+  ActivationReplacePreview,
   AgentActivation,
   AgentKind,
   CatalogClient,
@@ -43,6 +44,11 @@ interface PlannedFixtureLinkImport extends LinkImportPreview {
   skillId: string;
 }
 
+type PlannedFixtureReplace = ActivationReplacePreview & {
+  skillId: string;
+  agentId: string;
+};
+
 const fixture = fixtureJson as FixtureFile;
 
 export function createFixtureCatalogClient(): CatalogClient {
@@ -65,6 +71,8 @@ export function createFixtureCatalogClient(): CatalogClient {
   );
   const plans = new Map<string, PlannedFixtureActivation>();
   const linkImportPlans = new Map<string, PlannedFixtureLinkImport>();
+  const replacePlans = new Map<string, PlannedFixtureReplace>();
+  const appliedReplaces = new Map<string, PlannedFixtureReplace>();
 
   function discoverLink(sourcePath: string): LinkImportCandidate {
     const finalEntityPath = sourcePath.replace(/\/+$/, "");
@@ -178,6 +186,92 @@ export function createFixtureCatalogClient(): CatalogClient {
       plans.set(planToken, preview);
       return preview;
     },
+    async activationConflictDetails(skillId, agentId) {
+      const skill = skills.find(({ id }) => id === skillId);
+      const agent = fixture.agents.find(({ id }) => id === agentId);
+      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
+      return {
+        skillId,
+        agentId,
+        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
+        targetPath: skill.finalEntityPath,
+        occupier: {
+          kind: "real_directory",
+          symlinkTarget: null,
+          finalEntityPath: `${agent.skillsPath}/${skill.directoryName}`,
+          directoryName: skill.directoryName,
+          isSkill: true,
+          adoptable: true,
+          notAdoptableReason: null,
+        },
+      };
+    },
+    async planActivationReplace(skillId, agentId) {
+      const skill = skills.find(({ id }) => id === skillId);
+      const agent = fixture.agents.find(({ id }) => id === agentId);
+      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
+      const planToken = `fixture-replace-plan-${nextPlanId++}`;
+      const operationId = `fixture-replace-${nextPlanId}`;
+      const preview: PlannedFixtureReplace = {
+        planToken,
+        operationId,
+        skillId,
+        agentId,
+        skillDirectoryName: skill.directoryName,
+        agentName: agent.name,
+        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
+        targetPath: skill.finalEntityPath,
+        backupPath: `${skill.directoryName}.backup`,
+        occupantKind: "real_directory",
+      };
+      replacePlans.set(planToken, preview);
+      return preview;
+    },
+    async applyActivationReplace(planToken) {
+      const plan = replacePlans.get(planToken);
+      if (!plan)
+        throw { code: "plan_stale", message: "Replace preview expired." };
+      replacePlans.delete(planToken);
+      const current = enabledSkillIds.get(plan.agentId) ?? [];
+      enabledSkillIds.set(
+        plan.agentId,
+        Array.from(new Set([...current, plan.skillId])),
+      );
+      observedStates.set(`${plan.agentId}:${plan.skillId}`, "present");
+      appliedReplaces.set(plan.operationId, plan);
+      snapshotVersion += 1;
+      return {
+        skillId: plan.skillId,
+        agentId: plan.agentId,
+        desiredEnabled: true,
+        observedState: "present",
+        snapshotVersion,
+      };
+    },
+    async cancelActivationReplace(planToken) {
+      return replacePlans.delete(planToken);
+    },
+    async undoActivationReplace(operationId) {
+      const plan = appliedReplaces.get(operationId);
+      if (!plan)
+        throw { code: "plan_stale", message: "Replace already finalized." };
+      appliedReplaces.delete(operationId);
+      const current = enabledSkillIds.get(plan.agentId) ?? [];
+      enabledSkillIds.set(
+        plan.agentId,
+        current.filter((skillId) => skillId !== plan.skillId),
+      );
+      observedStates.set(`${plan.agentId}:${plan.skillId}`, "occupied");
+      snapshotVersion += 1;
+      return {
+        undone: true,
+        error: null,
+        snapshotVersion,
+      };
+    },
+    async finalizeActivationReplace(operationId) {
+      appliedReplaces.delete(operationId);
+    },
     async runActivationHealthCheck() {
       return {
         checked: Array.from(enabledSkillIds.values()).reduce(
@@ -285,13 +379,19 @@ export function createFixtureCatalogClient(): CatalogClient {
       return linkImportPlans.delete(planToken);
     },
     async discoverGitImport() {
-      return fixtureUnsupported("Git Import is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Git Import is not available in the preview fixture",
+      );
     },
     async planGitImportSelection() {
-      return fixtureUnsupported("Git Import is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Git Import is not available in the preview fixture",
+      );
     },
     async applyGitImportSelection() {
-      return fixtureUnsupported("Git Import is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Git Import is not available in the preview fixture",
+      );
     },
     async cancelGitImportSelection() {
       return false;
@@ -300,28 +400,44 @@ export function createFixtureCatalogClient(): CatalogClient {
       return { groups: [], errors: [] };
     },
     async planSkillUpdates() {
-      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+      return fixtureUnsupported(
+        "Skill Updates are not available in the preview fixture",
+      );
     },
     async applySkillUpdates() {
-      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+      return fixtureUnsupported(
+        "Skill Updates are not available in the preview fixture",
+      );
     },
     async pinSkillUpdates() {
-      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+      return fixtureUnsupported(
+        "Skill Updates are not available in the preview fixture",
+      );
     },
     async scanAdopt() {
-      return fixtureUnsupported("Adopt is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Adopt is not available in the preview fixture",
+      );
     },
     async planAdopt() {
-      return fixtureUnsupported("Adopt is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Adopt is not available in the preview fixture",
+      );
     },
     async applyAdopt() {
-      return fixtureUnsupported("Adopt is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Adopt is not available in the preview fixture",
+      );
     },
     async undoAdopt() {
-      return fixtureUnsupported("Adopt is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Adopt is not available in the preview fixture",
+      );
     },
     async finalizeAdopt() {
-      return fixtureUnsupported("Adopt is not available in the preview fixture");
+      return fixtureUnsupported(
+        "Adopt is not available in the preview fixture",
+      );
     },
     async cancelAdopt() {
       return false;

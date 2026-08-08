@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import type {
+  ActivationConflictDetails,
   ActivationPreview,
+  ActivationReplacePreview,
+  ActivationReplaceUndoResult,
+  ActivationResult,
   AdoptPlan,
   AdoptResult,
   AdoptScanReport,
@@ -47,9 +51,24 @@ export function App({ client }: AppProps) {
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [activationError, setActivationError] = useState<string | null>(null);
-  const [activationConflict, setActivationConflict] = useState<string | null>(
+  const [activationConflict, setActivationConflict] =
+    useState<ActivationConflictDetails | null>(null);
+  const [activationConflictMessage, setActivationConflictMessage] = useState<
+    string | null
+  >(null);
+  const [replacePreview, setReplacePreview] =
+    useState<ActivationReplacePreview | null>(null);
+  const [replaceOperationId, setReplaceOperationId] = useState<string | null>(
     null,
   );
+  const [replaceResult, setReplaceResult] = useState<ActivationResult | null>(
+    null,
+  );
+  const [replaceUndo, setReplaceUndo] =
+    useState<ActivationReplaceUndoResult | null>(null);
+  const [replaceError, setReplaceError] = useState<string | null>(null);
+  const [isApplyingReplace, setIsApplyingReplace] = useState(false);
+  const [isUndoingReplace, setIsUndoingReplace] = useState(false);
   const [activationPreview, setActivationPreview] =
     useState<ActivationPreview | null>(null);
   const [activationTriggerControlId, setActivationTriggerControlId] = useState<
@@ -61,8 +80,7 @@ export function App({ client }: AppProps) {
   const [isLinkImportOpen, setIsLinkImportOpen] = useState(false);
   const [importKind, setImportKind] = useState<ImportKind>("link");
   const [gitImportSource, setGitImportSource] = useState("");
-  const [gitImportForceFullDepth, setGitImportForceFullDepth] =
-    useState(false);
+  const [gitImportForceFullDepth, setGitImportForceFullDepth] = useState(false);
   const [gitImportDiscovery, setGitImportDiscovery] =
     useState<GitImportDiscovery | null>(null);
   const [gitImportSelected, setGitImportSelected] = useState<string[]>([]);
@@ -223,12 +241,13 @@ export function App({ client }: AppProps) {
     setPendingAgentId(agentId);
     setActivationError(null);
     setActivationConflict(null);
+    setActivationConflictMessage(null);
     try {
       setActivationPreview(
         await client.planActivation(selectedId, agentId, enabled),
       );
     } catch (reason) {
-      await handleActivationPlanError(reason, selectedId);
+      await handleActivationPlanError(reason, selectedId, agentId);
     } finally {
       setPendingAgentId(null);
     }
@@ -240,21 +259,33 @@ export function App({ client }: AppProps) {
     setPendingAgentId(agentId);
     setActivationError(null);
     setActivationConflict(null);
+    setActivationConflictMessage(null);
     try {
       setActivationPreview(
         await client.planActivationRepair(selectedId, agentId),
       );
     } catch (reason) {
-      await handleActivationPlanError(reason, selectedId);
+      await handleActivationPlanError(reason, selectedId, agentId);
     } finally {
       setPendingAgentId(null);
     }
   }
 
-  async function handleActivationPlanError(reason: unknown, skillId: string) {
+  async function handleActivationPlanError(
+    reason: unknown,
+    skillId: string,
+    agentId: string,
+  ) {
     const failure = readCommandError(reason);
     if (failure.code === "conflict") {
-      setActivationConflict(failure.message);
+      setActivationConflictMessage(failure.message);
+      try {
+        setActivationConflict(
+          await client.activationConflictDetails(skillId, agentId),
+        );
+      } catch {
+        // Keep the message-only Conflict sheet when details are unavailable.
+      }
     } else {
       setActivationError(failure.message);
     }
@@ -281,17 +312,10 @@ export function App({ client }: AppProps) {
     if (!activationPreview || !selectedId) return;
     setIsApplyingActivation(true);
     setActivationError(null);
+    const { skillId, agentId } = activationPreview;
     try {
       await client.applyActivation(activationPreview.planToken);
-      const [snapshot, nextDetail, nextAgents] = await Promise.all([
-        client.listSkills(filter),
-        client.inspectSkill(selectedId),
-        client.listAgents(selectedId),
-      ]);
-      setSkills(snapshot.items);
-      setDetail(nextDetail);
-      setAgents(nextAgents);
-      setAgentsReadyForSkillId(selectedId);
+      await refreshAfterActivationChange();
       setActivationPreview(null);
     } catch (reason) {
       const failure = readCommandError(reason);
@@ -302,7 +326,14 @@ export function App({ client }: AppProps) {
         // Keep the Apply failure as the primary actionable message.
       }
       if (failure.code === "conflict") {
-        setActivationConflict(failure.message);
+        setActivationConflictMessage(failure.message);
+        try {
+          setActivationConflict(
+            await client.activationConflictDetails(skillId, agentId),
+          );
+        } catch {
+          // Keep the message-only Conflict sheet when details are unavailable.
+        }
       } else {
         setActivationError(failure.message);
       }
@@ -312,12 +343,133 @@ export function App({ client }: AppProps) {
     }
   }
 
-  function openLinkImport() {
-    linkImportRunId.current += 1;
-    setLinkImportPreview(null);
-    setLinkImportResult(null);
-    setLinkImportError(null);
-    setIsLinkImportOpen(true);
+  async function refreshAfterActivationChange() {
+    if (!selectedId) return;
+    const [snapshot, nextDetail, nextAgents] = await Promise.all([
+      client.listSkills(filter),
+      client.inspectSkill(selectedId),
+      client.listAgents(selectedId),
+    ]);
+    setSkills(snapshot.items);
+    setDetail(nextDetail);
+    setAgents(nextAgents);
+    setAgentsReadyForSkillId(selectedId);
+  }
+
+  // -- Activation Conflict: Adopt existing item / Remove then replace / Cancel
+
+  /** Adopt the occupying item instead of replacing it: hand off to the Adopt
+   *  flow with that candidate pre-selected. */
+  async function adoptFromConflict(canonicalEntity: string) {
+    setActivationConflict(null);
+    setActivationConflictMessage(null);
+    setReplacePreview(null);
+    setReplaceOperationId(null);
+    setReplaceResult(null);
+    setReplaceUndo(null);
+    setReplaceError(null);
+    setIsAdoptOpen(true);
+    setAdoptReport(null);
+    setAdoptSelected([]);
+    setAdoptPlan(null);
+    setAdoptResult(null);
+    setAdoptUndo(null);
+    setAdoptError(null);
+    const runId = ++adoptRunId.current;
+    setAdoptActivity("scanning");
+    try {
+      const report = await client.scanAdopt();
+      if (runId !== adoptRunId.current) return;
+      setAdoptReport(report);
+      setAdoptSelected(
+        report.candidates.some(
+          (candidate) => candidate.canonicalEntity === canonicalEntity,
+        )
+          ? [canonicalEntity]
+          : [],
+      );
+    } catch (reason) {
+      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
+  }
+
+  async function planReplace() {
+    if (!activationConflict) return;
+    const { skillId, agentId } = activationConflict;
+    setReplaceError(null);
+    setReplacePreview(null);
+    try {
+      setReplacePreview(await client.planActivationReplace(skillId, agentId));
+    } catch (reason) {
+      setReplaceError(readError(reason));
+    }
+  }
+
+  async function applyReplace() {
+    if (!replacePreview) return;
+    setIsApplyingReplace(true);
+    setReplaceError(null);
+    const operationId = replacePreview.operationId;
+    try {
+      const result = await client.applyActivationReplace(
+        replacePreview.planToken,
+      );
+      await refreshAfterActivationChange();
+      setReplacePreview(null);
+      setReplaceOperationId(operationId);
+      setReplaceResult(result);
+    } catch (reason) {
+      setReplacePreview(null);
+      setReplaceError(readError(reason));
+    } finally {
+      setIsApplyingReplace(false);
+    }
+  }
+
+  async function undoReplace() {
+    if (!replaceOperationId) return;
+    setIsUndoingReplace(true);
+    setReplaceError(null);
+    try {
+      const undo = await client.undoActivationReplace(replaceOperationId);
+      await refreshAfterActivationChange();
+      setReplaceUndo(undo);
+    } catch (reason) {
+      setReplaceError(readError(reason));
+    } finally {
+      setIsUndoingReplace(false);
+    }
+  }
+
+  function closeActivationConflict() {
+    if (isApplyingReplace || isUndoingReplace) return;
+    const planToken = replacePreview?.planToken;
+    // Undo that fully succeeded already finished the journal; any other
+    // outcome (no undo, skipped or failed undo) leaves a committed backup
+    // that must be discarded on close.
+    const operationId =
+      replaceOperationId && (!replaceUndo || !replaceUndo.undone)
+        ? replaceOperationId
+        : null;
+    setActivationConflict(null);
+    setActivationConflictMessage(null);
+    setReplacePreview(null);
+    setReplaceOperationId(null);
+    setReplaceResult(null);
+    setReplaceUndo(null);
+    setReplaceError(null);
+    if (planToken) {
+      client.cancelActivationReplace(planToken).catch((reason) => {
+        setActivationError(readError(reason));
+      });
+    }
+    if (operationId) {
+      client.finalizeActivationReplace(operationId).catch((reason) => {
+        setActivationError(readError(reason));
+      });
+    }
   }
 
   async function previewLinkImport(sourcePath: string) {
@@ -359,23 +511,6 @@ export function App({ client }: AppProps) {
       setLinkImportError(readError(reason));
     } finally {
       if (runId === linkImportRunId.current) setLinkImportActivity("idle");
-    }
-  }
-
-  async function closeLinkImport() {
-    if (linkImportActivity === "applying") return;
-    linkImportRunId.current += 1;
-    const planToken = linkImportPreview?.planToken;
-    setIsLinkImportOpen(false);
-    setLinkImportPreview(null);
-    setLinkImportResult(null);
-    setLinkImportError(null);
-    setLinkImportActivity("idle");
-    if (!planToken) return;
-    try {
-      await client.cancelLinkImport(planToken);
-    } catch (reason) {
-      setError(readError(reason));
     }
   }
 
@@ -641,7 +776,9 @@ export function App({ client }: AppProps) {
       setAdoptReport(report);
       setAdoptSelected(
         report.candidates
-          .filter((candidate) => candidate.adoptable && candidate.risk === "none")
+          .filter(
+            (candidate) => candidate.adoptable && candidate.risk === "none",
+          )
           .map((candidate) => candidate.canonicalEntity),
       );
     } catch (reason) {
@@ -753,6 +890,13 @@ export function App({ client }: AppProps) {
       error={error}
       activationError={activationError}
       activationConflict={activationConflict}
+      activationConflictMessage={activationConflictMessage}
+      replacePreview={replacePreview}
+      replaceResult={replaceResult}
+      replaceUndo={replaceUndo}
+      replaceError={replaceError}
+      isApplyingReplace={isApplyingReplace}
+      isUndoingReplace={isUndoingReplace}
       activationPreview={activationPreview}
       activationTriggerControlId={activationTriggerControlId}
       pendingAgentId={pendingAgentId}
@@ -782,7 +926,11 @@ export function App({ client }: AppProps) {
       onRequestActivationRepair={requestActivationRepair}
       onApplyActivation={applyActivation}
       onCancelActivation={cancelActivation}
-      onCloseActivationConflict={() => setActivationConflict(null)}
+      onCloseActivationConflict={closeActivationConflict}
+      onAdoptFromConflict={adoptFromConflict}
+      onPlanReplace={planReplace}
+      onApplyReplace={applyReplace}
+      onUndoReplace={undoReplace}
       onOpenLinkImport={openImport}
       onImportKindChange={setImportKind}
       onPreviewLinkImport={previewLinkImport}

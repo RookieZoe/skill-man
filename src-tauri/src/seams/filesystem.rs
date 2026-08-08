@@ -17,6 +17,64 @@ pub struct DirectoryFingerprint {
     pub inode: u64,
 }
 
+/// The content occupying an Activation entry when Remove-then-replace is
+/// planned. The snapshot identifies the entry before it is moved to backup;
+/// same-volume moves preserve device+inode so the moved object can be
+/// re-identified at Undo and during startup recovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OccupantKind {
+    RealDirectory,
+    Symlink { target: PathBuf },
+    File { length: u64 },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OccupantSnapshot {
+    pub kind: OccupantKind,
+    pub device: u64,
+    pub inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationReplacePhase {
+    /// The occupant has been moved to backup (or the move is pending); the
+    /// catalog write decides whether recovery rolls forward or back.
+    Applying,
+    /// The replace succeeded; the backup is retained only while the result
+    /// window is open, then discarded.
+    Committed,
+    /// Undo is in progress: the Activation may already be removed. Recovery
+    /// completes the restore and never discards the backup.
+    Undoing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ActivationReplaceJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: ActivationReplacePhase,
+    pub skill_id: String,
+    pub agent_id: String,
+    pub entry_path: PathBuf,
+    pub target_path: PathBuf,
+    pub backup_path: PathBuf,
+    pub occupant: OccupantSnapshot,
+}
+
+/// A desired Activation as recorded in the catalog; used at startup to decide
+/// whether an interrupted Remove-then-replace had committed its catalog write.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActivationRecoveryBaseline {
+    pub skill_id: String,
+    pub agent_id: String,
+    pub expected_entry_path: PathBuf,
+    pub expected_target_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillFingerprint {
     pub directory: DirectoryFingerprint,
@@ -416,6 +474,127 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<(), FileSystemError>;
 
     fn remove_activation(&self, entry_path: &Path) -> Result<(), FileSystemError>;
+
+    /// Snapshot the content occupying an Activation entry: kind, symlink
+    /// target or file length, and the device+inode identity.
+    fn occupant_snapshot(&self, path: &Path) -> Result<OccupantSnapshot, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "snapshot Activation occupant",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation occupant snapshots are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Move the occupying entry to the operation backup (same-volume rename,
+    /// cross-volume verified copy); the entry must still match `expected`.
+    fn move_occupant_to_backup(
+        &self,
+        entry_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let _ = (entry_path, backup_path, library_root, expected);
+        Err(FileSystemError::Io {
+            operation: "back up Activation occupant",
+            path: entry_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation occupant backups are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Move the backed-up occupant back to its entry; the entry must be
+    /// absent and the backup must still match `expected`.
+    fn restore_occupant_from_backup(
+        &self,
+        backup_path: &Path,
+        entry_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let _ = (backup_path, entry_path, library_root, expected);
+        Err(FileSystemError::Io {
+            operation: "restore Activation occupant",
+            path: backup_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation occupant restores are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Discard a committed backup after verifying it still matches `expected`
+    /// (or is already gone). Never used while an Undo is in progress.
+    fn discard_replace_backup(
+        &self,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+    ) -> Result<(), FileSystemError> {
+        let _ = (backup_path, library_root, expected);
+        Err(FileSystemError::Io {
+            operation: "discard Activation occupant backup",
+            path: backup_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation occupant backups are not supported by this filesystem",
+            ),
+        })
+    }
+
+    fn write_activation_replace_journal(
+        &self,
+        library_root: &Path,
+        journal: &ActivationReplaceJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "write Activation replace journal",
+            path: PathBuf::from(&journal.operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation replace journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    fn finish_activation_replace_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "finish Activation replace journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation replace journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    fn recover_activation_replace_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[ActivationRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let _ = (library_root, baselines);
+        Err(FileSystemError::Io {
+            operation: "recover Activation replace journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Activation replace journal recovery is not supported by this filesystem",
+            ),
+        })
+    }
 
     /// List the top-level entries of an Agent skills directory for the
     /// Adopt scan: real directories and symlinks (resolved with the same

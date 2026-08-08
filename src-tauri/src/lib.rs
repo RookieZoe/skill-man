@@ -29,15 +29,17 @@ pub fn run() {
     use crate::tauri_adapter::adopt_api::AdoptApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
-        apply_activation, apply_adopt, apply_file_import, apply_file_import_selection,
-        apply_git_import_selection, apply_link_import, apply_skill_updates, cancel_activation,
+        activation_conflict_details, apply_activation, apply_activation_replace, apply_adopt,
+        apply_file_import, apply_file_import_selection, apply_git_import_selection,
+        apply_link_import, apply_skill_updates, cancel_activation, cancel_activation_replace,
         cancel_adopt, cancel_file_import, cancel_git_import_selection, cancel_link_import,
         check_skill_updates, discover_file_import, discover_file_import_collection,
-        discover_git_import, discover_link_import, finalize_adopt, inspect_skill, list_agents,
-        list_skills, pin_skill_updates, plan_activation, plan_activation_repair, plan_adopt,
-        plan_file_import, plan_file_import_selection, plan_file_reinstall,
-        plan_git_import_selection, plan_link_import, plan_skill_updates,
-        run_activation_health_check, scan_adopt, undo_adopt,
+        discover_git_import, discover_link_import, finalize_activation_replace, finalize_adopt,
+        inspect_skill, list_agents, list_skills, pin_skill_updates, plan_activation,
+        plan_activation_repair, plan_activation_replace, plan_adopt, plan_file_import,
+        plan_file_import_selection, plan_file_reinstall, plan_git_import_selection,
+        plan_link_import, plan_skill_updates, run_activation_health_check, scan_adopt,
+        undo_activation_replace, undo_adopt,
     };
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
@@ -114,9 +116,10 @@ pub fn run() {
                 .with_recovery_gate(recovery_gate.clone()),
             ));
             app.manage(ActivationApi::new(
-                ActivationService::new(runtime_store, filesystem, library_root)
+                ActivationService::new(runtime_store.clone(), filesystem, library_root)
                     .with_recovery_gate(recovery_gate)
-                    .with_agent_adapters(Arc::new(BuiltInAgentAdapters)),
+                    .with_agent_adapters(Arc::new(BuiltInAgentAdapters))
+                    .with_conflict_checker(runtime_store),
             ));
             Ok(())
         })
@@ -129,6 +132,12 @@ pub fn run() {
             plan_activation_repair,
             apply_activation,
             cancel_activation,
+            activation_conflict_details,
+            plan_activation_replace,
+            apply_activation_replace,
+            cancel_activation_replace,
+            undo_activation_replace,
+            finalize_activation_replace,
             discover_link_import,
             plan_link_import,
             apply_link_import,

@@ -15,7 +15,7 @@ use crate::seams::adopt_store::{
 };
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
-use crate::seams::filesystem::FileSystem;
+use crate::seams::filesystem::{ActivationRecoveryBaseline, FileSystem};
 use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
     RemoteImportRecord, RemoteInstallRecord,
@@ -394,5 +394,47 @@ impl MaintenanceStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.record_skill_health(observations)
+    }
+
+    fn desired_activation_baselines(
+        &self,
+    ) -> Result<Vec<ActivationRecoveryBaseline>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only; Activation replace recovery baselines are unavailable"
+                    .into(),
+            ));
+        }
+        crate::seams::activation_store::ActivationStore::desired_activations(self.sqlite.as_ref())
+            .map(|activations| {
+                activations
+                    .into_iter()
+                    .map(|activation| ActivationRecoveryBaseline {
+                        skill_id: activation.skill_id.0,
+                        agent_id: activation.agent_id.0,
+                        expected_entry_path: activation.expected_entry_path,
+                        expected_target_path: activation.expected_target_path,
+                    })
+                    .collect()
+            })
+            .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
+    }
+}
+
+impl crate::core::activation::ActivationConflictChecker for RuntimeCatalogStore {
+    fn library_identity_conflict(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<AdoptConflict>, ActivationStoreError> {
+        if !self.is_writable() {
+            return Err(ActivationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::adopt_store::AdoptStore::find_library_conflict(
+            self.sqlite.as_ref(),
+            identity_key,
+        )
+        .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))
     }
 }

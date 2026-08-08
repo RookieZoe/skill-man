@@ -2,9 +2,12 @@ use crate::core::activation::{ActivationError, ActivationService, SetActivation}
 use crate::core::domain::{AgentId, SkillId};
 use crate::seams::filesystem::FileSystemError;
 use crate::tauri_adapter::dto::{
-    ActivationPreviewDto, ActivationResultDto, ApplyActivationRequestDto,
-    CancelActivationRequestDto, CommandErrorDto, PlanActivationRepairRequestDto,
-    PlanActivationRequestDto,
+    ActivationConflictDetailsDto, ActivationConflictRequestDto, ActivationPreviewDto,
+    ActivationReplacePreviewDto, ActivationReplaceUndoResultDto, ActivationResultDto,
+    ApplyActivationReplaceRequestDto, ApplyActivationRequestDto, CancelActivationReplaceRequestDto,
+    CancelActivationRequestDto, CommandErrorDto, FinalizeActivationReplaceRequestDto,
+    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
+    UndoActivationReplaceRequestDto,
 };
 
 pub struct ActivationApi {
@@ -56,6 +59,64 @@ impl ActivationApi {
     ) -> Result<bool, CommandErrorDto> {
         self.activation
             .cancel(&request.plan_token)
+            .map_err(command_error)
+    }
+
+    pub fn activation_conflict_details(
+        &self,
+        request: ActivationConflictRequestDto,
+    ) -> Result<ActivationConflictDetailsDto, CommandErrorDto> {
+        self.activation
+            .conflict_details(&SkillId(request.skill_id), &AgentId(request.agent_id))
+            .map(ActivationConflictDetailsDto::from)
+            .map_err(command_error)
+    }
+
+    pub fn plan_activation_replace(
+        &self,
+        request: PlanActivationReplaceRequestDto,
+    ) -> Result<ActivationReplacePreviewDto, CommandErrorDto> {
+        self.activation
+            .plan_replace(&SkillId(request.skill_id), &AgentId(request.agent_id))
+            .map(ActivationReplacePreviewDto::from)
+            .map_err(command_error)
+    }
+
+    pub fn apply_activation_replace(
+        &self,
+        request: ApplyActivationReplaceRequestDto,
+    ) -> Result<ActivationResultDto, CommandErrorDto> {
+        self.activation
+            .apply_replace(&request.plan_token)
+            .map(ActivationResultDto::from)
+            .map_err(command_error)
+    }
+
+    pub fn cancel_activation_replace(
+        &self,
+        request: CancelActivationReplaceRequestDto,
+    ) -> Result<bool, CommandErrorDto> {
+        self.activation
+            .cancel_replace(&request.plan_token)
+            .map_err(command_error)
+    }
+
+    pub fn undo_activation_replace(
+        &self,
+        request: UndoActivationReplaceRequestDto,
+    ) -> Result<ActivationReplaceUndoResultDto, CommandErrorDto> {
+        self.activation
+            .undo_replace(&request.operation_id)
+            .map(ActivationReplaceUndoResultDto::from)
+            .map_err(command_error)
+    }
+
+    pub fn finalize_activation_replace(
+        &self,
+        request: FinalizeActivationReplaceRequestDto,
+    ) -> Result<(), CommandErrorDto> {
+        self.activation
+            .finalize_replace(&request.operation_id)
             .map_err(command_error)
     }
 }

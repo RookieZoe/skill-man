@@ -46,6 +46,8 @@ export interface AgentActivation {
 
 export interface ActivationPreview {
   planToken: string;
+  skillId: string;
+  agentId: string;
   skillDirectoryName: string;
   agentName: string;
   enabled: boolean;
@@ -53,6 +55,43 @@ export interface ActivationPreview {
   entryPath: string;
   targetPath: string;
   compatibilityWarning: string | null;
+}
+
+export type OccupierKind = "real_directory" | "symlink" | "file";
+
+export interface OccupierSummary {
+  kind: OccupierKind;
+  symlinkTarget: string | null;
+  finalEntityPath: string | null;
+  directoryName: string;
+  isSkill: boolean;
+  adoptable: boolean;
+  notAdoptableReason: string | null;
+}
+
+export interface ActivationConflictDetails {
+  skillId: string;
+  agentId: string;
+  entryPath: string;
+  targetPath: string;
+  occupier: OccupierSummary;
+}
+
+export interface ActivationReplacePreview {
+  planToken: string;
+  operationId: string;
+  skillDirectoryName: string;
+  agentName: string;
+  entryPath: string;
+  targetPath: string;
+  backupPath: string;
+  occupantKind: OccupierKind;
+}
+
+export interface ActivationReplaceUndoResult {
+  undone: boolean;
+  error: string | null;
+  snapshotVersion: number;
 }
 
 export interface ActivationHealthReport {
@@ -305,6 +344,20 @@ export interface CatalogClient {
     skillId: string,
     agentId: string,
   ): Promise<ActivationPreview>;
+  activationConflictDetails(
+    skillId: string,
+    agentId: string,
+  ): Promise<ActivationConflictDetails>;
+  planActivationReplace(
+    skillId: string,
+    agentId: string,
+  ): Promise<ActivationReplacePreview>;
+  applyActivationReplace(planToken: string): Promise<ActivationResult>;
+  cancelActivationReplace(planToken: string): Promise<boolean>;
+  undoActivationReplace(
+    operationId: string,
+  ): Promise<ActivationReplaceUndoResult>;
+  finalizeActivationReplace(operationId: string): Promise<void>;
   runActivationHealthCheck(): Promise<ActivationHealthReport>;
   applyActivation(planToken: string): Promise<ActivationResult>;
   cancelActivation(planToken: string): Promise<boolean>;
@@ -358,6 +411,36 @@ const tauriCatalogClient: CatalogClient = {
   planActivationRepair(skillId, agentId) {
     return invoke<ActivationPreview>("plan_activation_repair", {
       request: { skillId, agentId },
+    });
+  },
+  activationConflictDetails(skillId, agentId) {
+    return invoke<ActivationConflictDetails>("activation_conflict_details", {
+      request: { skillId, agentId },
+    });
+  },
+  planActivationReplace(skillId, agentId) {
+    return invoke<ActivationReplacePreview>("plan_activation_replace", {
+      request: { skillId, agentId },
+    });
+  },
+  applyActivationReplace(planToken) {
+    return invoke<ActivationResult>("apply_activation_replace", {
+      request: { planToken },
+    });
+  },
+  cancelActivationReplace(planToken) {
+    return invoke<boolean>("cancel_activation_replace", {
+      request: { planToken },
+    });
+  },
+  undoActivationReplace(operationId) {
+    return invoke<ActivationReplaceUndoResult>("undo_activation_replace", {
+      request: { operationId },
+    });
+  },
+  finalizeActivationReplace(operationId) {
+    return invoke<void>("finalize_activation_replace", {
+      request: { operationId },
     });
   },
   runActivationHealthCheck() {

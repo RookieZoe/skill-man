@@ -101,6 +101,9 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_adopt_journals(library_root, &baselines, &entities)?;
+            let desired_activations = self.store.desired_activation_baselines()?;
+            self.filesystem
+                .recover_activation_replace_journals(library_root, &desired_activations)?;
         }
         Ok(())
     }

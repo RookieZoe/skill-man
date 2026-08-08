@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::activation::{ActivationPlanKind, ActivationPreview, ActivationResult};
+use crate::core::activation::{
+    ActivationConflictDetails, ActivationPlanKind, ActivationPreview, ActivationReplacePreview,
+    ActivationReplaceUndoResult, ActivationResult, OccupierKind, OccupierSummary,
+};
 use crate::core::adopt::{AdoptAppearance, AdoptAppearanceKind, AdoptCandidate, AdoptRisk};
 use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
@@ -275,6 +278,8 @@ pub struct CancelActivationRequestDto {
 #[serde(rename_all = "camelCase")]
 pub struct ActivationPreviewDto {
     pub plan_token: String,
+    pub skill_id: String,
+    pub agent_id: String,
     pub skill_directory_name: String,
     pub agent_name: String,
     pub enabled: bool,
@@ -306,6 +311,8 @@ impl From<ActivationPreview> for ActivationPreviewDto {
     fn from(value: ActivationPreview) -> Self {
         Self {
             plan_token: value.plan_token,
+            skill_id: value.skill_id.0,
+            agent_id: value.agent_id.0,
             skill_directory_name: value.skill_directory_name,
             agent_name: value.agent_name,
             enabled: value.enabled,
@@ -342,7 +349,6 @@ pub struct ActivationResultDto {
     pub observed_state: ActivationObservedStateDto,
     pub snapshot_version: u64,
 }
-
 impl From<ActivationResult> for ActivationResultDto {
     fn from(value: ActivationResult) -> Self {
         Self {
@@ -350,6 +356,162 @@ impl From<ActivationResult> for ActivationResultDto {
             agent_id: value.agent_id.0,
             desired_enabled: value.desired_enabled,
             observed_state: value.observed_state.into(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+// -- Activation Conflict (Enable 遇占用三选一) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationConflictRequestDto {
+    pub skill_id: String,
+    pub agent_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OccupierKindDto {
+    RealDirectory,
+    Symlink,
+    File,
+}
+
+impl From<OccupierKind> for OccupierKindDto {
+    fn from(value: OccupierKind) -> Self {
+        match value {
+            OccupierKind::RealDirectory => Self::RealDirectory,
+            OccupierKind::Symlink => Self::Symlink,
+            OccupierKind::File => Self::File,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OccupierSummaryDto {
+    pub kind: OccupierKindDto,
+    pub symlink_target: Option<String>,
+    pub final_entity_path: Option<String>,
+    pub directory_name: String,
+    pub is_skill: bool,
+    pub adoptable: bool,
+    pub not_adoptable_reason: Option<String>,
+}
+
+impl From<OccupierSummary> for OccupierSummaryDto {
+    fn from(value: OccupierSummary) -> Self {
+        Self {
+            kind: value.kind.into(),
+            symlink_target: value
+                .symlink_target
+                .map(|path| path.to_string_lossy().into_owned()),
+            final_entity_path: value
+                .final_entity_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            directory_name: value.directory_name,
+            is_skill: value.is_skill,
+            adoptable: value.adoptable,
+            not_adoptable_reason: value.not_adoptable_reason,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationConflictDetailsDto {
+    pub skill_id: String,
+    pub agent_id: String,
+    pub entry_path: String,
+    pub target_path: String,
+    pub occupier: OccupierSummaryDto,
+}
+
+impl From<ActivationConflictDetails> for ActivationConflictDetailsDto {
+    fn from(value: ActivationConflictDetails) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            agent_id: value.agent_id.0,
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            target_path: value.target_path.to_string_lossy().into_owned(),
+            occupier: value.occupier.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanActivationReplaceRequestDto {
+    pub skill_id: String,
+    pub agent_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationReplacePreviewDto {
+    pub plan_token: String,
+    pub operation_id: String,
+    pub skill_directory_name: String,
+    pub agent_name: String,
+    pub entry_path: String,
+    pub target_path: String,
+    pub backup_path: String,
+    pub occupant_kind: OccupierKindDto,
+}
+
+impl From<ActivationReplacePreview> for ActivationReplacePreviewDto {
+    fn from(value: ActivationReplacePreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            operation_id: value.operation_id,
+            skill_directory_name: value.skill_directory_name,
+            agent_name: value.agent_name,
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            target_path: value.target_path.to_string_lossy().into_owned(),
+            backup_path: value.backup_path.to_string_lossy().into_owned(),
+            occupant_kind: value.occupant_kind.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyActivationReplaceRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelActivationReplaceRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoActivationReplaceRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizeActivationReplaceRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationReplaceUndoResultDto {
+    pub undone: bool,
+    pub error: Option<String>,
+    pub snapshot_version: u64,
+}
+
+impl From<ActivationReplaceUndoResult> for ActivationReplaceUndoResultDto {
+    fn from(value: ActivationReplaceUndoResult) -> Self {
+        Self {
+            undone: value.undone,
+            error: value.error,
             snapshot_version: value.snapshot_version,
         }
     }

@@ -2,7 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { ImportKind, UpdatePanelState } from "../../app/App";
 import type {
+  ActivationConflictDetails,
   ActivationPreview,
+  ActivationReplacePreview,
+  ActivationReplaceUndoResult,
+  ActivationResult,
   AdoptPlan,
   AdoptResult,
   AdoptScanReport,
@@ -15,6 +19,8 @@ import type {
   Health,
   LinkImportPreview,
   LinkImportResult,
+  OccupierKind,
+  OccupierSummary,
   SkillDetail,
   SkillSummary,
   SourceKind,
@@ -37,7 +43,14 @@ interface LibraryDeskProps {
   agents: AgentActivation[];
   error: string | null;
   activationError: string | null;
-  activationConflict: string | null;
+  activationConflict: ActivationConflictDetails | null;
+  activationConflictMessage: string | null;
+  replacePreview: ActivationReplacePreview | null;
+  replaceResult: ActivationResult | null;
+  replaceUndo: ActivationReplaceUndoResult | null;
+  replaceError: string | null;
+  isApplyingReplace: boolean;
+  isUndoingReplace: boolean;
   activationPreview: ActivationPreview | null;
   activationTriggerControlId: string | null;
   pendingAgentId: string | null;
@@ -74,6 +87,10 @@ interface LibraryDeskProps {
   onApplyActivation: () => void;
   onCancelActivation: () => void;
   onCloseActivationConflict: () => void;
+  onAdoptFromConflict: (canonicalEntity: string) => void;
+  onPlanReplace: () => void;
+  onApplyReplace: () => void;
+  onUndoReplace: () => void;
   onOpenLinkImport: () => void;
   onImportKindChange: (kind: ImportKind) => void;
   onPreviewLinkImport: (sourcePath: string) => void;
@@ -109,6 +126,13 @@ export function LibraryDesk({
   error,
   activationError,
   activationConflict,
+  activationConflictMessage,
+  replacePreview,
+  replaceResult,
+  replaceUndo,
+  replaceError,
+  isApplyingReplace,
+  isUndoingReplace,
   activationPreview,
   activationTriggerControlId,
   pendingAgentId,
@@ -137,6 +161,10 @@ export function LibraryDesk({
   onApplyActivation,
   onCancelActivation,
   onCloseActivationConflict,
+  onAdoptFromConflict,
+  onPlanReplace,
+  onApplyReplace,
+  onUndoReplace,
   onOpenLinkImport,
   onImportKindChange,
   onPreviewLinkImport,
@@ -248,7 +276,18 @@ export function LibraryDesk({
       ) : null}
       {activationConflict ? (
         <ActivationConflictSheet
-          detail={activationConflict}
+          details={activationConflict}
+          message={activationConflictMessage}
+          replacePreview={replacePreview}
+          replaceResult={replaceResult}
+          replaceUndo={replaceUndo}
+          error={replaceError}
+          isApplying={isApplyingReplace}
+          isUndoing={isUndoingReplace}
+          onAdopt={onAdoptFromConflict}
+          onPlanReplace={onPlanReplace}
+          onApplyReplace={onApplyReplace}
+          onUndoReplace={onUndoReplace}
           onClose={onCloseActivationConflict}
         />
       ) : null}
@@ -550,11 +589,7 @@ function UpdateSection({
       <div className="update-toolbar">
         <h3 id="update-title">Updates</h3>
         {!hasChecked ? (
-          <button
-            type="button"
-            disabled={isBusy}
-            onClick={onCheckUpdates}
-          >
+          <button type="button" disabled={isBusy} onClick={onCheckUpdates}>
             {updatePanel.activity === "checking"
               ? "Checking"
               : "Check for updates"}
@@ -571,8 +606,7 @@ function UpdateSection({
         <div className="update-status">
           {item.hasUpdate ? (
             <p className="update-available" role="status">
-              Update available:{" "}
-              <code>{shortCommit(item.currentCommit)}</code> →{" "}
+              Update available: <code>{shortCommit(item.currentCommit)}</code> →{" "}
               <code>{shortCommit(item.resolvedCommit)}</code>
             </p>
           ) : (
@@ -604,11 +638,7 @@ function UpdateSection({
                     ? "Planning"
                     : "Reselect and update"}
                 </button>
-                <button
-                  type="button"
-                  disabled={isBusy}
-                  onClick={onPinUpdate}
-                >
+                <button type="button" disabled={isBusy} onClick={onPinUpdate}>
                   {updatePanel.activity === "pinning"
                     ? "Pinning"
                     : "Keep current version"}
@@ -665,11 +695,7 @@ function UpdateSection({
               >
                 {updatePanel.activity === "planning" ? "Planning" : "Update"}
               </button>
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={onPinUpdate}
-              >
+              <button type="button" disabled={isBusy} onClick={onPinUpdate}>
                 {updatePanel.activity === "pinning"
                   ? "Pinning"
                   : "Keep current version"}
@@ -844,13 +870,7 @@ function AdoptSheet({
 }) {
   const isBusy = activity !== "idle";
   const candidates = report?.candidates ?? [];
-  const step = result
-    ? "result"
-    : plan
-      ? "preview"
-      : report
-        ? "scan"
-        : "scan";
+  const step = result ? "result" : plan ? "preview" : report ? "scan" : "scan";
 
   return (
     <div
@@ -867,7 +887,10 @@ function AdoptSheet({
       >
         <ol className="import-progress" aria-label="Adopt progress">
           {(["scan", "preview", "result"] as const).map((stepName) => (
-            <li key={stepName} aria-current={step === stepName ? "step" : undefined}>
+            <li
+              key={stepName}
+              aria-current={step === stepName ? "step" : undefined}
+            >
               {capitalize(stepName)}
             </li>
           ))}
@@ -946,7 +969,10 @@ function AdoptSheet({
           <>
             <div className="activation-sheet-heading">
               <span className="eyebrow">Adopt preview</span>
-              <h2>Preview {plan.items.length} Skill{plan.items.length === 1 ? "" : "s"}</h2>
+              <h2>
+                Preview {plan.items.length} Skill
+                {plan.items.length === 1 ? "" : "s"}
+              </h2>
               <p>
                 Each Skill is its own transaction; a failure rolls back only
                 that Skill.
@@ -958,7 +984,10 @@ function AdoptSheet({
                   <div>
                     <strong>{item.directoryName}</strong>
                     <span className="candidate-path">
-                      {item.kind === "migrate" ? "moves into Library" : "registered as Link"} ·{" "}
+                      {item.kind === "migrate"
+                        ? "moves into Library"
+                        : "registered as Link"}{" "}
+                      ·{" "}
                       {item.targetAgents.length > 0
                         ? `enables on ${item.targetAgents
                             .map((agent) => agent.name)
@@ -1016,7 +1045,10 @@ function AdoptSheet({
                       checked={selected.includes(candidate.canonicalEntity)}
                       disabled={!candidate.adoptable || isBusy}
                       onChange={(event) =>
-                        onToggle(candidate.canonicalEntity, event.currentTarget.checked)
+                        onToggle(
+                          candidate.canonicalEntity,
+                          event.currentTarget.checked,
+                        )
                       }
                     />
                     <span>
@@ -1025,7 +1057,8 @@ function AdoptSheet({
                         {candidate.risk === "broken"
                           ? "Broken · target missing"
                           : candidate.risk === "external"
-                            ? "External · " + (candidate.riskReason ?? "outside home")
+                            ? "External · " +
+                              (candidate.riskReason ?? "outside home")
                             : candidate.conflict
                               ? `Conflict with "${candidate.conflict.directoryName}"`
                               : `${candidate.appearances.length} appearance${
@@ -1131,8 +1164,6 @@ function LinkImportSheet({
   const isApplying = activity === "applying";
   const isRunning = activity !== "idle" || gitImportActivity !== "idle";
   const isGit = kind === "git";
-  const gitIsDiscovering = gitImportActivity === "discovering";
-  const gitIsPlanning = gitImportActivity === "planning";
   const gitIsApplying = gitImportActivity === "applying";
   const gitStep = gitImportResult
     ? "result"
@@ -1462,7 +1493,9 @@ function GitImportFlow({
             Installed from {preview?.repoUrl ?? discovery?.repoUrl ?? "Git"} at
             commit{" "}
             <code>
-              {shortCommit(preview?.resolvedCommit ?? discovery?.resolvedCommit ?? "")}
+              {shortCommit(
+                preview?.resolvedCommit ?? discovery?.resolvedCommit ?? "",
+              )}
             </code>
             .
           </p>
@@ -1495,9 +1528,13 @@ function GitImportFlow({
       <>
         <div className="activation-sheet-heading">
           <span className="eyebrow">Import preview</span>
-          <h2>Preview {preview.items.length} Skill{preview.items.length === 1 ? "" : "s"}</h2>
+          <h2>
+            Preview {preview.items.length} Skill
+            {preview.items.length === 1 ? "" : "s"}
+          </h2>
           <p>
-            {preview.repoUrl} · <code>{shortCommit(preview.resolvedCommit)}</code>
+            {preview.repoUrl} ·{" "}
+            <code>{shortCommit(preview.resolvedCommit)}</code>
           </p>
         </div>
         <ul className="git-import-candidates git-import-preview-list">
@@ -1505,7 +1542,9 @@ function GitImportFlow({
             <li key={item.directoryName}>
               <div>
                 <strong>{item.directoryName}</strong>
-                <span className="candidate-path">{item.skillPath || "repo root"}</span>
+                <span className="candidate-path">
+                  {item.skillPath || "repo root"}
+                </span>
               </div>
               {item.conflict ? (
                 <span className="candidate-conflict" role="alert">
@@ -1550,7 +1589,9 @@ function GitImportFlow({
             disabled={!preview.canApply || isBusy}
             onClick={onApply}
           >
-            {isBusy ? "Importing" : `Install ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
+            {isBusy
+              ? "Importing"
+              : `Install ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
           </button>
         </div>
       </>
@@ -1566,7 +1607,8 @@ function GitImportFlow({
             {candidates.length} Skill{candidates.length === 1 ? "" : "s"} found
           </h2>
           <p>
-            {discovery.repoUrl} · <code>{shortCommit(discovery.resolvedCommit)}</code>
+            {discovery.repoUrl} ·{" "}
+            <code>{shortCommit(discovery.resolvedCommit)}</code>
             {discovery.truncated ? " · list truncated" : ""}
           </p>
         </div>
@@ -1670,7 +1712,9 @@ function GitImportFlow({
           disabled={!source.trim() || isBusy}
           onClick={() => onDiscover(source, forceFullDepth)}
         >
-          {activity === "discovering" ? "Fetching repository" : "Discover Skills"}
+          {activity === "discovering"
+            ? "Fetching repository"
+            : "Discover Skills"}
         </button>
       </div>
     </>
@@ -1785,65 +1829,296 @@ function ActivationPreviewSheet({
 }
 
 function ActivationConflictSheet({
-  detail,
+  details,
+  message,
+  replacePreview,
+  replaceResult,
+  replaceUndo,
+  error,
+  isApplying,
+  isUndoing,
+  onAdopt,
+  onPlanReplace,
+  onApplyReplace,
+  onUndoReplace,
   onClose,
 }: {
-  detail: string;
+  details: ActivationConflictDetails;
+  message: string | null;
+  replacePreview: ActivationReplacePreview | null;
+  replaceResult: ActivationResult | null;
+  replaceUndo: ActivationReplaceUndoResult | null;
+  error: string | null;
+  isApplying: boolean;
+  isUndoing: boolean;
+  onAdopt: (canonicalEntity: string) => void;
+  onPlanReplace: () => void;
+  onApplyReplace: () => void;
+  onUndoReplace: () => void;
   onClose: () => void;
 }) {
+  const isBusy = isApplying || isUndoing;
+  const sheet = useRef<HTMLElement>(null);
+  const replaceButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const step = replaceResult
+    ? "result"
+    : replacePreview
+      ? "preview"
+      : "conflict";
+  const occupier = details.occupier;
 
   useLayoutEffect(() => {
-    closeButton.current?.focus();
-  }, []);
+    if (step === "preview") {
+      replaceButton.current?.focus();
+    } else if (step === "result" && !replaceUndo) {
+      replaceButton.current?.focus();
+    } else {
+      closeButton.current?.focus();
+    }
+  }, [step, replaceUndo]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !isBusy) onClose();
       if (event.key === "Tab") {
-        event.preventDefault();
-        closeButton.current?.focus();
+        const buttons = Array.from(
+          sheet.current?.querySelectorAll("button") ?? [],
+        );
+        if (buttons.length === 0) return;
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          (last as HTMLButtonElement).focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          (first as HTMLButtonElement).focus();
+        }
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [isBusy, onClose]);
 
   return (
     <div
       className="activation-sheet-backdrop"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
+        if (event.currentTarget === event.target && !isBusy) onClose();
       }}
     >
       <section
+        ref={sheet}
         className="activation-sheet activation-conflict-sheet"
         role="dialog"
         aria-modal="true"
         aria-label="Activation conflict"
       >
-        <div className="activation-sheet-heading">
-          <span className="eyebrow">Conflict</span>
-          <h2>Activation path is occupied</h2>
-          <p>
-            Skill Man found existing content at the expected Agent entry and
-            left it unchanged.
-          </p>
-        </div>
-        <p className="activation-conflict-detail">{detail}</p>
-        <div className="activation-sheet-actions">
-          <button
-            ref={closeButton}
-            type="button"
-            className="activation-confirm-button"
-            onClick={onClose}
-          >
-            Keep existing content
-          </button>
-        </div>
+        {step === "conflict" ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Conflict</span>
+              <h2>Activation path is occupied</h2>
+              <p>
+                Skill Man found existing content at the expected Agent entry and
+                left it unchanged. Choose how to resolve it.
+              </p>
+            </div>
+            {message ? (
+              <p className="activation-conflict-detail">{message}</p>
+            ) : null}
+            <dl className="activation-paths">
+              <div>
+                <dt>Agent entry</dt>
+                <dd>{details.entryPath}</dd>
+              </div>
+              <div>
+                <dt>Would point to</dt>
+                <dd>{details.targetPath}</dd>
+              </div>
+            </dl>
+            <div className="conflict-occupier">
+              <strong>{occupierHeading(occupier)}</strong>
+              <span>{occupierDescription(occupier)}</span>
+              {occupier.adoptable ? null : occupier.notAdoptableReason ? (
+                <small className="candidate-conflict" role="status">
+                  {occupier.notAdoptableReason}
+                </small>
+              ) : null}
+            </div>
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Replace unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button
+                ref={closeButton}
+                type="button"
+                disabled={isBusy}
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!occupier.adoptable || !occupier.finalEntityPath}
+                onClick={() =>
+                  occupier.finalEntityPath
+                    ? onAdopt(occupier.finalEntityPath)
+                    : undefined
+                }
+              >
+                Adopt existing item
+              </button>
+              <button
+                ref={replaceButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={isBusy}
+                onClick={onPlanReplace}
+              >
+                Remove then replace
+              </button>
+            </div>
+          </>
+        ) : step === "preview" && replacePreview ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Replace</span>
+              <h2>Remove then replace {replacePreview.skillDirectoryName}</h2>
+              <p>
+                The occupying item is moved to a temporary backup before the
+                Activation is created in {replacePreview.agentName}.
+              </p>
+            </div>
+            <dl className="activation-paths">
+              <div>
+                <dt>Agent entry</dt>
+                <dd>{replacePreview.entryPath}</dd>
+              </div>
+              <div>
+                <dt>Final entity</dt>
+                <dd>{replacePreview.targetPath}</dd>
+              </div>
+              <div>
+                <dt>Temporary backup</dt>
+                <dd>{replacePreview.backupPath}</dd>
+              </div>
+            </dl>
+            <div className="activation-warning" role="status">
+              <strong>Explicit confirmation required</strong>
+              <span>
+                The existing {occupierKindLabel(replacePreview.occupantKind)} is
+                backed up while this window is open and is discarded when it
+                closes. Undo restores it before you close.
+              </span>
+            </div>
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Replace unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button
+                ref={closeButton}
+                type="button"
+                disabled={isBusy}
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button
+                ref={replaceButton}
+                type="button"
+                className="activation-confirm-button"
+                disabled={isBusy}
+                onClick={onApplyReplace}
+              >
+                {isApplying ? "Replacing" : "Remove and replace"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Replace complete</span>
+              <h2>Activation created</h2>
+              <p>
+                The Skill is enabled for this Agent. The previous item stays in
+                its temporary backup while this window is open.
+              </p>
+            </div>
+            {replaceUndo ? (
+              <div
+                className={
+                  replaceUndo.undone ? "update-result-ok" : "update-result-fail"
+                }
+                role="status"
+              >
+                {replaceUndo.undone
+                  ? "Previous item restored to its original location."
+                  : `Previous item not restored: ${replaceUndo.error ?? "unknown reason"}`}
+              </div>
+            ) : null}
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Replace unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button
+                ref={closeButton}
+                type="button"
+                disabled={isBusy}
+                onClick={onClose}
+              >
+                Close
+              </button>
+              {!replaceUndo ? (
+                <button
+                  ref={replaceButton}
+                  type="button"
+                  className="activation-confirm-button"
+                  disabled={isBusy}
+                  onClick={onUndoReplace}
+                >
+                  {isUndoing ? "Restoring" : "Restore previous item"}
+                </button>
+              ) : null}
+            </div>
+          </>
+        )}
       </section>
     </div>
   );
+}
+
+function occupierHeading(occupier: OccupierSummary) {
+  if (occupier.isSkill) {
+    return `${occupier.directoryName} · untracked Skill`;
+  }
+  return `${occupier.directoryName} · ${occupierKindLabel(occupier.kind)}`;
+}
+
+function occupierDescription(occupier: OccupierSummary) {
+  if (occupier.finalEntityPath) {
+    return `Resolves to ${occupier.finalEntityPath}`;
+  }
+  if (occupier.symlinkTarget) {
+    return `Symlink to ${occupier.symlinkTarget}`;
+  }
+  return "Existing content at the entry.";
+}
+
+function occupierKindLabel(kind: OccupierKind) {
+  if (kind === "real_directory") return "real directory";
+  if (kind === "symlink") return "symlink";
+  return "file";
 }
 
 function HealthNotice({ detail }: { detail: SkillDetail }) {

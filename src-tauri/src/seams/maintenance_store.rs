@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::core::domain::{Health, SkillId};
 use crate::seams::activation_store::ActivationStore;
+use crate::seams::filesystem::ActivationRecoveryBaseline;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSkillBaseline {
@@ -45,4 +46,14 @@ pub trait MaintenanceStore: ActivationStore {
     /// to decide whether an interrupted Adopt item had committed its catalog
     /// write before the process died.
     fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError>;
+
+    /// Every desired Activation; used to decide whether an interrupted
+    /// Remove-then-replace had committed its catalog write before the process
+    /// died. The default (no baselines) makes recovery roll uncommitted
+    /// replaces back — the safe direction for stores without Activation data.
+    fn desired_activation_baselines(
+        &self,
+    ) -> Result<Vec<ActivationRecoveryBaseline>, MaintenanceStoreError> {
+        Ok(Vec::new())
+    }
 }

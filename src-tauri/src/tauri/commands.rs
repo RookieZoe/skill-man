@@ -4,24 +4,27 @@ use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::adopt_api::AdoptApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AdoptPlanDto,
-    AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto, AgentActivationDto,
-    ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
-    ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
-    ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto, CancelActivationRequestDto,
-    CancelAdoptRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
-    CancelLinkImportRequestDto, CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
+    ActivationConflictDetailsDto, ActivationConflictRequestDto, ActivationHealthReportDto,
+    ActivationPreviewDto, ActivationReplacePreviewDto, ActivationReplaceUndoResultDto,
+    ActivationResultDto, AdoptPlanDto, AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto,
+    AgentActivationDto, ApplyActivationReplaceRequestDto, ApplyActivationRequestDto,
+    ApplyAdoptRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
+    ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto,
+    CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
+    CancelFileImportRequestDto, CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto,
+    CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
     FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
-    FileImportSelectionPreviewDto, FileImportSelectionResultDto, FinalizeAdoptRequestDto,
-    GitImportDiscoveryDto, GitImportSelectionPreviewDto, GitImportSelectionResultDto,
-    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
-    PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto, PlanActivationRequestDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto,
+    FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, GitImportDiscoveryDto,
+    GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
+    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, PinSkillUpdatesRequestDto,
+    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
-    PlanSkillUpdatesRequestDto, SkillDetailDto, UndoAdoptRequestDto, UpdateCheckReportDto,
-    UpdatePlanDto, UpdateResultDto,
+    PlanSkillUpdatesRequestDto, SkillDetailDto, UndoActivationReplaceRequestDto,
+    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
@@ -64,6 +67,53 @@ pub fn cancel_activation(
     request: CancelActivationRequestDto,
 ) -> Result<bool, CommandErrorDto> {
     state.cancel_activation(request)
+}
+#[tauri::command]
+pub fn activation_conflict_details(
+    state: State<'_, ActivationApi>,
+    request: ActivationConflictRequestDto,
+) -> Result<ActivationConflictDetailsDto, CommandErrorDto> {
+    state.activation_conflict_details(request)
+}
+
+#[tauri::command]
+pub fn plan_activation_replace(
+    state: State<'_, ActivationApi>,
+    request: PlanActivationReplaceRequestDto,
+) -> Result<ActivationReplacePreviewDto, CommandErrorDto> {
+    state.plan_activation_replace(request)
+}
+
+#[tauri::command]
+pub fn apply_activation_replace(
+    state: State<'_, ActivationApi>,
+    request: ApplyActivationReplaceRequestDto,
+) -> Result<ActivationResultDto, CommandErrorDto> {
+    state.apply_activation_replace(request)
+}
+
+#[tauri::command]
+pub fn cancel_activation_replace(
+    state: State<'_, ActivationApi>,
+    request: CancelActivationReplaceRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_activation_replace(request)
+}
+
+#[tauri::command]
+pub fn undo_activation_replace(
+    state: State<'_, ActivationApi>,
+    request: UndoActivationReplaceRequestDto,
+) -> Result<ActivationReplaceUndoResultDto, CommandErrorDto> {
+    state.undo_activation_replace(request)
+}
+
+#[tauri::command]
+pub fn finalize_activation_replace(
+    state: State<'_, ActivationApi>,
+    request: FinalizeActivationReplaceRequestDto,
+) -> Result<(), CommandErrorDto> {
+    state.finalize_activation_replace(request)
 }
 
 #[tauri::command]

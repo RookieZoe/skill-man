@@ -167,6 +167,8 @@ test("shows startup Activation drift and repairs only a missing Activation", asy
     });
   client.planActivationRepair = async () => ({
     planToken: "repair-plan",
+    skillId: "skill-authoring",
+    agentId: "claude-code",
     kind: "repair",
     skillDirectoryName: "skill-authoring",
     agentName: "Claude Code",
@@ -319,8 +321,12 @@ test("opens an explicit Conflict prompt when Repair finds occupied content", asy
     screen.getByText(/conflicts with existing content/),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Keep existing content" }),
-  ).toHaveFocus();
+    screen.getByRole("button", { name: "Remove then replace" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Adopt existing item" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
   await user.keyboard("{Escape}");
   expect(await screen.findByText("Enabled · Occupied")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Conflict" })).toHaveFocus();
@@ -358,6 +364,216 @@ test("offers a Conflict entry for an Activation already observed as occupied", a
   ).toBeInTheDocument();
   await user.keyboard("{Escape}");
   expect(conflict).toHaveFocus();
+});
+
+test("Cancel from the Conflict sheet leaves everything unchanged", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  let plannedReplace = 0;
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  client.planActivationReplace = async () => {
+    plannedReplace += 1;
+    throw new Error("planActivationReplace must not run on Cancel");
+  };
+  render(<App client={client} />);
+  const claudeActivation = await screen.findByRole("switch", {
+    name: "Enable skill-authoring for Claude Code",
+  });
+
+  await user.click(claudeActivation);
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(plannedReplace).toBe(0);
+  expect(claudeActivation).toHaveFocus();
+});
+
+test("disables Adopt existing item when the occupier is not a Skill", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  client.activationConflictDetails = async () => ({
+    skillId: "skill-authoring",
+    agentId: "claude-code",
+    entryPath: "~/.claude/skills/skill-authoring",
+    targetPath: "/Library/skills/skill-authoring",
+    occupier: {
+      kind: "file",
+      symlinkTarget: null,
+      finalEntityPath: null,
+      directoryName: "skill-authoring",
+      isSkill: false,
+      adoptable: false,
+      notAdoptableReason: "the entry is a regular file, not a Skill",
+    },
+  });
+  render(<App client={client} />);
+  const claudeActivation = await screen.findByRole("switch", {
+    name: "Enable skill-authoring for Claude Code",
+  });
+
+  await user.click(claudeActivation);
+
+  const adopt = await screen.findByRole("button", {
+    name: "Adopt existing item",
+  });
+  expect(adopt).toBeDisabled();
+  expect(screen.getByText(/not a Skill/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Remove then replace" }),
+  ).toBeEnabled();
+});
+
+test("Adopt existing item hands off to the Adopt flow with the candidate selected", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const scanAdopt = client.scanAdopt;
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  const canonicalEntity = "~/.claude/skills/skill-authoring";
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity,
+        directoryName: "skill-authoring",
+        directoryNames: ["skill-authoring"],
+        appearances: [
+          {
+            entryPath: canonicalEntity,
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        risk: "none",
+        riskReason: null,
+        conflict: null,
+        adoptable: true,
+        suggestedAgentIds: [],
+      },
+    ],
+  });
+  void scanAdopt;
+  render(<App client={client} />);
+  const claudeActivation = await screen.findByRole("switch", {
+    name: "Enable skill-authoring for Claude Code",
+  });
+
+  await user.click(claudeActivation);
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Adopt existing item" }));
+
+  expect(
+    await screen.findByRole("dialog", { name: "Adopt untracked Skills" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("dialog", { name: "Activation conflict" }),
+  ).not.toBeInTheDocument();
+  const checkbox = screen.getByRole("checkbox", {
+    name: /skill-authoring/,
+  });
+  expect(checkbox).toBeChecked();
+});
+
+test("Remove then replace previews, applies, and can be undone", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  render(<App client={client} />);
+  const claudeActivation = await screen.findByRole("switch", {
+    name: "Enable skill-authoring for Claude Code",
+  });
+
+  await user.click(claudeActivation);
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Remove then replace" }));
+
+  const preview = await screen.findByRole("dialog", {
+    name: "Activation conflict",
+  });
+  expect(preview).toHaveTextContent("Temporary backup");
+  expect(preview).toHaveTextContent("Explicit confirmation required");
+  await user.click(screen.getByRole("button", { name: "Remove and replace" }));
+
+  const result = await screen.findByRole("dialog", {
+    name: "Activation conflict",
+  });
+  expect(result).toHaveTextContent("Activation created");
+  expect(claudeActivation).toBeChecked();
+  await user.click(
+    screen.getByRole("button", { name: "Restore previous item" }),
+  );
+
+  expect(await screen.findByText(/Previous item restored/)).toBeInTheDocument();
+  expect(claudeActivation).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("finalizes the Replace when Undo was skipped", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  let finalized = 0;
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  client.undoActivationReplace = async () => ({
+    undone: false,
+    error:
+      "the Activation entry was replaced by external content; the original item could not be restored",
+    snapshotVersion: 0,
+  });
+  client.finalizeActivationReplace = async () => {
+    finalized += 1;
+  };
+  render(<App client={client} />);
+  const claudeActivation = await screen.findByRole("switch", {
+    name: "Enable skill-authoring for Claude Code",
+  });
+
+  await user.click(claudeActivation);
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Remove then replace" }));
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Remove and replace" }));
+  await screen.findByText("Activation created");
+  await user.click(
+    screen.getByRole("button", { name: "Restore previous item" }),
+  );
+  expect(await screen.findByText(/not restored/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Close" }));
+
+  expect(finalized).toBe(1);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 test("keeps persisted Agent state hidden until startup health completes", async () => {
@@ -562,9 +778,7 @@ test("checks Skill updates for a remote Install from the detail panel", async ()
   expect(
     await screen.findByRole("heading", { name: "media-xray" }),
   ).toBeInTheDocument();
-  expect(
-    screen.getByRole("heading", { name: "Updates" }),
-  ).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Updates" })).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Check for updates" }));
   expect(await screen.findByRole("status")).toHaveTextContent(
