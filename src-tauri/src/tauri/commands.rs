@@ -4,11 +4,16 @@ use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
     ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AgentActivationDto,
-    ApplyActivationRequestDto, ApplyLinkImportRequestDto, CancelActivationRequestDto,
-    CancelLinkImportRequestDto, CatalogListDto, CommandErrorDto, DiscoverLinkImportRequestDto,
-    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
-    PlanActivationRepairRequestDto, PlanActivationRequestDto, PlanLinkImportRequestDto,
-    SkillDetailDto,
+    ApplyActivationRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
+    ApplyLinkImportRequestDto, CancelActivationRequestDto, CancelFileImportRequestDto,
+    CancelLinkImportRequestDto, CatalogListDto, CommandErrorDto,
+    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    DiscoverLinkImportRequestDto, FileImportCandidateDto, FileImportDiscoveryDto,
+    FileImportPreviewDto, FileImportResultDto, FileImportSelectionPreviewDto,
+    FileImportSelectionResultDto, LinkImportCandidateDto, LinkImportPreviewDto,
+    LinkImportResultDto, ListSkillsRequestDto, PlanActivationRepairRequestDto,
+    PlanActivationRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
+    PlanFileReinstallRequestDto, PlanLinkImportRequestDto, SkillDetailDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
@@ -106,4 +111,68 @@ pub fn cancel_link_import(
     request: CancelLinkImportRequestDto,
 ) -> Result<bool, CommandErrorDto> {
     state.cancel_link_import(request)
+}
+
+#[tauri::command]
+pub fn discover_file_import(
+    state: State<'_, ImportApi>,
+    request: DiscoverFileImportRequestDto,
+) -> Result<FileImportCandidateDto, CommandErrorDto> {
+    state.discover_file_import(request)
+}
+
+#[tauri::command]
+pub fn discover_file_import_collection(
+    state: State<'_, ImportApi>,
+    request: DiscoverFileImportCollectionRequestDto,
+) -> Result<FileImportDiscoveryDto, CommandErrorDto> {
+    state.discover_file_import_collection(request)
+}
+
+#[tauri::command]
+pub fn plan_file_import(
+    state: State<'_, ImportApi>,
+    request: PlanFileImportRequestDto,
+) -> Result<FileImportPreviewDto, CommandErrorDto> {
+    state.plan_file_import(request)
+}
+
+#[tauri::command]
+pub fn plan_file_reinstall(
+    state: State<'_, ImportApi>,
+    request: PlanFileReinstallRequestDto,
+) -> Result<FileImportPreviewDto, CommandErrorDto> {
+    state.plan_file_reinstall(request)
+}
+
+#[tauri::command]
+pub fn plan_file_import_selection(
+    state: State<'_, ImportApi>,
+    request: PlanFileImportSelectionRequestDto,
+) -> Result<FileImportSelectionPreviewDto, CommandErrorDto> {
+    state.plan_file_import_selection(request)
+}
+
+#[tauri::command]
+pub fn apply_file_import(
+    state: State<'_, ImportApi>,
+    request: ApplyFileImportRequestDto,
+) -> Result<FileImportResultDto, CommandErrorDto> {
+    state.apply_file_import(request)
+}
+
+#[tauri::command]
+pub fn apply_file_import_selection(
+    state: State<'_, ImportApi>,
+    request: ApplyFileImportSelectionRequestDto,
+) -> Result<FileImportSelectionResultDto, CommandErrorDto> {
+    state.apply_file_import_selection(request)
+}
+
+#[tauri::command]
+pub fn cancel_file_import(
+    state: State<'_, ImportApi>,
+    request: CancelFileImportRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_file_import(request)
 }

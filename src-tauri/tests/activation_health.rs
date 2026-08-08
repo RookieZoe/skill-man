@@ -13,6 +13,9 @@ use skill_man_lib::seams::activation_store::{
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use skill_man_lib::seams::filesystem::FileSystem;
+use skill_man_lib::seams::maintenance_store::{
+    InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError, SkillHealthObservation,
+};
 
 #[test]
 fn startup_health_check_classifies_every_desired_activation() {
@@ -63,7 +66,7 @@ fn startup_health_check_classifies_every_desired_activation() {
 
     assert_eq!(report.checked, 6);
     assert_eq!(report.snapshot_version, 42);
-    assert_eq!(store.check_count(), 2);
+    assert_eq!(store.check_count(), 3);
     assert_eq!(
         store.states(),
         HashMap::from([
@@ -191,6 +194,21 @@ impl ActivationStore for HealthStore {
         observations: &[ActivationObservation],
     ) -> Result<u64, ActivationStoreError> {
         *self.observations.lock().expect("observation lock") = observations.to_vec();
+        Ok(42)
+    }
+}
+
+impl MaintenanceStore for HealthStore {
+    fn installed_skill_baselines(
+        &self,
+    ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError> {
+        Ok(Vec::new())
+    }
+
+    fn record_skill_health(
+        &self,
+        _observations: &[SkillHealthObservation],
+    ) -> Result<u64, MaintenanceStoreError> {
         Ok(42)
     }
 }

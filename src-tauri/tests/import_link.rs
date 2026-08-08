@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
+use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
@@ -57,6 +58,7 @@ fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
         runtime.clone(),
         filesystem.clone(),
         Arc::new(SystemClock::new()),
+        Arc::new(LocalFileSource::new()),
         library_root.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
@@ -176,6 +178,7 @@ fn library_conflict_is_visible_in_preview_and_cannot_be_applied() {
         runtime.clone(),
         filesystem,
         Arc::new(SystemClock::new()),
+        Arc::new(LocalFileSource::new()),
         library_root.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
@@ -237,6 +240,7 @@ fn apply_reports_plan_stale_when_the_link_source_changes_after_preview() {
         runtime.clone(),
         filesystem,
         Arc::new(SystemClock::new()),
+        Arc::new(LocalFileSource::new()),
         library_root,
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
@@ -299,6 +303,7 @@ fn link_identity_comes_from_the_selected_entry_and_retargeting_makes_the_plan_st
         runtime,
         filesystem,
         Arc::new(SystemClock::new()),
+        Arc::new(LocalFileSource::new()),
         library_root,
     ));
 

@@ -6,7 +6,9 @@ use crate::core::domain::{
     SkillDetail, SkillSummary, SourceKind,
 };
 use crate::core::import::{
-    LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
+    FileImportCandidate, FileImportDiscovery, FileImportPreview, FileImportResult,
+    FileImportSelectionPreview, FileImportSelectionResult, LibraryConflict, LinkImportCandidate,
+    LinkImportPreview, LinkImportResult,
 };
 use crate::core::maintenance::ActivationHealthReport;
 
@@ -371,6 +373,55 @@ pub struct CancelLinkImportRequestDto {
     pub plan_token: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverFileImportRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverFileImportCollectionRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFileImportRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFileReinstallRequestDto {
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFileImportSelectionRequestDto {
+    pub source_path: String,
+    pub selected_directory_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyFileImportRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyFileImportSelectionRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelFileImportRequestDto {
+    pub plan_token: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkImportCandidateDto {
@@ -391,6 +442,50 @@ impl From<LinkImportCandidate> for LinkImportCandidateDto {
             frontmatter_name: value.frontmatter_name,
             source_entry_path: value.source_entry_path.to_string_lossy().into_owned(),
             final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileImportCandidateDto {
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub frontmatter_name: Option<String>,
+    pub original_path: String,
+    pub original_filename: String,
+}
+
+impl From<FileImportCandidate> for FileImportCandidateDto {
+    fn from(value: FileImportCandidate) -> Self {
+        Self {
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            frontmatter_name: value.frontmatter_name,
+            original_path: value.original_path.to_string_lossy().into_owned(),
+            original_filename: value.original_filename,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileImportDiscoveryDto {
+    pub candidates: Vec<FileImportCandidateDto>,
+    pub truncated: bool,
+}
+
+impl From<FileImportDiscovery> for FileImportDiscoveryDto {
+    fn from(value: FileImportDiscovery) -> Self {
+        Self {
+            candidates: value
+                .candidates
+                .into_iter()
+                .map(FileImportCandidateDto::from)
+                .collect(),
+            truncated: value.truncated,
         }
     }
 }
@@ -443,6 +538,58 @@ impl From<LinkImportPreview> for LinkImportPreviewDto {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileImportPreviewDto {
+    pub plan_token: String,
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub original_path: String,
+    pub original_filename: String,
+    pub final_entity_path: String,
+    pub conflict: Option<LibraryConflictDto>,
+    pub can_apply: bool,
+}
+
+impl From<FileImportPreview> for FileImportPreviewDto {
+    fn from(value: FileImportPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            original_path: value.original_path.to_string_lossy().into_owned(),
+            original_filename: value.original_filename,
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            conflict: value.conflict.map(LibraryConflictDto::from),
+            can_apply: value.can_apply,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileImportSelectionPreviewDto {
+    pub plan_token: String,
+    pub items: Vec<FileImportPreviewDto>,
+    pub can_apply: bool,
+}
+
+impl From<FileImportSelectionPreview> for FileImportSelectionPreviewDto {
+    fn from(value: FileImportSelectionPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            items: value
+                .items
+                .into_iter()
+                .map(FileImportPreviewDto::from)
+                .collect(),
+            can_apply: value.can_apply,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinkImportResultDto {
     pub operation_id: String,
     pub skill_id: String,
@@ -461,6 +608,72 @@ impl From<LinkImportResult> for LinkImportResultDto {
             final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
             library_entry_path: None,
             snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileImportResultDto {
+    pub operation_id: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub final_entity_path: String,
+    pub library_entry_path: String,
+    pub snapshot_version: u64,
+    pub created_paths: Vec<String>,
+    pub removed_paths: Vec<String>,
+    pub retained_paths: Vec<String>,
+    pub retryable: bool,
+    pub recovery_required: bool,
+}
+
+impl From<FileImportResult> for FileImportResultDto {
+    fn from(value: FileImportResult) -> Self {
+        let stable_path = value.final_entity_path.to_string_lossy().into_owned();
+        let (created_paths, retained_paths) = if value.reinstalled {
+            (Vec::new(), vec![stable_path.clone()])
+        } else {
+            (vec![stable_path.clone()], Vec::new())
+        };
+        Self {
+            operation_id: value.operation_id,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            library_entry_path: value.final_entity_path.to_string_lossy().into_owned(),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            snapshot_version: value.snapshot_version,
+            created_paths,
+            removed_paths: Vec::new(),
+            retained_paths,
+            retryable: false,
+            recovery_required: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileImportSelectionResultDto {
+    pub operation_id: String,
+    pub items: Vec<FileImportResultDto>,
+    pub snapshot_version: u64,
+    pub retryable: bool,
+    pub recovery_required: bool,
+}
+
+impl From<FileImportSelectionResult> for FileImportSelectionResultDto {
+    fn from(value: FileImportSelectionResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            items: value
+                .items
+                .into_iter()
+                .map(FileImportResultDto::from)
+                .collect(),
+            snapshot_version: value.snapshot_version,
+            retryable: false,
+            recovery_required: false,
         }
     }
 }

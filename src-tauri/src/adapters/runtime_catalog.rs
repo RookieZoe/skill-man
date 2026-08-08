@@ -14,7 +14,10 @@ use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::FileSystem;
 use crate::seams::import_store::{
-    ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+    FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+};
+use crate::seams::maintenance_store::{
+    InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError, SkillHealthObservation,
 };
 
 pub struct RuntimeCatalogStore {
@@ -80,7 +83,10 @@ impl CatalogStore for RuntimeCatalogStore {
                 persisted.final_entity_path.display()
             ),
             SourceKind::RemoteInstall => "Installed from Git".into(),
-            SourceKind::FileInstall => "Installed from file".into(),
+            SourceKind::FileInstall => persisted.file_source_original_path.as_ref().map_or_else(
+                || "Installed from file".into(),
+                |path| format!("Installed from file · {path}"),
+            ),
         };
         Ok(Some(SkillDetail {
             summary: persisted.summary,
@@ -123,6 +129,57 @@ impl ImportStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.insert_link(record)
+    }
+
+    fn insert_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.insert_file(record)
+    }
+
+    fn insert_files(&self, records: Vec<FileImportRecord>) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.insert_files(records)
+    }
+
+    fn load_file_install(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<FileImportRecord>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.load_file_install(identity_key)
+    }
+
+    fn desired_activations_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<DesiredActivation>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.desired_activations_for_skill(skill_id)
+    }
+
+    fn replace_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.replace_file(record)
     }
 }
 
@@ -189,5 +246,30 @@ impl ActivationStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.record_observation(observation)
+    }
+}
+
+impl MaintenanceStore for RuntimeCatalogStore {
+    fn installed_skill_baselines(
+        &self,
+    ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only; recovery baselines are unavailable".into(),
+            ));
+        }
+        self.sqlite.installed_skill_baselines()
+    }
+
+    fn record_skill_health(
+        &self,
+        observations: &[SkillHealthObservation],
+    ) -> Result<u64, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.record_skill_health(observations)
     }
 }

@@ -18,6 +18,7 @@ use crate::seams::agent_adapter::{
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError,
 };
+use crate::seams::recovery::RecoveryGate;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -84,6 +85,7 @@ pub struct ActivationService {
     plans: Mutex<HashMap<String, PlannedActivation>>,
     next_plan_id: AtomicU64,
     plan_ttl: Duration,
+    recovery_gate: Arc<RecoveryGate>,
 }
 
 impl ActivationService {
@@ -100,6 +102,7 @@ impl ActivationService {
             plans: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
+            recovery_gate: Arc::new(RecoveryGate::ready()),
         }
     }
 
@@ -110,6 +113,11 @@ impl ActivationService {
 
     pub fn with_plan_ttl(mut self, plan_ttl: Duration) -> Self {
         self.plan_ttl = plan_ttl;
+        self
+    }
+
+    pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
+        self.recovery_gate = recovery_gate;
         self
     }
 
@@ -142,6 +150,7 @@ impl ActivationService {
         request: SetActivation,
         kind: ActivationPlanKind,
     ) -> Result<ActivationPreview, ActivationError> {
+        self.ensure_writes_ready()?;
         let context = self
             .store
             .load(&request.skill_id, &request.agent_id)?
@@ -303,6 +312,7 @@ impl ActivationService {
     }
 
     pub fn apply(&self, plan_token: &str) -> Result<ActivationResult, ActivationError> {
+        self.ensure_writes_ready()?;
         let mut plans = self
             .plans
             .lock()
@@ -419,12 +429,21 @@ impl ActivationService {
     }
 
     pub fn cancel(&self, plan_token: &str) -> Result<bool, ActivationError> {
+        self.ensure_writes_ready()?;
         let mut plans = self
             .plans
             .lock()
             .map_err(|_| ActivationError::Internal("Activation plan lock poisoned".into()))?;
         plans.retain(|_, plan| plan.created_at.elapsed() < self.plan_ttl);
         Ok(plans.remove(plan_token).is_some())
+    }
+
+    fn ensure_writes_ready(&self) -> Result<(), ActivationError> {
+        if self.recovery_gate.writes_are_ready() {
+            Ok(())
+        } else {
+            Err(ActivationError::RecoveryInProgress)
+        }
     }
 
     fn record_repair_observation(
@@ -563,6 +582,8 @@ pub enum ActivationError {
     PlanStale,
     #[error("the Activation plan was not found or has expired")]
     PlanNotFound,
+    #[error("startup recovery is still in progress")]
+    RecoveryInProgress,
     #[error(
         "Activation state failed and filesystem compensation also failed; recovery is required: state={state_error}; compensation={compensation_error}"
     )]

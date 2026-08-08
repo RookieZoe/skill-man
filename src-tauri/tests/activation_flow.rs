@@ -13,6 +13,7 @@ use skill_man_lib::seams::activation_store::{
 };
 use skill_man_lib::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError, SkillFingerprint,
+    StagedTreeSnapshot,
 };
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::dto::{ApplyActivationRequestDto, PlanActivationRequestDto};
@@ -1102,6 +1103,80 @@ impl FileSystem for FailingCompensationFileSystem {
 
     fn read_skill_document(&self, path: &std::path::Path) -> Result<String, FileSystemError> {
         self.delegate.read_skill_document(path)
+    }
+
+    fn tree_hash(&self, path: &std::path::Path) -> Result<String, FileSystemError> {
+        self.delegate.tree_hash(path)
+    }
+
+    fn staged_tree_snapshot(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<StagedTreeSnapshot, FileSystemError> {
+        self.delegate.staged_tree_snapshot(path)
+    }
+
+    fn available_space(&self, path: &std::path::Path) -> Result<u64, FileSystemError> {
+        self.delegate.available_space(path)
+    }
+
+    fn staged_child_directories(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, FileSystemError> {
+        self.delegate.staged_child_directories(path)
+    }
+
+    fn staged_has_skill_document(
+        &self,
+        directory: &std::path::Path,
+        filename: &str,
+    ) -> Result<bool, FileSystemError> {
+        self.delegate.staged_has_skill_document(directory, filename)
+    }
+
+    fn canonicalize_staged_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, FileSystemError> {
+        self.delegate.canonicalize_staged_path(path)
+    }
+
+    fn install_staged_skill(
+        &self,
+        staged_skill_path: &std::path::Path,
+        final_entity_path: &std::path::Path,
+        library_root: &std::path::Path,
+        operation_id: &str,
+        expected_staged_tree: &StagedTreeSnapshot,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        self.delegate.install_staged_skill(
+            staged_skill_path,
+            final_entity_path,
+            library_root,
+            operation_id,
+            expected_staged_tree,
+        )
+    }
+
+    fn discard_staging(
+        &self,
+        staging_operation_root: &std::path::Path,
+        library_root: &std::path::Path,
+        expected: Option<&DirectoryFingerprint>,
+    ) -> Result<(), FileSystemError> {
+        self.delegate
+            .discard_staging(staging_operation_root, library_root, expected)
+    }
+
+    fn discard_installed_skill(
+        &self,
+        final_entity_path: &std::path::Path,
+        library_root: &std::path::Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        self.delegate
+            .discard_installed_skill(final_entity_path, library_root, expected)
     }
 
     fn create_activation(

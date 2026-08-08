@@ -70,7 +70,13 @@ pub(crate) fn command_error(error: ActivationError) -> CommandErrorDto {
         ActivationError::SourceUnavailable(_) => "source_unavailable",
         ActivationError::TargetMismatch(_) => "target_mismatch",
         ActivationError::PlanStale | ActivationError::PlanNotFound => "plan_stale",
-        ActivationError::RecoveryRequired { .. } => "recovery_required",
+        ActivationError::RecoveryRequired { .. } | ActivationError::RecoveryInProgress => {
+            "recovery_required"
+        }
+        ActivationError::FileSystem(FileSystemError::RecoveryRequired { .. }) => {
+            "recovery_required"
+        }
+        ActivationError::FileSystem(FileSystemError::PlanStale { .. }) => "plan_stale",
         ActivationError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {

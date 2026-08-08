@@ -23,12 +23,17 @@ impl HealthApi {
 
 fn maintenance_error(error: MaintenanceError) -> CommandErrorDto {
     let code = match &error {
+        MaintenanceError::FileSystem(FileSystemError::RecoveryRequired { .. }) => {
+            "recovery_required"
+        }
+        MaintenanceError::FileSystem(FileSystemError::PlanStale { .. }) => "recovery_required",
         MaintenanceError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
             "permission_denied"
         }
         MaintenanceError::Store(_) => "state_unavailable",
+        MaintenanceError::MaintenanceStore(_) => "state_unavailable",
         MaintenanceError::FileSystem(_) | MaintenanceError::Internal(_) => "internal",
     };
     CommandErrorDto {

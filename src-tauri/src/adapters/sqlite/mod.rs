@@ -18,10 +18,13 @@ use crate::seams::catalog_store::{
     CatalogStoreError, StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
 };
 use crate::seams::import_store::{
-    ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+    FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+};
+use crate::seams::maintenance_store::{
+    InstalledSkillBaseline, MaintenanceStoreError, SkillHealthObservation,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE catalog_meta (
@@ -76,6 +79,13 @@ CREATE TABLE activations (
     PRIMARY KEY (skill_id, agent_id)
 );
 
+CREATE TABLE file_sources (
+    skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+    original_path TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    installed_at TEXT NOT NULL
+);
+
 CREATE TABLE preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     launch_at_login INTEGER NOT NULL DEFAULT 0 CHECK (launch_at_login IN (0, 1)),
@@ -87,7 +97,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 1, 0);
+VALUES (1, 2, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -349,10 +359,12 @@ impl SqliteCatalogStore {
                     skills.id, skills.directory_name, skills.display_name,
                     skills.description, skills.source_kind, skills.health,
                     skills.final_entity_path, skills.updated_at,
+                    file_sources.original_path,
                     (SELECT COUNT(*) FROM activations
                      WHERE activations.skill_id = skills.id
                        AND activations.desired_enabled = 1)
                  FROM skills
+                 LEFT JOIN file_sources ON file_sources.skill_id = skills.id
                  WHERE skills.id = ?1",
                 [&skill_id.0],
                 |row| {
@@ -364,10 +376,11 @@ impl SqliteCatalogStore {
                             description: row.get(3)?,
                             source_kind: parse_source_kind(&row.get::<_, String>(4)?)?,
                             health: parse_health(&row.get::<_, String>(5)?)?,
-                            enabled_agent_count: row.get(8)?,
+                            enabled_agent_count: row.get(9)?,
                         },
                         final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
                         updated_at: row.get(7)?,
+                        file_source_original_path: row.get(8)?,
                     })
                 },
             )
@@ -424,6 +437,80 @@ impl SqliteCatalogStore {
             .map_err(sqlite_catalog_error)
     }
 
+    pub fn installed_skill_baselines(
+        &self,
+    ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, final_entity_path, recorded_content_hash
+                 FROM skills
+                 WHERE source_kind IN ('remote_install', 'file_install')
+                   AND recorded_content_hash IS NOT NULL
+                 ORDER BY id",
+            )
+            .map_err(sqlite_maintenance_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(InstalledSkillBaseline {
+                    skill_id: SkillId(row.get(0)?),
+                    final_entity_path: PathBuf::from(row.get::<_, String>(1)?),
+                    recorded_content_hash: row.get(2)?,
+                })
+            })
+            .map_err(sqlite_maintenance_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    pub fn record_skill_health(
+        &self,
+        observations: &[SkillHealthObservation],
+    ) -> Result<u64, MaintenanceStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_maintenance_error)?;
+        let mut changed = false;
+        for observation in observations {
+            changed |= transaction
+                .execute(
+                    "UPDATE skills
+                     SET health = ?1,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?2 AND health != ?1",
+                    params![health_value(observation.health), observation.skill_id.0],
+                )
+                .map_err(sqlite_maintenance_error)?
+                > 0;
+        }
+        if changed {
+            transaction
+                .execute(
+                    "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                    [],
+                )
+                .map_err(sqlite_maintenance_error)?;
+        }
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_maintenance_error)?;
+        transaction.commit().map_err(sqlite_maintenance_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            MaintenanceStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, ActivationStoreError> {
         self.connection
             .lock()
@@ -442,6 +529,7 @@ pub struct PersistedSkillDetail {
     pub summary: SkillSummary,
     pub final_entity_path: PathBuf,
     pub updated_at: String,
+    pub file_source_original_path: Option<String>,
 }
 
 impl ImportStore for SqliteCatalogStore {
@@ -503,6 +591,260 @@ impl ImportStore for SqliteCatalogStore {
                     record.display_name,
                     record.description,
                     record.final_entity_path.to_string_lossy(),
+                ],
+            )
+            .map_err(sqlite_import_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_import_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_import_error)?;
+        transaction.commit().map_err(sqlite_import_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| ImportStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn insert_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_import_error)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                [&record.identity_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_import_error)?;
+        if let Some(directory_name) = existing {
+            return Err(ImportStoreError::Conflict(directory_name));
+        }
+        transaction
+            .execute(
+                "INSERT INTO skills (
+                    id, directory_name, identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path,
+                    recorded_content_hash, health, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, 'file_install', ?6, ?7, ?8, 'healthy',
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.skill_id.0,
+                    record.directory_name,
+                    record.identity_key,
+                    record.display_name,
+                    record.description,
+                    record.library_entry_path.to_string_lossy(),
+                    record.final_entity_path.to_string_lossy(),
+                    record.recorded_content_hash,
+                ],
+            )
+            .map_err(sqlite_import_error)?;
+        transaction
+            .execute(
+                "INSERT INTO file_sources (skill_id, original_path, original_filename, installed_at)
+                 VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    record.skill_id.0,
+                    record.original_path.to_string_lossy(),
+                    record.original_filename,
+                ],
+            )
+            .map_err(sqlite_import_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_import_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_import_error)?;
+        transaction.commit().map_err(sqlite_import_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| ImportStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn insert_files(&self, records: Vec<FileImportRecord>) -> Result<u64, ImportStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_import_error)?;
+        for record in records {
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                    [&record.identity_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sqlite_import_error)?;
+            if let Some(directory_name) = existing {
+                return Err(ImportStoreError::Conflict(directory_name));
+            }
+            transaction
+                .execute(
+                    "INSERT INTO skills (
+                        id, directory_name, identity_key, display_name, description,
+                        source_kind, library_entry_path, final_entity_path,
+                        recorded_content_hash, health, created_at, updated_at
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, 'file_install', ?6, ?7, ?8, 'healthy',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     )",
+                    params![
+                        record.skill_id.0,
+                        record.directory_name,
+                        record.identity_key,
+                        record.display_name,
+                        record.description,
+                        record.library_entry_path.to_string_lossy(),
+                        record.final_entity_path.to_string_lossy(),
+                        record.recorded_content_hash,
+                    ],
+                )
+                .map_err(sqlite_import_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO file_sources (
+                        skill_id, original_path, original_filename, installed_at
+                     ) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    params![
+                        record.skill_id.0,
+                        record.original_path.to_string_lossy(),
+                        record.original_filename,
+                    ],
+                )
+                .map_err(sqlite_import_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_import_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_import_error)?;
+        transaction.commit().map_err(sqlite_import_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| ImportStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn load_file_install(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<FileImportRecord>, ImportStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                        skills.display_name, skills.description,
+                        skills.library_entry_path, skills.final_entity_path,
+                        skills.recorded_content_hash, file_sources.original_path,
+                        file_sources.original_filename
+                   FROM skills
+                   JOIN file_sources ON file_sources.skill_id = skills.id
+                  WHERE skills.identity_key = ?1 AND skills.source_kind = 'file_install'",
+                [identity_key],
+                |row| {
+                    Ok(FileImportRecord {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                        identity_key: row.get(2)?,
+                        display_name: row.get(3)?,
+                        description: row.get(4)?,
+                        library_entry_path: PathBuf::from(row.get::<_, String>(5)?),
+                        final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
+                        recorded_content_hash: row.get(7)?,
+                        original_path: PathBuf::from(row.get::<_, String>(8)?),
+                        original_filename: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_import_error)
+    }
+
+    fn desired_activations_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<DesiredActivation>, ImportStoreError> {
+        let mut activations = <Self as ActivationStore>::desired_activations(self)
+            .map_err(|error| ImportStoreError::Unavailable(error.to_string()))?
+            .into_iter()
+            .filter(|activation| activation.skill_id == *skill_id)
+            .collect::<Vec<_>>();
+        activations.sort_by(|left, right| left.expected_entry_path.cmp(&right.expected_entry_path));
+        Ok(activations)
+    }
+
+    fn replace_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_import_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE skills
+                    SET display_name = ?2, description = ?3,
+                        recorded_content_hash = ?4, health = 'healthy',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE id = ?1 AND identity_key = ?5 AND source_kind = 'file_install'",
+                params![
+                    record.skill_id.0,
+                    record.display_name,
+                    record.description,
+                    record.recorded_content_hash,
+                    record.identity_key,
+                ],
+            )
+            .map_err(sqlite_import_error)?;
+        if changed != 1 {
+            return Err(ImportStoreError::Unavailable(
+                "file Install changed after reinstall preview".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE file_sources
+                    SET original_path = ?2, original_filename = ?3,
+                        installed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE skill_id = ?1",
+                params![
+                    record.skill_id.0,
+                    record.original_path.to_string_lossy(),
+                    record.original_filename,
                 ],
             )
             .map_err(sqlite_import_error)?;
@@ -800,6 +1142,17 @@ fn migrate_to_current(
     if existing_schema_version == 0 {
         transaction.execute_batch(INITIAL_SCHEMA)?;
     }
+    if existing_schema_version == 1 {
+        transaction.execute_batch(
+            "CREATE TABLE file_sources (
+                skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                original_path TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                installed_at TEXT NOT NULL
+             );
+             UPDATE catalog_meta SET schema_version = 2 WHERE singleton = 1;",
+        )?;
+    }
     transaction.commit()
 }
 
@@ -836,6 +1189,10 @@ fn sqlite_catalog_error(error: rusqlite::Error) -> CatalogStoreError {
 
 fn sqlite_import_error(error: rusqlite::Error) -> ImportStoreError {
     ImportStoreError::Unavailable(error.to_string())
+}
+
+fn sqlite_maintenance_error(error: rusqlite::Error) -> MaintenanceStoreError {
+    MaintenanceStoreError::Unavailable(error.to_string())
 }
 
 fn source_kind_value(value: SourceKind) -> &'static str {
