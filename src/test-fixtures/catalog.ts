@@ -308,6 +308,24 @@ export function createFixtureCatalogClient(): CatalogClient {
     async pinSkillUpdates() {
       return fixtureUnsupported("Skill Updates are not available in the preview fixture");
     },
+    async scanAdopt() {
+      return fixtureUnsupported("Adopt is not available in the preview fixture");
+    },
+    async planAdopt() {
+      return fixtureUnsupported("Adopt is not available in the preview fixture");
+    },
+    async applyAdopt() {
+      return fixtureUnsupported("Adopt is not available in the preview fixture");
+    },
+    async undoAdopt() {
+      return fixtureUnsupported("Adopt is not available in the preview fixture");
+    },
+    async finalizeAdopt() {
+      return fixtureUnsupported("Adopt is not available in the preview fixture");
+    },
+    async cancelAdopt() {
+      return false;
+    },
   };
 }
 

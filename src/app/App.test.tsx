@@ -571,3 +571,21 @@ test("checks Skill updates for a remote Install from the detail panel", async ()
     "This Skill is not tracked for updates.",
   );
 });
+
+test("opens the Adopt sheet and reports a fixture rejection", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  expect(
+    screen.getByRole("dialog", { name: "Adopt untracked Skills" }),
+  ).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "not available in the preview fixture",
+  );
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(
+    screen.queryByRole("dialog", { name: "Adopt untracked Skills" }),
+  ).not.toBeInTheDocument();
+});

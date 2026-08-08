@@ -12,9 +12,10 @@ use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
 use skill_man_lib::seams::filesystem::{
-    ActivationEntrySnapshot, DirectoryFingerprint, FileImportJournal, FileImportJournalItem,
-    FileImportJournalPhase, FileReplacement, FileSystem, FileSystemError, LinkSourceSnapshot,
-    SkillFingerprint, StagedTreeSnapshot,
+    ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceStep, AdoptJournal,
+    DirectoryFingerprint, FileImportJournal, FileImportJournalItem, FileImportJournalPhase,
+    FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceSnapshot,
+    ScannedSkillEntry, SkillFingerprint, StagedTreeSnapshot,
 };
 use skill_man_lib::seams::recovery::RecoveryGate;
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
@@ -1786,6 +1787,68 @@ impl FileSystem for LowSpaceFileSystem {
 
     fn remove_activation(&self, entry_path: &std::path::Path) -> Result<(), FileSystemError> {
         self.delegate.remove_activation(entry_path)
+    }
+
+    fn scan_skills_directory(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<ScannedSkillEntry>, FileSystemError> {
+        self.delegate.scan_skills_directory(path)
+    }
+
+    fn stage_external_directory(
+        &self,
+        source: &std::path::Path,
+        staging_destination: &std::path::Path,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        self.delegate
+            .stage_external_directory(source, staging_destination)
+    }
+
+    fn restore_external_directory(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        self.delegate
+            .restore_external_directory(source, destination, expected)
+    }
+
+    fn apply_adopt_appearances(
+        &self,
+        appearances: &[AdoptAppearanceStep],
+        activations: &[AdoptActivationStep],
+    ) -> Result<(), FileSystemError> {
+        self.delegate
+            .apply_adopt_appearances(appearances, activations)
+    }
+
+    fn write_adopt_journal(
+        &self,
+        library_root: &std::path::Path,
+        journal: &AdoptJournal,
+    ) -> Result<(), FileSystemError> {
+        self.delegate.write_adopt_journal(library_root, journal)
+    }
+
+    fn finish_adopt_journal(
+        &self,
+        library_root: &std::path::Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        self.delegate
+            .finish_adopt_journal(library_root, operation_id)
+    }
+
+    fn recover_adopt_journals(
+        &self,
+        library_root: &std::path::Path,
+        baselines: &[FileImportRecoveryBaseline],
+        adopted_entities: &[FileImportRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        self.delegate
+            .recover_adopt_journals(library_root, baselines, adopted_entities)
     }
 }
 

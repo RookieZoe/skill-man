@@ -18,6 +18,7 @@ pub fn run() {
     use crate::adapters::sqlite::SqliteCatalogStore;
     use crate::adapters::system_clock::SystemClock;
     use crate::core::activation::ActivationService;
+    use crate::core::adopt::AdoptService;
     use crate::core::catalog::CatalogService;
     use crate::core::import::ImportService;
     use crate::core::maintenance::MaintenanceService;
@@ -25,16 +26,18 @@ pub fn run() {
     use crate::seams::catalog_store::StartupAccess;
     use crate::seams::recovery::RecoveryGate;
     use crate::tauri_adapter::activation_api::ActivationApi;
+    use crate::tauri_adapter::adopt_api::AdoptApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
-        apply_activation, apply_file_import, apply_file_import_selection,
+        apply_activation, apply_adopt, apply_file_import, apply_file_import_selection,
         apply_git_import_selection, apply_link_import, apply_skill_updates, cancel_activation,
-        cancel_file_import, cancel_git_import_selection, cancel_link_import, check_skill_updates,
-        discover_file_import, discover_file_import_collection, discover_git_import,
-        discover_link_import, inspect_skill, list_agents, list_skills, pin_skill_updates,
-        plan_activation, plan_activation_repair, plan_file_import, plan_file_import_selection,
-        plan_file_reinstall, plan_git_import_selection, plan_link_import, plan_skill_updates,
-        run_activation_health_check,
+        cancel_adopt, cancel_file_import, cancel_git_import_selection, cancel_link_import,
+        check_skill_updates, discover_file_import, discover_file_import_collection,
+        discover_git_import, discover_link_import, finalize_adopt, inspect_skill, list_agents,
+        list_skills, pin_skill_updates, plan_activation, plan_activation_repair, plan_adopt,
+        plan_file_import, plan_file_import_selection, plan_file_reinstall,
+        plan_git_import_selection, plan_link_import, plan_skill_updates,
+        run_activation_health_check, scan_adopt, undo_adopt,
     };
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
@@ -65,7 +68,7 @@ pub fn run() {
             } else {
                 Arc::new(FixtureCatalogStore::library_desk())
             };
-            let filesystem = Arc::new(MacOsFileSystem::new(home_directory));
+            let filesystem = Arc::new(MacOsFileSystem::new(home_directory.clone()));
             let runtime_store = Arc::new(RuntimeCatalogStore::new(
                 fixture_store,
                 sqlite_store,
@@ -100,6 +103,16 @@ pub fn run() {
                 git_cache_root,
                 recovery_gate.clone(),
             )));
+            app.manage(AdoptApi::new(
+                AdoptService::new(
+                    runtime_store.clone(),
+                    filesystem.clone(),
+                    Arc::new(SystemClock::new()),
+                    library_root.clone(),
+                    home_directory,
+                )
+                .with_recovery_gate(recovery_gate.clone()),
+            ));
             app.manage(ActivationApi::new(
                 ActivationService::new(runtime_store, filesystem, library_root)
                     .with_recovery_gate(recovery_gate)
@@ -135,7 +148,13 @@ pub fn run() {
             check_skill_updates,
             plan_skill_updates,
             apply_skill_updates,
-            pin_skill_updates
+            pin_skill_updates,
+            scan_adopt,
+            plan_adopt,
+            apply_adopt,
+            undo_adopt,
+            finalize_adopt,
+            cancel_adopt
         ])
         .run(::tauri::generate_context!())
         .expect("Skill Man runtime failed");

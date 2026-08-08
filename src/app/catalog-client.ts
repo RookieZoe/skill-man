@@ -213,6 +213,85 @@ export interface UpdateResult {
   items: UpdateItemResult[];
 }
 
+export type AdoptRisk = "none" | "external" | "broken";
+
+export interface AdoptAppearance {
+  entryPath: string;
+  kind: "real_directory" | "symlink";
+  agentId: string | null;
+  shared: boolean;
+}
+
+export interface AdoptCandidate {
+  canonicalEntity: string;
+  directoryName: string;
+  directoryNames: string[];
+  appearances: AdoptAppearance[];
+  risk: AdoptRisk;
+  riskReason: string | null;
+  conflict: LibraryConflict | null;
+  adoptable: boolean;
+  suggestedAgentIds: string[];
+}
+
+export interface AdoptScanReport {
+  candidates: AdoptCandidate[];
+  truncated: boolean;
+}
+
+export interface AdoptSelection {
+  canonicalEntity: string;
+  agentIds: string[];
+}
+
+export interface AdoptTargetAgent {
+  agentId: string;
+  name: string;
+}
+
+export interface AdoptPlanItem {
+  directoryName: string;
+  canonicalEntity: string;
+  kind: "migrate" | "link";
+  finalEntityPath: string;
+  appearances: AdoptAppearance[];
+  targetAgents: AdoptTargetAgent[];
+  adoptable: boolean;
+  error: string | null;
+}
+
+export interface AdoptPlan {
+  planToken: string;
+  items: AdoptPlanItem[];
+  canApply: boolean;
+}
+
+export interface AdoptSkillResult {
+  skillId: string;
+  directoryName: string;
+  adopted: boolean;
+  error: string | null;
+}
+
+export interface AdoptResult {
+  operationId: string;
+  items: AdoptSkillResult[];
+  snapshotVersion: number;
+  undoAvailable: boolean;
+}
+
+export interface AdoptUndoItemResult {
+  directoryName: string;
+  undone: boolean;
+  error: string | null;
+}
+
+export interface AdoptUndoResult {
+  operationId: string;
+  items: AdoptUndoItemResult[];
+  snapshotVersion: number;
+}
+
 export interface CatalogClient {
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
@@ -251,6 +330,12 @@ export interface CatalogClient {
     abandonChanges: boolean,
   ): Promise<UpdateResult>;
   pinSkillUpdates(skillIds: string[]): Promise<void>;
+  scanAdopt(): Promise<AdoptScanReport>;
+  planAdopt(selections: AdoptSelection[]): Promise<AdoptPlan>;
+  applyAdopt(planToken: string): Promise<AdoptResult>;
+  undoAdopt(operationId: string): Promise<AdoptUndoResult>;
+  finalizeAdopt(operationId: string): Promise<void>;
+  cancelAdopt(planToken: string): Promise<boolean>;
 }
 
 let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
@@ -352,6 +437,24 @@ const tauriCatalogClient: CatalogClient = {
     return invoke<void>("pin_skill_updates", {
       request: { skillIds },
     });
+  },
+  scanAdopt() {
+    return invoke<AdoptScanReport>("scan_adopt");
+  },
+  planAdopt(selections) {
+    return invoke<AdoptPlan>("plan_adopt", { request: { selections } });
+  },
+  applyAdopt(planToken) {
+    return invoke<AdoptResult>("apply_adopt", { request: { planToken } });
+  },
+  undoAdopt(operationId) {
+    return invoke<AdoptUndoResult>("undo_adopt", { request: { operationId } });
+  },
+  finalizeAdopt(operationId) {
+    return invoke<void>("finalize_adopt", { request: { operationId } });
+  },
+  cancelAdopt(planToken) {
+    return invoke<boolean>("cancel_adopt", { request: { planToken } });
   },
 };
 

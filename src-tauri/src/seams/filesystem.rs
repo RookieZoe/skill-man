@@ -99,6 +99,93 @@ pub struct FileImportRecoveryBaseline {
     pub recorded_content_hash: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptJournalKind {
+    /// The entity was moved into the Library (file Install).
+    Migrate,
+    /// The entity stays outside; the Library records a pointer (Link).
+    Link,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptAppearanceKind {
+    RealDirectory,
+    Symlink {
+        original_target: PathBuf,
+    },
+    /// Entry under a shared/legacy scan source; never an Activation target.
+    SharedEntry,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AdoptAppearanceStep {
+    pub entry_path: PathBuf,
+    pub kind: AdoptAppearanceKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AdoptActivationStep {
+    pub agent_id: String,
+    pub entry_path: PathBuf,
+    pub target_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptItemPhase {
+    /// Staged in staging/<op>/<name>; nothing applied yet.
+    Staged,
+    /// The entity was installed at its stable Library path.
+    EntityInstalled,
+    /// The catalog row was committed.
+    CatalogCommitted,
+    /// Old appearances were replaced.
+    AppearancesApplied,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptJournalPhase {
+    Planned,
+    Applying,
+    Committed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AdoptJournalItem {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub kind: AdoptJournalKind,
+    pub staged_root: PathBuf,
+    pub staged_fingerprint: DirectoryFingerprint,
+    pub final_entity_path: PathBuf,
+    /// Empty for Link registrations.
+    pub recorded_content_hash: String,
+    pub original_path: PathBuf,
+    pub original_filename: String,
+    pub appearances: Vec<AdoptAppearanceStep>,
+    pub activations: Vec<AdoptActivationStep>,
+    pub phase: AdoptItemPhase,
+    pub installed_fingerprint: Option<DirectoryFingerprint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AdoptJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: AdoptJournalPhase,
+    pub staging_operation_root: PathBuf,
+    pub staging_fingerprint: DirectoryFingerprint,
+    pub items: Vec<AdoptJournalItem>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkSourceEntryKind {
     Directory,
@@ -122,6 +209,15 @@ pub struct LinkSourceSnapshot {
     pub entry_kind: LinkSourceEntryKind,
     pub symlink_chain: Vec<LinkSourceHop>,
     pub final_entity_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedSkillEntry {
+    pub entry_path: PathBuf,
+    pub name: String,
+    pub kind: LinkSourceEntryKind,
+    pub final_entity_path: Option<PathBuf>,
+    pub dangling: bool,
 }
 
 #[derive(Debug, Error)]
@@ -320,4 +416,57 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<(), FileSystemError>;
 
     fn remove_activation(&self, entry_path: &Path) -> Result<(), FileSystemError>;
+
+    /// List the top-level entries of an Agent skills directory for the
+    /// Adopt scan: real directories and symlinks (resolved with the same
+    /// loop/depth guards as Link sources); dangling entries are reported
+    /// with `dangling = true` and no final entity. Files are skipped.
+    fn scan_skills_directory(&self, path: &Path)
+    -> Result<Vec<ScannedSkillEntry>, FileSystemError>;
+
+    /// Move a real (non-symlink) directory from an external scan source into
+    /// the staging root: same-volume rename, cross-volume copy with per-file
+    /// verification then delete. Returns the staged fingerprint.
+    fn stage_external_directory(
+        &self,
+        source: &Path,
+        staging_destination: &Path,
+    ) -> Result<DirectoryFingerprint, FileSystemError>;
+
+    /// Reverse of `stage_external_directory` for Undo: move the directory
+    /// back to its original entry path. The destination must be absent.
+    fn restore_external_directory(
+        &self,
+        source: &Path,
+        destination: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError>;
+
+    /// Replace the old appearance entries (removing verified symlinks) and
+    /// create every planned Activation; idempotent so interrupted Adopt
+    /// operations can continue forward during recovery.
+    fn apply_adopt_appearances(
+        &self,
+        appearances: &[AdoptAppearanceStep],
+        activations: &[AdoptActivationStep],
+    ) -> Result<(), FileSystemError>;
+
+    fn write_adopt_journal(
+        &self,
+        library_root: &Path,
+        journal: &AdoptJournal,
+    ) -> Result<(), FileSystemError>;
+
+    fn finish_adopt_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError>;
+
+    fn recover_adopt_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[FileImportRecoveryBaseline],
+        adopted_entities: &[FileImportRecoveryBaseline],
+    ) -> Result<u32, FileSystemError>;
 }

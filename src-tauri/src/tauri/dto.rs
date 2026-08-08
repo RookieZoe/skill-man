@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::activation::{ActivationPlanKind, ActivationPreview, ActivationResult};
+use crate::core::adopt::{AdoptAppearance, AdoptAppearanceKind, AdoptCandidate, AdoptRisk};
 use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
@@ -1089,4 +1090,191 @@ impl From<UpdateResult> for UpdateResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct PinSkillUpdatesRequestDto {
     pub skill_ids: Vec<String>,
+}
+
+// -- Adopt --
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptRiskDto {
+    None,
+    External,
+    Broken,
+}
+
+impl From<AdoptRisk> for AdoptRiskDto {
+    fn from(value: AdoptRisk) -> Self {
+        match value {
+            AdoptRisk::None => Self::None,
+            AdoptRisk::External => Self::External,
+            AdoptRisk::Broken => Self::Broken,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptAppearanceDto {
+    pub entry_path: String,
+    pub kind: String,
+    pub agent_id: Option<String>,
+    pub shared: bool,
+}
+
+impl From<AdoptAppearance> for AdoptAppearanceDto {
+    fn from(value: AdoptAppearance) -> Self {
+        Self {
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            kind: match value.kind {
+                AdoptAppearanceKind::RealDirectory => "real_directory".into(),
+                AdoptAppearanceKind::Symlink { .. } => "symlink".into(),
+            },
+            agent_id: value.agent_id.map(|agent_id| agent_id.0),
+            shared: value.shared,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptCandidateDto {
+    pub canonical_entity: String,
+    pub directory_name: String,
+    pub directory_names: Vec<String>,
+    pub appearances: Vec<AdoptAppearanceDto>,
+    pub risk: AdoptRiskDto,
+    pub risk_reason: Option<String>,
+    pub conflict: Option<LibraryConflictDto>,
+    pub adoptable: bool,
+    pub suggested_agent_ids: Vec<String>,
+}
+
+impl From<AdoptCandidate> for AdoptCandidateDto {
+    fn from(value: AdoptCandidate) -> Self {
+        Self {
+            canonical_entity: value.canonical_entity.to_string_lossy().into_owned(),
+            directory_name: value.directory_name,
+            directory_names: value.directory_names,
+            appearances: value
+                .appearances
+                .into_iter()
+                .map(AdoptAppearanceDto::from)
+                .collect(),
+            risk: value.risk.into(),
+            risk_reason: value.risk_reason,
+            conflict: value.conflict.map(LibraryConflictDto::from),
+            adoptable: value.adoptable,
+            suggested_agent_ids: value
+                .suggested_agent_ids
+                .into_iter()
+                .map(|agent_id| agent_id.0)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptScanReportDto {
+    pub candidates: Vec<AdoptCandidateDto>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptSelectionDto {
+    pub canonical_entity: String,
+    pub agent_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanAdoptRequestDto {
+    pub selections: Vec<AdoptSelectionDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptTargetAgentDto {
+    pub agent_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptPlanItemDto {
+    pub directory_name: String,
+    pub canonical_entity: String,
+    pub kind: String,
+    pub final_entity_path: String,
+    pub appearances: Vec<AdoptAppearanceDto>,
+    pub target_agents: Vec<AdoptTargetAgentDto>,
+    pub adoptable: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptPlanDto {
+    pub plan_token: String,
+    pub items: Vec<AdoptPlanItemDto>,
+    pub can_apply: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAdoptRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptSkillResultDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub adopted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptResultDto {
+    pub operation_id: String,
+    pub items: Vec<AdoptSkillResultDto>,
+    pub snapshot_version: u64,
+    pub undo_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoAdoptRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptUndoItemResultDto {
+    pub directory_name: String,
+    pub undone: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptUndoResultDto {
+    pub operation_id: String,
+    pub items: Vec<AdoptUndoItemResultDto>,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizeAdoptRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelAdoptRequestDto {
+    pub plan_token: String,
 }

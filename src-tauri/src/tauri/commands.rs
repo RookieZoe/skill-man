@@ -1,23 +1,27 @@
 use tauri::State;
 
 use crate::tauri_adapter::activation_api::ActivationApi;
+use crate::tauri_adapter::adopt_api::AdoptApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AgentActivationDto,
-    ApplyActivationRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto,
-    CancelActivationRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
+    ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AdoptPlanDto,
+    AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto, AgentActivationDto,
+    ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
+    ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
+    ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto, CancelActivationRequestDto,
+    CancelAdoptRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
     CancelLinkImportRequestDto, CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
     FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
-    FileImportSelectionPreviewDto, FileImportSelectionResultDto, GitImportDiscoveryDto,
-    GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
-    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, PinSkillUpdatesRequestDto,
-    PlanActivationRepairRequestDto, PlanActivationRequestDto, PlanFileImportRequestDto,
-    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
-    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PlanSkillUpdatesRequestDto,
-    SkillDetailDto, UpdateCheckReportDto, UpdatePlanDto, UpdateResultDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto, FinalizeAdoptRequestDto,
+    GitImportDiscoveryDto, GitImportSelectionPreviewDto, GitImportSelectionResultDto,
+    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
+    PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto, PlanActivationRequestDto,
+    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
+    PlanFileReinstallRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
+    PlanSkillUpdatesRequestDto, SkillDetailDto, UndoAdoptRequestDto, UpdateCheckReportDto,
+    UpdatePlanDto, UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
@@ -244,4 +248,49 @@ pub fn pin_skill_updates(
     request: PinSkillUpdatesRequestDto,
 ) -> Result<(), CommandErrorDto> {
     state.pin_skill_updates(request)
+}
+
+#[tauri::command]
+pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptScanReportDto, CommandErrorDto> {
+    state.scan_adopt()
+}
+
+#[tauri::command]
+pub fn plan_adopt(
+    state: State<'_, AdoptApi>,
+    request: PlanAdoptRequestDto,
+) -> Result<AdoptPlanDto, CommandErrorDto> {
+    state.plan_adopt(request)
+}
+
+#[tauri::command]
+pub fn apply_adopt(
+    state: State<'_, AdoptApi>,
+    request: ApplyAdoptRequestDto,
+) -> Result<AdoptResultDto, CommandErrorDto> {
+    state.apply_adopt(request)
+}
+
+#[tauri::command]
+pub fn undo_adopt(
+    state: State<'_, AdoptApi>,
+    request: UndoAdoptRequestDto,
+) -> Result<AdoptUndoResultDto, CommandErrorDto> {
+    state.undo_adopt(request)
+}
+
+#[tauri::command]
+pub fn finalize_adopt(
+    state: State<'_, AdoptApi>,
+    request: FinalizeAdoptRequestDto,
+) -> Result<(), CommandErrorDto> {
+    state.finalize_adopt(request)
+}
+
+#[tauri::command]
+pub fn cancel_adopt(
+    state: State<'_, AdoptApi>,
+    request: CancelAdoptRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_adopt(request)
 }

@@ -3,6 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import type {
   ActivationPreview,
+  AdoptPlan,
+  AdoptResult,
+  AdoptScanReport,
+  AdoptUndoResult,
   AgentActivation,
   CatalogClient,
   CatalogFilter,
@@ -79,6 +83,17 @@ export function App({ client }: AppProps) {
     result: null,
   });
   const [reselectPath, setReselectPath] = useState("");
+  const [isAdoptOpen, setIsAdoptOpen] = useState(false);
+  const [adoptReport, setAdoptReport] = useState<AdoptScanReport | null>(null);
+  const [adoptSelected, setAdoptSelected] = useState<string[]>([]);
+  const [adoptPlan, setAdoptPlan] = useState<AdoptPlan | null>(null);
+  const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
+  const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
+  const [adoptError, setAdoptError] = useState<string | null>(null);
+  const [adoptActivity, setAdoptActivity] = useState<
+    "idle" | "scanning" | "planning" | "applying" | "undoing"
+  >("idle");
+  const adoptRunId = useRef(0);
   const [linkImportPreview, setLinkImportPreview] =
     useState<LinkImportPreview | null>(null);
   const [linkImportResult, setLinkImportResult] =
@@ -609,6 +624,125 @@ export function App({ client }: AppProps) {
     }
   }
 
+  async function openAdopt() {
+    adoptRunId.current += 1;
+    setIsAdoptOpen(true);
+    setAdoptReport(null);
+    setAdoptSelected([]);
+    setAdoptPlan(null);
+    setAdoptResult(null);
+    setAdoptUndo(null);
+    setAdoptError(null);
+    const runId = adoptRunId.current;
+    setAdoptActivity("scanning");
+    try {
+      const report = await client.scanAdopt();
+      if (runId !== adoptRunId.current) return;
+      setAdoptReport(report);
+      setAdoptSelected(
+        report.candidates
+          .filter((candidate) => candidate.adoptable && candidate.risk === "none")
+          .map((candidate) => candidate.canonicalEntity),
+      );
+    } catch (reason) {
+      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
+  }
+
+  function toggleAdoptCandidate(canonicalEntity: string, checked: boolean) {
+    setAdoptSelected((selected) =>
+      checked
+        ? [...selected, canonicalEntity]
+        : selected.filter((entity) => entity !== canonicalEntity),
+    );
+  }
+
+  async function planAdopt() {
+    if (adoptSelected.length === 0) return;
+    const runId = ++adoptRunId.current;
+    setAdoptActivity("planning");
+    setAdoptError(null);
+    try {
+      const plan = await client.planAdopt(
+        adoptSelected.map((canonicalEntity) => ({
+          canonicalEntity,
+          agentIds: [],
+        })),
+      );
+      if (runId !== adoptRunId.current) {
+        await client.cancelAdopt(plan.planToken).catch(() => undefined);
+        return;
+      }
+      setAdoptPlan(plan);
+    } catch (reason) {
+      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
+  }
+
+  async function applyAdopt() {
+    if (!adoptPlan?.canApply) return;
+    const runId = ++adoptRunId.current;
+    setAdoptActivity("applying");
+    setAdoptError(null);
+    try {
+      const result = await client.applyAdopt(adoptPlan.planToken);
+      const snapshot = await client.listSkills(filter);
+      setSkills(snapshot.items);
+      setAdoptPlan(null);
+      setAdoptResult(result);
+    } catch (reason) {
+      setAdoptPlan(null);
+      setAdoptError(readError(reason));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
+  }
+
+  async function undoAdopt() {
+    if (!adoptResult?.operationId) return;
+    const runId = ++adoptRunId.current;
+    setAdoptActivity("undoing");
+    setAdoptError(null);
+    try {
+      const undo = await client.undoAdopt(adoptResult.operationId);
+      const snapshot = await client.listSkills(filter);
+      setSkills(snapshot.items);
+      setAdoptUndo(undo);
+    } catch (reason) {
+      setAdoptError(readError(reason));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
+  }
+
+  async function closeAdopt() {
+    if (adoptActivity === "applying" || adoptActivity === "undoing") return;
+    adoptRunId.current += 1;
+    const planToken = adoptPlan?.planToken;
+    const operationId =
+      adoptResult?.operationId && adoptResult.undoAvailable && !adoptUndo
+        ? adoptResult.operationId
+        : null;
+    setIsAdoptOpen(false);
+    setAdoptReport(null);
+    setAdoptSelected([]);
+    setAdoptPlan(null);
+    setAdoptResult(null);
+    setAdoptUndo(null);
+    setAdoptError(null);
+    setAdoptActivity("idle");
+    if (planToken) {
+      await client.cancelAdopt(planToken).catch(() => undefined);
+    }
+    if (operationId) {
+      await client.finalizeAdopt(operationId).catch(() => undefined);
+    }
+  }
+
   return (
     <LibraryDesk
       filter={filter}
@@ -667,6 +801,20 @@ export function App({ client }: AppProps) {
       onApplySkillUpdate={applySkillUpdate}
       onPinSkillUpdate={pinSkillUpdate}
       onReselectPathChange={setReselectPath}
+      isAdoptOpen={isAdoptOpen}
+      adoptReport={adoptReport}
+      adoptSelected={adoptSelected}
+      adoptPlan={adoptPlan}
+      adoptResult={adoptResult}
+      adoptUndo={adoptUndo}
+      adoptError={adoptError}
+      adoptActivity={adoptActivity}
+      onOpenAdopt={openAdopt}
+      onToggleAdoptCandidate={toggleAdoptCandidate}
+      onPlanAdopt={planAdopt}
+      onApplyAdopt={applyAdopt}
+      onUndoAdopt={undoAdopt}
+      onCloseAdopt={closeAdopt}
     />
   );
 }

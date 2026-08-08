@@ -2658,7 +2658,7 @@ fn collect_recursive_skill_directories(
     Ok(())
 }
 
-fn validate_staged_tree(
+pub(crate) fn validate_staged_tree(
     filesystem: &dyn FileSystem,
     snapshot: &StagedTreeSnapshot,
 ) -> Result<(), ImportError> {
@@ -2813,7 +2813,7 @@ fn validate_utf8_link_source(snapshot: &LinkSourceSnapshot) -> Result<(), Import
     Ok(())
 }
 
-fn normalize_identity(directory_name: &str) -> Result<String, ImportError> {
+pub(crate) fn normalize_identity(directory_name: &str) -> Result<String, ImportError> {
     if directory_name.is_empty()
         || directory_name == "."
         || directory_name == ".."

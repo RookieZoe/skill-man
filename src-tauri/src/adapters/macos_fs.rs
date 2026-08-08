@@ -10,9 +10,11 @@ use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::seams::filesystem::{
-    ActivationEntrySnapshot, DirectoryFingerprint, FileImportJournal, FileImportJournalPhase,
-    FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind,
-    LinkSourceHop, LinkSourceSnapshot, SkillFingerprint, StagedEntryKind, StagedTreeEntry,
+    ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
+    AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
+    DirectoryFingerprint, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
+    FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
+    LinkSourceSnapshot, ScannedSkillEntry, SkillFingerprint, StagedEntryKind, StagedTreeEntry,
     StagedTreeSnapshot,
 };
 
@@ -137,6 +139,41 @@ impl MacOsFileSystem {
             self.discard_installed_skill(&final_entity_path, library_root, &fingerprint)?;
         }
         Ok(())
+    }
+
+    /// Reverse-compensate an interrupted, not-yet-committed Adopt item: move
+    /// the migrated entity (staged or installed) back to its real-directory
+    /// appearance. Link items never moved anything.
+    fn restore_uncommitted_adopt_item(
+        &self,
+        item: &AdoptJournalItem,
+    ) -> Result<(), FileSystemError> {
+        if !matches!(item.kind, AdoptJournalKind::Migrate) {
+            return Ok(());
+        }
+        let Some(real_appearance) = item
+            .appearances
+            .iter()
+            .find(|appearance| matches!(appearance.kind, AdoptAppearanceKind::RealDirectory))
+        else {
+            return Ok(());
+        };
+        let (source, expected) = match &item.installed_fingerprint {
+            Some(fingerprint) => (&item.final_entity_path, fingerprint),
+            None => (&item.staged_root, &item.staged_fingerprint),
+        };
+        match fs::symlink_metadata(source) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect interrupted Adopt entity",
+                    path: source.clone(),
+                    source: error,
+                });
+            }
+        }
+        self.restore_external_directory(source, &real_appearance.entry_path, expected)
     }
 }
 
@@ -1026,6 +1063,415 @@ impl FileSystem for MacOsFileSystem {
             source,
         })
     }
+
+    fn scan_skills_directory(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<ScannedSkillEntry>, FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        let mut entries = Vec::new();
+        let directory = match fs::read_dir(&path) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Adopt scan source",
+                    path,
+                    source,
+                });
+            }
+        };
+        for entry in directory {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Adopt scan source",
+                path: path.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&entry_path).map_err(|source| FileSystemError::Io {
+                    operation: "inspect Adopt scan entry",
+                    path: entry_path.clone(),
+                    source,
+                })?;
+            if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_owned();
+            match self.inspect_link_source(&entry_path) {
+                Ok(snapshot) => entries.push(ScannedSkillEntry {
+                    entry_path: entry_path.clone(),
+                    name: name.clone(),
+                    kind: snapshot.entry_kind,
+                    final_entity_path: Some(snapshot.final_entity_path),
+                    dangling: false,
+                }),
+                Err(_) => entries.push(ScannedSkillEntry {
+                    entry_path: entry_path.clone(),
+                    name,
+                    kind: LinkSourceEntryKind::Symlink {
+                        target: fs::read_link(&entry_path).unwrap_or_default(),
+                    },
+                    final_entity_path: None,
+                    dangling: true,
+                }),
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    fn stage_external_directory(
+        &self,
+        source: &Path,
+        staging_destination: &Path,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let source = self.normalize_configured_path(source)?;
+        let source_metadata =
+            fs::symlink_metadata(&source).map_err(|source_error| FileSystemError::Io {
+                operation: "inspect Adopt source directory",
+                path: source.clone(),
+                source: source_error,
+            })?;
+        if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
+            return Err(FileSystemError::NotDirectory { path: source });
+        }
+        let canonical = source
+            .canonicalize()
+            .map_err(|source_error| FileSystemError::Io {
+                operation: "canonicalize Adopt source directory",
+                path: source.clone(),
+                source: source_error,
+            })?;
+        if canonical != source {
+            return Err(FileSystemError::PlanStale { path: source });
+        }
+        if let Some(parent) = staging_destination.parent() {
+            fs::create_dir_all(parent).map_err(|source_error| FileSystemError::Io {
+                operation: "create Adopt staging directory",
+                path: parent.to_path_buf(),
+                source: source_error,
+            })?;
+        }
+        move_directory_verified(&source, staging_destination)?;
+        self.directory_fingerprint(staging_destination)
+    }
+
+    fn restore_external_directory(
+        &self,
+        source: &Path,
+        destination: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let source = self.normalize_configured_path(source)?;
+        let destination = self.normalize_configured_path(destination)?;
+        let current = self.directory_fingerprint(&source)?;
+        if current != *expected {
+            return Err(FileSystemError::PlanStale { path: source });
+        }
+        match fs::symlink_metadata(&destination) {
+            Err(source_error) if source_error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(FileSystemError::PlanStale { path: destination }),
+            Err(source_error) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect Adopt restore destination",
+                    path: destination,
+                    source: source_error,
+                });
+            }
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|source_error| FileSystemError::Io {
+                operation: "create Adopt restore parent",
+                path: parent.to_path_buf(),
+                source: source_error,
+            })?;
+        }
+        move_directory_verified(&source, &destination)
+    }
+
+    fn write_adopt_journal(
+        &self,
+        library_root: &Path,
+        journal: &AdoptJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(&journal.operation_id)?;
+        let operations_root = library_root.join("operations");
+        let operation_root = operations_root.join(&journal.operation_id);
+        fs::create_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "create Adopt operation directory",
+            path: operation_root.clone(),
+            source,
+        })?;
+        sync_directory(&operations_root, "sync Adopt operations directory")?;
+        let journal_path = operation_root.join("adopt-journal.json");
+        let temporary_path = operation_root.join("adopt-journal.tmp");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize Adopt journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary Adopt journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write Adopt journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync Adopt journal",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish Adopt journal",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(&operation_root, "sync Adopt operation directory")
+    }
+
+    fn finish_adopt_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(operation_id)?;
+        let operation_root = library_root.join("operations").join(operation_id);
+        let journal_path = operation_root.join("adopt-journal.json");
+        if journal_path.is_file() {
+            let journal_bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read completed Adopt journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let history_root = library_root.join("operation-history");
+            fs::create_dir_all(&history_root).map_err(|source| FileSystemError::Io {
+                operation: "create Adopt operation history",
+                path: history_root.clone(),
+                source,
+            })?;
+            let archive_path = history_root.join(format!("{operation_id}.adopt.json"));
+            let archive_temporary = history_root.join(format!(".{operation_id}.adopt.tmp"));
+            let mut archive = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&archive_temporary)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "open temporary Adopt history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive
+                .write_all(&journal_bytes)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "write Adopt history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive.sync_all().map_err(|source| FileSystemError::Io {
+                operation: "sync Adopt history",
+                path: archive_temporary.clone(),
+                source,
+            })?;
+            fs::rename(&archive_temporary, &archive_path).map_err(|source| {
+                FileSystemError::Io {
+                    operation: "publish Adopt history",
+                    path: archive_path,
+                    source,
+                }
+            })?;
+            sync_directory(&history_root, "sync Adopt operation history")?;
+        }
+        match fs::remove_file(&journal_path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove completed Adopt journal",
+                    path: journal_path,
+                    source,
+                });
+            }
+        }
+        match fs::remove_dir(&operation_root) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "remove completed Adopt operation directory",
+                path: operation_root,
+                source,
+            }),
+        }
+    }
+
+    fn recover_adopt_journals(
+        &self,
+        library_root: &Path,
+        baselines: &[FileImportRecoveryBaseline],
+        adopted_entities: &[FileImportRecoveryBaseline],
+    ) -> Result<u32, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        let entries = match fs::read_dir(&operations_root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Adopt recovery journals",
+                    path: operations_root,
+                    source,
+                });
+            }
+        };
+        let mut recovered = 0_u32;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Adopt recovery journals",
+                path: operations_root.clone(),
+                source,
+            })?;
+            let operation_root = entry.path();
+            let journal_path = operation_root.join("adopt-journal.json");
+            if !journal_path.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read Adopt recovery journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let mut journal: AdoptJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Adopt recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            validate_operation_id(&journal.operation_id)?;
+            if operation_root.file_name().and_then(|name| name.to_str())
+                != Some(journal.operation_id.as_str())
+            {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_root,
+                });
+            }
+            match journal.phase {
+                AdoptJournalPhase::Planned => {
+                    // The plan-time staging move already relocated the user's
+                    // entity; reverse-compensate instead of deleting (§6.4).
+                    for item in &journal.items {
+                        self.restore_uncommitted_adopt_item(item)?;
+                    }
+                }
+                AdoptJournalPhase::Committed => {}
+                AdoptJournalPhase::Applying => {
+                    for item in &mut journal.items {
+                        match item.phase {
+                            AdoptItemPhase::Staged | AdoptItemPhase::Done => {}
+                            AdoptItemPhase::EntityInstalled
+                            | AdoptItemPhase::CatalogCommitted
+                            | AdoptItemPhase::AppearancesApplied => {
+                                let catalog_committed = adopted_entities.iter().any(|entity| {
+                                    entity.skill_id == item.skill_id
+                                        && entity.final_entity_path == item.final_entity_path
+                                        && (item.recorded_content_hash.is_empty()
+                                            || baselines.iter().any(|baseline| {
+                                                baseline.skill_id == item.skill_id
+                                                    && baseline.recorded_content_hash
+                                                        == item.recorded_content_hash
+                                            }))
+                                });
+                                if !catalog_committed {
+                                    self.restore_uncommitted_adopt_item(item)?;
+                                    item.installed_fingerprint = None;
+                                    item.phase = AdoptItemPhase::Staged;
+                                } else {
+                                    self.apply_adopt_appearances(
+                                        &item.appearances,
+                                        &item.activations,
+                                    )?;
+                                    item.phase = AdoptItemPhase::Done;
+                                }
+                            }
+                        }
+                    }
+                    self.write_adopt_journal(&library_root, &journal)?;
+                }
+            }
+            self.discard_staging(
+                &journal.staging_operation_root,
+                &library_root,
+                Some(&journal.staging_fingerprint),
+            )?;
+            self.finish_adopt_journal(&library_root, &journal.operation_id)?;
+            recovered = recovered.saturating_add(1);
+        }
+        discard_orphaned_staging(&library_root)?;
+        Ok(recovered)
+    }
+
+    fn apply_adopt_appearances(
+        &self,
+        appearances: &[AdoptAppearanceStep],
+        activations: &[AdoptActivationStep],
+    ) -> Result<(), FileSystemError> {
+        for appearance in appearances {
+            if let AdoptAppearanceKind::Symlink { original_target } = &appearance.kind {
+                match self.activation_snapshot(&appearance.entry_path)? {
+                    ActivationEntrySnapshot::Missing => {}
+                    ActivationEntrySnapshot::Symlink { target } if target == *original_target => {
+                        fs::remove_file(&appearance.entry_path).map_err(|source| {
+                            FileSystemError::Io {
+                                operation: "remove Adopt appearance entry",
+                                path: appearance.entry_path.clone(),
+                                source,
+                            }
+                        })?;
+                    }
+                    ActivationEntrySnapshot::Symlink { .. } | ActivationEntrySnapshot::Other => {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "replace Adopt appearance entry",
+                            path: appearance.entry_path.clone(),
+                            message: "the appearance entry changed while Adopt was interrupted"
+                                .into(),
+                        });
+                    }
+                }
+            }
+        }
+        for activation in activations {
+            match self.activation_snapshot(&activation.entry_path)? {
+                ActivationEntrySnapshot::Symlink { target } if target == activation.target_path => {
+                }
+                ActivationEntrySnapshot::Missing => {
+                    self.create_activation(&activation.target_path, &activation.entry_path)?;
+                }
+                ActivationEntrySnapshot::Symlink { .. } | ActivationEntrySnapshot::Other => {
+                    return Err(FileSystemError::RecoveryRequired {
+                        operation: "create Adopt Activation",
+                        path: activation.entry_path.clone(),
+                        message: "the Activation entry is occupied".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1495,6 +1941,136 @@ fn remove_owned_directory_if_present(
             source,
         }),
     }
+}
+
+fn move_directory_verified(source: &Path, destination: &Path) -> Result<(), FileSystemError> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(source_error) if source_error.raw_os_error() == Some(libc::EXDEV) => {
+            copy_directory_verified(source, destination)?;
+            remove_owned_directory_if_present(source, None, "remove copied Adopt source")?;
+            Ok(())
+        }
+        Err(source_error) => Err(FileSystemError::Io {
+            operation: "move Adopt source directory",
+            path: source.to_path_buf(),
+            source: source_error,
+        }),
+    }
+}
+
+fn copy_directory_verified(source: &Path, destination: &Path) -> Result<(), FileSystemError> {
+    let copy = (|| {
+        fs::create_dir(destination).map_err(|source_error| FileSystemError::Io {
+            operation: "create Adopt copy destination",
+            path: destination.to_path_buf(),
+            source: source_error,
+        })?;
+        for entry in fs::read_dir(source).map_err(|source_error| FileSystemError::Io {
+            operation: "enumerate Adopt copy source",
+            path: source.to_path_buf(),
+            source: source_error,
+        })? {
+            let entry = entry.map_err(|source_error| FileSystemError::Io {
+                operation: "enumerate Adopt copy source",
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata =
+                fs::symlink_metadata(&source_path).map_err(|source_error| FileSystemError::Io {
+                    operation: "inspect Adopt copy source entry",
+                    path: source_path.clone(),
+                    source: source_error,
+                })?;
+            if metadata.file_type().is_symlink() {
+                let target =
+                    fs::read_link(&source_path).map_err(|source_error| FileSystemError::Io {
+                        operation: "read Adopt copy source symlink",
+                        path: source_path.clone(),
+                        source: source_error,
+                    })?;
+                std::os::unix::fs::symlink(&target, &destination_path).map_err(|source_error| {
+                    FileSystemError::Io {
+                        operation: "copy Adopt source symlink",
+                        path: source_path,
+                        source: source_error,
+                    }
+                })?;
+            } else if metadata.is_dir() {
+                copy_directory_verified(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                let mut input = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                    .open(&source_path)
+                    .map_err(|source_error| FileSystemError::Io {
+                        operation: "open Adopt copy source entry without following links",
+                        path: source_path.clone(),
+                        source: source_error,
+                    })?;
+                let opened_metadata =
+                    input
+                        .metadata()
+                        .map_err(|source_error| FileSystemError::Io {
+                            operation: "inspect opened Adopt copy source entry",
+                            path: source_path.clone(),
+                            source: source_error,
+                        })?;
+                if opened_metadata.dev() != metadata.dev()
+                    || opened_metadata.ino() != metadata.ino()
+                    || opened_metadata.len() != metadata.len()
+                {
+                    return Err(FileSystemError::PlanStale { path: source_path });
+                }
+                let mut output = fs::File::create(&destination_path).map_err(|source_error| {
+                    FileSystemError::Io {
+                        operation: "create Adopt copy destination entry",
+                        path: destination_path.clone(),
+                        source: source_error,
+                    }
+                })?;
+                std::io::copy(&mut input, &mut output).map_err(|source_error| {
+                    FileSystemError::Io {
+                        operation: "copy Adopt source entry",
+                        path: source_path.clone(),
+                        source: source_error,
+                    }
+                })?;
+                let finished_metadata =
+                    input
+                        .metadata()
+                        .map_err(|source_error| FileSystemError::Io {
+                            operation: "reinspect copied Adopt source entry",
+                            path: source_path.clone(),
+                            source: source_error,
+                        })?;
+                if finished_metadata.dev() != metadata.dev()
+                    || finished_metadata.ino() != metadata.ino()
+                    || finished_metadata.len() != metadata.len()
+                    || finished_metadata.mtime() != metadata.mtime()
+                    || finished_metadata.mtime_nsec() != metadata.mtime_nsec()
+                {
+                    return Err(FileSystemError::PlanStale { path: source_path });
+                }
+            } else {
+                return Err(FileSystemError::Io {
+                    operation: "inspect Adopt copy source entry",
+                    path: source_path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "unsupported entry type",
+                    ),
+                });
+            }
+        }
+        Ok(())
+    })();
+    if copy.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    copy
 }
 
 fn discard_orphaned_staging(library_root: &Path) -> Result<(), FileSystemError> {

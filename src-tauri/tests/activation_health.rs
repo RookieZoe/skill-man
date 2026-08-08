@@ -14,7 +14,8 @@ use skill_man_lib::seams::activation_store::{
 };
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::maintenance_store::{
-    InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError, SkillHealthObservation,
+    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError,
+    SkillHealthObservation,
 };
 
 #[test]
@@ -210,5 +211,9 @@ impl MaintenanceStore for HealthStore {
         _observations: &[SkillHealthObservation],
     ) -> Result<u64, MaintenanceStoreError> {
         Ok(42)
+    }
+
+    fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
+        Ok(Vec::new())
     }
 }

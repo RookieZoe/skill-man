@@ -13,6 +13,13 @@ pub struct InstalledSkillBaseline {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptedSkillEntity {
+    pub skill_id: SkillId,
+    pub final_entity_path: PathBuf,
+    pub recorded_content_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillHealthObservation {
     pub skill_id: SkillId,
     pub health: Health,
@@ -33,4 +40,9 @@ pub trait MaintenanceStore: ActivationStore {
         &self,
         observations: &[SkillHealthObservation],
     ) -> Result<u64, MaintenanceStoreError>;
+
+    /// Every Managed Skill row (id, final entity, recorded hash if any) used
+    /// to decide whether an interrupted Adopt item had committed its catalog
+    /// write before the process died.
+    fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError>;
 }

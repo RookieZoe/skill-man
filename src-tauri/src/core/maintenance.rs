@@ -89,6 +89,18 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_file_import_journals(library_root, &baselines)?;
+            let entities = self
+                .store
+                .adopted_skill_entities()?
+                .into_iter()
+                .map(|entity| FileImportRecoveryBaseline {
+                    skill_id: entity.skill_id.0,
+                    final_entity_path: entity.final_entity_path,
+                    recorded_content_hash: entity.recorded_content_hash.unwrap_or_default(),
+                })
+                .collect::<Vec<_>>();
+            self.filesystem
+                .recover_adopt_journals(library_root, &baselines, &entities)?;
         }
         Ok(())
     }

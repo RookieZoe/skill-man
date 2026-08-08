@@ -10,6 +10,9 @@ use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
+use crate::seams::adopt_store::{
+    AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict as AdoptConflict,
+};
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::FileSystem;
@@ -18,7 +21,8 @@ use crate::seams::import_store::{
     RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::maintenance_store::{
-    InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError, SkillHealthObservation,
+    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError,
+    SkillHealthObservation,
 };
 
 pub struct RuntimeCatalogStore {
@@ -120,7 +124,10 @@ impl ImportStore for RuntimeCatalogStore {
                 "catalog startup is read-only".into(),
             ));
         }
-        self.sqlite.find_library_conflict(identity_key)
+        crate::seams::import_store::ImportStore::find_library_conflict(
+            self.sqlite.as_ref(),
+            identity_key,
+        )
     }
 
     fn insert_link(&self, record: LinkImportRecord) -> Result<u64, ImportStoreError> {
@@ -246,6 +253,50 @@ impl ImportStore for RuntimeCatalogStore {
     }
 }
 
+impl AdoptStore for RuntimeCatalogStore {
+    fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.list_agents()
+    }
+
+    fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.insert_adopted(record)
+    }
+
+    fn remove_adopted_skill(&self, skill_id: &SkillId) -> Result<u64, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.remove_adopted_skill(skill_id)
+    }
+
+    fn find_library_conflict(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<AdoptConflict>, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::adopt_store::AdoptStore::find_library_conflict(
+            self.sqlite.as_ref(),
+            identity_key,
+        )
+    }
+}
+
 impl ActivationStore for RuntimeCatalogStore {
     fn load(
         &self,
@@ -313,6 +364,15 @@ impl ActivationStore for RuntimeCatalogStore {
 }
 
 impl MaintenanceStore for RuntimeCatalogStore {
+    fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only; Adopt recovery entities are unavailable".into(),
+            ));
+        }
+        self.sqlite.adopted_skill_entities()
+    }
+
     fn installed_skill_baselines(
         &self,
     ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError> {

@@ -14,6 +14,10 @@ use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
+use crate::seams::adopt_store::{
+    AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
+    LibraryConflict as AdoptLibraryConflict,
+};
 use crate::seams::catalog_store::{
     CatalogStoreError, StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
 };
@@ -22,7 +26,7 @@ use crate::seams::import_store::{
     RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::maintenance_store::{
-    InstalledSkillBaseline, MaintenanceStoreError, SkillHealthObservation,
+    AdoptedSkillEntity, InstalledSkillBaseline, MaintenanceStoreError, SkillHealthObservation,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
@@ -446,6 +450,30 @@ impl SqliteCatalogStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map(Some)
             .map_err(sqlite_catalog_error)
+    }
+
+    pub fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare("SELECT id, final_entity_path, recorded_content_hash FROM skills")
+            .map_err(sqlite_maintenance_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(AdoptedSkillEntity {
+                    skill_id: SkillId(row.get(0)?),
+                    final_entity_path: PathBuf::from(row.get::<_, String>(1)?),
+                    recorded_content_hash: row.get(2)?,
+                })
+            })
+            .map_err(sqlite_maintenance_error)?;
+        let mut entities = Vec::new();
+        for row in rows {
+            entities.push(row.map_err(sqlite_maintenance_error)?);
+        }
+        Ok(entities)
     }
 
     pub fn installed_skill_baselines(
@@ -1133,6 +1161,182 @@ impl ImportStore for SqliteCatalogStore {
     }
 }
 
+impl AdoptStore for SqliteCatalogStore {
+    fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .prepare("SELECT id, name, kind, skills_path, detected FROM agents ORDER BY name")
+            .map_err(sqlite_adopt_error)?
+            .query_map([], |row| {
+                Ok(AdoptAgent {
+                    agent_id: AgentId(row.get(0)?),
+                    name: row.get(1)?,
+                    kind: parse_agent_kind(&row.get::<_, String>(2)?)?,
+                    skills_path: PathBuf::from(row.get::<_, String>(3)?),
+                    detected: row.get::<_, bool>(4)?,
+                })
+            })
+            .map_err(sqlite_adopt_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_adopt_error)
+    }
+
+    fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_adopt_error)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                [&record.identity_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_adopt_error)?;
+        if let Some(directory_name) = existing {
+            return Err(AdoptStoreError::Conflict(directory_name));
+        }
+        let source_kind = if record.library_entry_path.is_some() {
+            "file_install"
+        } else {
+            "link"
+        };
+        transaction
+            .execute(
+                "INSERT INTO skills (
+                    id, directory_name, identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path,
+                    recorded_content_hash, health, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'healthy',
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.skill_id.0,
+                    record.directory_name,
+                    record.identity_key,
+                    record.display_name,
+                    record.description,
+                    source_kind,
+                    record
+                        .library_entry_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    record.final_entity_path.to_string_lossy(),
+                    record.recorded_content_hash,
+                ],
+            )
+            .map_err(sqlite_adopt_error)?;
+        if let (Some(original_path), Some(_)) =
+            (&record.original_path, &record.recorded_content_hash)
+        {
+            transaction
+                .execute(
+                    "INSERT INTO file_sources (skill_id, original_path, original_filename, installed_at)
+                     VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    params![record.skill_id.0, original_path.to_string_lossy(), record.original_filename],
+                )
+                .map_err(sqlite_adopt_error)?;
+        }
+        for activation in &record.activations {
+            transaction
+                .execute(
+                    "INSERT INTO activations (
+                        skill_id, agent_id, desired_enabled, expected_entry_path,
+                        expected_target_path, observed_state, last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    params![
+                        record.skill_id.0,
+                        activation.agent_id.0,
+                        activation.expected_entry_path.to_string_lossy(),
+                        activation.expected_target_path.to_string_lossy(),
+                    ],
+                )
+                .map_err(sqlite_adopt_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_adopt_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_adopt_error)?;
+        transaction.commit().map_err(sqlite_adopt_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| AdoptStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn remove_adopted_skill(&self, skill_id: &SkillId) -> Result<u64, AdoptStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_adopt_error)?;
+        let changed = transaction
+            .execute("DELETE FROM skills WHERE id = ?1", [skill_id.0.as_str()])
+            .map_err(sqlite_adopt_error)?;
+        if changed != 1 {
+            return Err(AdoptStoreError::Unavailable(
+                "the adopted Skill is no longer present".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_adopt_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_adopt_error)?;
+        transaction.commit().map_err(sqlite_adopt_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| AdoptStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn find_library_conflict(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<AdoptLibraryConflict>, AdoptStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT id, directory_name, final_entity_path FROM skills WHERE identity_key = ?1",
+                [identity_key],
+                |row| {
+                    Ok(AdoptLibraryConflict {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                        final_entity_path: PathBuf::from(row.get::<_, String>(2)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_adopt_error)
+    }
+}
+
 impl ActivationStore for SqliteCatalogStore {
     fn load(
         &self,
@@ -1576,4 +1780,8 @@ fn unix_timestamp() -> String {
         .unwrap_or_default()
         .as_secs()
         .to_string()
+}
+
+fn sqlite_adopt_error(error: rusqlite::Error) -> AdoptStoreError {
+    AdoptStoreError::Unavailable(error.to_string())
 }

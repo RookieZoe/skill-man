@@ -3,6 +3,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ImportKind, UpdatePanelState } from "../../app/App";
 import type {
   ActivationPreview,
+  AdoptPlan,
+  AdoptResult,
+  AdoptScanReport,
+  AdoptUndoResult,
   AgentActivation,
   CatalogFilter,
   GitImportDiscovery,
@@ -55,6 +59,14 @@ interface LibraryDeskProps {
   gitImportActivity: "idle" | "discovering" | "planning" | "applying";
   updatePanel: UpdatePanelState;
   reselectPath: string;
+  isAdoptOpen: boolean;
+  adoptReport: AdoptScanReport | null;
+  adoptSelected: string[];
+  adoptPlan: AdoptPlan | null;
+  adoptResult: AdoptResult | null;
+  adoptUndo: AdoptUndoResult | null;
+  adoptError: string | null;
+  adoptActivity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
   onRequestActivation: (agentId: string, enabled: boolean) => void;
@@ -80,6 +92,12 @@ interface LibraryDeskProps {
   onApplySkillUpdate: (abandonChanges: boolean) => void;
   onPinSkillUpdate: () => void;
   onReselectPathChange: (path: string) => void;
+  onOpenAdopt: () => void;
+  onToggleAdoptCandidate: (canonicalEntity: string, checked: boolean) => void;
+  onPlanAdopt: () => void;
+  onApplyAdopt: () => void;
+  onUndoAdopt: () => void;
+  onCloseAdopt: () => void;
 }
 
 export function LibraryDesk({
@@ -137,10 +155,24 @@ export function LibraryDesk({
   onApplySkillUpdate,
   onPinSkillUpdate,
   onReselectPathChange,
+  isAdoptOpen,
+  adoptReport,
+  adoptSelected,
+  adoptPlan,
+  adoptResult,
+  adoptUndo,
+  adoptError,
+  adoptActivity,
+  onOpenAdopt,
+  onToggleAdoptCandidate,
+  onPlanAdopt,
+  onApplyAdopt,
+  onUndoAdopt,
+  onCloseAdopt,
 }: LibraryDeskProps) {
-  const lastOverlay = useRef<"activation" | "import" | null>(null);
+  const lastOverlay = useRef<"activation" | "import" | "adopt" | null>(null);
   const hasActivationOverlay = Boolean(activationPreview || activationConflict);
-  const hasOverlay = hasActivationOverlay || isLinkImportOpen;
+  const hasOverlay = hasActivationOverlay || isLinkImportOpen || isAdoptOpen;
   useLayoutEffect(() => {
     if (hasActivationOverlay) {
       lastOverlay.current = "activation";
@@ -169,7 +201,7 @@ export function LibraryDesk({
         <a className="skip-link" href="#skill-detail">
           Skip to Skill detail
         </a>
-        <Toolbar onImport={onOpenLinkImport} />
+        <Toolbar onImport={onOpenLinkImport} onAdopt={onOpenAdopt} />
         {error ? (
           <div className="global-notice" role="alert">
             <strong>Library unavailable</strong>
@@ -220,6 +252,22 @@ export function LibraryDesk({
           onClose={onCloseActivationConflict}
         />
       ) : null}
+      {isAdoptOpen ? (
+        <AdoptSheet
+          report={adoptReport}
+          selected={adoptSelected}
+          plan={adoptPlan}
+          result={adoptResult}
+          undo={adoptUndo}
+          error={adoptError}
+          activity={adoptActivity}
+          onToggle={onToggleAdoptCandidate}
+          onPlan={onPlanAdopt}
+          onApply={onApplyAdopt}
+          onUndo={onUndoAdopt}
+          onClose={onCloseAdopt}
+        />
+      ) : null}
       {isLinkImportOpen ? (
         <LinkImportSheet
           kind={importKind}
@@ -253,7 +301,13 @@ export function LibraryDesk({
   );
 }
 
-function Toolbar({ onImport }: { onImport: () => void }) {
+function Toolbar({
+  onImport,
+  onAdopt,
+}: {
+  onImport: () => void;
+  onAdopt: () => void;
+}) {
   return (
     <header className="toolbar">
       <div className="product-mark" aria-hidden="true">
@@ -269,7 +323,7 @@ function Toolbar({ onImport }: { onImport: () => void }) {
         <button type="button" className="toolbar-button" disabled>
           Health check
         </button>
-        <button type="button" className="toolbar-button" disabled>
+        <button type="button" className="toolbar-button" onClick={onAdopt}>
           Adopt
         </button>
         <button
@@ -758,6 +812,262 @@ function AgentInspector({
         <span>Every Activation change requires a preview.</span>
       </div>
     </aside>
+  );
+}
+
+function AdoptSheet({
+  report,
+  selected,
+  plan,
+  result,
+  undo,
+  error,
+  activity,
+  onToggle,
+  onPlan,
+  onApply,
+  onUndo,
+  onClose,
+}: {
+  report: AdoptScanReport | null;
+  selected: string[];
+  plan: AdoptPlan | null;
+  result: AdoptResult | null;
+  undo: AdoptUndoResult | null;
+  error: string | null;
+  activity: "idle" | "scanning" | "planning" | "applying" | "undoing";
+  onToggle: (canonicalEntity: string, checked: boolean) => void;
+  onPlan: () => void;
+  onApply: () => void;
+  onUndo: () => void;
+  onClose: () => void;
+}) {
+  const isBusy = activity !== "idle";
+  const candidates = report?.candidates ?? [];
+  const step = result
+    ? "result"
+    : plan
+      ? "preview"
+      : report
+        ? "scan"
+        : "scan";
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !isBusy) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet import-sheet adopt-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Adopt untracked Skills"
+      >
+        <ol className="import-progress" aria-label="Adopt progress">
+          {(["scan", "preview", "result"] as const).map((stepName) => (
+            <li key={stepName} aria-current={step === stepName ? "step" : undefined}>
+              {capitalize(stepName)}
+            </li>
+          ))}
+        </ol>
+        {result ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Adopt complete</span>
+              <h2>
+                {result.items.filter((item) => item.adopted).length} of{" "}
+                {result.items.length} Skills adopted
+              </h2>
+              <p>
+                Adopted Skills are Managed and enabled on their target Agents.
+              </p>
+            </div>
+            <ul className="git-import-results">
+              {result.items.map((item) => (
+                <li key={item.directoryName}>
+                  <span>
+                    <strong>{item.directoryName}</strong>{" "}
+                    {item.adopted ? (
+                      <span className="candidate-clear">Adopted</span>
+                    ) : (
+                      <span className="candidate-conflict">
+                        Failed: {item.error ?? "unknown error"}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {undo ? (
+              <div
+                className={
+                  undo.items.every((item) => item.undone)
+                    ? "update-result-ok"
+                    : "update-result-fail"
+                }
+                role="status"
+              >
+                {undo.items.every((item) => item.undone)
+                  ? "Batch undone: original locations and entries restored."
+                  : undo.items
+                      .filter((item) => !item.undone)
+                      .map(
+                        (item) =>
+                          `${item.directoryName}: ${item.error ?? "unknown error"}`,
+                      )
+                      .join(" · ")}
+              </div>
+            ) : null}
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Adopt unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              {result.undoAvailable && !undo ? (
+                <button
+                  type="button"
+                  className="activation-confirm-button"
+                  disabled={isBusy}
+                  onClick={onUndo}
+                >
+                  {activity === "undoing" ? "Undoing" : "Undo this batch"}
+                </button>
+              ) : null}
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
+        ) : plan ? (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Adopt preview</span>
+              <h2>Preview {plan.items.length} Skill{plan.items.length === 1 ? "" : "s"}</h2>
+              <p>
+                Each Skill is its own transaction; a failure rolls back only
+                that Skill.
+              </p>
+            </div>
+            <ul className="git-import-candidates git-import-preview-list">
+              {plan.items.map((item) => (
+                <li key={item.directoryName}>
+                  <div>
+                    <strong>{item.directoryName}</strong>
+                    <span className="candidate-path">
+                      {item.kind === "migrate" ? "moves into Library" : "registered as Link"} ·{" "}
+                      {item.targetAgents.length > 0
+                        ? `enables on ${item.targetAgents
+                            .map((agent) => agent.name)
+                            .join(", ")}`
+                        : "one Activation"}
+                    </span>
+                  </div>
+                  {item.error ? (
+                    <span className="candidate-conflict" role="alert">
+                      {item.error}
+                    </span>
+                  ) : (
+                    <span className="candidate-clear">Ready</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Adopt unchanged</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="activation-confirm-button"
+                disabled={!plan.canApply || isBusy}
+                onClick={onApply}
+              >
+                {isBusy ? "Adopting" : "Adopt"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="activation-sheet-heading">
+              <span className="eyebrow">Adopt</span>
+              <h2>Untracked Skills</h2>
+              <p>
+                Scan Agent and shared directories. Safe candidates are
+                pre-selected; external, Broken and conflicting ones require
+                attention.
+              </p>
+            </div>
+            <ul className="git-import-candidates">
+              {candidates.map((candidate) => (
+                <li key={candidate.canonicalEntity}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(candidate.canonicalEntity)}
+                      disabled={!candidate.adoptable || isBusy}
+                      onChange={(event) =>
+                        onToggle(candidate.canonicalEntity, event.currentTarget.checked)
+                      }
+                    />
+                    <span>
+                      <strong>{candidate.directoryName}</strong>
+                      <span className="candidate-path">
+                        {candidate.risk === "broken"
+                          ? "Broken · target missing"
+                          : candidate.risk === "external"
+                            ? "External · " + (candidate.riskReason ?? "outside home")
+                            : candidate.conflict
+                              ? `Conflict with "${candidate.conflict.directoryName}"`
+                              : `${candidate.appearances.length} appearance${
+                                  candidate.appearances.length === 1 ? "" : "s"
+                                }`}
+                      </span>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {candidates.length === 0 && !isBusy ? (
+              <p role="status">No untracked Skills found.</p>
+            ) : null}
+            {report?.truncated ? (
+              <p className="candidate-conflict" role="status">
+                Candidate list truncated; Rescan after adopting to reveal more.
+              </p>
+            ) : null}
+            {error ? (
+              <div className="activation-error" role="alert">
+                <strong>Scan failed</strong>
+                <span>{error}</span>
+              </div>
+            ) : null}
+            <div className="activation-sheet-actions">
+              <button type="button" disabled={isBusy} onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="activation-confirm-button"
+                disabled={selected.length === 0 || isBusy || report === null}
+                onClick={onPlan}
+              >
+                {activity === "planning" ? "Preparing" : "Preview Adopt"}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
   );
 }
 
