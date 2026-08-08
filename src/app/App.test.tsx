@@ -526,3 +526,48 @@ test("shows Library Conflict in Link preview and blocks Import", async () => {
     screen.queryByRole("dialog", { name: "Link Import result" }),
   ).not.toBeInTheDocument();
 });
+
+test("switches the Import sheet to Git and reports a source rejection", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.click(screen.getByRole("button", { name: "Install from Git" }));
+  expect(
+    screen.getByRole("dialog", { name: "Import from Git" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/Public HTTPS repository/)).toBeInTheDocument();
+
+  await user.type(
+    screen.getByRole("textbox", { name: "Repository URL or owner/repo" }),
+    "owner/repo",
+  );
+  await user.click(screen.getByRole("button", { name: "Discover Skills" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "not available in the preview fixture",
+  );
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(
+    screen.queryByRole("dialog", { name: "Import from Git" }),
+  ).not.toBeInTheDocument();
+});
+
+test("checks Skill updates for a remote Install from the detail panel", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "media-xray" }));
+  expect(
+    await screen.findByRole("heading", { name: "media-xray" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: "Updates" }),
+  ).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "This Skill is not tracked for updates.",
+  );
+});

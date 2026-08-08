@@ -284,7 +284,35 @@ export function createFixtureCatalogClient(): CatalogClient {
     async cancelLinkImport(planToken) {
       return linkImportPlans.delete(planToken);
     },
+    async discoverGitImport() {
+      return fixtureUnsupported("Git Import is not available in the preview fixture");
+    },
+    async planGitImportSelection() {
+      return fixtureUnsupported("Git Import is not available in the preview fixture");
+    },
+    async applyGitImportSelection() {
+      return fixtureUnsupported("Git Import is not available in the preview fixture");
+    },
+    async cancelGitImportSelection() {
+      return false;
+    },
+    async checkSkillUpdates() {
+      return { groups: [], errors: [] };
+    },
+    async planSkillUpdates() {
+      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+    },
+    async applySkillUpdates() {
+      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+    },
+    async pinSkillUpdates() {
+      return fixtureUnsupported("Skill Updates are not available in the preview fixture");
+    },
   };
+}
+
+function fixtureUnsupported(message: string): never {
+  throw { code: "fixture_unsupported", message };
 }
 
 function includesFilter(

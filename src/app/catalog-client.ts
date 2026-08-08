@@ -103,6 +103,116 @@ export interface LinkImportResult {
   snapshotVersion: number;
 }
 
+export interface GitImportCandidate {
+  directoryName: string;
+  displayName: string;
+  description: string;
+  frontmatterName: string | null;
+  skillPath: string;
+}
+
+export interface GitImportDiscovery {
+  repoUrl: string;
+  requestedRef: string;
+  resolvedCommit: string;
+  candidates: GitImportCandidate[];
+  truncated: boolean;
+}
+
+export interface GitImportPreview {
+  planToken: string;
+  directoryName: string;
+  displayName: string;
+  description: string;
+  skillPath: string;
+  finalEntityPath: string;
+  conflict: LibraryConflict | null;
+  canApply: boolean;
+}
+
+export interface GitImportSelectionPreview {
+  planToken: string;
+  repoUrl: string;
+  requestedRef: string;
+  resolvedCommit: string;
+  items: GitImportPreview[];
+  canApply: boolean;
+}
+
+export interface GitImportResult {
+  operationId: string;
+  skillId: string;
+  directoryName: string;
+  finalEntityPath: string;
+  snapshotVersion: number;
+}
+
+export interface GitImportSelectionResult {
+  operationId: string;
+  items: GitImportResult[];
+  snapshotVersion: number;
+}
+
+export interface UpdateCheckItem {
+  skillId: string;
+  directoryName: string;
+  sourceUrl: string;
+  requestedRef: string;
+  currentCommit: string;
+  resolvedCommit: string;
+  hasUpdate: boolean;
+  modified: boolean;
+  upstreamPathGone: boolean;
+  lastCheckedAt: string | null;
+}
+
+export interface UpdateCheckGroup {
+  repoUrl: string;
+  items: UpdateCheckItem[];
+}
+
+export interface UpdateCheckReport {
+  groups: UpdateCheckGroup[];
+  errors: string[];
+}
+
+export interface UpdateSelection {
+  skillId: string;
+  newSkillPath: string | null;
+}
+
+export interface UpdatePlanItem {
+  skillId: string;
+  directoryName: string;
+  planToken: string;
+  currentCommit: string;
+  newCommit: string;
+  modified: boolean;
+  pathChanged: boolean;
+  error: string | null;
+}
+
+export interface UpdatePlan {
+  items: UpdatePlanItem[];
+}
+
+export interface UpdateApplyRequest {
+  planToken: string;
+  skillId: string;
+  directoryName: string;
+}
+
+export interface UpdateItemResult {
+  skillId: string;
+  directoryName: string;
+  updated: boolean;
+  error: string | null;
+}
+
+export interface UpdateResult {
+  items: UpdateItemResult[];
+}
+
 export interface CatalogClient {
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
@@ -123,6 +233,24 @@ export interface CatalogClient {
   planLinkImport(sourcePath: string): Promise<LinkImportPreview>;
   applyLinkImport(planToken: string): Promise<LinkImportResult>;
   cancelLinkImport(planToken: string): Promise<boolean>;
+  discoverGitImport(
+    source: string,
+    forceFullDepth: boolean,
+  ): Promise<GitImportDiscovery>;
+  planGitImportSelection(
+    source: string,
+    forceFullDepth: boolean,
+    selectedDirectoryNames: string[],
+  ): Promise<GitImportSelectionPreview>;
+  applyGitImportSelection(planToken: string): Promise<GitImportSelectionResult>;
+  cancelGitImportSelection(planToken: string): Promise<boolean>;
+  checkSkillUpdates(force: boolean): Promise<UpdateCheckReport>;
+  planSkillUpdates(selections: UpdateSelection[]): Promise<UpdatePlan>;
+  applySkillUpdates(
+    requests: UpdateApplyRequest[],
+    abandonChanges: boolean,
+  ): Promise<UpdateResult>;
+  pinSkillUpdates(skillIds: string[]): Promise<void>;
 }
 
 let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
@@ -183,6 +311,46 @@ const tauriCatalogClient: CatalogClient = {
   cancelLinkImport(planToken) {
     return invoke<boolean>("cancel_link_import", {
       request: { planToken },
+    });
+  },
+  discoverGitImport(source, forceFullDepth) {
+    return invoke<GitImportDiscovery>("discover_git_import", {
+      request: { source, forceFullDepth },
+    });
+  },
+  planGitImportSelection(source, forceFullDepth, selectedDirectoryNames) {
+    return invoke<GitImportSelectionPreview>("plan_git_import_selection", {
+      request: { source, forceFullDepth, selectedDirectoryNames },
+    });
+  },
+  applyGitImportSelection(planToken) {
+    return invoke<GitImportSelectionResult>("apply_git_import_selection", {
+      request: { planToken },
+    });
+  },
+  cancelGitImportSelection(planToken) {
+    return invoke<boolean>("cancel_git_import_selection", {
+      request: { planToken },
+    });
+  },
+  checkSkillUpdates(force) {
+    return invoke<UpdateCheckReport>("check_skill_updates", {
+      request: { force },
+    });
+  },
+  planSkillUpdates(selections) {
+    return invoke<UpdatePlan>("plan_skill_updates", {
+      request: { selections },
+    });
+  },
+  applySkillUpdates(requests, abandonChanges) {
+    return invoke<UpdateResult>("apply_skill_updates", {
+      request: { requests, abandonChanges },
+    });
+  },
+  pinSkillUpdates(skillIds) {
+    return invoke<void>("pin_skill_updates", {
+      request: { skillIds },
     });
   },
 };

@@ -1,9 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import type { ImportKind, UpdatePanelState } from "../../app/App";
 import type {
   ActivationPreview,
   AgentActivation,
   CatalogFilter,
+  GitImportDiscovery,
+  GitImportSelectionPreview,
+  GitImportSelectionResult,
   Health,
   LinkImportPreview,
   LinkImportResult,
@@ -36,10 +40,21 @@ interface LibraryDeskProps {
   isApplyingActivation: boolean;
   isCheckingActivations: boolean;
   isLinkImportOpen: boolean;
+  importKind: ImportKind;
   linkImportPreview: LinkImportPreview | null;
   linkImportResult: LinkImportResult | null;
   linkImportError: string | null;
   linkImportActivity: "idle" | "discovering" | "applying";
+  gitImportSource: string;
+  gitImportForceFullDepth: boolean;
+  gitImportDiscovery: GitImportDiscovery | null;
+  gitImportSelected: string[];
+  gitImportPreview: GitImportSelectionPreview | null;
+  gitImportResult: GitImportSelectionResult | null;
+  gitImportError: string | null;
+  gitImportActivity: "idle" | "discovering" | "planning" | "applying";
+  updatePanel: UpdatePanelState;
+  reselectPath: string;
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
   onRequestActivation: (agentId: string, enabled: boolean) => void;
@@ -48,10 +63,23 @@ interface LibraryDeskProps {
   onCancelActivation: () => void;
   onCloseActivationConflict: () => void;
   onOpenLinkImport: () => void;
+  onImportKindChange: (kind: ImportKind) => void;
   onPreviewLinkImport: (sourcePath: string) => void;
   onApplyLinkImport: () => void;
   onCloseLinkImport: () => void;
   onOpenImportedSkill: () => void;
+  onGitImportSourceChange: (source: string) => void;
+  onGitImportForceFullDepthChange: (force: boolean) => void;
+  onDiscoverGitImport: (source: string, forceFullDepth: boolean) => void;
+  onGitImportSelectionChange: (directoryNames: string[]) => void;
+  onPlanGitImport: () => void;
+  onApplyGitImport: () => void;
+  onOpenImportedGitSkill: (skillId: string) => void;
+  onCheckSkillUpdates: () => void;
+  onPlanSkillUpdate: (newSkillPath: string | null) => void;
+  onApplySkillUpdate: (abandonChanges: boolean) => void;
+  onPinSkillUpdate: () => void;
+  onReselectPathChange: (path: string) => void;
 }
 
 export function LibraryDesk({
@@ -69,10 +97,21 @@ export function LibraryDesk({
   isApplyingActivation,
   isCheckingActivations,
   isLinkImportOpen,
+  importKind,
   linkImportPreview,
   linkImportResult,
   linkImportError,
   linkImportActivity,
+  gitImportSource,
+  gitImportForceFullDepth,
+  gitImportDiscovery,
+  gitImportSelected,
+  gitImportPreview,
+  gitImportResult,
+  gitImportError,
+  gitImportActivity,
+  updatePanel,
+  reselectPath,
   onFilter,
   onSelect,
   onRequestActivation,
@@ -81,10 +120,23 @@ export function LibraryDesk({
   onCancelActivation,
   onCloseActivationConflict,
   onOpenLinkImport,
+  onImportKindChange,
   onPreviewLinkImport,
   onApplyLinkImport,
   onCloseLinkImport,
   onOpenImportedSkill,
+  onGitImportSourceChange,
+  onGitImportForceFullDepthChange,
+  onDiscoverGitImport,
+  onGitImportSelectionChange,
+  onPlanGitImport,
+  onApplyGitImport,
+  onOpenImportedGitSkill,
+  onCheckSkillUpdates,
+  onPlanSkillUpdate,
+  onApplySkillUpdate,
+  onPinSkillUpdate,
+  onReselectPathChange,
 }: LibraryDeskProps) {
   const lastOverlay = useRef<"activation" | "import" | null>(null);
   const hasActivationOverlay = Boolean(activationPreview || activationConflict);
@@ -132,7 +184,16 @@ export function LibraryDesk({
             onFilter={onFilter}
             onSelect={onSelect}
           />
-          <SkillDetailPanel detail={detail} />
+          <SkillDetailPanel
+            detail={detail}
+            updatePanel={updatePanel}
+            reselectPath={reselectPath}
+            onCheckUpdates={onCheckSkillUpdates}
+            onPlanUpdate={onPlanSkillUpdate}
+            onApplyUpdate={onApplySkillUpdate}
+            onPinUpdate={onPinSkillUpdate}
+            onReselectPathChange={onReselectPathChange}
+          />
           <AgentInspector
             detail={detail}
             agents={agents}
@@ -161,14 +222,31 @@ export function LibraryDesk({
       ) : null}
       {isLinkImportOpen ? (
         <LinkImportSheet
+          kind={importKind}
           preview={linkImportPreview}
           result={linkImportResult}
           error={linkImportError}
           activity={linkImportActivity}
+          gitImportSource={gitImportSource}
+          gitImportForceFullDepth={gitImportForceFullDepth}
+          gitImportDiscovery={gitImportDiscovery}
+          gitImportSelected={gitImportSelected}
+          gitImportPreview={gitImportPreview}
+          gitImportResult={gitImportResult}
+          gitImportError={gitImportError}
+          gitImportActivity={gitImportActivity}
+          onKindChange={onImportKindChange}
           onPreview={onPreviewLinkImport}
           onApply={onApplyLinkImport}
           onClose={onCloseLinkImport}
           onOpenImportedSkill={onOpenImportedSkill}
+          onGitImportSourceChange={onGitImportSourceChange}
+          onGitImportForceFullDepthChange={onGitImportForceFullDepthChange}
+          onDiscoverGitImport={onDiscoverGitImport}
+          onGitImportSelectionChange={onGitImportSelectionChange}
+          onPlanGitImport={onPlanGitImport}
+          onApplyGitImport={onApplyGitImport}
+          onOpenImportedGitSkill={onOpenImportedGitSkill}
         />
       ) : null}
     </div>
@@ -292,7 +370,25 @@ function LibrarySidebar({
   );
 }
 
-function SkillDetailPanel({ detail }: { detail: SkillDetail | null }) {
+function SkillDetailPanel({
+  detail,
+  updatePanel,
+  reselectPath,
+  onCheckUpdates,
+  onPlanUpdate,
+  onApplyUpdate,
+  onPinUpdate,
+  onReselectPathChange,
+}: {
+  detail: SkillDetail | null;
+  updatePanel: UpdatePanelState;
+  reselectPath: string;
+  onCheckUpdates: () => void;
+  onPlanUpdate: (newSkillPath: string | null) => void;
+  onApplyUpdate: (abandonChanges: boolean) => void;
+  onPinUpdate: () => void;
+  onReselectPathChange: (path: string) => void;
+}) {
   return (
     <main id="skill-detail" className="skill-detail" aria-label="Skill detail">
       {detail ? (
@@ -334,6 +430,18 @@ function SkillDetailPanel({ detail }: { detail: SkillDetail | null }) {
               Agent-visible name: <code>{detail.frontmatterName}</code>
             </p>
           ) : null}
+          {detail.sourceKind === "remote_install" ? (
+            <UpdateSection
+              skill={detail}
+              updatePanel={updatePanel}
+              reselectPath={reselectPath}
+              onCheckUpdates={onCheckUpdates}
+              onPlanUpdate={onPlanUpdate}
+              onApplyUpdate={onApplyUpdate}
+              onPinUpdate={onPinUpdate}
+              onReselectPathChange={onReselectPathChange}
+            />
+          ) : null}
           <section className="document-preview" aria-labelledby="preview-title">
             <div className="document-toolbar">
               <div>
@@ -350,6 +458,192 @@ function SkillDetailPanel({ detail }: { detail: SkillDetail | null }) {
       )}
     </main>
   );
+}
+
+function UpdateSection({
+  skill,
+  updatePanel,
+  reselectPath,
+  onCheckUpdates,
+  onPlanUpdate,
+  onApplyUpdate,
+  onPinUpdate,
+  onReselectPathChange,
+}: {
+  skill: SkillDetail;
+  updatePanel: UpdatePanelState;
+  reselectPath: string;
+  onCheckUpdates: () => void;
+  onPlanUpdate: (newSkillPath: string | null) => void;
+  onApplyUpdate: (abandonChanges: boolean) => void;
+  onPinUpdate: () => void;
+  onReselectPathChange: (path: string) => void;
+}) {
+  const isBusy = updatePanel.activity !== "idle";
+  const item = updatePanel.report?.groups
+    .flatMap((group) => group.items)
+    .find((candidate) => candidate.skillId === skill.id);
+  const planItem = updatePanel.plan?.items.find(
+    (candidate) => candidate.skillId === skill.id,
+  );
+  const resultItem = updatePanel.result?.items.find(
+    (candidate) => candidate.skillId === skill.id,
+  );
+  const hasChecked = updatePanel.report !== null;
+
+  return (
+    <section className="update-section" aria-labelledby="update-title">
+      <div className="update-toolbar">
+        <h3 id="update-title">Updates</h3>
+        {!hasChecked ? (
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={onCheckUpdates}
+          >
+            {updatePanel.activity === "checking"
+              ? "Checking"
+              : "Check for updates"}
+          </button>
+        ) : null}
+      </div>
+      {updatePanel.error ? (
+        <div className="activation-error" role="alert">
+          <strong>Update check failed</strong>
+          <span>{updatePanel.error}</span>
+        </div>
+      ) : null}
+      {!hasChecked ? null : item ? (
+        <div className="update-status">
+          {item.hasUpdate ? (
+            <p className="update-available" role="status">
+              Update available:{" "}
+              <code>{shortCommit(item.currentCommit)}</code> →{" "}
+              <code>{shortCommit(item.resolvedCommit)}</code>
+            </p>
+          ) : (
+            <p role="status">This Skill is up to date.</p>
+          )}
+          {item.upstreamPathGone ? (
+            <div className="update-path-gone" role="alert">
+              <strong>The upstream Skill path no longer exists</strong>
+              <span>
+                Choose the new location inside the repository, keep the current
+                version, or Remove the Skill later.
+              </span>
+              <div className="reselect-row">
+                <input
+                  type="text"
+                  value={reselectPath}
+                  placeholder="packages/skills/new-name"
+                  aria-label="New repository path"
+                  onChange={(event) =>
+                    onReselectPathChange(event.currentTarget.value)
+                  }
+                />
+                <button
+                  type="button"
+                  disabled={isBusy || !reselectPath.trim()}
+                  onClick={() => onPlanUpdate(reselectPath.trim())}
+                >
+                  {updatePanel.activity === "planning"
+                    ? "Planning"
+                    : "Reselect and update"}
+                </button>
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={onPinUpdate}
+                >
+                  {updatePanel.activity === "pinning"
+                    ? "Pinning"
+                    : "Keep current version"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {!item.hasUpdate || item.upstreamPathGone ? null : planItem ? (
+            <div className="update-plan">
+              {planItem.error ? (
+                <p className="update-plan-error" role="alert">
+                  {planItem.error}
+                </p>
+              ) : (
+                <>
+                  {planItem.modified ? (
+                    <p className="update-modified" role="alert">
+                      <strong>Local changes detected</strong>
+                      <span>
+                        Updating will abandon the local modifications to this
+                        Skill.
+                      </span>
+                    </p>
+                  ) : null}
+                  <div className="reselect-row">
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => onApplyUpdate(planItem.modified)}
+                    >
+                      {updatePanel.activity === "applying"
+                        ? "Updating"
+                        : planItem.modified
+                          ? "Abandon changes and update"
+                          : "Update"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => onPlanUpdate(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : item.hasUpdate && !item.upstreamPathGone ? (
+            <div className="reselect-row">
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => onPlanUpdate(null)}
+              >
+                {updatePanel.activity === "planning" ? "Planning" : "Update"}
+              </button>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={onPinUpdate}
+              >
+                {updatePanel.activity === "pinning"
+                  ? "Pinning"
+                  : "Keep current version"}
+              </button>
+            </div>
+          ) : null}
+          {resultItem ? (
+            <p
+              className={
+                resultItem.updated ? "update-result-ok" : "update-result-fail"
+              }
+              role="status"
+            >
+              {resultItem.updated
+                ? "Update applied."
+                : `Update failed: ${resultItem.error ?? "unknown error"}`}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <p role="status">This Skill is not tracked for updates.</p>
+      )}
+    </section>
+  );
+}
+
+function shortCommit(commit: string) {
+  return commit.length > 10 ? commit.slice(0, 10) : commit;
 }
 
 function AgentInspector({
@@ -468,63 +762,131 @@ function AgentInspector({
 }
 
 function LinkImportSheet({
+  kind,
   preview,
   result,
   error,
   activity,
+  gitImportSource,
+  gitImportForceFullDepth,
+  gitImportDiscovery,
+  gitImportSelected,
+  gitImportPreview,
+  gitImportResult,
+  gitImportError,
+  gitImportActivity,
+  onKindChange,
   onPreview,
   onApply,
   onClose,
   onOpenImportedSkill,
+  onGitImportSourceChange,
+  onGitImportForceFullDepthChange,
+  onDiscoverGitImport,
+  onGitImportSelectionChange,
+  onPlanGitImport,
+  onApplyGitImport,
+  onOpenImportedGitSkill,
 }: {
+  kind: ImportKind;
   preview: LinkImportPreview | null;
   result: LinkImportResult | null;
   error: string | null;
   activity: "idle" | "discovering" | "applying";
+  gitImportSource: string;
+  gitImportForceFullDepth: boolean;
+  gitImportDiscovery: GitImportDiscovery | null;
+  gitImportSelected: string[];
+  gitImportPreview: GitImportSelectionPreview | null;
+  gitImportResult: GitImportSelectionResult | null;
+  gitImportError: string | null;
+  gitImportActivity: "idle" | "discovering" | "planning" | "applying";
+  onKindChange: (kind: ImportKind) => void;
   onPreview: (sourcePath: string) => void;
   onApply: () => void;
   onClose: () => void;
   onOpenImportedSkill: () => void;
+  onGitImportSourceChange: (source: string) => void;
+  onGitImportForceFullDepthChange: (force: boolean) => void;
+  onDiscoverGitImport: (source: string, forceFullDepth: boolean) => void;
+  onGitImportSelectionChange: (directoryNames: string[]) => void;
+  onPlanGitImport: () => void;
+  onApplyGitImport: () => void;
+  onOpenImportedGitSkill: (skillId: string) => void;
 }) {
   const [sourcePath, setSourcePath] = useState("");
   const sourceInput = useRef<HTMLInputElement>(null);
   const primaryButton = useRef<HTMLButtonElement>(null);
   const isDiscovering = activity === "discovering";
   const isApplying = activity === "applying";
-  const isRunning = activity !== "idle";
-  const currentStep = result
+  const isRunning = activity !== "idle" || gitImportActivity !== "idle";
+  const isGit = kind === "git";
+  const gitIsDiscovering = gitImportActivity === "discovering";
+  const gitIsPlanning = gitImportActivity === "planning";
+  const gitIsApplying = gitImportActivity === "applying";
+  const gitStep = gitImportResult
     ? "result"
-    : preview
+    : gitImportPreview
       ? "preview"
-      : isDiscovering
+      : gitImportDiscovery
         ? "discover"
         : "source";
+  const currentStep = isGit
+    ? gitStep
+    : result
+      ? "result"
+      : preview
+        ? "preview"
+        : isDiscovering
+          ? "discover"
+          : "source";
 
   useLayoutEffect(() => {
-    if (result || preview) primaryButton.current?.focus();
-    else sourceInput.current?.focus();
-  }, [preview, result]);
+    if (result || preview || gitImportResult || gitImportPreview) {
+      primaryButton.current?.focus();
+    } else {
+      sourceInput.current?.focus();
+    }
+  }, [preview, result, gitImportPreview, gitImportResult]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isApplying) onClose();
+      if (event.key === "Escape" && !isApplying && !gitIsApplying) onClose();
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isApplying, onClose]);
+  }, [isApplying, gitIsApplying, onClose]);
+
+  function toggleGitCandidate(directoryName: string, checked: boolean) {
+    const next = checked
+      ? [...gitImportSelected, directoryName]
+      : gitImportSelected.filter((name) => name !== directoryName);
+    onGitImportSelectionChange(next);
+  }
 
   return (
     <div
       className="activation-sheet-backdrop"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target && !isApplying) onClose();
+        if (
+          event.currentTarget === event.target &&
+          !isApplying &&
+          !gitIsApplying
+        )
+          onClose();
       }}
     >
       <section
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label={result ? "Link Import result" : "Import Link"}
+        aria-label={
+          result
+            ? "Link Import result"
+            : gitImportResult
+              ? "Import result"
+              : `Import ${isGit ? "from Git" : "Link"}`
+        }
       >
         <ol className="import-progress" aria-label="Import progress">
           {(["source", "discover", "preview", "result"] as const).map(
@@ -538,7 +900,29 @@ function LinkImportSheet({
             ),
           )}
         </ol>
-        {result ? (
+        {isGit ? (
+          <GitImportFlow
+            source={gitImportSource}
+            forceFullDepth={gitImportForceFullDepth}
+            discovery={gitImportDiscovery}
+            selected={gitImportSelected}
+            preview={gitImportPreview}
+            result={gitImportResult}
+            error={gitImportError}
+            activity={gitImportActivity}
+            onSourceChange={onGitImportSourceChange}
+            onForceFullDepthChange={onGitImportForceFullDepthChange}
+            onDiscover={onDiscoverGitImport}
+            onSelectionChange={toggleGitCandidate}
+            onPlan={onPlanGitImport}
+            onApply={onApplyGitImport}
+            onClose={onClose}
+            onKindChange={onKindChange}
+            onOpenImportedSkill={onOpenImportedGitSkill}
+            primaryButton={primaryButton}
+            sourceInput={sourceInput}
+          />
+        ) : result ? (
           <>
             <div className="activation-sheet-heading">
               <span className="eyebrow">Import complete</span>
@@ -647,6 +1031,7 @@ function LinkImportSheet({
                 folder stays at its source.
               </p>
             </div>
+            <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
             <label className="import-source-field">
               <span>Local folder path</span>
               <input
@@ -682,6 +1067,303 @@ function LinkImportSheet({
         )}
       </section>
     </div>
+  );
+}
+
+function SourceKindSwitch({
+  kind,
+  onKindChange,
+}: {
+  kind: ImportKind;
+  onKindChange: (kind: ImportKind) => void;
+}) {
+  return (
+    <div className="import-kind-switch" role="group" aria-label="Import source">
+      <button
+        type="button"
+        aria-pressed={kind === "link"}
+        onClick={() => onKindChange("link")}
+      >
+        Link local folder
+      </button>
+      <button
+        type="button"
+        aria-pressed={kind === "git"}
+        onClick={() => onKindChange("git")}
+      >
+        Install from Git
+      </button>
+    </div>
+  );
+}
+
+function GitImportFlow({
+  source,
+  forceFullDepth,
+  discovery,
+  selected,
+  preview,
+  result,
+  error,
+  activity,
+  onSourceChange,
+  onForceFullDepthChange,
+  onDiscover,
+  onSelectionChange,
+  onPlan,
+  onApply,
+  onClose,
+  onKindChange,
+  onOpenImportedSkill,
+  primaryButton,
+  sourceInput,
+}: {
+  source: string;
+  forceFullDepth: boolean;
+  discovery: GitImportDiscovery | null;
+  selected: string[];
+  preview: GitImportSelectionPreview | null;
+  result: GitImportSelectionResult | null;
+  error: string | null;
+  activity: "idle" | "discovering" | "planning" | "applying";
+  onSourceChange: (source: string) => void;
+  onForceFullDepthChange: (force: boolean) => void;
+  onDiscover: (source: string, forceFullDepth: boolean) => void;
+  onSelectionChange: (directoryName: string, checked: boolean) => void;
+  onPlan: () => void;
+  onApply: () => void;
+  onClose: () => void;
+  onKindChange: (kind: ImportKind) => void;
+  onOpenImportedSkill: (skillId: string) => void;
+  primaryButton: React.RefObject<HTMLButtonElement | null>;
+  sourceInput: React.RefObject<HTMLInputElement | null>;
+}) {
+  const isBusy = activity !== "idle";
+  const candidates = discovery?.candidates ?? [];
+  const selectedCount = selected.length;
+
+  if (result) {
+    return (
+      <>
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Import complete</span>
+          <h2>{result.items.length} Skills are Managed</h2>
+          <p>
+            Installed from {preview?.repoUrl ?? discovery?.repoUrl ?? "Git"} at
+            commit{" "}
+            <code>
+              {shortCommit(preview?.resolvedCommit ?? discovery?.resolvedCommit ?? "")}
+            </code>
+            .
+          </p>
+        </div>
+        <ul className="git-import-results">
+          {result.items.map((item) => (
+            <li key={item.skillId}>
+              <span>{item.directoryName}</span>
+              <button
+                type="button"
+                onClick={() => onOpenImportedSkill(item.skillId)}
+              >
+                View in Library
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="activation-sheet-actions">
+          <button type="button" disabled={isBusy} onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  if (preview) {
+    const blocked = preview.items.some((item) => !item.canApply);
+    return (
+      <>
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Import preview</span>
+          <h2>Preview {preview.items.length} Skill{preview.items.length === 1 ? "" : "s"}</h2>
+          <p>
+            {preview.repoUrl} · <code>{shortCommit(preview.resolvedCommit)}</code>
+          </p>
+        </div>
+        <ul className="git-import-candidates git-import-preview-list">
+          {preview.items.map((item) => (
+            <li key={item.directoryName}>
+              <div>
+                <strong>{item.directoryName}</strong>
+                <span className="candidate-path">{item.skillPath || "repo root"}</span>
+              </div>
+              {item.conflict ? (
+                <span className="candidate-conflict" role="alert">
+                  Conflict with “{item.conflict.directoryName}”
+                </span>
+              ) : (
+                <span className="candidate-clear">Ready</span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {blocked ? (
+          <div className="import-conflict" role="alert">
+            <strong>Library Conflict</strong>
+            <span>
+              One or more selected Skills already exist in the Library. Rename
+              or Remove the existing Skills, or cancel.
+            </span>
+          </div>
+        ) : null}
+        <div className="activation-warning import-risk" role="status">
+          <strong>Review imported instructions</strong>
+          <span>
+            These SKILL.md files can become instructions for every Agent you
+            enable.
+          </span>
+        </div>
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>Import unchanged</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
+        <div className="activation-sheet-actions">
+          <button type="button" disabled={isBusy} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            ref={primaryButton}
+            type="button"
+            className="activation-confirm-button"
+            disabled={!preview.canApply || isBusy}
+            onClick={onApply}
+          >
+            {isBusy ? "Importing" : `Install ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  if (discovery) {
+    return (
+      <>
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">Discover</span>
+          <h2>
+            {candidates.length} Skill{candidates.length === 1 ? "" : "s"} found
+          </h2>
+          <p>
+            {discovery.repoUrl} · <code>{shortCommit(discovery.resolvedCommit)}</code>
+            {discovery.truncated ? " · list truncated" : ""}
+          </p>
+        </div>
+        <ul className="git-import-candidates">
+          {candidates.map((candidate) => (
+            <li key={`${candidate.directoryName}:${candidate.skillPath}`}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={selected.includes(candidate.directoryName)}
+                  onChange={(event) =>
+                    onSelectionChange(
+                      candidate.directoryName,
+                      event.currentTarget.checked,
+                    )
+                  }
+                />
+                <span>
+                  <strong>{candidate.directoryName}</strong>
+                  <span className="candidate-path">
+                    {candidate.skillPath || "repo root"}
+                  </span>
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>Discovery failed</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
+        <div className="activation-sheet-actions">
+          <button type="button" disabled={isBusy} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            ref={primaryButton}
+            type="button"
+            className="activation-confirm-button"
+            disabled={selectedCount === 0 || isBusy}
+            onClick={onPlan}
+          >
+            {activity === "planning"
+              ? "Preparing"
+              : `Preview ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="activation-sheet-heading">
+        <span className="eyebrow">Import · Git</span>
+        <h2>Install from Git</h2>
+        <p>
+          Public HTTPS repository. Skill Man discovers Skills, stages them, and
+          tracks updates for the branch you install.
+        </p>
+      </div>
+      <SourceKindSwitch kind="git" onKindChange={onKindChange} />
+      <label className="import-source-field">
+        <span>Repository URL or owner/repo</span>
+        <input
+          ref={sourceInput}
+          type="text"
+          value={source}
+          disabled={isBusy}
+          placeholder="vercel-labs/skills"
+          onChange={(event) => onSourceChange(event.currentTarget.value)}
+        />
+      </label>
+      <label className="import-option">
+        <input
+          type="checkbox"
+          checked={forceFullDepth}
+          disabled={isBusy}
+          onChange={(event) =>
+            onForceFullDepthChange(event.currentTarget.checked)
+          }
+        />
+        <span>Force full-depth scan (slow repos)</span>
+      </label>
+      {error ? (
+        <div className="activation-error" role="alert">
+          <strong>Source unavailable</strong>
+          <span>{error}</span>
+        </div>
+      ) : null}
+      <div className="activation-sheet-actions">
+        <button type="button" disabled={isBusy} onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          ref={primaryButton}
+          type="button"
+          className="activation-confirm-button"
+          disabled={!source.trim() || isBusy}
+          onClick={() => onDiscover(source, forceFullDepth)}
+        >
+          {activity === "discovering" ? "Fetching repository" : "Discover Skills"}
+        </button>
+      </div>
+    </>
   );
 }
 

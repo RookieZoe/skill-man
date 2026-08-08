@@ -1,0 +1,483 @@
+//! Skill Update module (ADR-0004 §更新).
+//!
+//! Checks trackable remote Installs (default branch and branch refs; tags and
+//! commits are pinned and never checked), merges fetches per repository,
+//! groups results for the UI, and applies Updates through the Import
+//! module's stable replacement machinery. Modified entities are never
+//! silently replaced: Apply requires the user to abandon local changes.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use thiserror::Error;
+
+use crate::core::domain::{Health, SkillId};
+use crate::core::git_source::{
+    DEFAULT_BRANCH_REF, git_mirror_path, is_trackable_ref, skill_document_path,
+};
+use crate::core::import::{ImportError, ImportService};
+use crate::seams::clock::Clock;
+use crate::seams::filesystem::FileSystem;
+use crate::seams::import_store::{ImportStore, ImportStoreError, RemoteInstallRecord};
+use crate::seams::recovery::RecoveryGate;
+use crate::seams::source::{GitSource, GitTreeEntry, SourceError};
+
+const UPDATE_COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateCheckItem {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub source_url: String,
+    pub requested_ref: String,
+    pub current_commit: String,
+    pub resolved_commit: String,
+    pub has_update: bool,
+    pub modified: bool,
+    pub upstream_path_gone: bool,
+    pub last_checked_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateCheckGroup {
+    pub repo_url: String,
+    pub items: Vec<UpdateCheckItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateCheckReport {
+    pub groups: Vec<UpdateCheckGroup>,
+    /// Repo-scoped failures (offline, resolution, listing); the UI presents
+    /// them as inline notices without blocking successful groups.
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateSelection {
+    pub skill_id: SkillId,
+    /// Reselect the repo-relative Skill path (upstream path-gone flow).
+    pub new_skill_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdatePlanItem {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub plan_token: String,
+    pub current_commit: String,
+    pub new_commit: String,
+    pub modified: bool,
+    pub path_changed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdatePlan {
+    pub items: Vec<UpdatePlanItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateApplyRequest {
+    pub plan_token: String,
+    pub skill_id: SkillId,
+    pub directory_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateItemResult {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub updated: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateResult {
+    pub items: Vec<UpdateItemResult>,
+}
+
+#[derive(Debug, Error)]
+pub enum UpdateError {
+    #[error("{0}")]
+    Validation(String),
+    #[error(transparent)]
+    Store(#[from] ImportStoreError),
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    #[error(transparent)]
+    Import(#[from] ImportError),
+    #[error("internal Update error: {0}")]
+    Internal(String),
+}
+
+pub struct UpdateService {
+    store: Arc<dyn ImportStore>,
+    filesystem: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
+    git: Arc<dyn GitSource>,
+    git_cache_root: PathBuf,
+    import: ImportService,
+}
+
+impl UpdateService {
+    pub fn new(
+        store: Arc<dyn ImportStore>,
+        filesystem: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+        git: Arc<dyn GitSource>,
+        library_root: PathBuf,
+        git_cache_root: PathBuf,
+        recovery_gate: Arc<RecoveryGate>,
+    ) -> Self {
+        let import = ImportService::new(
+            store.clone(),
+            filesystem.clone(),
+            clock.clone(),
+            Arc::new(crate::adapters::local_file_source::LocalFileSource::new()),
+            library_root,
+        )
+        .with_recovery_gate(recovery_gate)
+        .with_git_source(git.clone())
+        .with_git_cache_root(git_cache_root.clone());
+        Self {
+            store,
+            filesystem,
+            clock,
+            git,
+            git_cache_root,
+            import,
+        }
+    }
+
+    /// Check trackable remote Installs for updates. Each repository is
+    /// fetched once; results are grouped per repository. Successful checks
+    /// record `last_checked_at` (the 24h cooldown), failures degrade into
+    /// report errors without disturbing other repositories.
+    pub fn check_updates(&self, force: bool) -> Result<UpdateCheckReport, UpdateError> {
+        let records = self.store.load_remote_installs()?;
+        let trackable = records
+            .iter()
+            .filter(|record| is_trackable_ref(&record.requested_ref))
+            .collect::<Vec<_>>();
+        let mut by_repo: HashMap<&str, Vec<&RemoteInstallRecord>> = HashMap::new();
+        for record in &trackable {
+            by_repo
+                .entry(record.source_url.as_str())
+                .or_default()
+                .push(record);
+        }
+        let now_seconds =
+            i64::try_from(self.clock.unix_epoch_nanos() / 1_000_000_000).unwrap_or(i64::MAX);
+        let mut groups = Vec::new();
+        let mut errors = Vec::new();
+        for (repo_url, items) in by_repo {
+            if !force
+                && items.iter().all(|item| {
+                    item.last_checked_at.is_some_and(|checked| {
+                        now_seconds.saturating_sub(checked) < UPDATE_COOLDOWN_SECONDS
+                    })
+                })
+            {
+                // Within the cooldown: silent skip, as ADR-0004 requires.
+                continue;
+            }
+            let mirror = self.git_mirror_for(repo_url);
+            let report = match self.git.fetch_mirror(repo_url, &mirror) {
+                Ok(report) => report,
+                Err(error) => {
+                    errors.push(format!("{repo_url}: {error}"));
+                    continue;
+                }
+            };
+            let default_branch = report.default_branch.as_deref();
+            let default_resolved = match default_branch {
+                Some(branch) => self
+                    .git
+                    .resolve_commit(&mirror, &format!("refs/heads/{branch}"))?,
+                None => self.git.resolve_commit(&mirror, "HEAD")?,
+            };
+            let mut listed: Option<(String, Vec<GitTreeEntry>)> = None;
+            let mut group_items = Vec::with_capacity(items.len());
+            for item in items {
+                let resolved = match self.resolve_tracked_ref(&mirror, &default_resolved, item)? {
+                    Some(commit) => commit,
+                    None => {
+                        errors.push(format!(
+                            "{repo_url}: the tracked branch '{}' could not be resolved",
+                            item.requested_ref
+                        ));
+                        continue;
+                    }
+                };
+                let has_update = resolved != item.resolved_commit;
+                let mut upstream_path_gone = false;
+                if has_update {
+                    let entries = match &listed {
+                        Some((commit, entries)) if *commit == resolved => entries,
+                        _ => {
+                            let entries = self.git.list_tree(&mirror, &resolved)?;
+                            listed = Some((resolved.clone(), entries));
+                            listed
+                                .as_ref()
+                                .map(|(_, entries)| entries)
+                                .expect("listed entries were stored")
+                        }
+                    };
+                    upstream_path_gone = !entries.iter().any(|entry| {
+                        entry.path.to_string_lossy() == skill_document_path(&item.skill_path)
+                    });
+                }
+                if let Err(error) = self.store.record_remote_check(&item.skill_id) {
+                    errors.push(format!("{}: {error}", item.directory_name));
+                }
+                group_items.push(UpdateCheckItem {
+                    skill_id: item.skill_id.clone(),
+                    directory_name: item.directory_name.clone(),
+                    source_url: item.source_url.clone(),
+                    requested_ref: item.requested_ref.clone(),
+                    current_commit: item.resolved_commit.clone(),
+                    resolved_commit: resolved,
+                    has_update,
+                    modified: item.health == Health::Modified,
+                    upstream_path_gone,
+                    last_checked_at: item.last_checked_at,
+                });
+            }
+            groups.push(UpdateCheckGroup {
+                repo_url: repo_url.to_owned(),
+                items: group_items,
+            });
+        }
+        Ok(UpdateCheckReport { groups, errors })
+    }
+
+    /// Plan Updates for the selected remote Installs. Fetches each involved
+    /// repository once, resolves the tracked ref, verifies the Skill path
+    /// still exists at the new commit, and delegates each replacement to the
+    /// Import module (staging, journal, stable path replacement). Per-item
+    /// errors (already up to date, upstream path gone, offline) are reported
+    /// on the item so the UI can present them next to the Skill.
+    pub fn plan_updates(&self, selections: &[UpdateSelection]) -> Result<UpdatePlan, UpdateError> {
+        let records = self.store.load_remote_installs()?;
+        let mut items = Vec::new();
+        let mut by_repo: HashMap<String, Vec<(&UpdateSelection, &RemoteInstallRecord)>> =
+            HashMap::new();
+        for selection in selections {
+            let Some(record) = records
+                .iter()
+                .find(|record| record.skill_id == selection.skill_id)
+            else {
+                items.push(UpdatePlanItem {
+                    skill_id: selection.skill_id.clone(),
+                    directory_name: String::new(),
+                    plan_token: String::new(),
+                    current_commit: String::new(),
+                    new_commit: String::new(),
+                    modified: false,
+                    path_changed: false,
+                    error: Some("the Skill is not a remote Install".into()),
+                });
+                continue;
+            };
+            by_repo
+                .entry(record.source_url.clone())
+                .or_default()
+                .push((selection, record));
+        }
+        for (repo_url, selections) in by_repo {
+            let mirror = self.git_mirror_for(&repo_url);
+            let fetch = self.git.fetch_mirror(&repo_url, &mirror);
+            let default_resolved = match fetch {
+                Ok(report) => match report.default_branch.as_deref() {
+                    Some(branch) => self
+                        .git
+                        .resolve_commit(&mirror, &format!("refs/heads/{branch}"))?,
+                    None => self.git.resolve_commit(&mirror, "HEAD")?,
+                },
+                Err(error) => {
+                    for (selection, record) in selections {
+                        items.push(update_item_error(selection, record, error.to_string()));
+                    }
+                    continue;
+                }
+            };
+            let mut listed: Option<(String, Vec<GitTreeEntry>)> = None;
+            for (selection, record) in selections {
+                let resolved = match self.resolve_tracked_ref(&mirror, &default_resolved, record)? {
+                    Some(commit) => commit,
+                    None => {
+                        items.push(update_item_error(
+                            selection,
+                            record,
+                            format!(
+                                "the tracked branch '{}' could not be resolved",
+                                record.requested_ref
+                            ),
+                        ));
+                        continue;
+                    }
+                };
+                let entries = match &listed {
+                    Some((commit, entries)) if *commit == resolved => entries,
+                    _ => {
+                        let entries = self.git.list_tree(&mirror, &resolved)?;
+                        listed = Some((resolved.clone(), entries));
+                        listed
+                            .as_ref()
+                            .map(|(_, entries)| entries)
+                            .expect("listed entries were stored")
+                    }
+                };
+                let path_changed = selection.new_skill_path.is_some();
+                let skill_path = selection
+                    .new_skill_path
+                    .clone()
+                    .unwrap_or_else(|| record.skill_path.clone());
+                let document_path = skill_document_path(&skill_path);
+                if !entries
+                    .iter()
+                    .any(|entry| entry.path.to_string_lossy() == document_path)
+                {
+                    items.push(update_item_error(
+                        selection,
+                        record,
+                        format!(
+                            "the upstream Skill path '{skill_path}' no longer exists at commit {resolved}"
+                        ),
+                    ));
+                    continue;
+                }
+                if !path_changed && resolved == record.resolved_commit {
+                    items.push(update_item_error(
+                        selection,
+                        record,
+                        "the Skill is already up to date".into(),
+                    ));
+                    continue;
+                }
+                match self.import.plan_git_reinstall(
+                    &record.identity_key,
+                    &record.source_url,
+                    &resolved,
+                    selection.new_skill_path.as_deref(),
+                    false,
+                ) {
+                    Ok(preview) => items.push(UpdatePlanItem {
+                        skill_id: selection.skill_id.clone(),
+                        directory_name: record.directory_name.clone(),
+                        plan_token: preview.plan_token,
+                        current_commit: record.resolved_commit.clone(),
+                        new_commit: resolved.clone(),
+                        modified: self.entity_is_modified(record),
+                        path_changed,
+                        error: None,
+                    }),
+                    Err(error) => {
+                        items.push(update_item_error(selection, record, error.to_string()))
+                    }
+                }
+            }
+        }
+        Ok(UpdatePlan { items })
+    }
+
+    /// Apply planned Updates. Each Skill is its own operation (its own
+    /// journal): a failure rolls back only that Skill and leaves the others
+    /// and their Activations untouched. `abandon_changes` is the explicit
+    /// Modified confirmation.
+    pub fn apply_updates(
+        &self,
+        requests: &[UpdateApplyRequest],
+        abandon_changes: bool,
+    ) -> Result<UpdateResult, UpdateError> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            match self
+                .import
+                .apply_git_reinstall(&request.plan_token, abandon_changes)
+            {
+                Ok(_) => results.push(UpdateItemResult {
+                    skill_id: request.skill_id.clone(),
+                    directory_name: request.directory_name.clone(),
+                    updated: true,
+                    error: None,
+                }),
+                Err(error) => results.push(UpdateItemResult {
+                    skill_id: request.skill_id.clone(),
+                    directory_name: request.directory_name.clone(),
+                    updated: false,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+        Ok(UpdateResult { items: results })
+    }
+
+    /// Pin one or more remote Installs to their current commit: the recorded
+    /// ref becomes the resolved commit, so no further update checks apply.
+    pub fn pin_updates(&self, skill_ids: &[SkillId]) -> Result<(), UpdateError> {
+        let records = self.store.load_remote_installs()?;
+        for skill_id in skill_ids {
+            let record = records
+                .iter()
+                .find(|record| record.skill_id == *skill_id)
+                .ok_or_else(|| {
+                    UpdateError::Validation("the Skill is not a remote Install".into())
+                })?;
+            self.store
+                .set_remote_requested_ref(skill_id, &record.resolved_commit)?;
+        }
+        Ok(())
+    }
+
+    fn git_mirror_for(&self, repo_url: &str) -> PathBuf {
+        git_mirror_path(&self.git_cache_root, repo_url)
+    }
+
+    /// Resolve the commit for one tracked Install: "HEAD" uses the repository
+    /// default branch; explicit branches resolve via `refs/heads` (already
+    /// prefixed refs resolve as-is). `None` when the tracked ref is absent.
+    fn resolve_tracked_ref(
+        &self,
+        mirror: &Path,
+        default_resolved: &Option<String>,
+        record: &RemoteInstallRecord,
+    ) -> Result<Option<String>, UpdateError> {
+        if record.requested_ref == DEFAULT_BRANCH_REF {
+            return Ok(default_resolved.clone());
+        }
+        let branch_ref = if record.requested_ref.starts_with("refs/heads/") {
+            record.requested_ref.clone()
+        } else {
+            format!("refs/heads/{}", record.requested_ref)
+        };
+        Ok(self.git.resolve_commit(mirror, &branch_ref)?)
+    }
+
+    /// Authoritative Modified detection at plan time: the entity's current
+    /// tree hash differs from the recorded hash (persisted health may be
+    /// stale because health checks run at startup).
+    fn entity_is_modified(&self, record: &RemoteInstallRecord) -> bool {
+        self.filesystem
+            .tree_hash(&record.final_entity_path)
+            .is_ok_and(|hash| hash != record.recorded_content_hash)
+    }
+}
+
+fn update_item_error(
+    selection: &UpdateSelection,
+    record: &RemoteInstallRecord,
+    message: String,
+) -> UpdatePlanItem {
+    UpdatePlanItem {
+        skill_id: selection.skill_id.clone(),
+        directory_name: record.directory_name.clone(),
+        plan_token: String::new(),
+        current_commit: record.resolved_commit.clone(),
+        new_commit: String::new(),
+        modified: record.health == Health::Modified,
+        path_changed: false,
+        error: Some(message),
+    }
+}

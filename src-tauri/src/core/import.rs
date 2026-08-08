@@ -7,6 +7,11 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::core::domain::{SkillId, parse_skill_metadata, skill_identity_key};
+use crate::core::git_source::{
+    DEFAULT_BRANCH_REF, DiscoveryMode, GitResolveError, GitSourceParseError, GitSourceSpec,
+    ResolvedGitRef, discover_skills_from_paths, git_mirror_path, parse_git_source_input,
+    repo_name_from_url, resolve_git_ref, skill_document_path, validate_skill_path,
+};
 use crate::seams::activation_store::DesiredActivation;
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
@@ -16,10 +21,12 @@ use crate::seams::filesystem::{
 };
 use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict as StoreLibraryConflict,
-    LinkImportRecord,
+    LinkImportRecord, RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::recovery::RecoveryGate;
-use crate::seams::source::{FileSource, SourceError, StagedFileSource};
+use crate::seams::source::{
+    FileSource, GitSource, GitTreeEntryKind, SourceError, StagedFileSource,
+};
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_SKILL_BYTES: u64 = 256 * 1024 * 1024;
@@ -120,6 +127,64 @@ pub struct FileImportSelectionResult {
     pub snapshot_version: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportCandidate {
+    pub directory_name: String,
+    pub identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    pub frontmatter_name: Option<String>,
+    /// Repo-relative Skill directory; empty means the repo root.
+    pub skill_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportDiscovery {
+    pub repo_url: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub candidates: Vec<GitImportCandidate>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportPreview {
+    pub plan_token: String,
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub skill_path: String,
+    pub final_entity_path: PathBuf,
+    pub conflict: Option<LibraryConflict>,
+    pub can_apply: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportSelectionPreview {
+    pub plan_token: String,
+    pub repo_url: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub items: Vec<GitImportPreview>,
+    pub can_apply: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportResult {
+    pub operation_id: String,
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub final_entity_path: PathBuf,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitImportSelectionResult {
+    pub operation_id: String,
+    pub items: Vec<GitImportResult>,
+    pub snapshot_version: u64,
+}
+
 #[derive(Clone)]
 struct PlannedLinkImport {
     candidate: LinkImportCandidate,
@@ -143,13 +208,63 @@ struct PlannedFileImport {
     operation_id: String,
     created_at_millis: u128,
     reinstall: Option<PlannedFileReinstall>,
+    /// Present for remote Installs (Import selection or Update reinstall).
+    remote: Option<PlannedRemoteImport>,
 }
 
 #[derive(Clone)]
 struct PlannedFileReinstall {
-    existing_record: FileImportRecord,
+    existing_record: ReinstallBaseline,
     existing_tree_snapshot: StagedTreeSnapshot,
     activations: Vec<DesiredActivation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReinstallBaseline {
+    File(FileImportRecord),
+    Remote(RemoteInstallRecord),
+}
+
+impl ReinstallBaseline {
+    fn recorded_content_hash(&self) -> &str {
+        match self {
+            Self::File(record) => &record.recorded_content_hash,
+            Self::Remote(record) => &record.recorded_content_hash,
+        }
+    }
+
+    /// Compare only the stable identity fields; derived observations such as
+    /// persisted health may legitimately change between plan and apply.
+    fn stable_matches(&self, other: &ReinstallBaseline) -> bool {
+        match (self, other) {
+            (Self::File(left), Self::File(right)) => {
+                left.skill_id == right.skill_id
+                    && left.identity_key == right.identity_key
+                    && left.final_entity_path == right.final_entity_path
+                    && left.recorded_content_hash == right.recorded_content_hash
+            }
+            (Self::Remote(left), Self::Remote(right)) => {
+                left.skill_id == right.skill_id
+                    && left.identity_key == right.identity_key
+                    && left.final_entity_path == right.final_entity_path
+                    && left.recorded_content_hash == right.recorded_content_hash
+                    && left.source_url == right.source_url
+                    && left.requested_ref == right.requested_ref
+                    && left.resolved_commit == right.resolved_commit
+                    && left.skill_path == right.skill_path
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PlannedRemoteImport {
+    repo_url: String,
+    requested_ref: String,
+    resolved_commit: String,
+    skill_path: String,
+    abandon_changes: bool,
 }
 
 enum AppliedFileChange {
@@ -167,6 +282,7 @@ struct PlannedFileImportBatch {
     staging_fingerprint: DirectoryFingerprint,
     operation_id: String,
     created_at_millis: u128,
+    commit_remotes: bool,
 }
 
 pub struct ImportService {
@@ -174,7 +290,9 @@ pub struct ImportService {
     filesystem: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
     file_source: Arc<dyn FileSource>,
+    git_source: Arc<dyn GitSource>,
     library_root: PathBuf,
+    git_cache_root: Option<PathBuf>,
     plans: Mutex<HashMap<String, PlannedLinkImport>>,
     file_plans: Mutex<HashMap<String, PlannedFileImport>>,
     file_batch_plans: Mutex<HashMap<String, PlannedFileImportBatch>>,
@@ -197,7 +315,9 @@ impl ImportService {
             filesystem,
             clock,
             file_source,
+            git_source: Arc::new(crate::adapters::git_source::SystemGitSource::new()),
             library_root,
+            git_cache_root: None,
             plans: Mutex::new(HashMap::new()),
             file_plans: Mutex::new(HashMap::new()),
             file_batch_plans: Mutex::new(HashMap::new()),
@@ -210,6 +330,16 @@ impl ImportService {
 
     pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
         self.recovery_gate = recovery_gate;
+        self
+    }
+
+    pub fn with_git_source(mut self, git_source: Arc<dyn GitSource>) -> Self {
+        self.git_source = git_source;
+        self
+    }
+
+    pub fn with_git_cache_root(mut self, git_cache_root: PathBuf) -> Self {
+        self.git_cache_root = Some(git_cache_root);
         self
     }
 
@@ -527,6 +657,7 @@ impl ImportService {
                 operation_id: operation_id.clone(),
                 created_at_millis,
                 reinstall: None,
+                remote: None,
             });
             previews.push(FileImportPreview {
                 plan_token: plan_token.clone(),
@@ -547,6 +678,7 @@ impl ImportService {
             staging_fingerprint,
             operation_id,
             created_at_millis,
+            commit_remotes: false,
         };
         let journal = file_import_journal(
             &batch.operation_id,
@@ -739,20 +871,50 @@ impl ImportService {
                 "file Import batch staging cleanup failed after filesystem apply: {error}"
             )));
         }
-        let records = batch
-            .items
-            .iter()
-            .map(file_record_from_plan)
-            .collect::<Vec<_>>();
-        let snapshot_version = match self.store.insert_files(records) {
-            Ok(version) => version,
-            Err(error) => {
-                return match self.rollback_installed_paths(&installed) {
-                    Ok(()) => self.finish_aborted_file_journal(&batch.operation_id, error.into()),
-                    Err(compensation) => Err(ImportError::RecoveryRequired(format!(
-                        "catalog batch insert failed: {error}; filesystem rollback also failed: {compensation}"
-                    ))),
-                };
+        let snapshot_version = if batch.commit_remotes {
+            let records = batch
+                .items
+                .iter()
+                .map(|item| {
+                    remote_record_from_plan(
+                        item,
+                        item.remote
+                            .as_ref()
+                            .expect("git Import batch items carry a remote record"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            match self.store.insert_remotes(records) {
+                Ok(version) => version,
+                Err(error) => {
+                    return match self.rollback_installed_paths(&installed) {
+                        Ok(()) => {
+                            self.finish_aborted_file_journal(&batch.operation_id, error.into())
+                        }
+                        Err(compensation) => Err(ImportError::RecoveryRequired(format!(
+                            "catalog batch insert failed: {error}; filesystem rollback also failed: {compensation}"
+                        ))),
+                    };
+                }
+            }
+        } else {
+            let records = batch
+                .items
+                .iter()
+                .map(file_record_from_plan)
+                .collect::<Vec<_>>();
+            match self.store.insert_files(records) {
+                Ok(version) => version,
+                Err(error) => {
+                    return match self.rollback_installed_paths(&installed) {
+                        Ok(()) => {
+                            self.finish_aborted_file_journal(&batch.operation_id, error.into())
+                        }
+                        Err(compensation) => Err(ImportError::RecoveryRequired(format!(
+                            "catalog batch insert failed: {error}; filesystem rollback also failed: {compensation}"
+                        ))),
+                    };
+                }
             }
         };
         journal.phase = FileImportJournalPhase::CatalogCommitted;
@@ -899,6 +1061,7 @@ impl ImportService {
             operation_id,
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: None,
+            remote: None,
         };
         let journal = file_import_journal(
             &plan.operation_id,
@@ -1070,10 +1233,11 @@ impl ImportService {
             operation_id,
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: Some(PlannedFileReinstall {
-                existing_record,
+                existing_record: ReinstallBaseline::File(existing_record),
                 existing_tree_snapshot,
                 activations,
             }),
+            remote: None,
         };
         let journal = file_import_journal(
             &plan.operation_id,
@@ -1125,6 +1289,13 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("file Import plan lock poisoned".into()))?
             .remove(plan_token)
             .ok_or(ImportError::PlanNotFound)?;
+        self.apply_planned_file(plan)
+    }
+
+    /// Apply a planned single-Skill Import or reinstall. Remote Updates set
+    /// `abandon_changes` on the plan so Modified entities are never silently
+    /// replaced.
+    fn apply_planned_file(&self, plan: PlannedFileImport) -> Result<FileImportResult, ImportError> {
         if self
             .clock
             .monotonic_millis()
@@ -1147,7 +1318,17 @@ impl ImportService {
             );
         }
         if let Some(reinstall) = &plan.reinstall {
-            let current = match self.store.load_file_install(&plan.candidate.identity_key) {
+            let current = match &reinstall.existing_record {
+                ReinstallBaseline::File(_) => self
+                    .store
+                    .load_file_install(&plan.candidate.identity_key)
+                    .map(|record| record.map(ReinstallBaseline::File)),
+                ReinstallBaseline::Remote(_) => self
+                    .store
+                    .load_remote_install(&plan.candidate.identity_key)
+                    .map(|record| record.map(ReinstallBaseline::Remote)),
+            };
+            let current = match current {
                 Ok(Some(current)) => current,
                 Ok(None) => {
                     return self.abort_unapplied_file_journal(
@@ -1192,7 +1373,7 @@ impl ImportService {
                     );
                 }
             };
-            if current != reinstall.existing_record
+            if !reinstall.existing_record.stable_matches(&current)
                 || current_tree_snapshot != reinstall.existing_tree_snapshot
                 || current_activations != reinstall.activations
                 || self
@@ -1209,6 +1390,19 @@ impl ImportService {
                     &plan.staging_fingerprint,
                     ImportError::PlanStale,
                 );
+            }
+            if let Some(remote) = &plan.remote {
+                if !remote.abandon_changes
+                    && current_tree_snapshot.content_hash
+                        != reinstall.existing_record.recorded_content_hash()
+                {
+                    return self.abort_unapplied_file_journal(
+                        &plan.operation_id,
+                        &plan.staging_operation_root,
+                        &plan.staging_fingerprint,
+                        ImportError::Modified,
+                    );
+                }
             }
         } else if let Some(conflict) = match self
             .store
@@ -1377,10 +1571,15 @@ impl ImportService {
             }
         }
         let record = file_record_from_plan(&plan);
-        let catalog_result = if plan.reinstall.is_some() {
-            self.store.replace_file(record)
-        } else {
-            self.store.insert_file(record)
+        let catalog_result = match (&plan.reinstall, &plan.remote) {
+            (Some(_), Some(remote)) => self
+                .store
+                .update_remote_install(remote_record_from_plan(&plan, remote)),
+            (Some(_), None) => self.store.replace_file(record),
+            (None, Some(remote)) => self
+                .store
+                .insert_remotes(vec![remote_record_from_plan(&plan, remote)]),
+            (None, None) => self.store.insert_file(record),
         };
         let snapshot_version = match catalog_result {
             Ok(version) => version,
@@ -1551,6 +1750,576 @@ impl ImportService {
         Ok(false)
     }
 
+    // -- Git remote Import (ADR-0004) --
+
+    /// Discover Skill candidates in a remote repository, following the two-phase
+    /// discovery semantics (standard positions, recursive fallback, optional
+    /// forced full depth). Fetches into the persistent mirror cache.
+    pub fn discover_git(
+        &self,
+        source: &str,
+        force_full_depth: bool,
+    ) -> Result<GitImportDiscovery, ImportError> {
+        let (spec, mirror, resolved) = self.git_setup(source)?;
+        let mut candidates =
+            self.discover_git_candidates(&spec, &mirror, &resolved, force_full_depth)?;
+        let truncated = candidates.len() > MAX_SOURCE_SKILLS;
+        candidates.truncate(MAX_SOURCE_SKILLS);
+        Ok(GitImportDiscovery {
+            repo_url: spec.url,
+            requested_ref: resolved.recorded_ref,
+            resolved_commit: resolved.commit,
+            candidates,
+            truncated,
+        })
+    }
+
+    /// Preview a multi-select of Git Skill candidates: re-fetch, stage each
+    /// selected Skill from the resolved commit, validate, and persist a
+    /// filesystem journal before the user confirms.
+    pub fn plan_git_selection(
+        &self,
+        source: &str,
+        force_full_depth: bool,
+        selected_directory_names: &[String],
+    ) -> Result<GitImportSelectionPreview, ImportError> {
+        self.ensure_writes_ready()?;
+        let (spec, mirror, resolved) = self.git_setup(source)?;
+        let all = self.discover_git_candidates(&spec, &mirror, &resolved, force_full_depth)?;
+        let selected = selected_directory_names
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let chosen = all
+            .into_iter()
+            .filter(|candidate| selected.contains(&candidate.directory_name))
+            .collect::<Vec<_>>();
+        if chosen.is_empty() || chosen.len() != selected.len() {
+            return Err(ImportError::Validation(
+                "git Import selection contains an unknown Skill name".into(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for candidate in &chosen {
+            if !seen.insert(candidate.identity_key.clone()) {
+                return Err(ImportError::Validation(format!(
+                    "git Import selection contains duplicate Skill names: '{}'",
+                    candidate.directory_name
+                )));
+            }
+            validate_skill_path(&candidate.skill_path)?;
+        }
+        let operation_id = self.next_git_operation_id();
+        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let mut staged_sources = Vec::with_capacity(chosen.len());
+        for candidate in &chosen {
+            let destination = staging_operation_root.join(&candidate.directory_name);
+            if let Err(error) = self.git_source.stage_skill(
+                &mirror,
+                &resolved.commit,
+                &candidate.skill_path,
+                &destination,
+            ) {
+                let cleanup = self.filesystem.discard_staging(
+                    &staging_operation_root,
+                    &self.library_root,
+                    None,
+                );
+                return match cleanup {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(ImportError::RecoveryRequired(format!(
+                        "git Import staging failed: {error}; staging cleanup also failed: {cleanup}"
+                    ))),
+                };
+            }
+            staged_sources.push(StagedFileSource {
+                original_path: mirror.clone(),
+                original_filename: repo_name_from_url(&spec.url),
+                suggested_root_name: candidate.directory_name.clone(),
+                staged_content_root: destination,
+            });
+        }
+        let (staged, staging_fingerprint) =
+            self.validate_prestaged_sources(&staging_operation_root, staged_sources)?;
+        let required_space = staged
+            .iter()
+            .map(|(_, _, snapshot)| snapshot.total_file_bytes)
+            .fold(0_u64, u64::saturating_add)
+            .saturating_mul(2)
+            .saturating_add(DISK_SPACE_RESERVE_BYTES);
+        let available_space = match self.filesystem.available_space(&self.library_root) {
+            Ok(space) => space,
+            Err(error) => {
+                return self.cleanup_staging_after_error(
+                    &staging_operation_root,
+                    Some(&staging_fingerprint),
+                    error.into(),
+                );
+            }
+        };
+        if available_space < required_space {
+            return self.cleanup_staging_after_error(
+                &staging_operation_root,
+                Some(&staging_fingerprint),
+                ImportError::DiskFull {
+                    required_bytes: required_space,
+                    available_bytes: available_space,
+                },
+            );
+        }
+        let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
+        let plan_token = format!("git-import-selection-plan-{plan_number}");
+        let created_at_millis = self.clock.monotonic_millis();
+        let mut items = Vec::with_capacity(chosen.len());
+        let mut previews = Vec::with_capacity(chosen.len());
+        for ((candidate, staged_source, tree_snapshot), git_candidate) in
+            staged.into_iter().zip(chosen.iter())
+        {
+            let conflict = match self.store.find_library_conflict(&candidate.identity_key) {
+                Ok(conflict) => conflict.map(map_library_conflict),
+                Err(error) => {
+                    return self.cleanup_staging_after_error(
+                        &staging_operation_root,
+                        Some(&staging_fingerprint),
+                        error.into(),
+                    );
+                }
+            };
+            let final_entity_path = self
+                .library_root
+                .join("skills")
+                .join(&candidate.directory_name);
+            let skill_id = SkillId(format!(
+                "git-{}-{}",
+                self.clock.unix_epoch_nanos(),
+                self.next_skill_id.fetch_add(1, Ordering::Relaxed)
+            ));
+            items.push(PlannedFileImport {
+                candidate: candidate.clone(),
+                staged_source,
+                staging_operation_root: staging_operation_root.clone(),
+                staging_fingerprint: staging_fingerprint.clone(),
+                final_entity_path: final_entity_path.clone(),
+                skill_id,
+                tree_snapshot,
+                conflict: conflict.clone(),
+                operation_id: operation_id.clone(),
+                created_at_millis,
+                reinstall: None,
+                remote: Some(PlannedRemoteImport {
+                    repo_url: spec.url.clone(),
+                    requested_ref: resolved.recorded_ref.clone(),
+                    resolved_commit: resolved.commit.clone(),
+                    skill_path: git_candidate.skill_path.clone(),
+                    abandon_changes: false,
+                }),
+            });
+            previews.push(GitImportPreview {
+                plan_token: plan_token.clone(),
+                directory_name: candidate.directory_name,
+                display_name: candidate.display_name,
+                description: candidate.description,
+                skill_path: git_candidate.skill_path.clone(),
+                final_entity_path,
+                conflict: conflict.clone(),
+                can_apply: conflict.is_none(),
+            });
+        }
+        let can_apply = previews.iter().all(|preview| preview.can_apply);
+        let batch = PlannedFileImportBatch {
+            items,
+            staging_operation_root,
+            staging_fingerprint,
+            operation_id,
+            created_at_millis,
+            commit_remotes: true,
+        };
+        let journal = file_import_journal(
+            &batch.operation_id,
+            &batch.staging_operation_root,
+            &batch.staging_fingerprint,
+            &batch.items,
+        );
+        if let Err(error) = self
+            .filesystem
+            .write_file_import_journal(&self.library_root, &journal)
+        {
+            return self.abort_unapplied_file_journal(
+                &batch.operation_id,
+                &batch.staging_operation_root,
+                &batch.staging_fingerprint,
+                error.into(),
+            );
+        }
+        let mut batch_plans = match self.file_batch_plans.lock() {
+            Ok(plans) => plans,
+            Err(_) => {
+                return self.abort_unapplied_file_journal(
+                    &batch.operation_id,
+                    &batch.staging_operation_root,
+                    &batch.staging_fingerprint,
+                    ImportError::Internal("git Import batch plan lock poisoned".into()),
+                );
+            }
+        };
+        batch_plans.insert(plan_token.clone(), batch);
+        Ok(GitImportSelectionPreview {
+            plan_token,
+            repo_url: spec.url,
+            requested_ref: resolved.recorded_ref,
+            resolved_commit: resolved.commit,
+            items: previews,
+            can_apply,
+        })
+    }
+
+    pub fn apply_git_selection(
+        &self,
+        plan_token: &str,
+    ) -> Result<GitImportSelectionResult, ImportError> {
+        let result = self.apply_file_selection(plan_token)?;
+        Ok(GitImportSelectionResult {
+            operation_id: result.operation_id,
+            snapshot_version: result.snapshot_version,
+            items: result
+                .items
+                .into_iter()
+                .map(|item| GitImportResult {
+                    operation_id: item.operation_id,
+                    skill_id: item.skill_id,
+                    directory_name: item.directory_name,
+                    final_entity_path: item.final_entity_path,
+                    snapshot_version: item.snapshot_version,
+                })
+                .collect(),
+        })
+    }
+
+    /// Preview replacing an existing remote Install with the content at
+    /// `resolved_commit` (an Update, or a path reselection). Detects Modified
+    /// entities so Apply can require abandoning local changes.
+    pub fn plan_git_reinstall(
+        &self,
+        identity_key: &str,
+        source_url: &str,
+        resolved_commit: &str,
+        new_skill_path: Option<&str>,
+        abandon_changes: bool,
+    ) -> Result<FileImportPreview, ImportError> {
+        self.ensure_writes_ready()?;
+        let record = self
+            .store
+            .load_remote_install(identity_key)?
+            .ok_or_else(|| {
+                ImportError::Validation(format!(
+                    "'{identity_key}' is not an existing remote Install"
+                ))
+            })?;
+        if record.source_url != source_url {
+            return Err(ImportError::Validation(
+                "the Update source does not match the installed remote source".into(),
+            ));
+        }
+        let skill_path = new_skill_path
+            .map(str::to_owned)
+            .unwrap_or_else(|| record.skill_path.clone());
+        validate_skill_path(&skill_path)?;
+        let spec = GitSourceSpec {
+            url: record.source_url.clone(),
+            requested_ref: Some(record.requested_ref.clone()),
+            path_prefix: None,
+        };
+        let mirror = self.git_mirror_for(&spec)?;
+        let fetch = self.git_source.fetch_mirror(&spec.url, &mirror);
+        let commit = match self.git_source.resolve_commit(&mirror, resolved_commit) {
+            Ok(Some(commit)) => commit,
+            Ok(None) => {
+                return Err(ImportError::from(GitResolveError::RefNotFound(
+                    resolved_commit.into(),
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(error) = fetch {
+            // A stale mirror is acceptable when the pinned commit is already
+            // present; otherwise the fetch failure is the actionable error.
+            if self.git_source.resolve_commit(&mirror, &commit)?.is_none() {
+                return Err(error.into());
+            }
+        }
+        let document_path = skill_document_path(&skill_path);
+        let entries = self.git_source.list_tree(&mirror, &commit)?;
+        if !entries
+            .iter()
+            .any(|entry| entry.path.to_string_lossy() == document_path)
+        {
+            return Err(ImportError::Validation(format!(
+                "the upstream Skill path '{skill_path}' no longer exists at commit {commit}"
+            )));
+        }
+        let operation_id = self.next_git_operation_id();
+        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let destination = staging_operation_root.join(&record.directory_name);
+        if let Err(error) = self
+            .git_source
+            .stage_skill(&mirror, &commit, &skill_path, &destination)
+        {
+            let cleanup =
+                self.filesystem
+                    .discard_staging(&staging_operation_root, &self.library_root, None);
+            return match cleanup {
+                Ok(()) => Err(error.into()),
+                Err(cleanup) => Err(ImportError::RecoveryRequired(format!(
+                    "git reinstall staging failed: {error}; staging cleanup also failed: {cleanup}"
+                ))),
+            };
+        }
+        let staged_source = StagedFileSource {
+            original_path: mirror.clone(),
+            original_filename: repo_name_from_url(&spec.url),
+            suggested_root_name: record.directory_name.clone(),
+            staged_content_root: destination,
+        };
+        let (mut staged, staging_fingerprint) =
+            self.validate_prestaged_sources(&staging_operation_root, vec![staged_source])?;
+        let (candidate, staged_source, tree_snapshot) = staged.remove(0);
+        let required_space = tree_snapshot
+            .total_file_bytes
+            .saturating_mul(2)
+            .saturating_add(DISK_SPACE_RESERVE_BYTES);
+        let available_space = match self.filesystem.available_space(&self.library_root) {
+            Ok(space) => space,
+            Err(error) => {
+                return self.cleanup_staging_after_error(
+                    &staging_operation_root,
+                    Some(&staging_fingerprint),
+                    error.into(),
+                );
+            }
+        };
+        if available_space < required_space {
+            return self.cleanup_staging_after_error(
+                &staging_operation_root,
+                Some(&staging_fingerprint),
+                ImportError::DiskFull {
+                    required_bytes: required_space,
+                    available_bytes: available_space,
+                },
+            );
+        }
+        let existing_tree_snapshot = match self
+            .filesystem
+            .staged_tree_snapshot(&record.final_entity_path)
+        {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return self.cleanup_staging_after_error(
+                    &staging_operation_root,
+                    Some(&staging_fingerprint),
+                    ImportError::PlanStale,
+                );
+            }
+        };
+        let activations = match self.store.desired_activations_for_skill(&record.skill_id) {
+            Ok(activations) => activations,
+            Err(error) => {
+                return self.cleanup_staging_after_error(
+                    &staging_operation_root,
+                    Some(&staging_fingerprint),
+                    error.into(),
+                );
+            }
+        };
+        if self
+            .verify_file_reinstall_activations(
+                &record.final_entity_path,
+                &existing_tree_snapshot.root,
+                &activations,
+            )
+            .is_err()
+        {
+            return self.cleanup_staging_after_error(
+                &staging_operation_root,
+                Some(&staging_fingerprint),
+                ImportError::PlanStale,
+            );
+        }
+        let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
+        let plan_token = format!("git-reinstall-plan-{plan_number}");
+        let plan = PlannedFileImport {
+            candidate,
+            staged_source,
+            staging_operation_root,
+            staging_fingerprint,
+            final_entity_path: record.final_entity_path.clone(),
+            skill_id: record.skill_id.clone(),
+            tree_snapshot,
+            conflict: None,
+            operation_id,
+            created_at_millis: self.clock.monotonic_millis(),
+            reinstall: Some(PlannedFileReinstall {
+                existing_record: ReinstallBaseline::Remote(record.clone()),
+                existing_tree_snapshot,
+                activations,
+            }),
+            remote: Some(PlannedRemoteImport {
+                repo_url: spec.url.clone(),
+                requested_ref: spec
+                    .requested_ref
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BRANCH_REF.into()),
+                resolved_commit: commit,
+                skill_path,
+                abandon_changes,
+            }),
+        };
+        let journal = file_import_journal(
+            &plan.operation_id,
+            &plan.staging_operation_root,
+            &plan.staging_fingerprint,
+            std::slice::from_ref(&plan),
+        );
+        if let Err(error) = self
+            .filesystem
+            .write_file_import_journal(&self.library_root, &journal)
+        {
+            return self.abort_unapplied_file_journal(
+                &plan.operation_id,
+                &plan.staging_operation_root,
+                &plan.staging_fingerprint,
+                error.into(),
+            );
+        }
+        let mut file_plans = match self.file_plans.lock() {
+            Ok(plans) => plans,
+            Err(_) => {
+                return self.abort_unapplied_file_journal(
+                    &plan.operation_id,
+                    &plan.staging_operation_root,
+                    &plan.staging_fingerprint,
+                    ImportError::Internal("git reinstall plan lock poisoned".into()),
+                );
+            }
+        };
+        file_plans.insert(plan_token.clone(), plan);
+        Ok(FileImportPreview {
+            plan_token,
+            directory_name: record.directory_name.clone(),
+            display_name: record.display_name.clone(),
+            description: record.description.clone(),
+            original_path: record.final_entity_path.clone(),
+            original_filename: repo_name_from_url(&spec.url),
+            final_entity_path: record.final_entity_path.clone(),
+            conflict: None,
+            can_apply: true,
+        })
+    }
+
+    /// Apply a planned remote reinstall. `abandon_changes` overrides the
+    /// plan's flag, so the Modified confirmation happens at Apply time.
+    pub fn apply_git_reinstall(
+        &self,
+        plan_token: &str,
+        abandon_changes: bool,
+    ) -> Result<FileImportResult, ImportError> {
+        self.ensure_writes_ready()?;
+        let mut plan = self
+            .file_plans
+            .lock()
+            .map_err(|_| ImportError::Internal("git reinstall plan lock poisoned".into()))?
+            .remove(plan_token)
+            .ok_or(ImportError::PlanNotFound)?;
+        if let Some(remote) = &mut plan.remote {
+            remote.abandon_changes = abandon_changes;
+        }
+        self.apply_planned_file(plan)
+    }
+
+    fn git_setup(
+        &self,
+        source: &str,
+    ) -> Result<(GitSourceSpec, PathBuf, ResolvedGitRef), ImportError> {
+        self.ensure_writes_ready()?;
+        let spec = parse_git_source_input(source)?;
+        let mirror = self.git_mirror_for(&spec)?;
+        let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
+        let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)?;
+        Ok((spec, mirror, resolved))
+    }
+
+    fn git_mirror_for(&self, spec: &GitSourceSpec) -> Result<PathBuf, ImportError> {
+        let cache_root = self
+            .git_cache_root
+            .clone()
+            .ok_or_else(|| ImportError::Internal("Git cache root is not configured".into()))?;
+        Ok(git_mirror_path(&cache_root, &spec.url))
+    }
+
+    fn discover_git_candidates(
+        &self,
+        spec: &GitSourceSpec,
+        mirror: &Path,
+        resolved: &ResolvedGitRef,
+        force_full_depth: bool,
+    ) -> Result<Vec<GitImportCandidate>, ImportError> {
+        let entries = self.git_source.list_tree(mirror, &resolved.commit)?;
+        let mut files = Vec::new();
+        for entry in entries {
+            if matches!(
+                entry.kind,
+                GitTreeEntryKind::Blob | GitTreeEntryKind::Symlink
+            ) {
+                files.push(entry.path);
+            }
+        }
+        let mode = if force_full_depth {
+            DiscoveryMode::ForceFullDepth
+        } else {
+            DiscoveryMode::StandardWithRecursiveFallback
+        };
+        let discovered = discover_skills_from_paths(
+            &repo_name_from_url(&spec.url),
+            &files,
+            spec.path_prefix.as_deref(),
+            mode,
+        );
+        let mut candidates = Vec::with_capacity(discovered.len());
+        for skill in discovered {
+            let identity_key = normalize_identity(&skill.directory_name)?;
+            let document_path = skill_document_path(&skill.skill_path);
+            let Ok(Some(blob)) = self.git_source.read_blob(
+                mirror,
+                &resolved.commit,
+                &document_path,
+                usize::try_from(MAX_SKILL_DOCUMENT_BYTES).expect("512 KiB fits usize"),
+            ) else {
+                // Unreadable or oversized SKILL.md: the candidate is not selectable.
+                continue;
+            };
+            let metadata = parse_skill_metadata(&String::from_utf8_lossy(&blob));
+            candidates.push(GitImportCandidate {
+                directory_name: skill.directory_name.clone(),
+                identity_key,
+                display_name: metadata
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| skill.directory_name.clone()),
+                description: metadata.description.unwrap_or_default(),
+                frontmatter_name: metadata.name,
+                skill_path: skill.skill_path,
+            });
+        }
+        Ok(candidates)
+    }
+
+    fn next_git_operation_id(&self) -> String {
+        format!(
+            "git-import-{}-{}",
+            self.clock.unix_epoch_nanos(),
+            self.next_plan_id.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     fn finish_cancelled_file_plan(
         &self,
         operation_id: &str,
@@ -1601,34 +2370,60 @@ impl ImportService {
         let staged_source = self
             .file_source
             .stage(source_path, staging_operation_root)?;
+        let (discovered, truncated) =
+            discover_staged_skills(self.filesystem.as_ref(), &staged_source)?;
+        if discovered.is_empty() {
+            return self.cleanup_staging_after_error(
+                staging_operation_root,
+                None,
+                ImportError::Validation(
+                    "file Import source must contain a readable SKILL.md".into(),
+                ),
+            );
+        }
+        let staged_sources = discovered
+            .into_iter()
+            .filter(|(directory_name, _)| {
+                selected_directory_names
+                    .as_ref()
+                    .is_none_or(|selected| selected.contains(directory_name))
+            })
+            .map(|(directory_name, staged_skill_path)| StagedFileSource {
+                original_path: staged_source.original_path.clone(),
+                original_filename: staged_source.original_filename.clone(),
+                suggested_root_name: directory_name,
+                staged_content_root: staged_skill_path,
+            })
+            .collect::<Vec<_>>();
+        let (candidates, staging_fingerprint) =
+            self.validate_prestaged_sources(staging_operation_root, staged_sources)?;
+        Ok((candidates, staging_fingerprint, truncated))
+    }
+
+    /// Validate already-staged Skill roots (one per candidate) and produce the
+    /// validated candidates. Cleans the staging root on any validation failure.
+    fn validate_prestaged_sources(
+        &self,
+        staging_operation_root: &Path,
+        staged_sources: Vec<StagedFileSource>,
+    ) -> Result<(Vec<ValidatedFileCandidate>, DirectoryFingerprint), ImportError> {
         let staging_fingerprint = self
             .filesystem
             .directory_fingerprint(staging_operation_root)?;
         let validation = (|| {
-            let (discovered, truncated) =
-                discover_staged_skills(self.filesystem.as_ref(), &staged_source)?;
-            if discovered.is_empty() {
-                return Err(ImportError::Validation(
-                    "file Import source must contain a readable SKILL.md".into(),
-                ));
-            }
-            let mut candidates = Vec::with_capacity(discovered.len());
-            for (directory_name, staged_skill_path) in discovered {
-                if selected_directory_names
-                    .is_some_and(|selected| !selected.contains(&directory_name))
-                {
-                    continue;
-                }
+            let mut candidates = Vec::with_capacity(staged_sources.len());
+            for staged_source in staged_sources {
+                let directory_name = staged_source.suggested_root_name.clone();
                 let identity_key = normalize_identity(&directory_name)?;
-                let tree_snapshot = self.filesystem.staged_tree_snapshot(&staged_skill_path)?;
+                let tree_snapshot = self
+                    .filesystem
+                    .staged_tree_snapshot(&staged_source.staged_content_root)?;
                 validate_staged_tree(self.filesystem.as_ref(), &tree_snapshot)?;
                 let skill_markdown = self
                     .filesystem
-                    .read_skill_document(&staged_skill_path)
+                    .read_skill_document(&staged_source.staged_content_root)
                     .map_err(|error| {
-                        ImportError::Validation(format!(
-                            "file Import SKILL.md is not readable: {error}"
-                        ))
+                        ImportError::Validation(format!("Import SKILL.md is not readable: {error}"))
                     })?;
                 let metadata = parse_skill_metadata(&skill_markdown);
                 let candidate = FileImportCandidate {
@@ -1640,19 +2435,12 @@ impl ImportService {
                     original_path: staged_source.original_path.clone(),
                     original_filename: staged_source.original_filename.clone(),
                 };
-                candidates.push((
-                    candidate,
-                    StagedFileSource {
-                        staged_content_root: staged_skill_path,
-                        ..staged_source.clone()
-                    },
-                    tree_snapshot,
-                ));
+                candidates.push((candidate, staged_source, tree_snapshot));
             }
-            Ok((candidates, truncated))
+            Ok(candidates)
         })();
         match validation {
-            Ok((candidates, truncated)) => Ok((candidates, staging_fingerprint, truncated)),
+            Ok(candidates) => Ok((candidates, staging_fingerprint)),
             Err(error) => match self.filesystem.discard_staging(
                 staging_operation_root,
                 &self.library_root,
@@ -1714,6 +2502,26 @@ fn file_record_from_plan(plan: &PlannedFileImport) -> FileImportRecord {
         recorded_content_hash: plan.tree_snapshot.content_hash.clone(),
         original_path: plan.candidate.original_path.clone(),
         original_filename: plan.candidate.original_filename.clone(),
+    }
+}
+
+fn remote_record_from_plan(
+    plan: &PlannedFileImport,
+    remote: &PlannedRemoteImport,
+) -> RemoteImportRecord {
+    RemoteImportRecord {
+        skill_id: plan.skill_id.clone(),
+        directory_name: plan.candidate.directory_name.clone(),
+        identity_key: plan.candidate.identity_key.clone(),
+        display_name: plan.candidate.display_name.clone(),
+        description: plan.candidate.description.clone(),
+        library_entry_path: plan.final_entity_path.clone(),
+        final_entity_path: plan.final_entity_path.clone(),
+        recorded_content_hash: plan.tree_snapshot.content_hash.clone(),
+        source_url: remote.repo_url.clone(),
+        requested_ref: remote.requested_ref.clone(),
+        resolved_commit: remote.resolved_commit.clone(),
+        skill_path: remote.skill_path.clone(),
     }
 }
 
@@ -2049,6 +2857,8 @@ pub enum ImportError {
         required_bytes: u64,
         available_bytes: u64,
     },
+    #[error("the installed Skill has local modifications; abandon them to Update")]
+    Modified,
     #[error("file Import requires recovery: {0}")]
     RecoveryRequired(String),
     #[error(transparent)]
@@ -2059,6 +2869,23 @@ pub enum ImportError {
     Source(#[from] SourceError),
     #[error("{0}")]
     Internal(String),
+}
+
+impl From<GitSourceParseError> for ImportError {
+    fn from(error: GitSourceParseError) -> Self {
+        ImportError::Validation(error.to_string())
+    }
+}
+
+impl From<GitResolveError> for ImportError {
+    fn from(error: GitResolveError) -> Self {
+        match error {
+            GitResolveError::RefNotFound(reference) => ImportError::Validation(format!(
+                "the requested Git ref '{reference}' was not found in the repository"
+            )),
+            GitResolveError::Source(source) => ImportError::Source(source),
+        }
+    }
 }
 
 #[cfg(test)]

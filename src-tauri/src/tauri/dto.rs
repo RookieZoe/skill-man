@@ -7,10 +7,15 @@ use crate::core::domain::{
 };
 use crate::core::import::{
     FileImportCandidate, FileImportDiscovery, FileImportPreview, FileImportResult,
-    FileImportSelectionPreview, FileImportSelectionResult, LibraryConflict, LinkImportCandidate,
-    LinkImportPreview, LinkImportResult,
+    FileImportSelectionPreview, FileImportSelectionResult, GitImportCandidate, GitImportDiscovery,
+    GitImportPreview, GitImportResult, GitImportSelectionPreview, GitImportSelectionResult,
+    LibraryConflict, LinkImportCandidate, LinkImportPreview, LinkImportResult,
 };
 use crate::core::maintenance::ActivationHealthReport;
+use crate::core::update::{
+    UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
+    UpdatePlanItem, UpdateResult,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -676,4 +681,412 @@ impl From<FileImportSelectionResult> for FileImportSelectionResultDto {
             recovery_required: false,
         }
     }
+}
+
+// -- Git remote Import --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverGitImportRequestDto {
+    pub source: String,
+    pub force_full_depth: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanGitImportSelectionRequestDto {
+    pub source: String,
+    pub force_full_depth: bool,
+    pub selected_directory_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyGitImportSelectionRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelGitImportSelectionRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportCandidateDto {
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub frontmatter_name: Option<String>,
+    pub skill_path: String,
+}
+
+impl From<GitImportCandidate> for GitImportCandidateDto {
+    fn from(value: GitImportCandidate) -> Self {
+        Self {
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            frontmatter_name: value.frontmatter_name,
+            skill_path: value.skill_path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportDiscoveryDto {
+    pub repo_url: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub candidates: Vec<GitImportCandidateDto>,
+    pub truncated: bool,
+}
+
+impl From<GitImportDiscovery> for GitImportDiscoveryDto {
+    fn from(value: GitImportDiscovery) -> Self {
+        Self {
+            repo_url: value.repo_url,
+            requested_ref: value.requested_ref,
+            resolved_commit: value.resolved_commit,
+            candidates: value
+                .candidates
+                .into_iter()
+                .map(GitImportCandidateDto::from)
+                .collect(),
+            truncated: value.truncated,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportPreviewDto {
+    pub plan_token: String,
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub skill_path: String,
+    pub final_entity_path: String,
+    pub conflict: Option<LibraryConflictDto>,
+    pub can_apply: bool,
+}
+
+impl From<GitImportPreview> for GitImportPreviewDto {
+    fn from(value: GitImportPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            skill_path: value.skill_path,
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            conflict: value.conflict.map(LibraryConflictDto::from),
+            can_apply: value.can_apply,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportSelectionPreviewDto {
+    pub plan_token: String,
+    pub repo_url: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub items: Vec<GitImportPreviewDto>,
+    pub can_apply: bool,
+}
+
+impl From<GitImportSelectionPreview> for GitImportSelectionPreviewDto {
+    fn from(value: GitImportSelectionPreview) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            repo_url: value.repo_url,
+            requested_ref: value.requested_ref,
+            resolved_commit: value.resolved_commit,
+            items: value
+                .items
+                .into_iter()
+                .map(GitImportPreviewDto::from)
+                .collect(),
+            can_apply: value.can_apply,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportResultDto {
+    pub operation_id: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub final_entity_path: String,
+    pub snapshot_version: u64,
+}
+
+impl From<GitImportResult> for GitImportResultDto {
+    fn from(value: GitImportResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitImportSelectionResultDto {
+    pub operation_id: String,
+    pub items: Vec<GitImportResultDto>,
+    pub snapshot_version: u64,
+}
+
+impl From<GitImportSelectionResult> for GitImportSelectionResultDto {
+    fn from(value: GitImportSelectionResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            items: value
+                .items
+                .into_iter()
+                .map(GitImportResultDto::from)
+                .collect(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+// -- Skill Updates --
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckSkillUpdatesRequestDto {
+    pub force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckItemDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub source_url: String,
+    pub requested_ref: String,
+    pub current_commit: String,
+    pub resolved_commit: String,
+    pub has_update: bool,
+    pub modified: bool,
+    pub upstream_path_gone: bool,
+    pub last_checked_at: Option<String>,
+}
+
+impl From<UpdateCheckItem> for UpdateCheckItemDto {
+    fn from(value: UpdateCheckItem) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            source_url: value.source_url,
+            requested_ref: value.requested_ref,
+            current_commit: value.current_commit,
+            resolved_commit: value.resolved_commit,
+            has_update: value.has_update,
+            modified: value.modified,
+            upstream_path_gone: value.upstream_path_gone,
+            last_checked_at: value.last_checked_at.map(epoch_seconds_to_rfc3339),
+        }
+    }
+}
+
+/// Spec §5.3: persisted times may be integer epoch, DTOs always output RFC 3339.
+fn epoch_seconds_to_rfc3339(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60,
+    )
+}
+
+/// Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month as u32, day as u32)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckGroupDto {
+    pub repo_url: String,
+    pub items: Vec<UpdateCheckItemDto>,
+}
+
+impl From<UpdateCheckGroup> for UpdateCheckGroupDto {
+    fn from(value: UpdateCheckGroup) -> Self {
+        Self {
+            repo_url: value.repo_url,
+            items: value
+                .items
+                .into_iter()
+                .map(UpdateCheckItemDto::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckReportDto {
+    pub groups: Vec<UpdateCheckGroupDto>,
+    pub errors: Vec<String>,
+}
+
+impl From<UpdateCheckReport> for UpdateCheckReportDto {
+    fn from(value: UpdateCheckReport) -> Self {
+        Self {
+            groups: value
+                .groups
+                .into_iter()
+                .map(UpdateCheckGroupDto::from)
+                .collect(),
+            errors: value.errors,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSelectionDto {
+    pub skill_id: String,
+    pub new_skill_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanSkillUpdatesRequestDto {
+    pub selections: Vec<UpdateSelectionDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePlanItemDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub plan_token: String,
+    pub current_commit: String,
+    pub new_commit: String,
+    pub modified: bool,
+    pub path_changed: bool,
+    pub error: Option<String>,
+}
+
+impl From<UpdatePlanItem> for UpdatePlanItemDto {
+    fn from(value: UpdatePlanItem) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            plan_token: value.plan_token,
+            current_commit: value.current_commit,
+            new_commit: value.new_commit,
+            modified: value.modified,
+            path_changed: value.path_changed,
+            error: value.error,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePlanDto {
+    pub items: Vec<UpdatePlanItemDto>,
+}
+
+impl From<UpdatePlan> for UpdatePlanDto {
+    fn from(value: UpdatePlan) -> Self {
+        Self {
+            items: value
+                .items
+                .into_iter()
+                .map(UpdatePlanItemDto::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApplyRequestDto {
+    pub plan_token: String,
+    pub skill_id: String,
+    pub directory_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySkillUpdatesRequestDto {
+    pub requests: Vec<UpdateApplyRequestDto>,
+    pub abandon_changes: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateItemResultDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub updated: bool,
+    pub error: Option<String>,
+}
+
+impl From<UpdateItemResult> for UpdateItemResultDto {
+    fn from(value: UpdateItemResult) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            updated: value.updated,
+            error: value.error,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateResultDto {
+    pub items: Vec<UpdateItemResultDto>,
+}
+
+impl From<UpdateResult> for UpdateResultDto {
+    fn from(value: UpdateResult) -> Self {
+        Self {
+            items: value
+                .items
+                .into_iter()
+                .map(UpdateItemResultDto::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinSkillUpdatesRequestDto {
+    pub skill_ids: Vec<String>,
 }

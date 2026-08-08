@@ -1,0 +1,624 @@
+//! Git transport adapter.
+//!
+//! Speaks to the system `git` binary to fetch mirrors and materialize tree
+//! subtrees. The Core owns the mirror layout under `<Library>/cache/git/`;
+//! this adapter only performs transport, with hard timeouts and never
+//! prompting for credentials. No hooks can run: the mirrors are bare, and
+//! `archive`/`ls-tree`/`cat-file` never touch a working tree or config of
+//! the remote repository.
+
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::adapters::zip_extract::extract_zip_archive;
+use crate::seams::source::{
+    GitFetchReport, GitSource, GitTreeEntry, GitTreeEntryKind, SourceError,
+};
+
+const CONNECT_TIMEOUT_SECONDS: u64 = 60;
+const FETCH_TIMEOUT_SECONDS: u64 = 300;
+const LOCAL_OP_TIMEOUT_SECONDS: u64 = 60;
+
+pub struct SystemGitSource;
+
+impl SystemGitSource {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SystemGitSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct GitOutput {
+    stdout: Vec<u8>,
+}
+
+fn run_git(
+    args: &[&str],
+    total_seconds: u64,
+    stdout_cap: Option<usize>,
+) -> Result<GitOutput, SourceError> {
+    run_git_impl(args, total_seconds, stdout_cap, None)
+}
+
+fn run_git_to_file(
+    args: &[&str],
+    total_seconds: u64,
+    stdout_path: &Path,
+) -> Result<GitOutput, SourceError> {
+    run_git_impl(args, total_seconds, None, Some(stdout_path))
+}
+
+fn run_git_impl(
+    args: &[&str],
+    total_seconds: u64,
+    stdout_cap: Option<usize>,
+    stdout_path: Option<&Path>,
+) -> Result<GitOutput, SourceError> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(total_seconds);
+    let mut command = Command::new("git");
+    command
+        .args(["-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|source| SourceError::Io {
+        operation: "spawn git",
+        path: Path::new("git").to_path_buf(),
+        source,
+    })?;
+    let mut stdout = child.stdout.take().expect("git stdout was piped");
+    let mut stderr = child.stderr.take().expect("git stderr was piped");
+    let output_file = stdout_path.map(Path::to_path_buf);
+    let cap = stdout_cap;
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut file = output_file.as_ref().and_then(|path| {
+            fs::File::create(path)
+                .map_err(|source| {
+                    eprintln!(
+                        "skill-man: could not create git output file {}: {source}",
+                        path.display()
+                    )
+                })
+                .ok()
+        });
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut over_cap = false;
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if cap.is_some_and(|cap| output.len().saturating_add(count) > cap) {
+                        over_cap = true;
+                        output.clear();
+                    } else if !over_cap {
+                        output.extend_from_slice(&buffer[..count]);
+                    }
+                    if let Some(file) = &mut file {
+                        let _ = file.write_all(&buffer[..count]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        (output, over_cap)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    });
+    let summary = args
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (stdout, over_cap) = stdout_reader
+                    .join()
+                    .map_err(|_| SourceError::Git("git stdout reader panicked".into()))?;
+                let stderr = stderr_reader
+                    .join()
+                    .map_err(|_| SourceError::Git("git stderr reader panicked".into()))?;
+                if over_cap {
+                    return Err(SourceError::Validation(format!(
+                        "git output exceeded the size limit: {summary}"
+                    )));
+                }
+                if status.success() {
+                    return Ok(GitOutput { stdout });
+                }
+                return Err(SourceError::Git(format!(
+                    "`git {summary}` failed ({}): {}",
+                    status
+                        .code()
+                        .map_or_else(|| "signal".into(), |code| code.to_string()),
+                    stderr.trim()
+                )));
+            }
+            Ok(None) => {}
+            Err(source) => {
+                return Err(SourceError::Io {
+                    operation: "wait for git",
+                    path: Path::new("git").to_path_buf(),
+                    source,
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            // Kill the whole process group (git may have spawned helpers).
+            let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(SourceError::Git(format!(
+                "`git {summary}` timed out after {total_seconds}s"
+            )));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn is_mirror_present(mirror_dir: &Path) -> bool {
+    mirror_dir.join("HEAD").is_file()
+}
+
+impl GitSource for SystemGitSource {
+    fn fetch_mirror(&self, url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError> {
+        if !is_mirror_present(mirror_dir) {
+            if mirror_dir.exists() {
+                fs::remove_dir_all(mirror_dir).map_err(|source| SourceError::Io {
+                    operation: "clear partial Git mirror",
+                    path: mirror_dir.to_path_buf(),
+                    source,
+                })?;
+            }
+            if let Some(parent) = mirror_dir.parent() {
+                fs::create_dir_all(parent).map_err(|source| SourceError::Io {
+                    operation: "create Git cache directory",
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            if let Err(error) = run_git(
+                &["clone", "--mirror", url, mirror_dir.to_str().unwrap_or(".")],
+                FETCH_TIMEOUT_SECONDS,
+                None,
+            )
+            .map(|_| ())
+            {
+                let _ = fs::remove_dir_all(mirror_dir);
+                return Err(error);
+            }
+        } else {
+            run_git(
+                &[
+                    "-C",
+                    mirror_dir.to_str().unwrap_or("."),
+                    "fetch",
+                    "--prune",
+                    "origin",
+                ],
+                FETCH_TIMEOUT_SECONDS,
+                None,
+            )
+            .map_err(|error| {
+                // A failed refresh leaves the previous mirror state intact, so a
+                // later retry can still succeed; only the check is reported.
+                SourceError::Git(format!(
+                    "could not refresh the Git mirror for {url}: {error}"
+                ))
+            })?;
+        }
+        let default_branch = run_git(
+            &["ls-remote", "--symref", url, "HEAD"],
+            CONNECT_TIMEOUT_SECONDS,
+            Some(4096),
+        )
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| {
+                    let line = line.trim();
+                    line.strip_prefix("ref: refs/heads/")
+                        .and_then(|rest| rest.split_once('\t'))
+                        .map(|(branch, _)| branch.to_owned())
+                })
+        });
+        Ok(GitFetchReport { default_branch })
+    }
+
+    fn resolve_commit(&self, mirror_dir: &Path, rev: &str) -> Result<Option<String>, SourceError> {
+        let output = run_git(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "rev-parse",
+                "--verify",
+                &format!("{rev}^{{commit}}"),
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            Some(128),
+        );
+        match output {
+            Ok(output) => {
+                let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if commit.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(commit))
+                }
+            }
+            Err(SourceError::Git(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn list_tree(&self, mirror_dir: &Path, commit: &str) -> Result<Vec<GitTreeEntry>, SourceError> {
+        let output = run_git(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "ls-tree",
+                "-r",
+                "-z",
+                commit,
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            None,
+        )?;
+        let mut entries = Vec::new();
+        for record in output.stdout.split(|byte| *byte == 0) {
+            if record.is_empty() {
+                continue;
+            }
+            let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let (metadata, path) = record.split_at(separator);
+            let path = std::path::PathBuf::from(String::from_utf8_lossy(&path[1..]).into_owned());
+            let mut fields = metadata.splitn(3, |byte| *byte == b' ');
+            let mode = fields.next().unwrap_or_default();
+            let kind = if mode == b"40000" {
+                GitTreeEntryKind::Tree
+            } else if mode == b"120000" {
+                GitTreeEntryKind::Symlink
+            } else if mode == b"160000" {
+                GitTreeEntryKind::Submodule
+            } else {
+                GitTreeEntryKind::Blob
+            };
+            entries.push(GitTreeEntry { path, kind });
+        }
+        Ok(entries)
+    }
+
+    fn read_blob(
+        &self,
+        mirror_dir: &Path,
+        commit: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, SourceError> {
+        let output = run_git(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "cat-file",
+                "blob",
+                &format!("{commit}:{path}"),
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            Some(max_bytes.saturating_add(1)),
+        );
+        match output {
+            Ok(output) => Ok(Some(output.stdout)),
+            Err(SourceError::Git(message))
+                if message.contains("does not exist")
+                    || message.contains("exists on disk, but not in")
+                    || message.contains("Not a valid object name") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn stage_skill(
+        &self,
+        mirror_dir: &Path,
+        commit: &str,
+        skill_path: &str,
+        destination: &Path,
+    ) -> Result<(), SourceError> {
+        let parent = destination.parent().ok_or_else(|| {
+            SourceError::Validation("Git staging destination has no parent".into())
+        })?;
+        fs::create_dir_all(parent).map_err(|source| SourceError::Io {
+            operation: "create Git staging directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        let archive_name = destination
+            .file_name()
+            .map(|name| format!(".{}.skill.zip", name.to_string_lossy()))
+            .unwrap_or_else(|| ".skill.zip".into());
+        let archive_path = parent.join(archive_name);
+        let mut args = vec![
+            "-C",
+            mirror_dir.to_str().unwrap_or("."),
+            "archive",
+            "--format=zip",
+            commit,
+            "--",
+        ];
+        if !skill_path.is_empty() {
+            args.push(skill_path);
+        }
+        let result = run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, &archive_path)
+            .map(|_| ())
+            .and_then(|()| {
+                extract_zip_archive(
+                    &archive_path,
+                    destination,
+                    (!skill_path.is_empty()).then(|| Path::new(skill_path)),
+                )
+            });
+        let _ = fs::remove_file(&archive_path);
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    use super::{SystemGitSource, is_mirror_present};
+    use crate::seams::source::GitSource;
+    use std::process::Command;
+
+    /// Create a local fixture repository with a couple of commits.
+    fn fixture_repo(root: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).expect("create fixture repo");
+        for (path, contents) in files {
+            let file = repo.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).expect("create fixture parent");
+            std::fs::File::create(&file)
+                .expect("create fixture file")
+                .write_all(contents.as_bytes())
+                .expect("write fixture file");
+        }
+        let output = Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        assert!(
+            output.status.success(),
+            "git init: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["config", "user.email", "fixture@example.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config email");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["config", "user.name", "Fixture"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config name");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["commit", "-q", "-m", "fixture commit"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        assert!(
+            output.status.success(),
+            "git commit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        repo
+    }
+
+    fn file_url(path: &std::path::Path) -> String {
+        format!("file://{}", path.display())
+    }
+
+    #[test]
+    fn fetches_mirrors_and_resolves_commits_from_local_fixtures() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[
+                ("SKILL.md", "---\nname: fixture\n---\n"),
+                ("README.md", "readme"),
+            ],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        let report = source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        assert_eq!(report.default_branch.as_deref(), Some("main"));
+        assert!(is_mirror_present(&mirror));
+        let commit = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve branch")
+            .expect("branch present");
+        assert_eq!(commit.len(), 40);
+        assert_eq!(
+            source
+                .resolve_commit(&mirror, "refs/heads/main")
+                .expect("resolve ref"),
+            Some(commit.clone())
+        );
+        assert_eq!(
+            source.resolve_commit(&mirror, "nope").expect("missing ref"),
+            None
+        );
+    }
+
+    #[test]
+    fn fetches_refresh_an_existing_mirror() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[("SKILL.md", "---\nname: fixture\n---\n")],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("first fetch");
+        let before = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        std::fs::write(repo.join("SKILL.md"), "---\nname: fixture\n---\n# v2\n")
+            .expect("update file");
+        let output = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["commit", "-q", "-m", "second commit"])
+            .current_dir(&repo)
+            .output()
+            .expect("commit");
+        assert!(output.status.success());
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("second fetch");
+        let after = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn lists_trees_and_reads_blobs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[
+                ("SKILL.md", "---\nname: fixture\n---\n"),
+                ("skills/a/SKILL.md", "# A\n"),
+            ],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let commit = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let entries = source.list_tree(&mirror, &commit).expect("list tree");
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"SKILL.md".into()));
+        assert!(paths.contains(&"skills/a/SKILL.md".into()));
+        let blob = source
+            .read_blob(&mirror, &commit, "skills/a/SKILL.md", 4096)
+            .expect("read blob")
+            .expect("blob present");
+        assert_eq!(String::from_utf8_lossy(&blob), "# A\n");
+        assert_eq!(
+            source
+                .read_blob(&mirror, &commit, "missing.md", 4096)
+                .expect("read missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn stages_skill_directories_from_commits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[
+                ("packages/skills/one/SKILL.md", "# One\n"),
+                ("packages/skills/one/lib.rs", "fn one() {}\n"),
+            ],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let commit = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let destination = temp.path().join("staging/one");
+        source
+            .stage_skill(&mirror, &commit, "packages/skills/one", &destination)
+            .expect("stage skill");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("SKILL.md")).expect("read SKILL.md"),
+            "# One\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("lib.rs")).expect("read lib.rs"),
+            "fn one() {}\n"
+        );
+        assert!(
+            !destination.join("packages").exists(),
+            "the repo-relative prefix must be stripped"
+        );
+        assert!(
+            !temp.path().join("staging").join(".one.skill.zip").exists(),
+            "the transient archive must be removed"
+        );
+    }
+}

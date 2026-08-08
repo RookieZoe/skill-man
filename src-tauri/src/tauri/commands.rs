@@ -5,18 +5,23 @@ use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
     ActivationHealthReportDto, ActivationPreviewDto, ActivationResultDto, AgentActivationDto,
     ApplyActivationRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    ApplyLinkImportRequestDto, CancelActivationRequestDto, CancelFileImportRequestDto,
-    CancelLinkImportRequestDto, CatalogListDto, CommandErrorDto,
+    ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, ApplySkillUpdatesRequestDto,
+    CancelActivationRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
+    CancelLinkImportRequestDto, CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
-    DiscoverLinkImportRequestDto, FileImportCandidateDto, FileImportDiscoveryDto,
-    FileImportPreviewDto, FileImportResultDto, FileImportSelectionPreviewDto,
-    FileImportSelectionResultDto, LinkImportCandidateDto, LinkImportPreviewDto,
-    LinkImportResultDto, ListSkillsRequestDto, PlanActivationRepairRequestDto,
-    PlanActivationRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
-    PlanFileReinstallRequestDto, PlanLinkImportRequestDto, SkillDetailDto,
+    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
+    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto, GitImportDiscoveryDto,
+    GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
+    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, PinSkillUpdatesRequestDto,
+    PlanActivationRepairRequestDto, PlanActivationRequestDto, PlanFileImportRequestDto,
+    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
+    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PlanSkillUpdatesRequestDto,
+    SkillDetailDto, UpdateCheckReportDto, UpdatePlanDto, UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
+use crate::tauri_adapter::update_api::UpdateApi;
 
 #[tauri::command]
 pub fn plan_activation(
@@ -175,4 +180,68 @@ pub fn cancel_file_import(
     request: CancelFileImportRequestDto,
 ) -> Result<bool, CommandErrorDto> {
     state.cancel_file_import(request)
+}
+
+#[tauri::command]
+pub fn discover_git_import(
+    state: State<'_, ImportApi>,
+    request: DiscoverGitImportRequestDto,
+) -> Result<GitImportDiscoveryDto, CommandErrorDto> {
+    state.discover_git_import(request)
+}
+
+#[tauri::command]
+pub fn plan_git_import_selection(
+    state: State<'_, ImportApi>,
+    request: PlanGitImportSelectionRequestDto,
+) -> Result<GitImportSelectionPreviewDto, CommandErrorDto> {
+    state.plan_git_import_selection(request)
+}
+
+#[tauri::command]
+pub fn apply_git_import_selection(
+    state: State<'_, ImportApi>,
+    request: ApplyGitImportSelectionRequestDto,
+) -> Result<GitImportSelectionResultDto, CommandErrorDto> {
+    state.apply_git_import_selection(request)
+}
+
+#[tauri::command]
+pub fn cancel_git_import_selection(
+    state: State<'_, ImportApi>,
+    request: CancelGitImportSelectionRequestDto,
+) -> Result<bool, CommandErrorDto> {
+    state.cancel_git_import_selection(request)
+}
+
+#[tauri::command]
+pub fn check_skill_updates(
+    state: State<'_, UpdateApi>,
+    request: CheckSkillUpdatesRequestDto,
+) -> Result<UpdateCheckReportDto, CommandErrorDto> {
+    state.check_skill_updates(request)
+}
+
+#[tauri::command]
+pub fn plan_skill_updates(
+    state: State<'_, UpdateApi>,
+    request: PlanSkillUpdatesRequestDto,
+) -> Result<UpdatePlanDto, CommandErrorDto> {
+    state.plan_skill_updates(request)
+}
+
+#[tauri::command]
+pub fn apply_skill_updates(
+    state: State<'_, UpdateApi>,
+    request: ApplySkillUpdatesRequestDto,
+) -> Result<UpdateResultDto, CommandErrorDto> {
+    state.apply_skill_updates(request)
+}
+
+#[tauri::command]
+pub fn pin_skill_updates(
+    state: State<'_, UpdateApi>,
+    request: PinSkillUpdatesRequestDto,
+) -> Result<(), CommandErrorDto> {
+    state.pin_skill_updates(request)
 }

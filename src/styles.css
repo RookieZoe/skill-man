@@ -1186,3 +1186,231 @@ button:active:not(:disabled) {
     width: 100%;
   }
 }
+
+/* -- Import source kind switch and Git Import flow -- */
+.import-kind-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.import-kind-switch button {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.import-kind-switch button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+.import-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.git-import-candidates {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+}
+.git-import-candidates li {
+  border-bottom: 1px solid var(--divider);
+}
+.git-import-candidates li:last-child {
+  border-bottom: none;
+}
+.git-import-candidates label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.git-import-candidates label span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.candidate-path {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.git-import-preview-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+}
+.candidate-conflict {
+  color: var(--broken);
+  font-size: 12px;
+}
+.candidate-clear {
+  color: var(--healthy);
+  font-size: 12px;
+}
+.git-import-results {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+}
+.git-import-results li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--divider);
+}
+.git-import-results li:last-child {
+  border-bottom: none;
+}
+.git-import-results button {
+  font: inherit;
+  font-size: 13px;
+  color: var(--accent-strong);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+.git-import-results button:hover {
+  background: var(--accent-soft);
+}
+
+/* -- Skill Update section -- */
+.update-section {
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin: 16px 0;
+  background: var(--surface-muted);
+}
+.update-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.update-toolbar h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.update-toolbar button {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.update-toolbar button:disabled,
+.reselect-row button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.update-status {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+.update-status p {
+  margin: 0;
+}
+.update-available {
+  color: var(--accent-strong);
+}
+.update-path-gone {
+  border: 1px solid var(--modified);
+  background: oklch(96% 0.03 90);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.update-path-gone strong {
+  font-size: 13px;
+}
+.update-path-gone span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.reselect-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.reselect-row input {
+  flex: 1;
+  min-width: 180px;
+  padding: 7px 10px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+}
+.reselect-row button {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.update-modified {
+  border: 1px solid var(--modified);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.update-modified strong {
+  color: var(--modified);
+  font-size: 13px;
+}
+.update-modified span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.update-plan-error {
+  color: var(--broken);
+}
+.update-result-ok {
+  color: var(--healthy);
+}
+.update-result-fail {
+  color: var(--broken);
+}

@@ -15,6 +15,7 @@ use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::FileSystem;
 use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
+    RemoteImportRecord, RemoteInstallRecord,
 };
 use crate::seams::maintenance_store::{
     InstalledSkillBaseline, MaintenanceStore, MaintenanceStoreError, SkillHealthObservation,
@@ -180,6 +181,68 @@ impl ImportStore for RuntimeCatalogStore {
             ));
         }
         self.sqlite.replace_file(record)
+    }
+
+    fn insert_remotes(&self, records: Vec<RemoteImportRecord>) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.insert_remotes(records)
+    }
+
+    fn load_remote_installs(&self) -> Result<Vec<RemoteInstallRecord>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.load_remote_installs()
+    }
+
+    fn load_remote_install(
+        &self,
+        identity_key: &str,
+    ) -> Result<Option<RemoteInstallRecord>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.load_remote_install(identity_key)
+    }
+
+    fn update_remote_install(&self, record: RemoteImportRecord) -> Result<u64, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.update_remote_install(record)
+    }
+
+    fn record_remote_check(&self, skill_id: &SkillId) -> Result<(), ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite.record_remote_check(skill_id)
+    }
+
+    fn set_remote_requested_ref(
+        &self,
+        skill_id: &SkillId,
+        requested_ref: &str,
+    ) -> Result<(), ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.sqlite
+            .set_remote_requested_ref(skill_id, requested_ref)
     }
 }
 
