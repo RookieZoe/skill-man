@@ -1832,7 +1832,7 @@ impl FileSystem for MacOsFileSystem {
                 path: final_entity_path,
             });
         }
-        if !backup_path.starts_with(&library_root.join("operations")) {
+        if !backup_path.starts_with(library_root.join("operations")) {
             return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
         }
         if fs::symlink_metadata(&backup_path).is_ok() {
@@ -1884,7 +1884,7 @@ impl FileSystem for MacOsFileSystem {
     ) -> Result<(), FileSystemError> {
         let backup_path = self.normalize_configured_path(backup_path)?;
         let library_root = self.normalize_configured_path(library_root)?;
-        if !backup_path.starts_with(&library_root.join("operations")) {
+        if !backup_path.starts_with(library_root.join("operations")) {
             return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
         }
         remove_owned_directory_if_present(&backup_path, expected, "discard Library entity backup")
