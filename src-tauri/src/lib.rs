@@ -19,8 +19,10 @@ pub fn run() {
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::sqlite::SqliteCatalogStore;
     use crate::adapters::system_clock::SystemClock;
+    use crate::adapters::tauri_app_updater::TauriAppUpdater;
     use crate::core::activation::ActivationService;
     use crate::core::adopt::AdoptService;
+    use crate::core::app_update::AppUpdateService;
     use crate::core::catalog::CatalogService;
     use crate::core::import::ImportService;
     use crate::core::maintenance::MaintenanceService;
@@ -33,21 +35,24 @@ pub fn run() {
     use crate::seams::recovery::RecoveryGate;
     use crate::tauri_adapter::activation_api::ActivationApi;
     use crate::tauri_adapter::adopt_api::AdoptApi;
+    use crate::tauri_adapter::app_update_api::AppUpdateApi;
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
         activation_conflict_details, apply_activation, apply_activation_replace, apply_adopt,
         apply_file_import, apply_file_import_selection, apply_git_import_selection,
         apply_link_import, apply_relocate_link, apply_remove_skill, apply_skill_updates,
-        cancel_activation, cancel_activation_replace, cancel_adopt, cancel_file_import,
-        cancel_git_import_selection, cancel_link_import, cancel_relocate_link, cancel_remove_skill,
-        check_skill_updates, complete_onboarding, create_agent_directory, discover_file_import,
-        discover_file_import_collection, discover_git_import, discover_link_import,
-        finalize_activation_replace, finalize_adopt, inspect_skill, list_agents, list_skills,
-        load_preferences, pin_skill_updates, plan_activation, plan_activation_repair,
-        plan_activation_replace, plan_adopt, plan_file_import, plan_file_import_selection,
-        plan_file_reinstall, plan_git_import_selection, plan_link_import, plan_remove_skill,
-        plan_skill_updates, relocate_link, run_activation_health_check, scan_adopt, startup_info,
-        undo_activation_replace, undo_adopt, update_preferences,
+        cancel_activation, cancel_activation_replace, cancel_adopt, cancel_app_update,
+        cancel_file_import, cancel_git_import_selection, cancel_link_import, cancel_relocate_link,
+        cancel_remove_skill, check_app_update, check_skill_updates, complete_onboarding,
+        create_agent_directory, discover_file_import, discover_file_import_collection,
+        discover_git_import, discover_link_import, download_app_update,
+        finalize_activation_replace, finalize_adopt, inspect_skill, install_app_update,
+        list_agents, list_skills, load_preferences, pin_skill_updates, plan_activation,
+        plan_activation_repair, plan_activation_replace, plan_adopt, plan_file_import,
+        plan_file_import_selection, plan_file_reinstall, plan_git_import_selection,
+        plan_link_import, plan_remove_skill, plan_skill_updates, relocate_link,
+        run_activation_health_check, scan_adopt, startup_info, undo_activation_replace, undo_adopt,
+        update_preferences,
     };
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
@@ -58,6 +63,7 @@ pub fn run() {
 
     let app = ::tauri::Builder::default()
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
             let library_root = home_directory.join("Library/Application Support/skill-man");
@@ -88,6 +94,11 @@ pub fn run() {
                 sqlite_store,
                 filesystem.clone(),
             ));
+            app.manage(AppUpdateApi::new(AppUpdateService::new(
+                Arc::new(TauriAppUpdater::new(app.handle().clone())),
+                runtime_store.clone(),
+                Arc::new(SystemClock::new()),
+            )));
             let recovery_gate = Arc::new(RecoveryGate::blocked());
             let git_cache_root = library_root.join("cache");
             let import_service = ImportService::new(
@@ -190,6 +201,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
+            check_app_update,
+            download_app_update,
+            cancel_app_update,
+            install_app_update,
             list_skills,
             inspect_skill,
             list_agents,

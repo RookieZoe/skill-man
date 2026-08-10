@@ -15,6 +15,7 @@ import type {
   AdoptUndoResult,
   AgentActivation,
   AppPreferences,
+  AvailableAppUpdate,
   CatalogClient,
   CatalogFilter,
   GitImportDiscovery,
@@ -66,6 +67,20 @@ export interface RemovePanelState {
   error: string | null;
 }
 
+export interface AppUpdatePanelState {
+  activity:
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "ready"
+    | "cancelling"
+    | "installing";
+  update: AvailableAppUpdate | null;
+  checkStatus: "up_to_date" | "skipped" | null;
+  error: string | null;
+}
+
 export function App({ client }: AppProps) {
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -83,6 +98,13 @@ export function App({ client }: AppProps) {
   );
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
+  const [appUpdatePanel, setAppUpdatePanel] = useState<AppUpdatePanelState>({
+    activity: "idle",
+    update: null,
+    checkStatus: null,
+    error: null,
+  });
+  const appUpdateCheckRunId = useRef(0);
   const [startupAgents, setStartupAgents] = useState<StartupAgent[]>([]);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -244,6 +266,34 @@ export function App({ client }: AppProps) {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (preferences?.checkAppUpdates !== true) return;
+    let current = true;
+    const runId = ++appUpdateCheckRunId.current;
+    client
+      .checkAppUpdate(false)
+      .then((result) => {
+        if (
+          current &&
+          runId === appUpdateCheckRunId.current &&
+          result.status === "available"
+        ) {
+          setAppUpdatePanel({
+            activity: "available",
+            update: result,
+            checkStatus: null,
+            error: null,
+          });
+        }
+      })
+      .catch(() => {
+        // Background and offline checks are intentionally silent.
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, preferences?.checkAppUpdates]);
 
   useEffect(() => {
     // Spec §10.1 + §10.2: the background Skill update check runs at startup
@@ -1168,6 +1218,139 @@ export function App({ client }: AppProps) {
     }
   }
 
+  async function checkAppUpdate() {
+    const runId = ++appUpdateCheckRunId.current;
+    setAppUpdatePanel({
+      activity: "checking",
+      update: null,
+      checkStatus: null,
+      error: null,
+    });
+    try {
+      const result = await client.checkAppUpdate(true);
+      if (runId !== appUpdateCheckRunId.current) return;
+      if (result.status === "available") {
+        setAppUpdatePanel({
+          activity: "available",
+          update: result,
+          checkStatus: null,
+          error: null,
+        });
+        setIsPreferencesOpen(false);
+      } else {
+        setAppUpdatePanel({
+          activity: "idle",
+          update: null,
+          checkStatus: result.status,
+          error: null,
+        });
+      }
+    } catch (reason) {
+      if (runId !== appUpdateCheckRunId.current) return;
+      setAppUpdatePanel({
+        activity: "idle",
+        update: null,
+        checkStatus: null,
+        error: readAppUpdateError(reason),
+      });
+    }
+  }
+
+  async function downloadAppUpdate() {
+    const update = appUpdatePanel.update;
+    if (!update || appUpdatePanel.activity !== "available") return;
+    setAppUpdatePanel((state) => ({
+      ...state,
+      activity: "downloading",
+      error: null,
+    }));
+    try {
+      await client.downloadAppUpdate(update.updateId);
+      setAppUpdatePanel((state) =>
+        state.update?.updateId === update.updateId
+          ? { ...state, activity: "ready", error: null }
+          : state,
+      );
+    } catch (reason) {
+      setAppUpdatePanel((state) =>
+        state.update?.updateId === update.updateId
+          ? readCommandError(reason).code === "update_cancelled" ||
+            state.activity === "cancelling"
+            ? state
+            : {
+                ...state,
+                activity: "available",
+                error: readAppUpdateError(reason),
+              }
+          : state,
+      );
+    }
+  }
+
+  async function installAppUpdate() {
+    const update = appUpdatePanel.update;
+    if (!update || appUpdatePanel.activity !== "ready") return;
+    setAppUpdatePanel((state) => ({
+      ...state,
+      activity: "installing",
+      error: null,
+    }));
+    try {
+      await client.installAppUpdate(update.updateId);
+      setAppUpdatePanel({
+        activity: "idle",
+        update: null,
+        checkStatus: null,
+        error: null,
+      });
+    } catch (reason) {
+      setAppUpdatePanel((state) =>
+        state.update?.updateId === update.updateId
+          ? { ...state, activity: "ready", error: readAppUpdateError(reason) }
+          : state,
+      );
+    }
+  }
+
+  async function closeAppUpdate() {
+    const update = appUpdatePanel.update;
+    if (
+      !update ||
+      appUpdatePanel.activity === "cancelling" ||
+      appUpdatePanel.activity === "installing"
+    )
+      return;
+    const previousActivity = appUpdatePanel.activity;
+    setAppUpdatePanel((state) => ({
+      ...state,
+      activity: "cancelling",
+      error: null,
+    }));
+    try {
+      await client.cancelAppUpdate(update.updateId);
+      setAppUpdatePanel((state) =>
+        state.update?.updateId === update.updateId
+          ? {
+              activity: "idle",
+              update: null,
+              checkStatus: null,
+              error: null,
+            }
+          : state,
+      );
+    } catch (reason) {
+      setAppUpdatePanel((state) =>
+        state.update?.updateId === update.updateId
+          ? {
+              ...state,
+              activity: previousActivity,
+              error: readAppUpdateError(reason),
+            }
+          : state,
+      );
+    }
+  }
+
   // -- First-run onboarding (spec §8.7, three skippable steps) --
 
   async function completeOnboarding() {
@@ -1340,6 +1523,7 @@ export function App({ client }: AppProps) {
       preferences={preferences}
       preferencesWarning={preferencesWarning}
       preferencesError={preferencesError}
+      appUpdatePanel={appUpdatePanel}
       isOnboardingOpen={isOnboardingOpen}
       onboardingStep={onboardingStep}
       onboardingAgents={startupAgents}
@@ -1349,6 +1533,10 @@ export function App({ client }: AppProps) {
       onOpenPreferences={() => setIsPreferencesOpen(true)}
       onClosePreferences={() => setIsPreferencesOpen(false)}
       onTogglePreference={togglePreference}
+      onCheckAppUpdate={checkAppUpdate}
+      onDownloadAppUpdate={downloadAppUpdate}
+      onInstallAppUpdate={installAppUpdate}
+      onCloseAppUpdate={closeAppUpdate}
       onCompleteOnboarding={completeOnboarding}
       onAdvanceOnboarding={advanceOnboarding}
       onCreateAgentDirectory={createOnboardingAgentDirectory}
@@ -1381,4 +1569,24 @@ function readCommandError(reason: unknown) {
         : "internal",
     message: readError(reason),
   };
+}
+
+function readAppUpdateError(reason: unknown) {
+  const { code } = readCommandError(reason);
+  switch (code) {
+    case "source_unavailable":
+      return "无法连接更新服务。请检查网络后重试。";
+    case "state_unavailable":
+      return "无法读取更新状态。请重新启动 Skill Man 后重试。";
+    case "stale_update":
+      return "这次应用更新已失效。请重新检查更新。";
+    case "download_failed":
+      return "下载或签名验证失败。请检查网络后重试。";
+    case "install_failed":
+      return "无法安装应用更新。请重新启动 Skill Man 后重试。";
+    case "update_cancelled":
+      return "应用更新已取消。";
+    default:
+      return "应用更新失败。请稍后重试。";
+  }
 }

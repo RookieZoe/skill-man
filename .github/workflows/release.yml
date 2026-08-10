@@ -1,0 +1,433 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+  RELEASE_COMMIT: ${{ github.sha }}
+  RELEASE_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  verify:
+    name: Verify tagged source
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+        with:
+          targets: aarch64-apple-darwin
+          components: rustfmt, clippy
+
+      - name: Verify tag is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "$tag_commit" = "$head_commit"
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release configuration
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -s LICENSE
+          test "$(gh api "repos/$RELEASE_REPOSITORY" --jq .visibility)" = public
+          sentinel='UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE'
+          if grep -Fq \
+            "$sentinel" \
+            src-tauri/tauri.conf.json \
+            src-tauri/tauri.release.conf.json
+          then
+            echo "Replace the updater public-key sentinel before releasing" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const base = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          const release = JSON.parse(
+            readFileSync("src-tauri/tauri.release.conf.json", "utf8"),
+          );
+          const pubkey = base.plugins?.updater?.pubkey;
+          if (typeof pubkey !== "string" || pubkey.trim().length === 0) {
+            throw new Error("Tauri updater pubkey must be a non-empty string");
+          }
+          if (release.bundle?.createUpdaterArtifacts !== true) {
+            throw new Error(
+              "tauri.release.conf.json must enable createUpdaterArtifacts",
+            );
+          }
+          NODE
+          node scripts/release/prepare-release.mjs \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --tag "$RELEASE_TAG" \
+            --check-version-only \
+            > "$RUNNER_TEMP/release-version.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run full verification gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run format:check
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          npm run check:capabilities
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run test:release
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+          npm run build:web
+          npm run tauri build -- --no-bundle --target aarch64-apple-darwin
+
+  release:
+    name: Sign, notarize, and create Draft Release
+    needs: verify
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment:
+      name: release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Require protected release secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for secret_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY \
+            APPLE_API_KEY_P8_BASE64 \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          do
+            if [[ -z "${!secret_name}" ]]; then
+              echo "Missing release Environment secret: $secret_name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate and ASC key
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          key_dir="$RUNNER_TEMP/skill-man-release-keys"
+          certificate_path="$key_dir/certificate.p12"
+          api_key_path="$key_dir/notary-api-key.p8"
+          keychain_path="$key_dir/signing.keychain-db"
+          mkdir -p "$key_dir"
+          chmod 700 "$key_dir"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          original_keychain="$(security default-keychain -d user | tr -d '"')"
+          {
+            echo "APPLE_API_KEY_PATH=$api_key_path"
+            echo "BUILD_KEYCHAIN_PATH=$keychain_path"
+            echo "ORIGINAL_KEYCHAIN_PATH=$original_keychain"
+          } >> "$GITHUB_ENV"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 7200 "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain_path" |
+              awk -F'"' '/Developer ID Application/ { print $2 }'
+          )"
+          if [[ -z "$signing_identity" || "$signing_identity" == *$'\n'* ]]; then
+            echo "Expected exactly one Developer ID Application identity" >&2
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            "repos/$RELEASE_REPOSITORY/releases/generate-notes" \
+            -f "tag_name=$RELEASE_TAG" \
+            -f "target_commitish=$RELEASE_COMMIT" \
+            --jq .body > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      - name: Build signed and notarized aarch64 bundles
+        id: tauri-build
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --target aarch64-apple-darwin --config src-tauri/tauri.release.conf.json
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+
+      - name: Prepare updater metadata and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/prepare-release.mjs \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --tag "$RELEASE_TAG" \
+            --repository "$RELEASE_REPOSITORY" \
+            --artifacts-dir "$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle" \
+            --release-notes "$RUNNER_TEMP/release-notes.md" \
+            --output-dir "$RUNNER_TEMP/prepared-release" \
+            > "$RUNNER_TEMP/release-manifest.json"
+
+      - name: Verify signing, notarization, staple, and Gatekeeper
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          dmg="$(jq -er .dmg "$manifest")"
+          mount_point="$(mktemp -d "$RUNNER_TEMP/skill-man-dmg.XXXXXX")"
+          smoke_pid=""
+          terminate_smoke() {
+            if [[ -n "$smoke_pid" ]] && kill -0 "$smoke_pid" 2>/dev/null; then
+              kill -TERM "$smoke_pid" >/dev/null 2>&1 || true
+              (
+                sleep 5
+                kill -KILL "$smoke_pid" >/dev/null 2>&1 || true
+              ) &
+              watchdog_pid=$!
+              wait "$smoke_pid" 2>/dev/null || true
+              kill "$watchdog_pid" >/dev/null 2>&1 || true
+              wait "$watchdog_pid" 2>/dev/null || true
+            elif [[ -n "$smoke_pid" ]]; then
+              wait "$smoke_pid" 2>/dev/null || true
+            fi
+            smoke_pid=""
+          }
+          cleanup_mount() {
+            terminate_smoke
+            hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+            rmdir "$mount_point" >/dev/null 2>&1 || true
+          }
+          trap cleanup_mount EXIT
+
+          hdiutil verify "$dmg"
+          xcrun stapler validate -v "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+
+          apps=("$mount_point"/*.app)
+          if [[ ${#apps[@]} -ne 1 || ! -d "${apps[0]}" ]]; then
+            echo "Expected exactly one app bundle in the DMG" >&2
+            exit 1
+          fi
+          app="${apps[0]}"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          codesign_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          grep -q '^Authority=Developer ID Application:' <<< "$codesign_info"
+          grep -Eq '^flags=.*\(.*runtime.*\)' <<< "$codesign_info"
+          grep -q '^Timestamp=' <<< "$codesign_info"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          executable="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$app/Contents/Info.plist"
+          )"
+          test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
+
+          installed_root="$RUNNER_TEMP/skill-man-install-smoke/Applications"
+          installed_app="$installed_root/Skill Man.app"
+          mkdir -p "$installed_root"
+          ditto "$app" "$installed_app"
+          codesign --verify --deep --strict --verbose=4 "$installed_app"
+
+          smoke_log="$RUNNER_TEMP/skill-man-install-smoke/launch.log"
+          "$installed_app/Contents/MacOS/$executable" > "$smoke_log" 2>&1 &
+          smoke_pid=$!
+          sleep 5
+          if ! kill -0 "$smoke_pid" 2>/dev/null; then
+            echo "Installed Skill Man exited during launch smoke" >&2
+            sed -n '1,200p' "$smoke_log" >&2
+            wait "$smoke_pid" 2>/dev/null || true
+            smoke_pid=""
+            exit 1
+          fi
+          terminate_smoke
+
+          cleanup_mount
+          trap - EXIT
+
+      - name: Create ordinary Draft Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          dmg="$(jq -er .dmg "$manifest")"
+          updater="$(jq -er .updater "$manifest")"
+          signature="$(jq -er .signature "$manifest")"
+          gh release create "$RELEASE_TAG" \
+            "$dmg" \
+            "$updater" \
+            "$signature" \
+            --repo "$RELEASE_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "Skill Man $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      - name: Upload custom updater metadata and checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          latest_json="$(jq -er .latestJson "$manifest")"
+          checksums="$(jq -er .checksums "$manifest")"
+          gh release upload "$RELEASE_TAG" \
+            "$latest_json" \
+            "$checksums" \
+            --repo "$RELEASE_REPOSITORY" \
+            --clobber
+
+      - name: Verify Draft Release read-back
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          releases="$RUNNER_TEMP/releases.json"
+          release="$RUNNER_TEMP/release.json"
+          gh api "repos/$RELEASE_REPOSITORY/releases?per_page=100" > "$releases"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            '[.[] | select(.tag_name == $tag)] | length == 1' \
+            "$releases" >/dev/null
+          jq \
+            --arg tag "$RELEASE_TAG" \
+            '.[] | select(.tag_name == $tag)' \
+            "$releases" > "$release"
+          jq -e \
+            '.draft == true and .prerelease == false and (.body | length > 0)' \
+            "$release" >/dev/null
+
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          actual_assets="$RUNNER_TEMP/actual-assets.txt"
+          {
+            jq -r '.dmg | split("/")[-1]' "$manifest"
+            jq -r '.updater | split("/")[-1]' "$manifest"
+            jq -r '.signature | split("/")[-1]' "$manifest"
+            printf '%s\n' latest.json SHA256SUMS
+          } | LC_ALL=C sort > "$expected_assets"
+          jq -r '.assets[].name' "$release" | LC_ALL=C sort > "$actual_assets"
+          diff -u "$expected_assets" "$actual_assets"
+
+          latest_asset_id="$(
+            jq -er '.assets[] | select(.name == "latest.json") | .id' "$release"
+          )"
+          gh api \
+            -H 'Accept: application/octet-stream' \
+            "repos/$RELEASE_REPOSITORY/releases/assets/$latest_asset_id" \
+            > "$RUNNER_TEMP/remote-latest.json"
+          cmp \
+            "$(jq -er .latestJson "$manifest")" \
+            "$RUNNER_TEMP/remote-latest.json"
+
+      - name: Clean signing material
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${ORIGINAL_KEYCHAIN_PATH:-}" ]]; then
+            security default-keychain -s "$ORIGINAL_KEYCHAIN_PATH" || true
+          fi
+          security delete-keychain \
+            "$RUNNER_TEMP/skill-man-release-keys/signing.keychain-db" || true
+          rm -f \
+            "$RUNNER_TEMP/skill-man-release-keys/certificate.p12" \
+            "$RUNNER_TEMP/skill-man-release-keys/notary-api-key.p8"
+          rmdir "$RUNNER_TEMP/skill-man-release-keys" >/dev/null 2>&1 || true

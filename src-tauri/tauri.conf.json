@@ -27,11 +27,22 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": ["dmg"],
+    "createUpdaterArtifacts": false,
     "icon": [],
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/RookieZoe/skill-man/releases/latest/download/latest.json"
+      ],
+      "pubkey": "UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE"
     }
   }
 }

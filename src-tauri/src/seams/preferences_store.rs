@@ -48,4 +48,10 @@ pub trait PreferencesStore: Send + Sync {
         &self,
         updates: PreferenceUpdates,
     ) -> Result<AppPreferences, PreferencesStoreError>;
+
+    /// Unix epoch seconds of the last successful App Update check. This is
+    /// operational cooldown state, not a fifth user-visible Preference.
+    fn last_app_update_check_at(&self) -> Result<Option<i64>, PreferencesStoreError>;
+
+    fn record_app_update_check_at(&self, checked_at: i64) -> Result<(), PreferencesStoreError>;
 }

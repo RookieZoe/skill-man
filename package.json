@@ -9,11 +9,12 @@
     "build:web": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
+    "test:release": "node --test scripts/release/*.node-test.mjs",
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings 0",
     "check:capabilities": "node scripts/check-capabilities.mjs",
-    "format": "prettier --write package.json tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts eslint.config.js index.html src scripts .github src-tauri/tauri.conf.json src-tauri/capabilities",
-    "format:check": "prettier --check package.json tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts eslint.config.js index.html src scripts .github src-tauri/tauri.conf.json src-tauri/capabilities",
+    "format": "prettier --write package.json tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts eslint.config.js index.html src scripts .github src-tauri/tauri.conf.json src-tauri/tauri.release.conf.json src-tauri/capabilities",
+    "format:check": "prettier --check package.json tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts eslint.config.js index.html src scripts .github src-tauri/tauri.conf.json src-tauri/tauri.release.conf.json src-tauri/capabilities",
     "tauri": "tauri"
   },
   "dependencies": {

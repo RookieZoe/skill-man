@@ -113,6 +113,32 @@ export interface UpdatePreferencesResult {
   warning: string | null;
 }
 
+export type AppUpdateCheck =
+  | { status: "skipped" }
+  | { status: "up_to_date" }
+  | {
+      status: "available";
+      version: string;
+      currentVersion: string;
+      releaseNotes: string;
+      downloadSizeBytes: number;
+      updateId: string;
+    };
+
+export type AvailableAppUpdate = Extract<
+  AppUpdateCheck,
+  { status: "available" }
+>;
+
+export interface DownloadedAppUpdate {
+  updateId: string;
+  version: string;
+}
+
+export interface CancelledAppUpdate {
+  updateId: string;
+}
+
 export interface StartupAgent {
   id: string;
   name: string;
@@ -429,6 +455,10 @@ export interface CatalogClient {
   updatePreferences(
     updates: PreferenceUpdates,
   ): Promise<UpdatePreferencesResult>;
+  checkAppUpdate(force: boolean): Promise<AppUpdateCheck>;
+  downloadAppUpdate(updateId: string): Promise<DownloadedAppUpdate>;
+  cancelAppUpdate(updateId: string): Promise<CancelledAppUpdate>;
+  installAppUpdate(updateId: string): Promise<void>;
   startupInfo(): Promise<StartupInfo>;
   completeOnboarding(): Promise<void>;
   createAgentDirectory(agentId: string): Promise<StartupInfo>;
@@ -562,6 +592,26 @@ const tauriCatalogClient: CatalogClient = {
   updatePreferences(updates) {
     return invoke<UpdatePreferencesResult>("update_preferences", {
       request: updates,
+    });
+  },
+  checkAppUpdate(force) {
+    return invoke<AppUpdateCheck>("check_app_update", {
+      request: { force },
+    });
+  },
+  downloadAppUpdate(updateId) {
+    return invoke<DownloadedAppUpdate>("download_app_update", {
+      request: { updateId },
+    });
+  },
+  cancelAppUpdate(updateId) {
+    return invoke<CancelledAppUpdate>("cancel_app_update", {
+      request: { updateId },
+    });
+  },
+  installAppUpdate(updateId) {
+    return invoke<void>("install_app_update", {
+      request: { updateId },
     });
   },
   startupInfo() {

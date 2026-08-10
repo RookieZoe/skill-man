@@ -308,6 +308,18 @@ export function createFixtureCatalogClient(): CatalogClient {
       };
       return { preferences: { ...preferences }, warning: null };
     },
+    async checkAppUpdate() {
+      return { status: "up_to_date" };
+    },
+    async downloadAppUpdate(updateId) {
+      return { updateId, version: "0.2.0" };
+    },
+    async cancelAppUpdate(updateId) {
+      return { updateId };
+    },
+    async installAppUpdate() {
+      return undefined;
+    },
     async startupInfo() {
       return {
         firstRun: !firstRunCompleted,

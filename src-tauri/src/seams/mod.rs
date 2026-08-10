@@ -1,6 +1,7 @@
 pub mod activation_store;
 pub mod adopt_store;
 pub mod agent_adapter;
+pub mod app_updater;
 pub mod catalog_store;
 pub mod clock;
 pub mod filesystem;

@@ -2,40 +2,74 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::adopt_api::AdoptApi;
+use crate::tauri_adapter::app_update_api::AppUpdateApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
     ActivationConflictDetailsDto, ActivationConflictRequestDto, ActivationHealthReportDto,
     ActivationPreviewDto, ActivationReplacePreviewDto, ActivationReplaceUndoResultDto,
     ActivationResultDto, AdoptPlanDto, AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto,
-    AgentActivationDto, AppPreferencesDto, ApplyActivationReplaceRequestDto,
+    AgentActivationDto, AppPreferencesDto, AppUpdateCheckDto, ApplyActivationReplaceRequestDto,
     ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
     ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
     ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
     ApplySkillUpdatesRequestDto, CancelActivationReplaceRequestDto, CancelActivationRequestDto,
-    CancelAdoptRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
-    CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
-    CatalogListDto, CheckSkillUpdatesRequestDto, CommandErrorDto, CreateAgentDirectoryRequestDto,
+    CancelAdoptRequestDto, CancelAppUpdateRequestDto, CancelFileImportRequestDto,
+    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CancelRelocateLinkRequestDto,
+    CancelRemoveSkillRequestDto, CancelledAppUpdateDto, CatalogListDto, CheckAppUpdateRequestDto,
+    CheckSkillUpdatesRequestDto, CommandErrorDto, CreateAgentDirectoryRequestDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
-    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
-    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
-    FileImportSelectionPreviewDto, FileImportSelectionResultDto,
+    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto,
+    DownloadedAppUpdateDto, FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto,
+    FileImportResultDto, FileImportSelectionPreviewDto, FileImportSelectionResultDto,
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, GitImportDiscoveryDto,
-    GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
-    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, PinSkillUpdatesRequestDto,
-    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
-    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
-    PlanFileReinstallRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
-    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
-    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
-    RemoveSkillResultDto, SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto,
-    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
-    UpdateResultDto,
+    GitImportSelectionPreviewDto, GitImportSelectionResultDto, InstallAppUpdateRequestDto,
+    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
+    PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto,
+    PlanActivationRequestDto, PlanAdoptRequestDto, PlanFileImportRequestDto,
+    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
+    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PlanRemoveSkillRequestDto,
+    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, RelocateLinkPreviewDto,
+    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
+    SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
+
+#[tauri::command]
+pub async fn check_app_update(
+    state: State<'_, AppUpdateApi>,
+    request: CheckAppUpdateRequestDto,
+) -> Result<AppUpdateCheckDto, CommandErrorDto> {
+    state.check_app_update(request).await
+}
+
+#[tauri::command]
+pub async fn download_app_update(
+    state: State<'_, AppUpdateApi>,
+    request: DownloadAppUpdateRequestDto,
+) -> Result<DownloadedAppUpdateDto, CommandErrorDto> {
+    state.download_app_update(request).await
+}
+
+#[tauri::command]
+pub fn cancel_app_update(
+    state: State<'_, AppUpdateApi>,
+    request: CancelAppUpdateRequestDto,
+) -> Result<CancelledAppUpdateDto, CommandErrorDto> {
+    state.cancel_app_update(request)
+}
+
+#[tauri::command]
+pub fn install_app_update(
+    state: State<'_, AppUpdateApi>,
+    request: InstallAppUpdateRequestDto,
+) -> Result<(), CommandErrorDto> {
+    state.install_app_update(request)
+}
 
 #[tauri::command]
 pub fn plan_activation(

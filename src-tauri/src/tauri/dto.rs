@@ -5,6 +5,9 @@ use crate::core::activation::{
     ActivationReplaceUndoResult, ActivationResult, OccupierKind, OccupierSummary,
 };
 use crate::core::adopt::{AdoptAppearance, AdoptAppearanceKind, AdoptCandidate, AdoptRisk};
+use crate::core::app_update::{
+    AppUpdateCheck, AppUpdateOffer, CancelledAppUpdate, DownloadedAppUpdate,
+};
 use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
@@ -24,6 +27,103 @@ use crate::core::update::{
     UpdatePlanItem, UpdateResult,
 };
 use crate::seams::preferences_store::{AppPreferences, PreferenceUpdates};
+
+// -- Skill Man application Update (ADR-0006) --
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckAppUpdateRequestDto {
+    pub force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppUpdateCheckDto {
+    #[serde(rename = "skipped")]
+    Skipped,
+    UpToDate,
+    Available {
+        #[serde(rename = "updateId")]
+        update_id: String,
+        #[serde(rename = "currentVersion")]
+        current_version: String,
+        version: String,
+        #[serde(rename = "releaseNotes")]
+        release_notes: String,
+        #[serde(rename = "downloadSizeBytes")]
+        download_size_bytes: u64,
+    },
+}
+
+impl From<AppUpdateCheck> for AppUpdateCheckDto {
+    fn from(value: AppUpdateCheck) -> Self {
+        match value {
+            AppUpdateCheck::SkippedCooldown => Self::Skipped,
+            AppUpdateCheck::UpToDate => Self::UpToDate,
+            AppUpdateCheck::Available(AppUpdateOffer {
+                update_id,
+                current_version,
+                version,
+                release_notes,
+                download_size_bytes,
+            }) => Self::Available {
+                update_id,
+                current_version,
+                version,
+                release_notes,
+                download_size_bytes,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadAppUpdateRequestDto {
+    pub update_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadedAppUpdateDto {
+    pub update_id: String,
+    pub version: String,
+}
+
+impl From<DownloadedAppUpdate> for DownloadedAppUpdateDto {
+    fn from(value: DownloadedAppUpdate) -> Self {
+        Self {
+            update_id: value.update_id,
+            version: value.version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelAppUpdateRequestDto {
+    pub update_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelledAppUpdateDto {
+    pub update_id: String,
+}
+
+impl From<CancelledAppUpdate> for CancelledAppUpdateDto {
+    fn from(value: CancelledAppUpdate) -> Self {
+        Self {
+            update_id: value.update_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallAppUpdateRequestDto {
+    pub update_id: String,
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

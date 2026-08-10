@@ -579,6 +579,33 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
         }
         self.sqlite.update_preferences(updates)
     }
+
+    fn last_app_update_check_at(
+        &self,
+    ) -> Result<Option<i64>, crate::seams::preferences_store::PreferencesStoreError> {
+        if !self.is_writable() {
+            return Err(
+                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                    "catalog startup is read-only".into(),
+                ),
+            );
+        }
+        self.sqlite.last_app_update_check_at()
+    }
+
+    fn record_app_update_check_at(
+        &self,
+        checked_at: i64,
+    ) -> Result<(), crate::seams::preferences_store::PreferencesStoreError> {
+        if !self.is_writable() {
+            return Err(
+                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                    "catalog startup is read-only".into(),
+                ),
+            );
+        }
+        self.sqlite.record_app_update_check_at(checked_at)
+    }
 }
 
 impl crate::core::activation::ActivationConflictChecker for RuntimeCatalogStore {

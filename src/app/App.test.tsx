@@ -926,6 +926,335 @@ test("Preferences sheet shows exactly four switches with defaults", async () => 
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
+test("downloads an available app update before asking to install and restart", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => ({
+    status: "available",
+    version: "0.2.0",
+    currentVersion: "0.1.0",
+    releaseNotes: "Adds signed, verified app updates.",
+    downloadSizeBytes: 12 * 1024 * 1024,
+    updateId: "fixture-update-1",
+  });
+  let finishDownload:
+    ((downloaded: { updateId: string; version: string }) => void) | undefined;
+  client.downloadAppUpdate = () =>
+    new Promise<{ updateId: string; version: string }>((resolve) => {
+      finishDownload = resolve;
+    });
+  client.installAppUpdate = async (updateId) => {
+    if (updateId !== "fixture-update-1") {
+      throw new Error("The downloaded update was not installed.");
+    }
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "App update available",
+  });
+  expect(dialog).toHaveTextContent("0.2.0");
+  expect(dialog).toHaveTextContent("Current version 0.1.0");
+  expect(dialog).toHaveTextContent("Adds signed, verified app updates.");
+  expect(dialog).toHaveTextContent("12 MB");
+
+  await user.click(
+    within(dialog).getByRole("button", { name: "Download update" }),
+  );
+  expect(
+    within(dialog).queryByRole("button", { name: "Install and Restart" }),
+  ).not.toBeInTheDocument();
+
+  await act(async () =>
+    finishDownload?.({ updateId: "fixture-update-1", version: "0.2.0" }),
+  );
+  await user.click(
+    await within(dialog).findByRole("button", {
+      name: "Install and Restart",
+    }),
+  );
+  await waitFor(() => {
+    expect(
+      screen.queryByRole("dialog", { name: "App update available" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+test("cancels an in-flight app update download without making it installable", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => ({
+    status: "available",
+    version: "0.2.0",
+    currentVersion: "0.1.0",
+    releaseNotes: "A cancellable update.",
+    downloadSizeBytes: 12 * 1024 * 1024,
+    updateId: "fixture-cancel-download",
+  });
+  let rejectDownload: ((reason: unknown) => void) | undefined;
+  client.downloadAppUpdate = () =>
+    new Promise((_, reject) => {
+      rejectDownload = reject;
+    });
+  const cancelled: string[] = [];
+  client.cancelAppUpdate = async (updateId) => {
+    cancelled.push(updateId);
+    rejectDownload?.({ code: "update_cancelled", message: "cancelled" });
+    return { updateId };
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "App update available",
+  });
+  await user.click(
+    within(dialog).getByRole("button", { name: "Download update" }),
+  );
+  const cancelDownload = within(dialog).getByRole("button", {
+    name: "Cancel download",
+  });
+  expect(cancelDownload).toHaveFocus();
+  await user.click(cancelDownload);
+
+  expect(cancelled).toEqual(["fixture-cancel-download"]);
+  expect(
+    screen.queryByRole("dialog", { name: "App update available" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Install and Restart" }),
+  ).not.toBeInTheDocument();
+});
+
+test("discards a downloaded app update when Later is chosen", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => ({
+    status: "available",
+    version: "0.2.0",
+    currentVersion: "0.1.0",
+    releaseNotes: "Discard after verification.",
+    downloadSizeBytes: 12 * 1024 * 1024,
+    updateId: "fixture-discard-download",
+  });
+  client.downloadAppUpdate = async (updateId) => ({
+    updateId,
+    version: "0.2.0",
+  });
+  const cancelled: string[] = [];
+  client.cancelAppUpdate = async (updateId) => {
+    cancelled.push(updateId);
+    return { updateId };
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "App update available",
+  });
+  await user.click(
+    within(dialog).getByRole("button", { name: "Download update" }),
+  );
+  await user.click(
+    await within(dialog).findByRole("button", { name: "Later" }),
+  );
+
+  expect(cancelled).toEqual(["fixture-discard-download"]);
+  expect(
+    screen.queryByRole("dialog", { name: "App update available" }),
+  ).not.toBeInTheDocument();
+});
+
+test("keeps a downloaded app update visible when discard fails", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => ({
+    status: "available",
+    version: "0.2.0",
+    currentVersion: "0.1.0",
+    releaseNotes: "Keep verified bytes until discard succeeds.",
+    downloadSizeBytes: 12 * 1024 * 1024,
+    updateId: "fixture-discard-failure",
+  });
+  client.downloadAppUpdate = async (updateId) => ({
+    updateId,
+    version: "0.2.0",
+  });
+  client.cancelAppUpdate = async () => {
+    throw {
+      code: "state_unavailable",
+      message: "Could not release the downloaded update.",
+    };
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "App update available",
+  });
+  await user.click(
+    within(dialog).getByRole("button", { name: "Download update" }),
+  );
+  await user.click(
+    await within(dialog).findByRole("button", { name: "Later" }),
+  );
+
+  expect(dialog).toBeInTheDocument();
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    "无法读取更新状态。请重新启动 Skill Man 后重试。",
+  );
+  expect(
+    within(dialog).getByRole("button", { name: "Install and Restart" }),
+  ).toBeEnabled();
+});
+
+test("checks for an app update at startup when the preference is enabled", async () => {
+  const client = createFixtureCatalogClient();
+  client.checkAppUpdate = async (force) => {
+    if (force) throw new Error("Expected the scheduled update check.");
+    return {
+      status: "available",
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      releaseNotes: "A scheduled update is ready.",
+      downloadSizeBytes: 4 * 1024 * 1024,
+      updateId: "fixture-scheduled-update",
+    };
+  };
+
+  render(<App client={client} />);
+
+  expect(
+    await screen.findByRole("dialog", { name: "App update available" }),
+  ).toHaveTextContent("A scheduled update is ready.");
+});
+
+test("keeps a failed offline startup update check silent", async () => {
+  const client = createFixtureCatalogClient();
+  let attempted = false;
+  client.checkAppUpdate = async () => {
+    attempted = true;
+    throw new Error("The update server is offline.");
+  };
+
+  render(<App client={client} />);
+
+  await waitFor(() => expect(attempted).toBe(true));
+  expect(
+    screen.queryByText(/update server is offline/i),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("dialog", { name: "App update available" }),
+  ).not.toBeInTheDocument();
+});
+
+test("shows manual app update failures in Preferences", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => {
+    throw {
+      code: "source_unavailable",
+      message: "The update server is offline.",
+    };
+  };
+  render(<App client={client} />);
+
+  await user.click(await screen.findByRole("button", { name: "Preferences" }));
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法连接更新服务。请检查网络后重试。",
+  );
+  expect(
+    screen.getByRole("dialog", { name: "Preferences" }),
+  ).toBeInTheDocument();
+});
+
+test("closes the app update sheet with Escape and restores background focus", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.loadPreferences = async () => ({
+    launchAtLogin: false,
+    showInDock: true,
+    checkAppUpdates: false,
+    checkSkillUpdates: true,
+  });
+  client.checkAppUpdate = async () => ({
+    status: "available",
+    version: "0.2.0",
+    currentVersion: "0.1.0",
+    releaseNotes: "A focus-safe update.",
+    downloadSizeBytes: 1024,
+    updateId: "fixture-focus-update",
+  });
+  const { container } = render(<App client={client} />);
+
+  const preferencesTrigger = await screen.findByRole("button", {
+    name: "Preferences",
+  });
+  await user.click(preferencesTrigger);
+  await user.click(screen.getByRole("button", { name: "Check now" }));
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "App update available",
+  });
+  const downloadButton = within(dialog).getByRole("button", {
+    name: "Download update",
+  });
+  expect(downloadButton).toHaveFocus();
+  await user.tab();
+  expect(within(dialog).getByRole("button", { name: "Not now" })).toHaveFocus();
+  await user.tab();
+  expect(downloadButton).toHaveFocus();
+  expect(container.querySelector(".app-background")).toHaveAttribute("inert");
+
+  await user.keyboard("{Escape}");
+
+  expect(
+    screen.queryByRole("dialog", { name: "App update available" }),
+  ).not.toBeInTheDocument();
+  expect(preferencesTrigger).toHaveFocus();
+  expect(container.querySelector(".app-background")).not.toHaveAttribute(
+    "inert",
+  );
+});
+
 test("Preferences warning from the backend is shown inline", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();

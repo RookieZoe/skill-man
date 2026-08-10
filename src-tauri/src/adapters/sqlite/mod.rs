@@ -1724,6 +1724,39 @@ impl crate::seams::preferences_store::PreferencesStore for SqliteCatalogStore {
         // would deadlock on the same mutex.
         Self::load_preferences(self)
     }
+
+    fn last_app_update_check_at(&self) -> Result<Option<i64>, PreferencesStoreError> {
+        let connection = self
+            .connection()
+            .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?;
+        connection
+            .query_row(
+                "SELECT last_app_update_check_at FROM preferences WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))?
+            .map(|value| {
+                value.parse::<i64>().map_err(|error| {
+                    PreferencesStoreError::Unavailable(format!(
+                        "invalid App Update check timestamp: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn record_app_update_check_at(&self, checked_at: i64) -> Result<(), PreferencesStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| PreferencesStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .execute(
+                "UPDATE preferences SET last_app_update_check_at = ?1 WHERE singleton = 1",
+                [checked_at.to_string()],
+            )
+            .map(|_| ())
+            .map_err(|error| PreferencesStoreError::Unavailable(error.to_string()))
+    }
 }
 
 impl ActivationStore for SqliteCatalogStore {

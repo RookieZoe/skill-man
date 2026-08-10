@@ -6,4 +6,5 @@ pub mod macos_fs;
 pub mod runtime_catalog;
 pub mod sqlite;
 pub mod system_clock;
+pub mod tauri_app_updater;
 pub mod zip_extract;

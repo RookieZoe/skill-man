@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod adopt;
+pub mod app_update;
 pub mod catalog;
 pub mod domain;
 pub mod git_source;

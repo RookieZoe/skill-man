@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
+  AppUpdatePanelState,
   ImportKind,
   RelocatePanelState,
   RemovePanelState,
@@ -139,6 +140,7 @@ interface LibraryDeskProps {
   preferences: AppPreferences | null;
   preferencesWarning: string | null;
   preferencesError: string | null;
+  appUpdatePanel: AppUpdatePanelState;
   isOnboardingOpen: boolean;
   onboardingStep: number;
   onboardingAgents: StartupAgent[];
@@ -148,6 +150,10 @@ interface LibraryDeskProps {
   onOpenPreferences: () => void;
   onClosePreferences: () => void;
   onTogglePreference: (updates: PreferenceUpdates) => void;
+  onCheckAppUpdate: () => void;
+  onDownloadAppUpdate: () => void;
+  onInstallAppUpdate: () => void;
+  onCloseAppUpdate: () => void;
   onCompleteOnboarding: () => void;
   onAdvanceOnboarding: () => void;
   onCreateAgentDirectory: (agentId: string) => void;
@@ -250,6 +256,7 @@ export function LibraryDesk({
   preferences,
   preferencesWarning,
   preferencesError,
+  appUpdatePanel,
   isOnboardingOpen,
   onboardingStep,
   onboardingAgents,
@@ -259,19 +266,39 @@ export function LibraryDesk({
   onOpenPreferences,
   onClosePreferences,
   onTogglePreference,
+  onCheckAppUpdate,
+  onDownloadAppUpdate,
+  onInstallAppUpdate,
+  onCloseAppUpdate,
   onCompleteOnboarding,
   onAdvanceOnboarding,
   onCreateAgentDirectory,
   onFinishOnboardingWithAdopt,
 }: LibraryDeskProps) {
-  const lastOverlay = useRef<"activation" | "import" | "adopt" | null>(null);
+  const lastOverlay = useRef<
+    "activation" | "import" | "preferences" | "appUpdate" | null
+  >(null);
   const hasActivationOverlay = Boolean(activationPreview || activationConflict);
-  const hasOverlay = hasActivationOverlay || isLinkImportOpen || isAdoptOpen;
+  const hasOtherOverlay =
+    hasActivationOverlay ||
+    isLinkImportOpen ||
+    relocatePanel.isOpen ||
+    removePanel.isOpen ||
+    isAdoptOpen ||
+    isOnboardingOpen ||
+    isPreferencesOpen;
+  const hasAppUpdateOverlay =
+    Boolean(appUpdatePanel.update) && !hasOtherOverlay;
+  const hasOverlay = hasOtherOverlay || hasAppUpdateOverlay;
   useLayoutEffect(() => {
     if (hasActivationOverlay) {
       lastOverlay.current = "activation";
     } else if (isLinkImportOpen) {
       lastOverlay.current = "import";
+    } else if (hasAppUpdateOverlay) {
+      lastOverlay.current = "appUpdate";
+    } else if (isPreferencesOpen) {
+      lastOverlay.current = "preferences";
     } else if (lastOverlay.current) {
       if (lastOverlay.current === "activation" && activationTriggerControlId) {
         const trigger = document.getElementById(activationTriggerControlId);
@@ -284,10 +311,21 @@ export function LibraryDesk({
         (trigger ?? fallback)?.focus();
       } else if (lastOverlay.current === "import") {
         document.getElementById("link-import-trigger")?.focus();
+      } else if (
+        lastOverlay.current === "preferences" ||
+        lastOverlay.current === "appUpdate"
+      ) {
+        document.getElementById("preferences-trigger")?.focus();
       }
       lastOverlay.current = null;
     }
-  }, [activationTriggerControlId, hasActivationOverlay, isLinkImportOpen]);
+  }, [
+    activationTriggerControlId,
+    hasActivationOverlay,
+    hasAppUpdateOverlay,
+    isLinkImportOpen,
+    isPreferencesOpen,
+  ]);
 
   return (
     <div className="app-shell">
@@ -462,8 +500,18 @@ export function LibraryDesk({
           preferences={preferences}
           warning={preferencesWarning}
           error={preferencesError}
+          appUpdatePanel={appUpdatePanel}
           onToggle={onTogglePreference}
+          onCheckAppUpdate={onCheckAppUpdate}
           onClose={onClosePreferences}
+        />
+      ) : null}
+      {hasAppUpdateOverlay ? (
+        <AppUpdateSheet
+          panel={appUpdatePanel}
+          onDownload={onDownloadAppUpdate}
+          onInstall={onInstallAppUpdate}
+          onClose={onCloseAppUpdate}
         />
       ) : null}
     </div>
@@ -506,6 +554,7 @@ function Toolbar({
           Import
         </button>
         <button
+          id="preferences-trigger"
           type="button"
           className="icon-button"
           aria-label="Preferences"
@@ -2522,13 +2571,17 @@ function PreferencesSheet({
   preferences,
   warning,
   error,
+  appUpdatePanel,
   onToggle,
+  onCheckAppUpdate,
   onClose,
 }: {
   preferences: AppPreferences | null;
   warning: string | null;
   error: string | null;
+  appUpdatePanel: AppUpdatePanelState;
   onToggle: (updates: PreferenceUpdates) => void;
+  onCheckAppUpdate: () => void;
   onClose: () => void;
 }) {
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -2589,6 +2642,35 @@ function PreferencesSheet({
             </label>
           ))}
         </div>
+        <div className="app-update-check">
+          <span>
+            <strong>App updates</strong>
+            <small>
+              Check the signed latest release without changing your preference.
+            </small>
+          </span>
+          <button
+            id="app-update-check-trigger"
+            type="button"
+            disabled={appUpdatePanel.activity === "checking"}
+            onClick={onCheckAppUpdate}
+          >
+            {appUpdatePanel.activity === "checking" ? "Checking…" : "Check now"}
+          </button>
+        </div>
+        {appUpdatePanel.checkStatus ? (
+          <div className="app-update-check-result" role="status">
+            {appUpdatePanel.checkStatus === "up_to_date"
+              ? "Skill Man is up to date."
+              : "The update check was skipped."}
+          </div>
+        ) : null}
+        {appUpdatePanel.error && appUpdatePanel.update === null ? (
+          <div className="activation-error" role="alert">
+            <strong>Could not check for app updates</strong>
+            <span>{appUpdatePanel.error}</span>
+          </div>
+        ) : null}
         {warning ? (
           <div className="activation-warning" role="status">
             <strong>Applied with a warning</strong>
@@ -2609,6 +2691,155 @@ function PreferencesSheet({
       </section>
     </div>
   );
+}
+
+function AppUpdateSheet({
+  panel,
+  onDownload,
+  onInstall,
+  onClose,
+}: {
+  panel: AppUpdatePanelState;
+  onDownload: () => void;
+  onInstall: () => void;
+  onClose: () => void;
+}) {
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const primaryButton = useRef<HTMLButtonElement>(null);
+  const update = panel.update;
+  const isCancelling = panel.activity === "cancelling";
+  const isInstalling = panel.activity === "installing";
+  const blocksDismissal = isCancelling || isInstalling;
+  const blocksPrimary =
+    panel.activity === "downloading" || isCancelling || isInstalling;
+  const isReady = panel.activity === "ready";
+
+  useLayoutEffect(() => {
+    if (panel.activity === "downloading") {
+      cancelButton.current?.focus();
+    } else {
+      primaryButton.current?.focus();
+    }
+  }, [panel.activity]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !blocksDismissal) onClose();
+      if (
+        event.key === "Tab" &&
+        !event.shiftKey &&
+        document.activeElement === primaryButton.current
+      ) {
+        event.preventDefault();
+        cancelButton.current?.focus();
+      } else if (
+        event.key === "Tab" &&
+        event.shiftKey &&
+        document.activeElement === cancelButton.current
+      ) {
+        event.preventDefault();
+        primaryButton.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [blocksDismissal, onClose]);
+
+  if (!update) return null;
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !blocksDismissal) onClose();
+      }}
+    >
+      <section
+        className="activation-sheet app-update-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="App update available"
+      >
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">App update available</span>
+          <h2>Version {update.version}</h2>
+          <p>Current version {update.currentVersion}</p>
+        </div>
+        <dl className="app-update-details">
+          <div>
+            <dt>Archive size</dt>
+            <dd>{formatDownloadSize(update.downloadSizeBytes)}</dd>
+          </div>
+          <div>
+            <dt>Release notes</dt>
+            <dd>{update.releaseNotes || "No release notes provided."}</dd>
+          </div>
+        </dl>
+        {panel.activity === "downloading" ? (
+          <div className="app-update-progress" role="status">
+            Downloading and verifying the signed archive…
+          </div>
+        ) : null}
+        {isReady ? (
+          <div className="app-update-ready" role="status">
+            Download verified. Install and restart Skill Man now?
+          </div>
+        ) : null}
+        {panel.error ? (
+          <div className="activation-error" role="alert">
+            <strong>App update failed</strong>
+            <span>{panel.error}</span>
+          </div>
+        ) : null}
+        <div className="activation-sheet-actions">
+          <button
+            ref={cancelButton}
+            type="button"
+            disabled={blocksDismissal}
+            onClick={onClose}
+          >
+            {isCancelling
+              ? "Cancelling…"
+              : panel.activity === "downloading"
+                ? "Cancel download"
+                : isReady
+                  ? "Later"
+                  : "Not now"}
+          </button>
+          <button
+            ref={primaryButton}
+            type="button"
+            className="activation-confirm-button"
+            disabled={blocksPrimary}
+            onClick={isReady ? onInstall : onDownload}
+          >
+            {isCancelling
+              ? "Cancelling…"
+              : panel.activity === "downloading"
+                ? "Downloading…"
+                : panel.activity === "installing"
+                  ? "Installing…"
+                  : isReady
+                    ? "Install and Restart"
+                    : "Download update"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function formatDownloadSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 10 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function RemoveSheet({
