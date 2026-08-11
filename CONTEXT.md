@@ -1,8 +1,48 @@
 # Skill Man
 
-一个 macOS 桌面应用:统一管理本机所有 AI agent 的 skills(技能包),并按 agent 配置启用。本文件是项目词汇表 —— 所有产出(issue 标题、UI 文案、代码命名、提案)必须使用这里的规范词汇。
+一个 macOS 桌面应用:统一管理本机所有 AI agent 的 skills(技能包),并按 agent 配置启用。本文件是项目词汇表:代码、DTO 与 issue 标题使用稳定英文领域词,各 locale 的 UI 使用这里指定的显示词;本地化只改变显示,不重命名领域概念。
 
 ## Language
+
+### Localized display terms
+
+| Stable domain term | English UI | 简体中文 UI |
+|---|---|---|
+| Skill Man | Skill Man | Skill Man |
+| Skill | Skill | 技能 |
+| Library | Library | 技能库 |
+| Library Desk | Library Desk | 技能库工作台 |
+| Skill Man Home | Skill Man Home | Skill Man 主目录 |
+| Home Binding | Home Binding | Skill Man 主目录绑定 |
+| Legacy Home | Legacy Home | 旧版 Skill Man 主目录 |
+| Fixture Recovery | Fixture Recovery | 测试数据恢复 |
+| Safety Snapshot | Safety Snapshot | 安全快照 |
+| Fixture Recovery Lock | Fixture Recovery Lock | 测试数据恢复锁定 |
+| Agent | Agent | 智能体 |
+| Agent Preset | Agent preset | 智能体预设 |
+| Import | Import | 导入 |
+| Link | Link | 链接 |
+| Install | Install | 安装 |
+| Adopt | Adopt | 纳管 |
+| Managed | Managed | 已纳管 |
+| Untracked | Untracked | 未纳管 |
+| Enable / Disable | Enable / Disable | 启用 / 停用 |
+| Activation | Activation | 启用项 |
+| Broken | Broken | 已失效 |
+| Modified | Modified | 已修改 |
+| Conflict | Conflict | 冲突 |
+| Remove | Remove | 移出技能库 |
+| Preferences | Preferences | 设置 |
+
+### Content ownership
+
+**App Copy**:
+Skill Man 拥有语义与措辞的可见或 accessible 界面内容;所有 App Copy 都必须按当前 locale 本地化。Placeholder 中的自然语言属于 App Copy,其中的路径、URL、命令、文件名与格式示例是保持原样的 technical token。
+
+**Source Content**:
+Skill、用户或外部来源提供且必须原样展示的内容,包括 Skill 名称、描述与正文、路径、URL、Git 标识、用户自定义 Agent 名称、release notes 与外部命令输出。App 只本地化包裹这些值的 App Copy。
+
+### Domain terms
 
 **Skill**:
 一个 AI agent 技能包:一个含 `SKILL.md` 的目录。**身份 = 目录名**(唯一标识,Conflict 判定基准);`SKILL.md` frontmatter 的 name/description 仅为展示元数据。
@@ -13,7 +53,7 @@ Skill Man 管理全部 Managed Skill 的逻辑边界与单一可信源(single so
 _Avoid_: Store, Central Repo, 中央仓库(叙述中可用「中央仓」指代,命名一律用 Library)
 
 **Skill Man Home**:
-Skill Man 活动产品状态所属的物理根。它承载 Library 持久化内容及应用恢复所需的 Home 内状态,但不包含位于活动 Home 外的最小 Home Binding locator 与 durable recovery ledger。
+Skill Man 的 Home-scoped 活动产品状态所属的物理根。它承载 Library 持久化内容及应用恢复所需的 Home 内状态,但不包含必须独立于活动 Home 的 App-level 控制状态,包括最小 Home Binding locator、durable recovery ledger 与 locale 选择。
 _Avoid_: Library path, App Data directory
 
 **Home Binding**:
@@ -50,7 +90,7 @@ _Avoid_: Clone(来源不止 git), Copy
 
 **Broken**:
 状态:Library 条目存在,但其目标不可用 —— Link 来源的 skill 源目录被删除/移动,或 Activation 指向已消失的 Library 条目。
-_Avoid_: Missing, Dangling, 失效(叙述可用,命名用 Broken)
+_Avoid_: Missing, Dangling
 
 **Modified**:
 状态:Install 来源的 skill 在安装或最近一次更新后被本地改动,当前内容不再等同于已记录的安装内容。长期开发中的 skill 应使用 Link,而不是维持 Modified。
