@@ -9,8 +9,32 @@
 _Avoid_: Plugin, Extension, 插件
 
 **Library**:
-Skill Man 自有的中央仓:一个应用自定义位置的目录树(Install 来源的 skill 实体所在)加索引(Link 来源 skill 的指针)。本机全部 Managed skill 的单一可信源(single source of truth),不复用任何 agent 体系的约定目录。
+Skill Man 管理全部 Managed Skill 的逻辑边界与单一可信源(single source of truth):由 Catalog 中的 Managed Skill 索引和 Skill Man Home 内的 Install 实体组成;Link 来源的实体留在外部,Library 只记录其指针。Library 不复用任何 Agent 约定目录,也不等同于 Skill Man Home 的物理根。
 _Avoid_: Store, Central Repo, 中央仓库(叙述中可用「中央仓」指代,命名一律用 Library)
+
+**Skill Man Home**:
+Skill Man 活动产品状态所属的物理根。它承载 Library 持久化内容及应用恢复所需的 Home 内状态,但不包含位于活动 Home 外的最小 Home Binding locator 与 durable recovery ledger。
+_Avoid_: Library path, App Data directory
+
+**Home Binding**:
+当前应用配置与一个逻辑 Skill Man Home 身份之间的持久关联。首次确认并初始化成功后绑定不可变;Reconnect 或 Restore 同一身份不属于 Relocate,只有明确 Abandon 后才能建立新绑定。
+_Avoid_: Home path setting, Library location preference
+
+**Legacy Home**:
+在 Home Binding 引入前由旧版 Skill Man 创建的固定位置 Home。它必须先被识别并完成必要恢复,才能进入唯一一次首次绑定过渡。
+_Avoid_: Old Library
+
+**Fixture Recovery**:
+一次性修复被生产 fixture 污染的 Legacy Home 或 Bound Home 的流程。它不把污染项视为合法 Managed Skill,也不触发 Adopt、Remove、Enable 或 Activation Repair。
+_Avoid_: Remove, Undo, Operation Recovery
+
+**Safety Snapshot**:
+Fixture Recovery 写入前隔离的完整旧 Home,用于验证与回滚,不作为活动 Home 使用。它必须由用户显式删除,不得自动清理。
+_Avoid_: Migration backup, Undo backup
+
+**Fixture Recovery Lock**:
+检测到 fixture 污染或恢复状态不确定时,在用户确认、验证并提交 Fixture Recovery 前禁止全部常规产品写操作的状态;Fixture Recovery 自身经确认的受控写入是唯一例外。它与 Catalog 因 schema 或权限问题进入的 ReadOnly 访问状态不同。
+_Avoid_: ReadOnly, RecoveryRequired
 
 **Import**:
 把一个 skill 收入 Library 的动作。两种方式:Link(引用本地目录)、Install(安装,实体进 Library)。
