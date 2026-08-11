@@ -2667,7 +2667,7 @@ pub(crate) fn validate_staged_tree(
     for entry in &snapshot.entries {
         if entry.relative_path.to_str().is_none() {
             return Err(ImportError::Validation(
-                "file Import paths must be valid UTF-8".into(),
+                "Skill paths must be valid UTF-8".into(),
             ));
         }
         match &entry.kind {
@@ -2680,7 +2680,7 @@ pub(crate) fn validate_staged_tree(
                 };
                 if *length > limit {
                     return Err(ImportError::Validation(format!(
-                        "file Import file exceeds its size limit: {}",
+                        "Skill file exceeds its size limit: {}",
                         entry.relative_path.display()
                     )));
                 }
@@ -2689,7 +2689,7 @@ pub(crate) fn validate_staged_tree(
             StagedEntryKind::Symlink { target } => {
                 if target.to_str().is_none() || target.is_absolute() {
                     return Err(ImportError::Validation(format!(
-                        "file Import symlink target must be a valid UTF-8 relative path: {}",
+                        "Skill symlink target must be a valid UTF-8 relative path: {}",
                         entry.relative_path.display()
                     )));
                 }
@@ -2702,12 +2702,12 @@ pub(crate) fn validate_staged_tree(
         Some(StagedEntryKind::File { .. } | StagedEntryKind::Symlink { .. })
     ) {
         return Err(ImportError::Validation(
-            "file Import source must contain a readable SKILL.md".into(),
+            "Skill must contain a readable SKILL.md".into(),
         ));
     }
     if total_bytes > MAX_SKILL_BYTES || snapshot.total_file_bytes > MAX_SKILL_BYTES {
         return Err(ImportError::Validation(
-            "file Import Skill exceeds the 256 MB size limit".into(),
+            "Skill exceeds the 256 MB size limit".into(),
         ));
     }
     for entry in &snapshot.entries {
@@ -2771,13 +2771,13 @@ fn resolve_staged_relative_target(parent: &Path, target: &Path) -> Result<PathBu
             std::path::Component::ParentDir => {
                 if segments.pop().is_none() {
                     return Err(ImportError::Validation(
-                        "file Import symlink escapes the Skill".into(),
+                        "Skill symlink escapes the Skill root".into(),
                     ));
                 }
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 return Err(ImportError::Validation(
-                    "file Import symlink target must be relative".into(),
+                    "Skill symlink target must be relative".into(),
                 ));
             }
         }
@@ -2787,7 +2787,7 @@ fn resolve_staged_relative_target(parent: &Path, target: &Path) -> Result<PathBu
 
 fn unsafe_staged_symlink(link: &Path) -> ImportError {
     ImportError::Validation(format!(
-        "file Import symlink escapes the Skill, is dangling, or is cyclic: {}",
+        "Skill symlink escapes the Skill root, is dangling, or is cyclic: {}",
         link.display()
     ))
 }

@@ -100,6 +100,7 @@ interface LibraryDeskProps {
   adoptResult: AdoptResult | null;
   adoptUndo: AdoptUndoResult | null;
   adoptError: string | null;
+  adoptErrorHeading: string;
   adoptActivity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
@@ -245,6 +246,7 @@ export function LibraryDesk({
   adoptResult,
   adoptUndo,
   adoptError,
+  adoptErrorHeading,
   adoptActivity,
   onOpenAdopt,
   onToggleAdoptCandidate,
@@ -445,6 +447,7 @@ export function LibraryDesk({
           result={adoptResult}
           undo={adoptUndo}
           error={adoptError}
+          errorHeading={adoptErrorHeading}
           activity={adoptActivity}
           onToggle={onToggleAdoptCandidate}
           onPlan={onPlanAdopt}
@@ -1055,6 +1058,7 @@ function AdoptSheet({
   result,
   undo,
   error,
+  errorHeading,
   activity,
   onToggle,
   onPlan,
@@ -1068,6 +1072,7 @@ function AdoptSheet({
   result: AdoptResult | null;
   undo: AdoptUndoResult | null;
   error: string | null;
+  errorHeading: string;
   activity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onToggle: (canonicalEntity: string, checked: boolean) => void;
   onPlan: () => void;
@@ -1152,7 +1157,7 @@ function AdoptSheet({
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Adopt unchanged</strong>
+                <strong>{errorHeading}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -1214,7 +1219,7 @@ function AdoptSheet({
             </ul>
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Adopt unchanged</strong>
+                <strong>{errorHeading}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -1262,7 +1267,7 @@ function AdoptSheet({
                       <strong>{candidate.directoryName}</strong>
                       <span className="candidate-path">
                         {candidate.risk === "broken"
-                          ? "Broken · target missing"
+                          ? `Broken · ${candidate.riskReason ?? "target missing"}`
                           : candidate.risk === "external"
                             ? "External · " +
                               (candidate.riskReason ?? "outside home")
@@ -1287,7 +1292,7 @@ function AdoptSheet({
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Scan failed</strong>
+                <strong>{errorHeading}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -2469,7 +2474,7 @@ function OnboardingSheet({
                         <strong>{candidate.directoryName}</strong>
                         <span className="candidate-path">
                           {candidate.risk === "broken"
-                            ? "Broken · target missing"
+                            ? `Broken · ${candidate.riskReason ?? "target missing"}`
                             : candidate.risk === "external"
                               ? "External · " +
                                 (candidate.riskReason ?? "outside home")

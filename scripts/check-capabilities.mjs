@@ -1,6 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import process from "node:process";
 import { URL } from "node:url";
+
+import { containsDirectFileSystemAccess } from "./lib/core-boundaries.mjs";
 
 const [
   packageJson,
@@ -36,6 +38,25 @@ const forbiddenFrontendDependencies = [
   "@tauri-apps/plugin-shell",
   "@tauri-apps/plugin-updater",
 ];
+
+const coreSourceRoot = new URL("../src-tauri/src/core/", import.meta.url);
+const coreSourceEntries = await readdir(coreSourceRoot, {
+  recursive: true,
+  withFileTypes: true,
+});
+for (const entry of coreSourceEntries) {
+  if (!entry.isFile() || !entry.name.endsWith(".rs")) continue;
+  const sourceUrl = new URL(
+    entry.name,
+    new URL(`${entry.parentPath}/`, coreSourceRoot),
+  );
+  const source = await readFile(sourceUrl, "utf8");
+  if (containsDirectFileSystemAccess(source)) {
+    fail(
+      `Core filesystem access must go through the FileSystem seam: ${sourceUrl.pathname}`,
+    );
+  }
+}
 
 for (const dependency of forbiddenFrontendDependencies) {
   if (dependencyNames.includes(dependency)) {

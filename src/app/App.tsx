@@ -9,6 +9,7 @@ import type {
   ActivationReplacePreview,
   ActivationReplaceUndoResult,
   ActivationResult,
+  AdoptCandidate,
   AdoptPlan,
   AdoptResult,
   AdoptScanReport,
@@ -79,6 +80,10 @@ export interface AppUpdatePanelState {
   update: AvailableAppUpdate | null;
   checkStatus: "up_to_date" | "skipped" | null;
   error: string | null;
+}
+
+function isSafeAdoptCandidate(candidate: AdoptCandidate): boolean {
+  return candidate.adoptable && candidate.risk === "none";
 }
 
 export function App({ client }: AppProps) {
@@ -187,6 +192,7 @@ export function App({ client }: AppProps) {
   const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
   const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
   const [adoptError, setAdoptError] = useState<string | null>(null);
+  const [adoptErrorHeading, setAdoptErrorHeading] = useState("Scan failed");
   const [adoptActivity, setAdoptActivity] = useState<
     "idle" | "scanning" | "planning" | "applying" | "undoing"
   >("idle");
@@ -535,6 +541,7 @@ export function App({ client }: AppProps) {
     setAdoptResult(null);
     setAdoptUndo(null);
     setAdoptError(null);
+    setAdoptErrorHeading("Scan failed");
     const runId = ++adoptRunId.current;
     setAdoptActivity("scanning");
     try {
@@ -543,7 +550,9 @@ export function App({ client }: AppProps) {
       setAdoptReport(report);
       setAdoptSelected(
         report.candidates.some(
-          (candidate) => candidate.canonicalEntity === canonicalEntity,
+          (candidate) =>
+            candidate.canonicalEntity === canonicalEntity &&
+            isSafeAdoptCandidate(candidate),
         )
           ? [canonicalEntity]
           : [],
@@ -1092,6 +1101,7 @@ export function App({ client }: AppProps) {
     setAdoptResult(null);
     setAdoptUndo(null);
     setAdoptError(null);
+    setAdoptErrorHeading("Scan failed");
     const runId = adoptRunId.current;
     setAdoptActivity("scanning");
     try {
@@ -1100,9 +1110,7 @@ export function App({ client }: AppProps) {
       setAdoptReport(report);
       setAdoptSelected(
         report.candidates
-          .filter(
-            (candidate) => candidate.adoptable && candidate.risk === "none",
-          )
+          .filter(isSafeAdoptCandidate)
           .map((candidate) => candidate.canonicalEntity),
       );
     } catch (reason) {
@@ -1125,6 +1133,7 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("planning");
     setAdoptError(null);
+    setAdoptErrorHeading("Preview failed");
     try {
       const plan = await client.planAdopt(
         adoptSelected.map((canonicalEntity) => ({
@@ -1149,12 +1158,20 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("applying");
     setAdoptError(null);
+    setAdoptErrorHeading("Adopt failed");
     try {
       const result = await client.applyAdopt(adoptPlan.planToken);
-      const snapshot = await client.listSkills(filter);
-      setSkills(snapshot.items);
       setAdoptPlan(null);
       setAdoptResult(result);
+      try {
+        const snapshot = await client.listSkills(filter);
+        setSkills(snapshot.items);
+      } catch (reason) {
+        setAdoptErrorHeading("Refresh failed");
+        setAdoptError(
+          `Adopt completed, but the Library refresh failed: ${readError(reason)}`,
+        );
+      }
     } catch (reason) {
       setAdoptPlan(null);
       setAdoptError(readError(reason));
@@ -1168,11 +1185,19 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("undoing");
     setAdoptError(null);
+    setAdoptErrorHeading("Undo failed");
     try {
       const undo = await client.undoAdopt(adoptResult.operationId);
-      const snapshot = await client.listSkills(filter);
-      setSkills(snapshot.items);
       setAdoptUndo(undo);
+      try {
+        const snapshot = await client.listSkills(filter);
+        setSkills(snapshot.items);
+      } catch (reason) {
+        setAdoptErrorHeading("Refresh failed");
+        setAdoptError(
+          `Undo completed, but the Library refresh failed: ${readError(reason)}`,
+        );
+      }
     } catch (reason) {
       setAdoptError(readError(reason));
     } finally {
@@ -1512,6 +1537,7 @@ export function App({ client }: AppProps) {
       adoptResult={adoptResult}
       adoptUndo={adoptUndo}
       adoptError={adoptError}
+      adoptErrorHeading={adoptErrorHeading}
       adoptActivity={adoptActivity}
       onOpenAdopt={openAdopt}
       onToggleAdoptCandidate={toggleAdoptCandidate}

@@ -1497,7 +1497,7 @@ fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed
 fn startup_recovery_removes_staging_left_before_a_journal_was_durable() {
     let home = tempfile::tempdir().expect("temporary home");
     let library_root = home.path().join("Library/Application Support/skill-man");
-    let orphan = library_root.join("staging/pre-journal-crash");
+    let orphan = library_root.join("staging/file-import-pre-journal-crash");
     std::fs::create_dir_all(&orphan).expect("create orphaned staging");
     std::fs::write(orphan.join("partial"), "partial copy").expect("write partial staging");
     let fixture =

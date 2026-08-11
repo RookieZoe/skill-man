@@ -5,6 +5,82 @@ import { expect, test } from "vitest";
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 import { App } from "./App";
 
+function createAdoptableFixtureCatalogClient() {
+  const client = createFixtureCatalogClient();
+  const canonicalEntity = "~/.claude/skills/prompt-linter";
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity,
+        directoryName: "prompt-linter",
+        directoryNames: ["prompt-linter"],
+        appearances: [
+          {
+            entryPath: canonicalEntity,
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        risk: "none",
+        riskReason: null,
+        conflict: null,
+        adoptable: true,
+        suggestedAgentIds: [],
+      },
+    ],
+  });
+  client.planAdopt = async () => ({
+    planToken: "fixture-adopt-plan",
+    items: [
+      {
+        directoryName: "prompt-linter",
+        canonicalEntity,
+        kind: "migrate",
+        finalEntityPath: "/Library/skills/prompt-linter",
+        appearances: [
+          {
+            entryPath: canonicalEntity,
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        targetAgents: [],
+        adoptable: true,
+        error: null,
+      },
+    ],
+    canApply: true,
+  });
+  client.applyAdopt = async () => ({
+    operationId: "fixture-adopt-operation",
+    items: [
+      {
+        skillId: "prompt-linter",
+        directoryName: "prompt-linter",
+        adopted: true,
+        error: null,
+      },
+    ],
+    snapshotVersion: 8,
+    undoAvailable: true,
+  });
+  client.undoAdopt = async (operationId) => ({
+    operationId,
+    items: [
+      {
+        directoryName: "prompt-linter",
+        undone: true,
+        error: null,
+      },
+    ],
+    snapshotVersion: 9,
+  });
+  return client;
+}
+
 test("opens the Library Desk with a selected Skill and an Agent inspector", async () => {
   render(<App client={createFixtureCatalogClient()} />);
 
@@ -494,6 +570,64 @@ test("Adopt existing item hands off to the Adopt flow with the candidate selecte
   expect(checkbox).toBeChecked();
 });
 
+test("Adopt conflict handoff leaves an unsafe candidate unselected", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.planActivation = async () => {
+    throw {
+      code: "conflict",
+      message:
+        "The Activation path conflicts with existing content: ~/.claude/skills/skill-authoring",
+    };
+  };
+  const canonicalEntity = "~/.claude/skills/skill-authoring";
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity,
+        directoryName: "skill-authoring",
+        directoryNames: ["skill-authoring"],
+        appearances: [
+          {
+            entryPath: canonicalEntity,
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        risk: "broken",
+        riskReason:
+          "Skill symlink target must be a valid UTF-8 relative path: skill-authoring",
+        conflict: null,
+        adoptable: false,
+        suggestedAgentIds: [],
+      },
+    ],
+  });
+  render(<App client={client} />);
+
+  await user.click(
+    await screen.findByRole("switch", {
+      name: "Enable skill-authoring for Claude Code",
+    }),
+  );
+  await screen.findByRole("dialog", { name: "Activation conflict" });
+  await user.click(screen.getByRole("button", { name: "Adopt existing item" }));
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const checkbox = within(dialog).getByRole("checkbox", {
+    name: /skill-authoring/,
+  });
+  expect(checkbox).toBeDisabled();
+  expect(checkbox).not.toBeChecked();
+  expect(
+    within(dialog).getByRole("button", { name: "Preview Adopt" }),
+  ).toBeDisabled();
+});
+
 test("Remove then replace previews, applies, and can be undone", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
@@ -795,13 +929,277 @@ test("opens the Adopt sheet and reports a fixture rejection", async () => {
   expect(
     screen.getByRole("dialog", { name: "Adopt untracked Skills" }),
   ).toBeInTheDocument();
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "not available in the preview fixture",
-  );
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Scan failed");
+  expect(alert).toHaveTextContent("not available in the preview fixture");
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(
     screen.queryByRole("dialog", { name: "Adopt untracked Skills" }),
   ).not.toBeInTheDocument();
+});
+
+test("labels an Adopt preview failure separately from a scan failure", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity: "~/.claude/skills/prompt-linter",
+        directoryName: "prompt-linter",
+        directoryNames: ["prompt-linter"],
+        appearances: [
+          {
+            entryPath: "~/.claude/skills/prompt-linter",
+            kind: "real_directory",
+            agentId: "claude-code",
+            shared: false,
+          },
+        ],
+        risk: "none",
+        riskReason: null,
+        conflict: null,
+        adoptable: true,
+        suggestedAgentIds: [],
+      },
+    ],
+  });
+  client.planAdopt = async () => {
+    throw {
+      code: "validation",
+      message: "The selected Skill could not be previewed.",
+    };
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const preview = within(dialog).getByRole("button", {
+    name: "Preview Adopt",
+  });
+  await waitFor(() => expect(preview).toBeEnabled());
+  await user.click(preview);
+
+  const alert = await within(dialog).findByRole("alert");
+  expect(alert).toHaveTextContent("Preview failed");
+  expect(alert).not.toHaveTextContent("Scan failed");
+  expect(alert).toHaveTextContent("The selected Skill could not be previewed.");
+});
+
+test("leaves an unsafe Adopt candidate unselected and shows its scan reason", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.scanAdopt = async () => ({
+    truncated: false,
+    candidates: [
+      {
+        canonicalEntity: "~/.agents/skills/ask-matt",
+        directoryName: "ask-matt",
+        directoryNames: ["ask-matt"],
+        appearances: [
+          {
+            entryPath: "~/.agents/skills/ask-matt",
+            kind: "real_directory",
+            agentId: null,
+            shared: true,
+          },
+        ],
+        risk: "broken",
+        riskReason:
+          "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        conflict: null,
+        adoptable: false,
+        suggestedAgentIds: ["claude-code", "codex"],
+      },
+    ],
+  });
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+
+  const candidate = within(dialog).getByRole("checkbox", { name: /ask-matt/ });
+  expect(candidate).toBeDisabled();
+  expect(candidate).not.toBeChecked();
+  expect(dialog).toHaveTextContent(
+    "Broken · Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+  );
+  expect(
+    within(dialog).getByRole("button", { name: "Preview Adopt" }),
+  ).toBeDisabled();
+});
+
+test("keeps a completed Adopt undoable and finalizable when Library refresh fails", async () => {
+  const user = userEvent.setup();
+  const client = createAdoptableFixtureCatalogClient();
+  const listSkills = client.listSkills.bind(client);
+  const applyAdopt = client.applyAdopt.bind(client);
+  let applied = false;
+  let finalizedOperationId: string | null = null;
+  client.applyAdopt = async (planToken) => {
+    const result = await applyAdopt(planToken);
+    applied = true;
+    return result;
+  };
+  client.listSkills = async (filter) => {
+    if (applied) {
+      throw new Error("Library snapshot unavailable.");
+    }
+    return listSkills(filter);
+  };
+  client.finalizeAdopt = async (operationId) => {
+    finalizedOperationId = operationId;
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const previewButton = within(dialog).getByRole("button", {
+    name: "Preview Adopt",
+  });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  await user.click(previewButton);
+  await user.click(
+    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
+  );
+
+  expect(
+    await screen.findByRole("heading", { name: "1 of 1 Skills adopted" }),
+  ).toBeInTheDocument();
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent("Refresh failed");
+  expect(alert).toHaveTextContent(
+    "Adopt completed, but the Library refresh failed: Library snapshot unavailable.",
+  );
+  expect(
+    screen.getByRole("button", { name: "Undo this batch" }),
+  ).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() =>
+    expect(finalizedOperationId).toBe("fixture-adopt-operation"),
+  );
+});
+
+test("keeps a completed Undo when Library refresh fails", async () => {
+  const user = userEvent.setup();
+  const client = createAdoptableFixtureCatalogClient();
+  const listSkills = client.listSkills.bind(client);
+  const undoAdopt = client.undoAdopt.bind(client);
+  let undone = false;
+  client.undoAdopt = async (operationId) => {
+    const result = await undoAdopt(operationId);
+    undone = true;
+    return result;
+  };
+  client.listSkills = async (filter) => {
+    if (undone) {
+      throw new Error("Library snapshot unavailable after Undo.");
+    }
+    return listSkills(filter);
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const previewButton = within(dialog).getByRole("button", {
+    name: "Preview Adopt",
+  });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  await user.click(previewButton);
+  await user.click(
+    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
+  );
+  await user.click(
+    await within(dialog).findByRole("button", { name: "Undo this batch" }),
+  );
+
+  expect(await within(dialog).findByRole("status")).toHaveTextContent(
+    "Batch undone",
+  );
+  const alert = within(dialog).getByRole("alert");
+  expect(alert).toHaveTextContent("Refresh failed");
+  expect(alert).toHaveTextContent(
+    "Undo completed, but the Library refresh failed: Library snapshot unavailable after Undo.",
+  );
+  expect(
+    within(dialog).queryByRole("button", { name: "Undo this batch" }),
+  ).not.toBeInTheDocument();
+});
+
+test("reports an Adopt command failure before showing a result", async () => {
+  const user = userEvent.setup();
+  const client = createAdoptableFixtureCatalogClient();
+  client.applyAdopt = async () => {
+    throw new Error("Adopt command rejected the plan.");
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const previewButton = within(dialog).getByRole("button", {
+    name: "Preview Adopt",
+  });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  await user.click(previewButton);
+  await user.click(
+    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
+  );
+
+  const alert = await within(dialog).findByRole("alert");
+  expect(alert).toHaveTextContent("Adopt failed");
+  expect(alert).toHaveTextContent("Adopt command rejected the plan.");
+  expect(
+    within(dialog).queryByRole("heading", { name: /Skills adopted/ }),
+  ).not.toBeInTheDocument();
+});
+
+test("reports an Undo command failure and keeps Undo available", async () => {
+  const user = userEvent.setup();
+  const client = createAdoptableFixtureCatalogClient();
+  client.undoAdopt = async () => {
+    throw new Error("Undo command rejected the operation.");
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Adopt untracked Skills",
+  });
+  const previewButton = within(dialog).getByRole("button", {
+    name: "Preview Adopt",
+  });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  await user.click(previewButton);
+  await user.click(
+    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
+  );
+  await user.click(
+    await within(dialog).findByRole("button", { name: "Undo this batch" }),
+  );
+
+  const alert = await within(dialog).findByRole("alert");
+  expect(alert).toHaveTextContent("Undo failed");
+  expect(alert).toHaveTextContent("Undo command rejected the operation.");
+  expect(
+    within(dialog).getByRole("button", { name: "Undo this batch" }),
+  ).toBeInTheDocument();
 });
 
 test("shows the three-step onboarding on first run and Skip records completion", async () => {
@@ -876,6 +1274,25 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
         adoptable: true,
         suggestedAgentIds: [],
       },
+      {
+        canonicalEntity: "~/.agents/skills/ask-matt",
+        directoryName: "ask-matt",
+        directoryNames: ["ask-matt"],
+        appearances: [
+          {
+            entryPath: "~/.agents/skills/ask-matt",
+            kind: "real_directory",
+            agentId: null,
+            shared: true,
+          },
+        ],
+        risk: "broken",
+        riskReason:
+          "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        conflict: null,
+        adoptable: false,
+        suggestedAgentIds: ["claude-code", "codex"],
+      },
     ],
   });
   render(<App client={client} />);
@@ -885,8 +1302,11 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
   await user.click(screen.getByRole("button", { name: "Continue" }));
 
   expect(
-    await screen.findByText(/1 Untracked Skill found/),
+    await screen.findByText(/2 Untracked Skills found/),
   ).toBeInTheDocument();
+  expect(screen.getByText(/Broken · Skill symlink target/)).toHaveTextContent(
+    "Broken · Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+  );
   await user.click(
     screen.getByRole("button", { name: "Review Adopt candidates" }),
   );
@@ -898,6 +1318,9 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
     screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
   ).not.toBeInTheDocument();
   expect(screen.getByRole("checkbox", { name: /prompt-linter/ })).toBeChecked();
+  const unsafeCandidate = screen.getByRole("checkbox", { name: /ask-matt/ });
+  expect(unsafeCandidate).toBeDisabled();
+  expect(unsafeCandidate).not.toBeChecked();
 });
 
 test("Preferences sheet shows exactly four switches with defaults", async () => {

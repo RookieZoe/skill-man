@@ -312,6 +312,8 @@ pub struct AdoptActivationStep {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdoptItemPhase {
+    /// Apply has not moved or registered this Skill yet.
+    Planned,
     /// Staged in staging/<op>/<name>; nothing applied yet.
     Staged,
     /// The entity was installed at its stable Library path.
@@ -338,6 +340,11 @@ pub struct AdoptJournalItem {
     pub directory_name: String,
     pub kind: AdoptJournalKind,
     pub staged_root: PathBuf,
+    /// Identity of the external source before a Migrate item is staged. New
+    /// v2 journals persist it so interrupted cross-volume isolation can be
+    /// recovered without guessing which copy is authoritative.
+    #[serde(default)]
+    pub source_fingerprint: Option<DirectoryFingerprint>,
     pub staged_fingerprint: DirectoryFingerprint,
     pub final_entity_path: PathBuf,
     /// Empty for Link registrations.
@@ -742,6 +749,78 @@ pub trait FileSystem: Send + Sync {
         source: &Path,
         staging_destination: &Path,
     ) -> Result<DirectoryFingerprint, FileSystemError>;
+
+    /// Create one Adopt operation directory beneath the owned Library staging
+    /// root without following a replacement symlink. The returned fingerprint
+    /// pins the directory that later source moves must target.
+    fn create_adopt_staging_operation(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "create Adopt staging operation",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe Adopt staging is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Move an external source into a pinned Adopt operation directory. Both
+    /// the operation directory and source entity are re-identified before the
+    /// descriptor-relative move, closing the mkdir-to-move TOCTOU window.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_external_directory_in_adopt_operation(
+        &self,
+        source: &Path,
+        library_root: &Path,
+        operation_id: &str,
+        directory_name: &str,
+        expected_operation_root: &DirectoryFingerprint,
+        expected_source: &DirectoryFingerprint,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = (
+            source,
+            library_root,
+            operation_id,
+            expected_operation_root,
+            expected_source,
+        );
+        Err(FileSystemError::Io {
+            operation: "stage external directory for Adopt",
+            path: PathBuf::from(directory_name),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe Adopt staging is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Remove the original source retained under the deterministic
+    /// cross-volume isolation name after the Staged journal cursor is durable.
+    /// Same-volume migrations have no isolated source and return success.
+    fn discard_isolated_adopt_source(
+        &self,
+        source: &Path,
+        operation_id: &str,
+        expected_source: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let _ = operation_id;
+        Err(FileSystemError::Io {
+            operation: "discard isolated Adopt source",
+            path: source.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "safe isolated Adopt source cleanup is not supported (expected inode {})",
+                    expected_source.inode
+                ),
+            ),
+        })
+    }
 
     /// Reverse of `stage_external_directory` for Undo: move the directory
     /// back to its original entry path. The destination must be absent.
