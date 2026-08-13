@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::adopt::{
     AdoptError, AdoptPlanKind, AdoptRisk, AdoptSelection, AdoptService,
@@ -19,13 +17,16 @@ use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SkillId, SourceKind};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
+use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
 use skill_man_lib::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict,
 };
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::import_store::ImportStore;
-use skill_man_lib::seams::recovery::RecoveryGate;
+
+mod common;
+use common::BoundTestHome;
 
 fn write_skill(directory: &Path, name: &str, body: &str) -> PathBuf {
     let path = directory.join(name);
@@ -35,7 +36,7 @@ fn write_skill(directory: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 struct Harness {
-    home: tempfile::TempDir,
+    home: BoundTestHome,
     library_root: PathBuf,
     runtime: Arc<RuntimeCatalogStore>,
     filesystem: Arc<MacOsFileSystem>,
@@ -501,23 +502,11 @@ fn insert_committed_migrate_row(
 
 impl Harness {
     fn new() -> Self {
-        let home = tempfile::tempdir().expect("temporary home");
-        let library_root = home.path().join("Library/Application Support/skill-man");
-        let fixture = Arc::new(
-            FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"),
-        );
-        let sqlite = Arc::new(
-            SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-        );
-        sqlite
-            .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-            .expect("seed catalog");
-        let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-        let runtime = Arc::new(RuntimeCatalogStore::new(
-            fixture,
-            sqlite,
-            filesystem.clone(),
-        ));
+        let home = BoundTestHome::new();
+        home.seed_standard_library();
+        let library_root = home.library_root.clone();
+        let filesystem = home.filesystem.clone();
+        let runtime = home.runtime.clone();
         Self {
             home,
             library_root,
@@ -836,7 +825,7 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
     let source = write_skill(&claude, "symlinked-staging", "# Symlinked staging\n");
-    let recovery_gate = Arc::new(RecoveryGate::ready());
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
         harness.filesystem.clone(),
@@ -844,7 +833,7 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
         harness.library_root.clone(),
         harness.home.path().to_path_buf(),
     )
-    .with_recovery_gate(recovery_gate.clone());
+    .with_write_gate(write_gate.clone());
     let candidates = adopt.scan().expect("scan").candidates;
     let plan = adopt
         .plan(&[select(&candidates, "symlinked-staging")])
@@ -860,7 +849,7 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
         .expect_err("Apply must refuse a symlinked staging root");
 
     assert!(matches!(error, AdoptError::RecoveryRequired(_)), "{error}");
-    assert!(!recovery_gate.writes_are_ready());
+    assert!(!write_gate.is_product_write_open());
     assert_eq!(
         std::fs::read_to_string(source.join("SKILL.md")).expect("source remains readable"),
         "# Symlinked staging\n"
@@ -888,13 +877,16 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
 
     let sentinel = outside.join("external-content.txt");
     std::fs::write(&sentinel, "must survive recovery").expect("write external sentinel");
-    let restart_gate = Arc::new(RecoveryGate::blocked());
+    let restart_gate = Arc::new(WriteGate::new(WriteGateState::Open(
+        harness.home.home.clone(),
+    )));
+    restart_gate.mark_blocked();
     MaintenanceService::new(harness.runtime.clone(), harness.filesystem.clone())
         .with_library_root(harness.library_root.clone())
-        .with_recovery_gate(restart_gate.clone())
+        .with_write_gate(restart_gate.clone())
         .startup_check()
         .expect_err("startup must also refuse the symlinked staging root");
-    assert!(!restart_gate.writes_are_ready());
+    assert!(!restart_gate.is_product_write_open());
     assert_eq!(
         std::fs::read_to_string(&sentinel).expect("external sentinel remains"),
         "must survive recovery",
@@ -911,12 +903,11 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
 }
 
 #[test]
-fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
+fn gate_transition_makes_an_adopt_plan_stale() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    write_skill(&claude, "stable-adopt", "# Stable Adopt\n");
-    write_skill(&claude, "blocked-apply", "# Blocked apply\n");
-    let recovery_gate = Arc::new(RecoveryGate::ready());
+    write_skill(&claude, "gate-stale-skill", "# Gate stale\n");
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
         harness.filesystem.clone(),
@@ -924,7 +915,58 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
         harness.library_root.clone(),
         harness.home.path().to_path_buf(),
     )
-    .with_recovery_gate(recovery_gate.clone());
+    .with_write_gate(write_gate.clone());
+
+    let candidates = adopt.scan().expect("scan").candidates;
+    let plan = adopt
+        .plan(&[select(&candidates, "gate-stale-skill")])
+        .expect("Preview Adopt");
+    assert!(plan.can_apply);
+
+    // The write gate transitions to another Open Home (a reconnect-style
+    // bootstrap change): the generation bumped while the state class stayed
+    // open, so only the plan-token generation check can catch staleness.
+    write_gate
+        .transition_to(WriteGateState::Open(
+            skill_man_lib::core::home::BoundHome::test_value(
+                "c1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+                harness.library_root.join("other-home"),
+            ),
+        ))
+        .expect("transition to another Open Home");
+    let error = adopt
+        .apply(&plan.plan_token)
+        .expect_err("Apply after a gate transition");
+    assert!(matches!(error, AdoptError::PlanStale), "{error}");
+
+    // Nothing was adopted; the untracked Skill stays untracked.
+    let catalog = harness.catalog();
+    let skills = catalog
+        .list(skill_man_lib::core::domain::CatalogFilter::All)
+        .expect("list Library");
+    assert!(
+        !skills
+            .items
+            .iter()
+            .any(|skill| skill.directory_name == "gate-stale-skill")
+    );
+}
+
+#[test]
+fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
+    let harness = Harness::new();
+    let claude = harness.claude_skills();
+    write_skill(&claude, "stable-adopt", "# Stable Adopt\n");
+    write_skill(&claude, "blocked-apply", "# Blocked apply\n");
+    let write_gate = Arc::new(WriteGate::open_for_tests());
+    let adopt = AdoptService::new(
+        harness.runtime.clone(),
+        harness.filesystem.clone(),
+        Arc::new(FixedClock),
+        harness.library_root.clone(),
+        harness.home.path().to_path_buf(),
+    )
+    .with_write_gate(write_gate.clone());
     let candidates = adopt.scan().expect("scan").candidates;
     let stable_plan = adopt
         .plan(&[select(&candidates, "stable-adopt")])
@@ -947,7 +989,7 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
         .expect_err("Apply must require startup recovery");
 
     assert!(matches!(error, AdoptError::RecoveryRequired(_)), "{error}");
-    assert!(!recovery_gate.writes_are_ready());
+    assert!(!write_gate.is_product_write_open());
     let second = adopt
         .plan(&[select(&candidates, "blocked-apply")])
         .expect_err("the session stays write-locked");
@@ -983,7 +1025,7 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
     let filesystem = Arc::new(FailDoneJournalFileSystem::new(
         harness.home.path().to_path_buf(),
     ));
-    let recovery_gate = Arc::new(RecoveryGate::ready());
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
         filesystem.clone(),
@@ -991,7 +1033,7 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
         harness.library_root.clone(),
         harness.home.path().to_path_buf(),
     )
-    .with_recovery_gate(recovery_gate.clone());
+    .with_write_gate(write_gate.clone());
     let candidates = adopt.scan().expect("scan").candidates;
     let plan = adopt
         .plan(&[select(&candidates, "done-write-failure")])
@@ -1012,7 +1054,7 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
         result.items[0].error
     );
     assert!(!result.undo_available);
-    assert!(recovery_gate.writes_are_ready());
+    assert!(write_gate.is_product_write_open());
     assert!(source.join("SKILL.md").is_file());
     assert!(
         std::fs::symlink_metadata(&source)
@@ -1287,7 +1329,7 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     let codex = harness.codex_skills();
     let shared = harness.shared_skills();
     write_skill(&shared, "undo-fault", "# Undo fault\n");
-    let recovery_gate = Arc::new(RecoveryGate::ready());
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         Arc::new(FailFirstAdoptRemovalStore::new(harness.runtime.clone())),
         harness.filesystem.clone(),
@@ -1295,7 +1337,7 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
         harness.library_root.clone(),
         harness.home.path().to_path_buf(),
     )
-    .with_recovery_gate(recovery_gate.clone());
+    .with_write_gate(write_gate.clone());
     let candidates = adopt.scan().expect("scan").candidates;
     let plan = adopt
         .plan(&[select(&candidates, "undo-fault")])
@@ -1308,7 +1350,7 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
         .expect_err("a failure after Undo starts needs durable recovery");
 
     assert!(matches!(error, AdoptError::RecoveryRequired(_)), "{error}");
-    assert!(!recovery_gate.writes_are_ready());
+    assert!(!write_gate.is_product_write_open());
     assert!(
         harness
             .library_root
@@ -1340,14 +1382,18 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
         "the injected catalog failure leaves the durable row present"
     );
 
-    let restart_gate = Arc::new(RecoveryGate::blocked());
+    let restart_gate = Arc::new(WriteGate::new(WriteGateState::Open(
+        harness.home.home.clone(),
+    )));
+    restart_gate.mark_blocked();
+    assert!(!restart_gate.is_product_write_open());
     MaintenanceService::new(harness.runtime.clone(), harness.filesystem.clone())
         .with_library_root(harness.library_root.clone())
-        .with_recovery_gate(restart_gate.clone())
+        .with_write_gate(restart_gate.clone())
         .startup_check()
         .expect("startup uses the catalog row to recover the interrupted Undo forward");
 
-    assert!(restart_gate.writes_are_ready());
+    assert!(restart_gate.is_product_write_open());
     assert_eq!(
         std::fs::read_link(claude.join("undo-fault")).expect("restored Claude Activation"),
         library_entity
@@ -1728,14 +1774,18 @@ fn startup_recovery_prefers_an_isolated_cross_volume_source_over_the_older_copy(
         .write_adopt_journal(&harness.library_root, &journal)
         .expect("write interrupted isolation journal");
 
-    let recovery_gate = Arc::new(RecoveryGate::blocked());
+    let write_gate = Arc::new(WriteGate::new(WriteGateState::Open(
+        harness.home.home.clone(),
+    )));
+    write_gate.mark_blocked();
+    assert!(!write_gate.is_product_write_open());
     MaintenanceService::new(harness.runtime.clone(), harness.filesystem.clone())
         .with_library_root(harness.library_root.clone())
-        .with_recovery_gate(recovery_gate.clone())
+        .with_write_gate(write_gate.clone())
         .startup_check()
         .expect("recover isolated source");
 
-    assert!(recovery_gate.writes_are_ready());
+    assert!(write_gate.is_product_write_open());
     assert_eq!(
         std::fs::read_to_string(source.join("late.txt")).expect("late content was restored"),
         "must survive recovery\n"

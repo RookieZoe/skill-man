@@ -1762,6 +1762,98 @@ pub struct StartupInfoDto {
     pub agents: Vec<StartupAgentDto>,
 }
 
+/// Catalog access of a Bound Home (spec §4.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogAccessDto {
+    ReadWrite,
+    ReadOnly,
+}
+
+/// Why a Bound Home's Catalog is read-only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogReadOnlyReasonDto {
+    UnsupportedSchema,
+    IntegrityFailed,
+    OpenFailed,
+}
+
+/// Raw technical facts, never App Copy (spec §4.7): presentation-side copy
+/// keys off `code`; `message` is the explicitly labeled raw detail.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticDto {
+    pub code: String,
+    pub message: String,
+}
+
+/// The closed top-level bootstrap route union (spec §4.2). `state` is the
+/// discriminant; each variant carries only typed fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum BootstrapSnapshotDto {
+    AppStateUnavailable {
+        diagnostic: Option<DiagnosticDto>,
+    },
+    Unconfigured,
+    LegacyDetected {
+        path: String,
+    },
+    FixtureRecoveryLocked {
+        home_id: Option<String>,
+        path: Option<String>,
+    },
+    HomeCandidatePending {
+        path: String,
+        operation_id: String,
+    },
+    Bound {
+        home_id: String,
+        catalog_access: CatalogAccessDto,
+        catalog_readonly_reason: Option<CatalogReadOnlyReasonDto>,
+        snapshot_version: u64,
+    },
+    HomeUnavailable {
+        home_id: String,
+        path: String,
+        diagnostic: Option<DiagnosticDto>,
+    },
+    HomeIdentityMismatch {
+        home_id: String,
+        path: String,
+        diagnostic: Option<DiagnosticDto>,
+    },
+}
+
+/// `bootstrap://changed` payload: isomorphic to the query snapshot plus the
+/// write-gate generation so React can reconcile without re-querying.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapChangedPayloadDto {
+    pub snapshot: BootstrapSnapshotDto,
+    pub generation: u64,
+}
+
+/// Closed command failure (spec §4.7): a typed public error plus optional raw
+/// diagnostic. Never carries free-form App Copy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicErrorDto {
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandFailureDto {
+    pub error: PublicErrorDto,
+    pub diagnostic: Option<DiagnosticDto>,
+}
+
 impl From<StartupInfo> for StartupInfoDto {
     fn from(value: StartupInfo) -> Self {
         Self {

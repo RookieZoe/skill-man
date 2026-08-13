@@ -9,27 +9,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::domain::{AgentId, CatalogFilter, SkillId};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::{MaintenanceError, MaintenanceService};
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::activation_store::ActivationStore;
 use skill_man_lib::seams::filesystem::{
     FileSystem, RemoveActivationStep, RemoveInitialEntry, RemoveJournal, RemoveJournalPhase,
     RemoveRecoveryBaseline, RemoveSourceKind,
 };
 use skill_man_lib::seams::maintenance_store::MaintenanceStore;
-use skill_man_lib::seams::recovery::RecoveryGate;
+
+mod common;
+use common::BoundTestHome;
 
 struct TestHarness {
-    home: tempfile::TempDir,
+    home: BoundTestHome,
     library_root: PathBuf,
     runtime: Arc<RuntimeCatalogStore>,
     catalog: CatalogService,
@@ -39,26 +40,15 @@ struct TestHarness {
 }
 
 fn harness() -> TestHarness {
-    harness_with_gate(Arc::new(RecoveryGate::ready()))
+    harness_with_gate(Arc::new(WriteGate::open_for_tests()))
 }
 
-fn harness_with_gate(recovery_gate: Arc<RecoveryGate>) -> TestHarness {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+fn harness_with_gate(write_gate: Arc<WriteGate>) -> TestHarness {
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -66,15 +56,15 @@ fn harness_with_gate(recovery_gate: Arc<RecoveryGate>) -> TestHarness {
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
     )
-    .with_recovery_gate(recovery_gate.clone());
+    .with_write_gate(write_gate.clone());
     let catalog = CatalogService::new(runtime.clone());
     let activation =
         ActivationService::new(runtime.clone(), filesystem.clone(), library_root.clone())
             .with_agent_adapters(Arc::new(BuiltInAgentAdapters))
-            .with_recovery_gate(recovery_gate.clone());
+            .with_write_gate(write_gate.clone());
     let maintenance = MaintenanceService::new(runtime.clone(), filesystem)
         .with_library_root(library_root.clone())
-        .with_recovery_gate(recovery_gate);
+        .with_write_gate(write_gate);
     TestHarness {
         home,
         library_root,
@@ -419,7 +409,7 @@ fn interrupted_remove_rolls_forward_when_the_catalog_row_is_gone() {
 
 #[test]
 fn unrecoverable_remove_locks_writes_and_keeps_browsing_available() {
-    let gate = Arc::new(RecoveryGate::ready());
+    let gate = Arc::new(WriteGate::open_for_tests());
     let harness = harness_with_gate(gate.clone());
     let source = harness.home.path().join("Projects/locked-skill");
     let agent_root = harness.home.path().join(".claude/skills");
@@ -520,7 +510,7 @@ fn remove_recovery_baselines_cover_every_managed_skill() {
 
 #[test]
 fn retrying_recovery_after_repair_unlocks_writes() {
-    let gate = Arc::new(RecoveryGate::ready());
+    let gate = Arc::new(WriteGate::open_for_tests());
     let harness = harness_with_gate(gate.clone());
     let source = harness.home.path().join("Projects/retry-skill");
     let agent_root = harness.home.path().join(".claude/skills");

@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
-use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::ActivationService;
 use skill_man_lib::core::catalog::CatalogService;
@@ -20,10 +17,14 @@ use skill_man_lib::tauri_adapter::dto::{
 };
 use skill_man_lib::tauri_adapter::import_api::ImportApi;
 
+mod common;
+use common::BoundTestHome;
+
 #[test]
 fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Projects/linked-authoring");
     let claude_root = home.path().join(".claude/skills");
     let codex_root = home.path().join(".codex/skills");
@@ -40,20 +41,8 @@ fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
     )
     .expect("write Skill document");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -153,27 +142,16 @@ fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
 
 #[test]
 fn library_conflict_is_visible_in_preview_and_cannot_be_applied() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Projects/SKILL-AUTHORING");
     std::fs::create_dir_all(&source).expect("create conflicting Link source");
     std::fs::write(source.join("SKILL.md"), "# Different Skill\n")
         .expect("write conflicting Skill document");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem,
@@ -216,26 +194,15 @@ fn library_conflict_is_visible_in_preview_and_cannot_be_applied() {
 
 #[test]
 fn apply_reports_plan_stale_when_the_link_source_changes_after_preview() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Projects/changing-skill");
     std::fs::create_dir_all(&source).expect("create Link source");
     std::fs::write(source.join("SKILL.md"), "# Changing Skill\n").expect("write Skill document");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem,
@@ -273,8 +240,9 @@ fn apply_reports_plan_stale_when_the_link_source_changes_after_preview() {
 
 #[test]
 fn link_identity_comes_from_the_selected_entry_and_retargeting_makes_the_plan_stale() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let projects = home.path().join("Projects");
     let first_target = projects.join("physical-one");
     let second_target = projects.join("physical-two");
@@ -285,20 +253,8 @@ fn link_identity_comes_from_the_selected_entry_and_retargeting_makes_the_plan_st
     }
     std::os::unix::fs::symlink(&first_target, &source).expect("create selected Link entry");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,

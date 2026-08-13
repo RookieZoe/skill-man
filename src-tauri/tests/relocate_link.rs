@@ -8,11 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
@@ -24,8 +22,11 @@ use skill_man_lib::seams::filesystem::{
 };
 use skill_man_lib::seams::maintenance_store::MaintenanceStore;
 
+mod common;
+use common::BoundTestHome;
+
 struct TestHarness {
-    home: tempfile::TempDir,
+    home: BoundTestHome,
     library_root: PathBuf,
     runtime: Arc<RuntimeCatalogStore>,
     catalog: CatalogService,
@@ -35,22 +36,11 @@ struct TestHarness {
 }
 
 fn harness() -> TestHarness {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportService::new(
         runtime.clone(),
         filesystem.clone(),

@@ -1,9 +1,3 @@
-use std::sync::Arc;
-
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
-use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
-use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::core::activation::ActivationService;
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::maintenance::MaintenanceService;
@@ -15,28 +9,21 @@ use skill_man_lib::tauri_adapter::dto::{
 };
 use skill_man_lib::tauri_adapter::health_api::HealthApi;
 
+mod common;
+use common::BoundTestHome;
+
 #[test]
 fn tauri_activation_round_trip_persists_and_reads_back_real_filesystem_state() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    let database_path = library_root.join("skill-man.sqlite3");
-    let claude_root = home.path().join(".claude/skills");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
+    let database_path = home.catalog_path();
+    let claude_root = home.claude_root();
     std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
 
     let target_path = {
-        let fixture = Arc::new(
-            FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"),
-        );
-        let sqlite = Arc::new(SqliteCatalogStore::open(&database_path).expect("open SQLite"));
-        sqlite
-            .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-            .expect("seed catalog metadata");
-        let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-        let runtime = Arc::new(RuntimeCatalogStore::new(
-            fixture,
-            sqlite,
-            filesystem.clone(),
-        ));
+        let filesystem = home.filesystem.clone();
+        let runtime = home.runtime.clone();
         let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
         let activation = ActivationApi::new(ActivationService::new(
             runtime.clone(),
@@ -137,19 +124,8 @@ fn tauri_activation_round_trip_persists_and_reads_back_real_filesystem_state() {
         target_path
     };
 
-    let fixture = Arc::new(
-        FixtureCatalogStore::runtime(&library_root).expect("rematerialize runtime fixture"),
-    );
-    let sqlite = Arc::new(SqliteCatalogStore::open(&database_path).expect("reopen SQLite"));
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("preserve existing catalog metadata");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let runtime = home.reopen();
+    let filesystem = home.filesystem.clone();
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
     let activation = ActivationApi::new(ActivationService::new(runtime, filesystem, library_root));
 

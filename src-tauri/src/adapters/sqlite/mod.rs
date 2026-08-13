@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -7,9 +6,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use thiserror::Error;
 
 use crate::core::domain::{
-    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, CatalogSeed,
-    Compatibility, Health, SkillId, SkillSummary, SourceKind, skill_identity_key,
+    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, Compatibility,
+    Health, SkillId, SkillSummary, SourceKind,
 };
+use crate::core::home::{BoundHome, HomeId};
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
@@ -18,6 +18,7 @@ use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
     LibraryConflict as AdoptLibraryConflict,
 };
+use crate::seams::catalog_probe::{CURRENT_CATALOG_SCHEMA_VERSION, CatalogHomeIdentity};
 use crate::seams::catalog_store::{
     CatalogStoreError, StartupAccess, StartupDiagnostic, StartupDiagnosticCode, StartupStatus,
 };
@@ -31,7 +32,7 @@ use crate::seams::maintenance_store::{
 };
 use crate::seams::preferences_store::PreferencesStoreError;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = CURRENT_CATALOG_SCHEMA_VERSION;
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE catalog_meta (
@@ -39,7 +40,11 @@ CREATE TABLE catalog_meta (
     schema_version INTEGER NOT NULL,
     snapshot_version INTEGER NOT NULL DEFAULT 0,
     first_run_completed_at TEXT,
-    last_startup_check_at TEXT
+    last_startup_check_at TEXT,
+    home_id TEXT,
+    volume_fsid TEXT,
+    volume_uuid TEXT,
+    home_bound_at TEXT
 );
 
 CREATE TABLE skills (
@@ -115,15 +120,13 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 4, 0);
+VALUES (1, 5, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
 
 #[derive(Debug, Error)]
 pub enum CatalogStoreOpenError {
-    #[error("could not prepare the Library directory: {0}")]
-    PrepareLibrary(#[source] std::io::Error),
     #[error("could not open the SQLite catalog: {0}")]
     Open(#[source] rusqlite::Error),
     #[error("could not configure the SQLite catalog: {0}")]
@@ -132,17 +135,41 @@ pub enum CatalogStoreOpenError {
     Backup(#[source] rusqlite::Error),
 }
 
+/// Errors opening or creating the Catalog of a verified `BoundHome`.
+#[derive(Debug, Error)]
+pub enum BoundCatalogOpenError {
+    #[error("the Catalog does not exist at the bound Home path")]
+    Missing,
+    #[error("the Catalog schema {found} is not the bound schema {CURRENT_SCHEMA_VERSION}")]
+    SchemaNotBound { found: u32 },
+    #[error("the Catalog has no recorded Home identity")]
+    IdentityMissing,
+    #[error("the Catalog identity does not match the bound Home")]
+    IdentityMismatch,
+    #[error("could not open the bound SQLite catalog: {0}")]
+    Open(#[source] rusqlite::Error),
+    #[error("could not configure the bound SQLite catalog: {0}")]
+    Configure(#[source] CatalogStoreOpenError),
+    #[error("could not migrate the fresh Catalog: {0}")]
+    Migration(#[source] rusqlite::Error),
+    #[error("could not write the Home identity into the Catalog: {0}")]
+    WriteIdentity(#[source] rusqlite::Error),
+    #[error("a Catalog already exists at the candidate path")]
+    AlreadyExists,
+}
+
 pub struct SqliteCatalogStore {
     connection: Mutex<Connection>,
     startup_status: StartupStatus,
 }
 
 impl SqliteCatalogStore {
+    /// Test/binding-internal convenience: opens an existing Catalog, creating
+    /// a fresh v5 file only when the path does not exist. Production
+    /// composition never calls this without a verified `BoundHome`; the
+    /// bootstrap authority resolves state read-only first (spec §3.4: a
+    /// pre-identity Catalog is only probed, never auto-migrated).
     pub fn open(path: &Path) -> Result<Self, CatalogStoreOpenError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(CatalogStoreOpenError::PrepareLibrary)?;
-        }
-
         let existing_schema_version = detect_schema_version(path);
         if existing_schema_version > CURRENT_SCHEMA_VERSION {
             let connection = open_read_only(path)?;
@@ -162,16 +189,32 @@ impl SqliteCatalogStore {
             });
         }
 
-        let backup_path = if existing_schema_version < CURRENT_SCHEMA_VERSION && has_content(path) {
-            Some(backup_catalog(path, existing_schema_version)?)
-        } else {
-            None
-        };
+        // Pre-identity schemas (v1–v4) may only be probed read-only: the
+        // one-time Legacy transition owns their migration (spec §3.4).
+        if existing_schema_version != 0 && existing_schema_version < CURRENT_SCHEMA_VERSION {
+            let connection = open_read_only(path)?;
+            return Ok(Self {
+                connection: Mutex::new(connection),
+                startup_status: StartupStatus {
+                    access: StartupAccess::ReadOnly,
+                    schema_version: existing_schema_version,
+                    diagnostic: Some(StartupDiagnostic {
+                        code: StartupDiagnosticCode::MigrationRequired,
+                        message: format!(
+                            "Catalog schema {existing_schema_version} predates Home identity; migration is owned by the Home Binding/Legacy flow."
+                        ),
+                        backup_path: None,
+                    }),
+                },
+            });
+        }
 
         let mut connection = Connection::open(path).map_err(CatalogStoreOpenError::Open)?;
         configure_connection(&connection)?;
 
-        if existing_schema_version < CURRENT_SCHEMA_VERSION {
+        if existing_schema_version == 0 {
+            // Fresh file: create the current schema. This is the only case
+            // ordinary open() writes; it never migrates existing data.
             if let Err(error) = migrate_to_current(&mut connection, existing_schema_version) {
                 connection
                     .pragma_update(None, "query_only", true)
@@ -184,7 +227,7 @@ impl SqliteCatalogStore {
                         diagnostic: Some(StartupDiagnostic {
                             code: StartupDiagnosticCode::MigrationFailed,
                             message: format!("Catalog migration failed: {error}"),
-                            backup_path: backup_path.map(path_to_string),
+                            backup_path: None,
                         }),
                     },
                 });
@@ -205,80 +248,99 @@ impl SqliteCatalogStore {
         self.startup_status.clone()
     }
 
-    pub fn seed_catalog_if_empty(&self, seed: &CatalogSeed) -> Result<(), ActivationStoreError> {
-        let mut connection = self.connection()?;
+    /// Read-only open for a verified Bound Home whose writable open failed
+    /// (permission, lock, transient I/O): the session continues read-only
+    /// with the gate in `CatalogReadOnly`. Never migrates or writes.
+    pub fn open_read_only(path: &Path) -> Result<Self, CatalogStoreOpenError> {
+        let connection = open_read_only(path)?;
+        let schema_version = detect_schema_version(path);
+        Ok(Self {
+            connection: Mutex::new(connection),
+            startup_status: StartupStatus {
+                access: StartupAccess::ReadOnly,
+                schema_version,
+                diagnostic: None,
+            },
+        })
+    }
+
+    /// Open the Catalog of a verified `BoundHome` for writing. Re-verifies
+    /// the recorded identity against the bound value object (spec §3.4:
+    /// `BoundCatalogStore` construction requires the four identity fields to
+    /// be present and matching). Refuses anything else; never migrates.
+    pub fn open_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
+        if !has_content(path) {
+            return Err(BoundCatalogOpenError::Missing);
+        }
+        let schema = detect_schema_version(path);
+        if schema != CURRENT_SCHEMA_VERSION {
+            return Err(BoundCatalogOpenError::SchemaNotBound { found: schema });
+        }
+        let connection = Connection::open(path).map_err(BoundCatalogOpenError::Open)?;
+        configure_connection(&connection).map_err(BoundCatalogOpenError::Configure)?;
+        let stored =
+            read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
+        if stored.home_id != bound.home_id
+            || stored.volume_fsid != bound.volume_fsid
+            || stored.volume_uuid != bound.volume_uuid
+        {
+            return Err(BoundCatalogOpenError::IdentityMismatch);
+        }
+        Ok(Self {
+            connection: Mutex::new(connection),
+            startup_status: StartupStatus {
+                access: StartupAccess::ReadWrite,
+                schema_version: CURRENT_SCHEMA_VERSION,
+                diagnostic: None,
+            },
+        })
+    }
+
+    /// Create a fresh v5 Catalog carrying `bound`'s identity. The primitive
+    /// behind the Home Binding flow (ticket #45) and the test Home helper;
+    /// refuses an existing file so it can never overwrite real data.
+    pub fn create_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
+        if has_content(path) {
+            return Err(BoundCatalogOpenError::AlreadyExists);
+        }
+        let mut connection = Connection::open(path).map_err(BoundCatalogOpenError::Open)?;
+        configure_connection(&connection).map_err(BoundCatalogOpenError::Configure)?;
+        migrate_to_current(&mut connection, 0).map_err(BoundCatalogOpenError::Migration)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_activation_error)?;
-        let skill_count: i64 = transaction
-            .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
-            .map_err(sqlite_activation_error)?;
-        if skill_count != 0 {
-            transaction.commit().map_err(sqlite_activation_error)?;
-            return Ok(());
-        }
-
-        for skill in &seed.skills {
-            let summary = &skill.summary;
-            let library_entry_path = if summary.source_kind == SourceKind::Link {
-                None
-            } else {
-                Some(skill.final_entity_path.as_str())
-            };
-            transaction
-                .execute(
-                    "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
-                        source_kind, library_entry_path, final_entity_path, health,
-                        created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-                    params![
-                        summary.id.0,
-                        summary.directory_name,
-                        skill_identity_key(&summary.directory_name),
-                        summary.display_name,
-                        summary.description,
-                        source_kind_value(summary.source_kind),
-                        library_entry_path,
-                        skill.final_entity_path,
-                        health_value(summary.health),
-                        skill.last_activity_at,
-                    ],
-                )
-                .map_err(sqlite_activation_error)?;
-        }
-        for agent in &seed.agents {
-            transaction
-                .execute(
-                    "INSERT INTO agents (
-                        id, name, kind, skills_path, path_identity_key, detected,
-                        compatibility, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                    params![
-                        agent.id.0,
-                        agent.name,
-                        agent_kind_value(agent.kind),
-                        agent.skills_path,
-                        agent.skills_path.to_lowercase(),
-                        agent.detected,
-                        compatibility_value(agent.compatibility),
-                        "1970-01-01T00:00:00Z",
-                    ],
-                )
-                .map_err(sqlite_activation_error)?;
-        }
-        let snapshot_version = i64::try_from(seed.snapshot_version).map_err(|_| {
-            ActivationStoreError::Unavailable(
-                "fixture snapshot version exceeds SQLite range".into(),
-            )
-        })?;
+            .map_err(BoundCatalogOpenError::WriteIdentity)?;
         transaction
             .execute(
-                "UPDATE catalog_meta SET snapshot_version = ?1 WHERE singleton = 1",
-                [snapshot_version],
+                "UPDATE catalog_meta
+                 SET home_id = ?1, volume_fsid = ?2, volume_uuid = ?3, home_bound_at = ?4
+                 WHERE singleton = 1",
+                params![
+                    bound.home_id.0,
+                    bound.volume_fsid,
+                    bound.volume_uuid,
+                    bound.bound_at,
+                ],
             )
-            .map_err(sqlite_activation_error)?;
-        transaction.commit().map_err(sqlite_activation_error)
+            .map_err(BoundCatalogOpenError::WriteIdentity)?;
+        transaction
+            .commit()
+            .map_err(BoundCatalogOpenError::WriteIdentity)?;
+        let stored =
+            read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
+        if stored.home_id != bound.home_id
+            || stored.volume_fsid != bound.volume_fsid
+            || stored.volume_uuid != bound.volume_uuid
+        {
+            return Err(BoundCatalogOpenError::IdentityMismatch);
+        }
+        Ok(Self {
+            connection: Mutex::new(connection),
+            startup_status: StartupStatus {
+                access: StartupAccess::ReadWrite,
+                schema_version: CURRENT_SCHEMA_VERSION,
+                diagnostic: None,
+            },
+        })
     }
 
     pub fn persisted_snapshot_version(&self) -> Result<u64, ActivationStoreError> {
@@ -2065,9 +2127,56 @@ fn migrate_to_current(
              UPDATE catalog_meta SET schema_version = 4 WHERE singleton = 1;",
         )?;
     }
+    if existing_schema_version == 4 {
+        // Schema v5: Home identity (spec §3.4). Exclusive to the Home
+        // Binding/Legacy transition; ordinary open() never reaches this.
+        transaction.execute_batch(
+            "ALTER TABLE catalog_meta ADD COLUMN home_id TEXT;
+             ALTER TABLE catalog_meta ADD COLUMN volume_fsid TEXT;
+             ALTER TABLE catalog_meta ADD COLUMN volume_uuid TEXT;
+             ALTER TABLE catalog_meta ADD COLUMN home_bound_at TEXT;
+             UPDATE catalog_meta SET schema_version = 5 WHERE singleton = 1;",
+        )?;
+    }
     transaction.commit()
 }
 
+/// Read the Home identity columns; `None` when missing, empty or invalid.
+fn read_catalog_identity(connection: &Connection) -> Option<CatalogHomeIdentity> {
+    let (home_id, volume_fsid, volume_uuid, home_bound_at): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT home_id, volume_fsid, volume_uuid, home_bound_at
+             FROM catalog_meta WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let home_id = HomeId::parse(&home_id?)?;
+    let volume_fsid = volume_fsid?;
+    let volume_uuid = volume_uuid?;
+    let home_bound_at = home_bound_at?;
+    if volume_fsid.is_empty() || volume_uuid.is_empty() || home_bound_at.is_empty() {
+        return None;
+    }
+    Some(CatalogHomeIdentity {
+        home_id,
+        volume_fsid,
+        volume_uuid,
+        home_bound_at,
+    })
+}
+
+/// Whole-file SQLite backup taken by the Home Binding/Legacy migration flow
+/// (ticket #45) before any pre-identity schema is migrated; covered by the
+/// unit tests in this module.
+#[allow(dead_code)]
 fn backup_catalog(path: &Path, schema_version: u32) -> Result<PathBuf, CatalogStoreOpenError> {
     let extension = format!("pre-migration-v{schema_version}.bak");
     let backup_path = path.with_extension(extension);
@@ -2087,10 +2196,6 @@ fn has_content(path: &Path) -> bool {
     path.metadata().is_ok_and(|metadata| metadata.len() > 0)
 }
 
-fn path_to_string(path: PathBuf) -> String {
-    path.to_string_lossy().into_owned()
-}
-
 fn sqlite_activation_error(error: rusqlite::Error) -> ActivationStoreError {
     ActivationStoreError::Unavailable(error.to_string())
 }
@@ -2105,14 +2210,6 @@ fn sqlite_import_error(error: rusqlite::Error) -> ImportStoreError {
 
 fn sqlite_maintenance_error(error: rusqlite::Error) -> MaintenanceStoreError {
     MaintenanceStoreError::Unavailable(error.to_string())
-}
-
-fn source_kind_value(value: SourceKind) -> &'static str {
-    match value {
-        SourceKind::Link => "link",
-        SourceKind::RemoteInstall => "remote_install",
-        SourceKind::FileInstall => "file_install",
-    }
 }
 
 fn parse_source_kind(value: &str) -> rusqlite::Result<SourceKind> {
@@ -2141,27 +2238,12 @@ fn parse_health(value: &str) -> rusqlite::Result<Health> {
     }
 }
 
-fn agent_kind_value(value: AgentKind) -> &'static str {
-    match value {
-        AgentKind::ClaudePreset => "claude_preset",
-        AgentKind::CodexPreset => "codex_preset",
-        AgentKind::Custom => "custom",
-    }
-}
-
 fn parse_agent_kind(value: &str) -> rusqlite::Result<AgentKind> {
     match value {
         "claude_preset" => Ok(AgentKind::ClaudePreset),
         "codex_preset" => Ok(AgentKind::CodexPreset),
         "custom" => Ok(AgentKind::Custom),
         value => Err(invalid_enum_value(3, value)),
-    }
-}
-
-fn compatibility_value(value: Compatibility) -> &'static str {
-    match value {
-        Compatibility::Verified => "verified",
-        Compatibility::Unknown => "unknown",
     }
 }
 
@@ -2212,4 +2294,190 @@ fn unix_timestamp() -> String {
 
 fn sqlite_adopt_error(error: rusqlite::Error) -> AdoptStoreError {
     AdoptStoreError::Unavailable(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::home::BoundHome;
+    use crate::seams::catalog_probe::CatalogProbe;
+
+    fn bound_home() -> BoundHome {
+        BoundHome::test_value(
+            "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+            PathBuf::from("/tmp/skill-man-home"),
+        )
+    }
+
+    #[test]
+    fn fresh_open_creates_v5_without_identity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let store = SqliteCatalogStore::open(&path).expect("fresh open");
+        let status = store.startup_status();
+        assert_eq!(status.access, StartupAccess::ReadWrite);
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(status.diagnostic.is_none());
+        let identity = read_catalog_identity(&store.connection().expect("catalog connection"));
+        assert!(identity.is_none(), "fresh Catalog has no Home identity");
+    }
+
+    #[test]
+    fn v4_catalog_opens_read_only_with_migration_required() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            let connection = Connection::open(&path).expect("create v4 catalog");
+            connection
+                .execute_batch(
+                    "CREATE TABLE catalog_meta (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        schema_version INTEGER NOT NULL,
+                        snapshot_version INTEGER NOT NULL DEFAULT 0,
+                        first_run_completed_at TEXT,
+                        last_startup_check_at TEXT
+                     );
+                     INSERT INTO catalog_meta (singleton, schema_version) VALUES (1, 4);",
+                )
+                .expect("seed v4 header");
+        }
+        let store = SqliteCatalogStore::open(&path).expect("open v4 read-only");
+        let status = store.startup_status();
+        assert_eq!(status.access, StartupAccess::ReadOnly);
+        assert_eq!(status.schema_version, 4);
+        assert_eq!(
+            status.diagnostic.expect("diagnostic").code,
+            StartupDiagnosticCode::MigrationRequired
+        );
+        // Ordinary open must not migrate or back up the v4 file.
+        assert!(!path.with_extension("pre-migration-v4.bak").exists());
+    }
+
+    #[test]
+    fn migrate_v4_to_v5_preserves_rows_and_adds_identity_columns() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            let connection = Connection::open(&path).expect("create v4 catalog");
+            connection
+                .execute_batch(
+                    "CREATE TABLE catalog_meta (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        schema_version INTEGER NOT NULL,
+                        snapshot_version INTEGER NOT NULL DEFAULT 0,
+                        first_run_completed_at TEXT,
+                        last_startup_check_at TEXT
+                     );
+                     INSERT INTO catalog_meta (singleton, schema_version, first_run_completed_at)
+                     VALUES (1, 4, '2026-08-01T00:00:00Z');",
+                )
+                .expect("seed v4 header");
+        }
+        let mut connection = Connection::open(&path).expect("reopen");
+        migrate_to_current(&mut connection, 4).expect("v4 → v5 migration");
+        let schema: u32 = connection
+            .query_row(
+                "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version");
+        assert_eq!(schema, 5);
+        let first_run: Option<String> = connection
+            .query_row(
+                "SELECT first_run_completed_at FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("first run flag preserved");
+        assert_eq!(first_run.as_deref(), Some("2026-08-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn create_bound_and_open_bound_roundtrip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let bound = bound_home();
+        SqliteCatalogStore::create_bound(&bound, &path).expect("create bound Catalog");
+
+        let opened = SqliteCatalogStore::open_bound(&bound, &path).expect("reopen bound Catalog");
+        assert_eq!(opened.startup_status().access, StartupAccess::ReadWrite);
+        assert_eq!(opened.startup_status().schema_version, 5);
+
+        let probe = crate::adapters::catalog_probe::SqliteCatalogProbe::new();
+        let report = probe.probe(&path).expect("read-only probe");
+        assert!(report.exists);
+        assert_eq!(report.schema_version, Some(5));
+        assert!(report.integrity_ok);
+        assert!(report.foreign_keys_ok);
+        let identity = report.home_identity.expect("recorded identity");
+        assert_eq!(identity.home_id, bound.home_id);
+        assert_eq!(identity.volume_fsid, bound.volume_fsid);
+        assert_eq!(identity.volume_uuid, bound.volume_uuid);
+    }
+
+    #[test]
+    fn open_bound_rejects_missing_schema_and_identity_mismatch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bound = bound_home();
+
+        // Missing file.
+        let missing = dir.path().join("missing.sqlite3");
+        assert!(matches!(
+            SqliteCatalogStore::open_bound(&bound, &missing),
+            Err(BoundCatalogOpenError::Missing)
+        ));
+
+        // Fresh v5 without identity.
+        let fresh = dir.path().join("fresh.sqlite3");
+        SqliteCatalogStore::open(&fresh).expect("fresh open");
+        assert!(matches!(
+            SqliteCatalogStore::open_bound(&bound, &fresh),
+            Err(BoundCatalogOpenError::IdentityMissing)
+        ));
+
+        // Bound to a different Home.
+        let other = BoundHome::test_value(
+            "c1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+            PathBuf::from("/tmp/other-home"),
+        );
+        let path = dir.path().join("other.sqlite3");
+        SqliteCatalogStore::create_bound(&other, &path).expect("create other bound Catalog");
+        assert!(matches!(
+            SqliteCatalogStore::open_bound(&bound, &path),
+            Err(BoundCatalogOpenError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn create_bound_refuses_an_existing_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        SqliteCatalogStore::open(&path).expect("fresh open");
+        assert!(matches!(
+            SqliteCatalogStore::create_bound(&bound_home(), &path),
+            Err(BoundCatalogOpenError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn backup_catalog_produces_a_restorable_copy() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        SqliteCatalogStore::open(&path).expect("fresh open");
+        let backup = backup_catalog(&path, 4).expect("backup copy");
+        let source = Connection::open(&path).expect("source");
+        let mut destination = Connection::open(&backup).expect("backup connection");
+        rusqlite::backup::Backup::new(&source, &mut destination)
+            .and_then(|backup| backup.run_to_completion(128, Duration::from_millis(10), None))
+            .expect("restore backup");
+        let schema: u32 = destination
+            .query_row(
+                "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version");
+        assert_eq!(schema, CURRENT_SCHEMA_VERSION);
+    }
 }

@@ -1,4 +1,7 @@
 pub mod agent_adapters;
+pub mod app_state_store;
+pub mod catalog_probe;
+pub mod closed_catalog;
 pub mod fixture_catalog;
 pub mod git_source;
 pub mod local_file_source;
@@ -7,4 +10,5 @@ pub mod runtime_catalog;
 pub mod sqlite;
 pub mod system_clock;
 pub mod tauri_app_updater;
+pub mod volume_identity;
 pub mod zip_extract;

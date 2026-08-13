@@ -133,6 +133,18 @@ export function createFixtureCatalogClient(): CatalogClient {
   }
 
   return {
+    async getBootstrapSnapshot() {
+      return {
+        state: "bound",
+        homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+        catalogAccess: "read_write",
+        catalogReadonlyReason: null,
+        snapshotVersion,
+      };
+    },
+    async listenBootstrapChanged() {
+      return () => {};
+    },
     async listSkills(filter) {
       return {
         snapshotVersion,

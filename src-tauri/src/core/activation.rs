@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::core::domain::{
     ActivationObservedState, AgentId, AgentKind, SkillId, parse_skill_metadata, skill_identity_key,
 };
+use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
 use crate::seams::activation_store::{
     ActivationObservation, ActivationRecord, ActivationStore, ActivationStoreError,
 };
@@ -20,7 +21,6 @@ use crate::seams::filesystem::{
     ActivationEntrySnapshot, ActivationReplaceJournal, ActivationReplacePhase,
     DirectoryFingerprint, FileSystem, FileSystemError, OccupantKind, OccupantSnapshot,
 };
-use crate::seams::recovery::RecoveryGate;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -135,6 +135,7 @@ struct PlannedActivation {
     entry_path: PathBuf,
     target_path: PathBuf,
     initial_entry: ActivationEntrySnapshot,
+    gate_generation: u64,
     created_at: Instant,
 }
 
@@ -155,6 +156,7 @@ struct PlannedReplacement {
     agent_fingerprint: DirectoryFingerprint,
     library_fingerprint: DirectoryFingerprint,
     target_fingerprint: DirectoryFingerprint,
+    gate_generation: u64,
     created_at: Instant,
 }
 
@@ -176,7 +178,7 @@ pub struct ActivationService {
     applied_replacements: Mutex<HashMap<String, AppliedReplacement>>,
     next_plan_id: AtomicU64,
     plan_ttl: Duration,
-    recovery_gate: Arc<RecoveryGate>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl ActivationService {
@@ -196,7 +198,7 @@ impl ActivationService {
             applied_replacements: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            recovery_gate: Arc::new(RecoveryGate::ready()),
+            write_gate: Arc::new(WriteGate::open_for_tests()),
         }
     }
 
@@ -215,8 +217,8 @@ impl ActivationService {
         self
     }
 
-    pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
-        self.recovery_gate = recovery_gate;
+    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
+        self.write_gate = write_gate;
         self
     }
 
@@ -394,6 +396,7 @@ impl ActivationService {
                 entry_path: entry_path.clone(),
                 target_path: target_path.clone(),
                 initial_entry,
+                gate_generation: self.write_gate.generation(),
                 created_at: Instant::now(),
             },
         );
@@ -422,6 +425,12 @@ impl ActivationService {
         let plan = plans
             .remove(plan_token)
             .ok_or(ActivationError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ActivationError::PlanStale);
+        }
         drop(plans);
         let current_context = self
             .store
@@ -729,6 +738,7 @@ impl ActivationService {
                 agent_fingerprint,
                 library_fingerprint,
                 target_fingerprint,
+                gate_generation: self.write_gate.generation(),
                 created_at,
             },
         );
@@ -761,6 +771,12 @@ impl ActivationService {
         let plan = plans
             .remove(plan_token)
             .ok_or(ActivationError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ActivationError::PlanStale);
+        }
         drop(plans);
         let context = self
             .store
@@ -1088,7 +1104,7 @@ impl ActivationService {
     }
 
     fn ensure_writes_ready(&self) -> Result<(), ActivationError> {
-        if self.recovery_gate.writes_are_ready() {
+        if self.write_gate.is_product_write_open() {
             Ok(())
         } else {
             Err(ActivationError::RecoveryInProgress)

@@ -11,6 +11,9 @@ pub enum StartupAccess {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupDiagnosticCode {
     MigrationFailed,
+    /// The Catalog predates Home identity; only the Home Binding/Legacy flow
+    /// may migrate it (spec §3.4).
+    MigrationRequired,
     UnsupportedSchema,
 }
 

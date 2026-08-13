@@ -9,20 +9,21 @@ use std::process::Command;
 use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SourceKind};
 use skill_man_lib::core::import::{ImportError, ImportService};
 use skill_man_lib::core::update::{UpdateApplyRequest, UpdateSelection, UpdateService};
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::import_store::ImportStore;
-use skill_man_lib::seams::recovery::RecoveryGate;
+
+mod common;
+use common::BoundTestHome;
 
 fn git(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -76,7 +77,7 @@ fn file_url(path: &Path) -> String {
 }
 
 struct Harness {
-    home: tempfile::TempDir,
+    home: BoundTestHome,
     library_root: PathBuf,
     cache_root: PathBuf,
     runtime: Arc<RuntimeCatalogStore>,
@@ -85,23 +86,11 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let home = tempfile::tempdir().expect("temporary home");
-        let library_root = home.path().join("Library/Application Support/skill-man");
-        let fixture = Arc::new(
-            FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"),
-        );
-        let sqlite = Arc::new(
-            SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-        );
-        sqlite
-            .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-            .expect("seed catalog");
-        let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-        let runtime = Arc::new(RuntimeCatalogStore::new(
-            fixture,
-            sqlite,
-            filesystem.clone(),
-        ));
+        let home = BoundTestHome::new();
+        home.seed_standard_library();
+        let library_root = home.library_root.clone();
+        let filesystem = home.filesystem.clone();
+        let runtime = home.runtime.clone();
         let cache_root = library_root.join("cache");
         Self {
             home,
@@ -132,7 +121,7 @@ impl Harness {
             Arc::new(SystemGitSource::new()),
             self.library_root.clone(),
             self.cache_root.clone(),
-            Arc::new(RecoveryGate::ready()),
+            Arc::new(WriteGate::open_for_tests()),
         )
     }
 

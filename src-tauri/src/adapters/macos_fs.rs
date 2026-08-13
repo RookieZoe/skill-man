@@ -604,6 +604,38 @@ impl FileSystem for MacOsFileSystem {
         read_skill_document_at(path)
     }
 
+    fn read_utf8_file(&self, path: &Path) -> Result<Option<String>, FileSystemError> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "read UTF-8 file",
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn write_utf8_file(&self, path: &Path, content: &str) -> Result<(), FileSystemError> {
+        std::fs::write(path, content).map_err(|source| FileSystemError::Io {
+            operation: "write UTF-8 file",
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn path_is_directory(&self, path: &Path) -> Result<bool, FileSystemError> {
+        match std::fs::metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "inspect directory existence",
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
     fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
         tree_hash_at(path)
     }

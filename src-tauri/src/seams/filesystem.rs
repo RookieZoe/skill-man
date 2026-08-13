@@ -1027,4 +1027,49 @@ pub trait FileSystem: Send + Sync {
             ),
         })
     }
+
+    /// Read a UTF-8 text file; `Ok(None)` when the file does not exist. Used
+    /// by the bootstrap authority for the Home marker (spec §3.3) so a
+    /// missing marker is a closed mismatch, not an I/O crash.
+    fn read_utf8_file(&self, path: &Path) -> Result<Option<String>, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "read UTF-8 file",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "UTF-8 file reads are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Write a UTF-8 text file; the parent directory must already exist.
+    /// Test composition writes Home markers through this seam so core stays
+    /// free of direct filesystem access (capability boundary).
+    fn write_utf8_file(&self, path: &Path, content: &str) -> Result<(), FileSystemError> {
+        let _ = (path, content);
+        Err(FileSystemError::Io {
+            operation: "write UTF-8 file",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "UTF-8 file writes are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Whether `path` is an existing directory; `Ok(false)` when it does not
+    /// exist or is not a directory. Used by bootstrap for the read-only
+    /// Legacy detection check (spec §3.3).
+    fn path_is_directory(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "inspect directory existence",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory existence checks are not supported by this filesystem",
+            ),
+        })
+    }
 }

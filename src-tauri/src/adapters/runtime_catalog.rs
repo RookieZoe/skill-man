@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::adapters::fixture_catalog::FixtureCatalogStore;
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::domain::{
     AgentActivation, AgentId, CatalogFilter, Health, SkillDetail, SkillId, SkillSummary,
@@ -28,22 +27,13 @@ use crate::seams::maintenance_store::{
 };
 
 pub struct RuntimeCatalogStore {
-    fixture: Arc<FixtureCatalogStore>,
     sqlite: Arc<SqliteCatalogStore>,
     filesystem: Arc<dyn FileSystem>,
 }
 
 impl RuntimeCatalogStore {
-    pub fn new(
-        fixture: Arc<FixtureCatalogStore>,
-        sqlite: Arc<SqliteCatalogStore>,
-        filesystem: Arc<dyn FileSystem>,
-    ) -> Self {
-        Self {
-            fixture,
-            sqlite,
-            filesystem,
-        }
+    pub fn new(sqlite: Arc<SqliteCatalogStore>, filesystem: Arc<dyn FileSystem>) -> Self {
+        Self { sqlite, filesystem }
     }
 
     fn is_writable(&self) -> bool {
@@ -53,32 +43,17 @@ impl RuntimeCatalogStore {
 
 impl CatalogStore for RuntimeCatalogStore {
     fn snapshot_version(&self) -> u64 {
-        if !self.is_writable() {
-            return self.fixture.snapshot_version();
-        }
-        self.sqlite
-            .persisted_snapshot_version()
-            .unwrap_or_else(|_| self.fixture.snapshot_version())
+        self.sqlite.persisted_snapshot_version().unwrap_or(0)
     }
 
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError> {
-        if !self.is_writable() {
-            return self.fixture.list(filter);
-        }
         self.sqlite.list_skill_summaries(filter)
     }
 
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
-        if !self.is_writable() {
-            return self.fixture.inspect(skill_id);
-        }
         let Some(persisted) = self.sqlite.persisted_skill_detail(skill_id)? else {
             return Ok(None);
         };
-        if let Some(mut detail) = self.fixture.inspect(skill_id)? {
-            detail.summary = persisted.summary;
-            return Ok(Some(detail));
-        }
         let skill_markdown = match self
             .filesystem
             .read_skill_document(&persisted.final_entity_path)
@@ -118,9 +93,6 @@ impl CatalogStore for RuntimeCatalogStore {
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError> {
-        if !self.is_writable() {
-            return self.fixture.list_agents(skill_id);
-        }
         self.sqlite.list_agent_activations(skill_id)
     }
 

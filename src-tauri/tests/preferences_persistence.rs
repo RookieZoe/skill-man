@@ -2,13 +2,10 @@
 //! tray's recently-enabled query (spec §9.4): persistence, defaults, the
 //! schema v3→v4 migration, ordering, and the pure tray label formatting.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::Connection;
 
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
-use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::core::domain::Health;
@@ -18,24 +15,18 @@ use skill_man_lib::seams::catalog_store::CatalogStore;
 use skill_man_lib::seams::preferences_store::{AppPreferences, PreferenceUpdates};
 use skill_man_lib::tauri_adapter::tray::tray_skill_label;
 
-fn runtime(home: &Path) -> Arc<RuntimeCatalogStore> {
-    let library_root = home.join("Library/Application Support/skill-man");
-    let database_path = library_root.join("skill-man.sqlite3");
-    std::fs::create_dir_all(&library_root).expect("create Library root");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize runtime fixture"));
-    let sqlite = Arc::new(SqliteCatalogStore::open(&database_path).expect("open SQLite"));
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog metadata");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.to_path_buf()));
-    Arc::new(RuntimeCatalogStore::new(fixture, sqlite, filesystem))
+mod common;
+use common::BoundTestHome;
+
+fn runtime(home: &BoundTestHome) -> Arc<RuntimeCatalogStore> {
+    home.runtime.clone()
 }
 
 #[test]
 fn preferences_defaults_match_the_spec_and_partial_updates_persist() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let runtime = runtime(home.path());
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let runtime = runtime(&home);
     let service = PreferencesService::new(runtime.clone());
 
     let defaults = service.load().expect("load Preferences");
@@ -71,9 +62,10 @@ fn preferences_defaults_match_the_spec_and_partial_updates_persist() {
 
 #[test]
 fn first_run_flag_flips_after_onboarding_completes() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let runtime = runtime(home.path());
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let runtime = runtime(&home);
+    let filesystem = home.filesystem.clone();
     let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem);
 
     let info = startup.startup_info().expect("startup info");
@@ -98,11 +90,10 @@ fn first_run_flag_flips_after_onboarding_completes() {
 
 #[test]
 fn recently_enabled_orders_by_last_enable_and_limits() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let runtime = runtime(home.path());
-    let database_path = home
-        .path()
-        .join("Library/Application Support/skill-man/skill-man.sqlite3");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let runtime = runtime(&home);
+    let database_path = home.catalog_path();
 
     // Seed Activations with distinct enable times directly (epoch seconds).
     let connection = Connection::open(&database_path).expect("open SQLite for seeding");
@@ -201,9 +192,10 @@ fn tray_labels_show_agent_counts_and_health_suffixes() {
 
 #[test]
 fn create_agent_directory_only_creates_known_missing_presets() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let runtime = runtime(home.path());
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let runtime = runtime(&home);
+    let filesystem = home.filesystem.clone();
     let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem);
 
     // An unknown Agent is rejected.
@@ -227,9 +219,7 @@ fn create_agent_directory_only_creates_known_missing_presets() {
     // A configured preset with a missing directory is created on request.
     let missing_skills_path = home.path().join(".custom-tools/skills");
     {
-        let database_path = home
-            .path()
-            .join("Library/Application Support/skill-man/skill-man.sqlite3");
+        let database_path = home.catalog_path();
         let connection = Connection::open(&database_path).expect("open SQLite");
         connection
             .execute(
@@ -287,31 +277,43 @@ fn create_agent_directory_only_creates_known_missing_presets() {
 }
 
 #[test]
-fn schema_v3_catalogs_migrate_to_v4_with_first_run_state() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    std::fs::create_dir_all(&library_root).expect("create Library root");
-    let database_path = library_root.join("skill-man.sqlite3");
-    let connection = Connection::open(&database_path).expect("create v3 catalog");
+fn pre_identity_catalogs_open_read_only_with_migration_required() {
+    let dir = tempfile::tempdir().expect("temporary home");
+    let database_path = dir
+        .path()
+        .join("Library/Application Support/skill-man.sqlite3");
+    std::fs::create_dir_all(database_path.parent().expect("parent directory"))
+        .expect("create parent directory");
+    let connection = Connection::open(&database_path).expect("create v4 catalog");
     connection
         .execute_batch(
             "CREATE TABLE catalog_meta (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 schema_version INTEGER NOT NULL,
                 snapshot_version INTEGER NOT NULL DEFAULT 0,
+                first_run_completed_at TEXT,
                 last_startup_check_at TEXT
              );
              INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-             VALUES (1, 3, 0);",
+             VALUES (1, 4, 0);",
         )
-        .expect("write v3 schema");
+        .expect("write v4 schema");
     drop(connection);
 
-    let sqlite = SqliteCatalogStore::open(&database_path).expect("open and migrate SQLite");
-    assert_eq!(sqlite.startup_status().schema_version, 4);
+    // Ordinary open() must not migrate pre-identity schemas (spec §3.4).
+    let sqlite = SqliteCatalogStore::open(&database_path).expect("open read-only");
+    let status = sqlite.startup_status();
+    assert_eq!(
+        status.access,
+        skill_man_lib::seams::catalog_store::StartupAccess::ReadOnly
+    );
+    assert_eq!(
+        status.diagnostic.expect("diagnostic").code,
+        skill_man_lib::seams::catalog_store::StartupDiagnosticCode::MigrationRequired
+    );
     assert_eq!(
         sqlite.first_run_completed_at().expect("first-run flag"),
         None,
-        "a migrated catalog has not completed onboarding"
+        "a read-only probe does not expose onboarding state"
     );
 }

@@ -1,23 +1,20 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use skill_man_lib::adapters::fixture_catalog::FixtureCatalogStore;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
-use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::ActivationService;
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
+use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
 use skill_man_lib::seams::filesystem::{
     ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceStep, AdoptJournal,
     DirectoryFingerprint, FileImportJournal, FileImportJournalItem, FileImportJournalPhase,
     FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceSnapshot,
     ScannedSkillEntry, SkillFingerprint, StagedTreeSnapshot,
 };
-use skill_man_lib::seams::recovery::RecoveryGate;
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{
@@ -32,10 +29,14 @@ use skill_man_lib::tauri_adapter::import_api::ImportApi;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
+mod common;
+use common::BoundTestHome;
+
 #[test]
 fn folder_file_import_installs_a_snapshot_at_the_stable_library_path() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/file-authoring");
     std::fs::create_dir_all(source.join("references")).expect("create file source");
     std::fs::write(
@@ -46,20 +47,8 @@ fn folder_file_import_installs_a_snapshot_at_the_stable_library_path() {
     std::fs::write(source.join("references/guide.md"), "# Original guide\n")
         .expect("write nested file");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem,
@@ -137,8 +126,9 @@ fn folder_file_import_installs_a_snapshot_at_the_stable_library_path() {
 
 #[test]
 fn zip_file_import_extracts_and_installs_a_single_skill_snapshot() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/zip-authoring.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -163,20 +153,8 @@ fn zip_file_import_extracts_and_installs_a_single_skill_snapshot() {
         .expect("write nested entry");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem,
@@ -219,8 +197,9 @@ fn zip_file_import_extracts_and_installs_a_single_skill_snapshot() {
 
 #[test]
 fn zip_file_import_rejects_parent_path_traversal_without_leaving_staging() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/traversal.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -239,20 +218,8 @@ fn zip_file_import_rejects_parent_path_traversal_without_leaving_staging() {
         .expect("write valid Skill entry");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -276,8 +243,9 @@ fn zip_file_import_rejects_parent_path_traversal_without_leaving_staging() {
 
 #[test]
 fn zip_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skill() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/safe-symlink.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -306,20 +274,8 @@ fn zip_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skill()
         .expect("add relative symlink");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -358,8 +314,9 @@ fn zip_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skill()
 
 #[test]
 fn folder_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skill() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/folder-symlink");
     std::fs::create_dir_all(source.join("references")).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# Folder symlink\n").expect("write SKILL.md");
@@ -368,20 +325,8 @@ fn folder_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skil
     std::os::unix::fs::symlink("guide.md", source.join("references/latest.md"))
         .expect("create safe source symlink");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -417,8 +362,9 @@ fn folder_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skil
 #[cfg(unix)]
 #[test]
 fn folder_file_import_accepts_a_contained_relative_skill_document_symlink() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/symlinked-skill-document");
     std::fs::create_dir_all(source.join("docs")).expect("create file source");
     std::fs::write(
@@ -429,7 +375,7 @@ fn folder_file_import_accepts_a_contained_relative_skill_document_symlink() {
     std::os::unix::fs::symlink("docs/actual-skill.md", source.join("SKILL.md"))
         .expect("create contained SKILL.md symlink");
 
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let preview = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -454,17 +400,8 @@ fn folder_file_import_accepts_a_contained_relative_skill_document_symlink() {
         "---\nname: symlinked-skill-document\ndescription: Contained document.\n---\n"
     );
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("reopen SQLite"),
-    );
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.reopen();
     HealthApi::new(MaintenanceService::new(runtime.clone(), filesystem).begin_startup())
         .run_activation_health_check()
         .expect("health scan accepts contained SKILL.md symlink");
@@ -479,9 +416,10 @@ fn folder_file_import_accepts_a_contained_relative_skill_document_symlink() {
 
 #[test]
 fn a_missing_local_file_source_is_reported_as_source_unavailable() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    let import = file_import_api(home.path(), &library_root);
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let _library_root = home.library_root.clone();
+    let import = file_import_api(&home);
 
     let error = import
         .discover_file_import(DiscoverFileImportRequestDto {
@@ -498,15 +436,16 @@ fn a_missing_local_file_source_is_reported_as_source_unavailable() {
 
 #[test]
 fn folder_file_import_rejects_a_lexically_collapsed_but_dangling_symlink() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let _library_root = home.library_root.clone();
     let source = home.path().join("Downloads/dangling-components");
     std::fs::create_dir_all(&source).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# Dangling components\n").expect("write SKILL.md");
     std::os::unix::fs::symlink("missing/../SKILL.md", source.join("bad-link.md"))
         .expect("create POSIX-dangling symlink");
 
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let error = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -517,8 +456,9 @@ fn folder_file_import_rejects_a_lexically_collapsed_but_dangling_symlink() {
 
 #[test]
 fn zip_file_import_rejects_an_absolute_archive_path() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/absolute-path.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -531,20 +471,8 @@ fn zip_file_import_rejects_an_absolute_archive_path() {
         .expect("write absolute entry");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -564,8 +492,9 @@ fn zip_file_import_rejects_an_absolute_archive_path() {
 
 #[test]
 fn zip_file_import_rejects_a_symlink_that_resolves_outside_the_skill() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/escaping-symlink.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -591,20 +520,8 @@ fn zip_file_import_rejects_a_symlink_that_resolves_outside_the_skill() {
         .expect("add escaping symlink");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -624,8 +541,9 @@ fn zip_file_import_rejects_a_symlink_that_resolves_outside_the_skill() {
 
 #[test]
 fn zip_file_import_uses_the_archive_stem_for_a_skill_at_the_archive_root() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/root-skill.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -644,20 +562,8 @@ fn zip_file_import_uses_the_archive_stem_for_a_skill_at_the_archive_root() {
         .expect("write root nested file");
     writer.finish().expect("finish ZIP archive");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -686,27 +592,16 @@ fn zip_file_import_uses_the_archive_stem_for_a_skill_at_the_archive_root() {
 
 #[test]
 fn health_check_marks_a_file_install_modified_when_its_entity_changes() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/hash-baseline");
     std::fs::create_dir_all(source.join("references")).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# Hash baseline\n").expect("write SKILL.md");
     std::fs::write(source.join("references/guide.md"), "before\n").expect("write baseline content");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -755,8 +650,9 @@ fn health_check_marks_a_file_install_modified_when_its_entity_changes() {
 
 #[test]
 fn folder_file_import_rejects_missing_skill_invalid_identity_and_oversized_files() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let downloads = home.path().join("Downloads");
     let missing_document = downloads.join("missing-document");
     std::fs::create_dir_all(&missing_document).expect("create source without SKILL.md");
@@ -774,20 +670,8 @@ fn folder_file_import_rejects_missing_skill_invalid_identity_and_oversized_files
         .set_len(32 * 1024 * 1024 + 1)
         .expect("size oversized sparse file");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -812,26 +696,15 @@ fn folder_file_import_rejects_missing_skill_invalid_identity_and_oversized_files
 
 #[test]
 fn file_import_apply_reports_plan_stale_when_the_stable_path_becomes_occupied() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/raced-skill");
     std::fs::create_dir_all(&source).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# Raced Skill\n").expect("write SKILL.md");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -869,8 +742,9 @@ fn file_import_apply_reports_plan_stale_when_the_stable_path_becomes_occupied() 
 
 #[test]
 fn zip_file_import_rejects_any_parent_component_even_when_the_path_stays_enclosed() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let _library_root = home.library_root.clone();
     let archive = home.path().join("Downloads/internal-parent.zip");
     std::fs::create_dir_all(archive.parent().unwrap()).expect("create Downloads");
     let archive_file = std::fs::File::create(&archive).expect("create ZIP archive");
@@ -886,7 +760,7 @@ fn zip_file_import_rejects_any_parent_component_even_when_the_path_stays_enclose
         .expect("write entry");
     writer.finish().expect("finish ZIP archive");
 
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let error = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: archive.to_string_lossy().into_owned(),
@@ -897,28 +771,17 @@ fn zip_file_import_rejects_any_parent_component_even_when_the_path_stays_enclose
 
 #[test]
 fn tree_hash_framing_detects_a_file_boundary_collision_as_modified() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/hash-framing");
     std::fs::create_dir_all(&source).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# Hash framing\n").expect("write SKILL.md");
     std::fs::write(source.join("a"), b"X").expect("write first file");
     std::fs::write(source.join("b"), b"Y").expect("write second file");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -963,8 +826,9 @@ fn tree_hash_framing_detects_a_file_boundary_collision_as_modified() {
 
 #[test]
 fn file_import_collection_uses_two_stage_discovery_and_installs_a_multi_selection() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let collection = home.path().join("Downloads/collection");
     for name in ["alpha", "beta"] {
         let skill = collection.join("skills").join(name);
@@ -984,7 +848,7 @@ fn file_import_collection_uses_two_stage_discovery_and_installs_a_multi_selectio
     std::fs::write(collection.join("deep/ignored/SKILL.md"), "# ignored\n")
         .expect("write deep candidate that standard discovery must ignore");
 
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let discovery = import
         .discover_file_import_collection(DiscoverFileImportCollectionRequestDto {
             source_path: collection.to_string_lossy().into_owned(),
@@ -1023,8 +887,9 @@ fn file_import_collection_uses_two_stage_discovery_and_installs_a_multi_selectio
 fn file_import_selection_validates_only_the_selected_candidates() {
     use std::os::unix::fs::symlink;
 
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let collection = home.path().join("Downloads/independent-validation");
     let good = collection.join("skills/good-candidate");
     let bad = collection.join("skills/bad-candidate");
@@ -1034,7 +899,7 @@ fn file_import_selection_validates_only_the_selected_candidates() {
     std::fs::write(bad.join("SKILL.md"), "# Bad candidate\n").expect("write bad candidate");
     symlink("../../outside", bad.join("escape")).expect("create invalid unselected symlink");
 
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let preview = import
         .plan_file_import_selection(PlanFileImportSelectionRequestDto {
             source_path: collection.to_string_lossy().into_owned(),
@@ -1058,8 +923,9 @@ fn file_import_selection_validates_only_the_selected_candidates() {
 
 #[test]
 fn file_import_collection_falls_back_to_recursive_discovery_and_reports_truncation() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let _library_root = home.library_root.clone();
     let recursive = home.path().join("Downloads/recursive-collection");
     std::fs::create_dir_all(recursive.join("packages/deep-skill"))
         .expect("create recursive candidate");
@@ -1068,7 +934,7 @@ fn file_import_collection_falls_back_to_recursive_discovery_and_reports_truncati
         "# Deep Skill\n",
     )
     .expect("write recursive candidate");
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let discovery = import
         .discover_file_import_collection(DiscoverFileImportCollectionRequestDto {
             source_path: recursive.to_string_lossy().into_owned(),
@@ -1097,15 +963,16 @@ fn file_import_collection_falls_back_to_recursive_discovery_and_reports_truncati
 
 #[test]
 fn cancelling_a_multi_selection_cleans_its_staging_and_operation_journal() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let collection = home.path().join("Downloads/cancel-collection");
     for name in ["cancel-alpha", "cancel-beta"] {
         let skill = collection.join("skills").join(name);
         std::fs::create_dir_all(&skill).expect("create candidate");
         std::fs::write(skill.join("SKILL.md"), "# Candidate\n").expect("write candidate");
     }
-    let import = file_import_api(home.path(), &library_root);
+    let import = file_import_api(&home);
     let preview = import
         .plan_file_import_selection(PlanFileImportSelectionRequestDto {
             source_path: collection.to_string_lossy().into_owned(),
@@ -1131,8 +998,9 @@ fn cancelling_a_multi_selection_cleans_its_staging_and_operation_journal() {
 
 #[test]
 fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/reinstallable");
     let claude_root = home.path().join(".claude/skills");
     std::fs::create_dir_all(&source).expect("create reinstall source");
@@ -1140,20 +1008,8 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
     std::fs::write(source.join("SKILL.md"), "# Reinstallable\n\nversion one\n")
         .expect("write initial source");
 
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -1257,22 +1113,11 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
 
 #[test]
 fn startup_maintenance_rolls_back_an_uncommitted_file_import_journal() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
 
     let operation_id = "file-import-crash-fixture";
     let final_entity_path = library_root.join("skills/crash-fixture");
@@ -1325,25 +1170,14 @@ fn startup_maintenance_rolls_back_an_uncommitted_file_import_journal() {
 
 #[test]
 fn startup_recovery_idempotently_finishes_an_already_rolled_back_reinstall() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/idempotent-reinstall");
     std::fs::create_dir_all(&source).expect("create source");
     std::fs::write(source.join("SKILL.md"), "# Original entity\n").expect("write source");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -1426,25 +1260,14 @@ fn startup_recovery_idempotently_finishes_an_already_rolled_back_reinstall() {
 
 #[test]
 fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/stale-reinstall-recovery");
     std::fs::create_dir_all(&source).expect("create source");
     std::fs::write(source.join("SKILL.md"), "# Original\n").expect("write source");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime.clone(),
         filesystem.clone(),
@@ -1495,25 +1318,14 @@ fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed
 
 #[test]
 fn startup_recovery_removes_staging_left_before_a_journal_was_durable() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let orphan = library_root.join("staging/file-import-pre-journal-crash");
     std::fs::create_dir_all(&orphan).expect("create orphaned staging");
     std::fs::write(orphan.join("partial"), "partial copy").expect("write partial staging");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
 
     HealthApi::new(
         MaintenanceService::new(runtime, filesystem)
@@ -1528,8 +1340,9 @@ fn startup_recovery_removes_staging_left_before_a_journal_was_durable() {
 #[cfg(unix)]
 #[test]
 fn startup_recovery_never_follows_a_symlinked_staging_root() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let victim = home.path().join("must-not-delete");
     std::fs::create_dir_all(victim.join("valuable-directory")).expect("create victim tree");
     std::fs::write(victim.join("valuable-directory/important.txt"), "keep me")
@@ -1552,27 +1365,16 @@ fn startup_recovery_never_follows_a_symlinked_staging_root() {
 
 #[test]
 fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/no-space");
     std::fs::create_dir_all(&source).expect("create file source");
     std::fs::write(source.join("SKILL.md"), "# No space\n").expect("write SKILL.md");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
     let filesystem = Arc::new(LowSpaceFileSystem {
         delegate: MacOsFileSystem::new(home.path().to_path_buf()),
     });
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+    let runtime = home.runtime.clone();
     let import = ImportApi::new(ImportService::new(
         runtime,
         filesystem,
@@ -1595,27 +1397,18 @@ fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
 }
 
 #[test]
-fn startup_recovery_gate_blocks_import_and_activation_writes() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let library_root = home.path().join("Library/Application Support/skill-man");
+fn startup_write_gate_blocks_import_and_activation_writes() {
+    let home = BoundTestHome::new();
+    home.seed_standard_library();
+    let library_root = home.library_root.clone();
     let source = home.path().join("Downloads/gated-skill");
     std::fs::create_dir_all(&source).expect("create gated source");
     std::fs::write(source.join("SKILL.md"), "# Gated\n").expect("write gated source");
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(&library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.path().to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
-    let recovery_gate = Arc::new(RecoveryGate::blocked());
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
+    let write_gate = Arc::new(WriteGate::new(WriteGateState::Closed {
+        reason: skill_man_lib::core::write_gate::ClosedReason::AppStateUnavailable,
+    }));
     let import = ImportApi::new(
         ImportService::new(
             runtime.clone(),
@@ -1624,11 +1417,11 @@ fn startup_recovery_gate_blocks_import_and_activation_writes() {
             Arc::new(LocalFileSource::new()),
             library_root.clone(),
         )
-        .with_recovery_gate(recovery_gate.clone()),
+        .with_write_gate(write_gate.clone()),
     );
     let activation = ActivationApi::new(
         ActivationService::new(runtime, filesystem, library_root.clone())
-            .with_recovery_gate(recovery_gate),
+            .with_write_gate(write_gate),
     );
 
     let import_error = import
@@ -1852,26 +1645,14 @@ impl FileSystem for LowSpaceFileSystem {
     }
 }
 
-fn file_import_api(home: &std::path::Path, library_root: &std::path::Path) -> ImportApi {
-    let fixture =
-        Arc::new(FixtureCatalogStore::runtime(library_root).expect("materialize fixture"));
-    let sqlite = Arc::new(
-        SqliteCatalogStore::open(&library_root.join("skill-man.sqlite3")).expect("open SQLite"),
-    );
-    sqlite
-        .seed_catalog_if_empty(&fixture.catalog_seed().expect("fixture seed"))
-        .expect("seed catalog");
-    let filesystem = Arc::new(MacOsFileSystem::new(home.to_path_buf()));
-    let runtime = Arc::new(RuntimeCatalogStore::new(
-        fixture,
-        sqlite,
-        filesystem.clone(),
-    ));
+fn file_import_api(home: &BoundTestHome) -> ImportApi {
+    let filesystem = home.filesystem.clone();
+    let runtime = home.runtime.clone();
     ImportApi::new(ImportService::new(
         runtime,
         filesystem,
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
-        library_root.to_path_buf(),
+        home.library_root.clone(),
     ))
 }

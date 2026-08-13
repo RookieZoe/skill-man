@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::core::domain::{
     ActivationObservedState, Health, SkillId, SourceKind, parse_skill_metadata,
 };
+use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileImportRecoveryBaseline, FileSystem,
@@ -22,7 +23,6 @@ use crate::seams::maintenance_store::{
     LinkSkillRecord, MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline,
     RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
-use crate::seams::recovery::RecoveryGate;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -93,6 +93,7 @@ struct PlannedRelocate {
     candidate: RelocateCandidate,
     fingerprint: SkillFingerprint,
     activations: Vec<RelocateActivationBaseline>,
+    gate_generation: u64,
     created_at: Instant,
 }
 
@@ -120,6 +121,7 @@ struct PlannedRemove {
     /// Install entity fingerprint at plan time; `None` when the entity is
     /// already gone (Broken Install).
     entity_fingerprint: Option<DirectoryFingerprint>,
+    gate_generation: u64,
     created_at: Instant,
 }
 
@@ -136,7 +138,7 @@ pub struct MaintenanceService {
     store: Arc<dyn MaintenanceStore>,
     filesystem: Arc<dyn FileSystem>,
     library_root: Option<PathBuf>,
-    recovery_gate: Arc<RecoveryGate>,
+    write_gate: Arc<WriteGate>,
     relocate_plans: Arc<Mutex<HashMap<String, PlannedRelocate>>>,
     remove_plans: Arc<Mutex<HashMap<String, PlannedRemove>>>,
     next_plan_id: Arc<AtomicU64>,
@@ -149,7 +151,7 @@ impl Clone for MaintenanceService {
             store: self.store.clone(),
             filesystem: self.filesystem.clone(),
             library_root: self.library_root.clone(),
-            recovery_gate: self.recovery_gate.clone(),
+            write_gate: self.write_gate.clone(),
             relocate_plans: self.relocate_plans.clone(),
             remove_plans: self.remove_plans.clone(),
             next_plan_id: self.next_plan_id.clone(),
@@ -164,7 +166,7 @@ impl MaintenanceService {
             store,
             filesystem,
             library_root: None,
-            recovery_gate: Arc::new(RecoveryGate::ready()),
+            write_gate: Arc::new(WriteGate::open_for_tests()),
             relocate_plans: Arc::new(Mutex::new(HashMap::new())),
             remove_plans: Arc::new(Mutex::new(HashMap::new())),
             next_plan_id: Arc::new(AtomicU64::new(1)),
@@ -177,8 +179,8 @@ impl MaintenanceService {
         self
     }
 
-    pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
-        self.recovery_gate = recovery_gate;
+    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
+        self.write_gate = write_gate;
         self
     }
 
@@ -197,8 +199,17 @@ impl MaintenanceService {
     }
 
     pub fn startup_check(&self) -> Result<ActivationHealthReport, MaintenanceError> {
-        self.recover_startup_operations()?;
-        self.recovery_gate.mark_ready();
+        // Operation recovery and the reopen only run when the session may
+        // write: `Open` (regular) or `Recovery` (the narrow startup-recovery
+        // capability). A `CatalogReadOnly` session skips both (spec §4.3:
+        // read-only refuses every product write, recovery included).
+        if matches!(
+            self.write_gate.snapshot().state,
+            WriteGateState::Open(_) | WriteGateState::Recovery { .. }
+        ) {
+            self.recover_startup_operations()?;
+            self.write_gate.mark_ready();
+        }
         self.run_health_check()
     }
 
@@ -384,6 +395,7 @@ impl MaintenanceService {
                 candidate: candidate.clone(),
                 fingerprint,
                 activations: activations.clone(),
+                gate_generation: self.write_gate.generation(),
                 created_at: Instant::now(),
             },
         );
@@ -417,6 +429,12 @@ impl MaintenanceService {
         let plan = plans
             .remove(plan_token)
             .ok_or(MaintenanceError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(MaintenanceError::PlanStale);
+        }
         drop(plans);
 
         // Re-preflight: the Link pointer, the new source and every Activation
@@ -736,7 +754,7 @@ impl MaintenanceService {
             }
         }
         if !compensation_errors.is_empty() {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: compensation_errors.join("; "),
@@ -746,7 +764,7 @@ impl MaintenanceService {
             .filesystem
             .finish_relocate_journal(library_root, &journal.operation_id)
         {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: format!(
@@ -810,6 +828,7 @@ impl MaintenanceService {
                 target: target.clone(),
                 activations: activations.clone(),
                 entity_fingerprint,
+                gate_generation: self.write_gate.generation(),
                 created_at: Instant::now(),
             },
         );
@@ -840,6 +859,12 @@ impl MaintenanceService {
         let plan = plans
             .remove(plan_token)
             .ok_or(MaintenanceError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(MaintenanceError::PlanStale);
+        }
         drop(plans);
 
         // Re-preflight: the row, every Activation entry and the Install
@@ -991,7 +1016,7 @@ impl MaintenanceService {
             .filesystem
             .write_remove_journal(&library_root, &journal)
         {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: "the Remove catalog delete committed".into(),
                 compensation_error: format!(
@@ -1009,7 +1034,7 @@ impl MaintenanceService {
                 &library_root,
                 Some(fingerprint),
             ) {
-                self.recovery_gate.mark_blocked();
+                self.write_gate.mark_blocked();
                 return Err(MaintenanceError::RecoveryRequired {
                     state_error: "the Remove catalog delete committed".into(),
                     compensation_error: format!(
@@ -1022,7 +1047,7 @@ impl MaintenanceService {
             .filesystem
             .finish_remove_journal(&library_root, &operation_id)
         {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: "the Remove catalog delete committed".into(),
                 compensation_error: format!("the completed journal could not be archived: {error}"),
@@ -1088,7 +1113,7 @@ impl MaintenanceService {
             }
         }
         if !compensation_errors.is_empty() {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: compensation_errors.join("; "),
@@ -1098,7 +1123,7 @@ impl MaintenanceService {
             .filesystem
             .finish_remove_journal(library_root, &journal.operation_id)
         {
-            self.recovery_gate.mark_blocked();
+            self.write_gate.mark_blocked();
             return Err(MaintenanceError::RecoveryRequired {
                 state_error: original.to_string(),
                 compensation_error: format!(
@@ -1110,7 +1135,7 @@ impl MaintenanceService {
     }
 
     fn ensure_writes_ready(&self) -> Result<(), MaintenanceError> {
-        if self.recovery_gate.writes_are_ready() {
+        if self.write_gate.is_product_write_open() {
             Ok(())
         } else {
             Err(MaintenanceError::RecoveryInProgress)
@@ -1140,7 +1165,7 @@ impl StartupMaintenance {
         // §10.4: a retry after a failed startup recovery must re-run the
         // journal recovery itself, not just a read-only scan — otherwise the
         // lock notice clears while writes stay refused.
-        if self.maintenance.recovery_gate.writes_are_ready() {
+        if self.maintenance.write_gate.is_product_write_open() {
             self.maintenance.run_health_check()
         } else {
             self.maintenance.startup_check()

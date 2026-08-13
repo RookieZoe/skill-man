@@ -17,10 +17,10 @@ use crate::core::git_source::{
     DEFAULT_BRANCH_REF, git_mirror_path, is_trackable_ref, skill_document_path,
 };
 use crate::core::import::{ImportError, ImportService};
+use crate::core::write_gate::WriteGate;
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::FileSystem;
 use crate::seams::import_store::{ImportStore, ImportStoreError, RemoteInstallRecord};
-use crate::seams::recovery::RecoveryGate;
 use crate::seams::source::{GitSource, GitTreeEntry, SourceError};
 
 const UPDATE_COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
@@ -128,7 +128,7 @@ impl UpdateService {
         git: Arc<dyn GitSource>,
         library_root: PathBuf,
         git_cache_root: PathBuf,
-        recovery_gate: Arc<RecoveryGate>,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         let import = ImportService::new(
             store.clone(),
@@ -137,7 +137,7 @@ impl UpdateService {
             Arc::new(crate::adapters::local_file_source::LocalFileSource::new()),
             library_root,
         )
-        .with_recovery_gate(recovery_gate)
+        .with_write_gate(write_gate)
         .with_git_source(git.clone())
         .with_git_cache_root(git_cache_root.clone());
         Self {

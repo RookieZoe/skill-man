@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::core::domain::{AgentId, AgentKind, SkillId, parse_skill_metadata, skill_identity_key};
 use crate::core::import::LibraryConflict;
+use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedActivation, AdoptedSkillRecord,
 };
@@ -28,7 +29,6 @@ use crate::seams::filesystem::{
     AdoptJournalPhase, DirectoryFingerprint, FileSystem, FileSystemError, LinkSourceEntryKind,
     StagedTreeSnapshot,
 };
-use crate::seams::recovery::RecoveryGate;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 const DISK_SPACE_RESERVE_BYTES: u64 = 100 * 1024 * 1024;
@@ -187,6 +187,7 @@ struct PlannedAdoptBatch {
     operation_id: String,
     items: Vec<PlannedAdoptItem>,
     journal: AdoptJournal,
+    gate_generation: u64,
     created_at_millis: u128,
 }
 
@@ -201,7 +202,7 @@ pub struct AdoptService {
     next_plan_id: AtomicU64,
     next_skill_id: AtomicU64,
     plan_ttl: Duration,
-    recovery_gate: Arc<RecoveryGate>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl AdoptService {
@@ -224,12 +225,12 @@ impl AdoptService {
             next_plan_id: AtomicU64::new(1),
             next_skill_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            recovery_gate: Arc::new(RecoveryGate::ready()),
+            write_gate: Arc::new(WriteGate::open_for_tests()),
         }
     }
 
-    pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
-        self.recovery_gate = recovery_gate;
+    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
+        self.write_gate = write_gate;
         self
     }
 
@@ -695,6 +696,7 @@ impl AdoptService {
             operation_id,
             items: planned_items,
             journal,
+            gate_generation: self.write_gate.generation(),
             created_at_millis: self.clock.monotonic_millis(),
         };
         let mut plans = self
@@ -729,6 +731,12 @@ impl AdoptService {
             .lock()
             .map_err(|_| AdoptError::Internal("Adopt plan lock poisoned".into()))?;
         let mut batch = plans.remove(plan_token).ok_or(AdoptError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: batch.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(AdoptError::PlanStale);
+        }
         drop(plans);
         if self
             .clock
@@ -1016,7 +1024,7 @@ impl AdoptService {
     }
 
     fn block_for_recovery(&self, context: &str, error: impl std::fmt::Display) -> AdoptError {
-        self.recovery_gate.mark_blocked();
+        self.write_gate.mark_blocked();
         AdoptError::RecoveryRequired(format!("{context}: {error}"))
     }
 
@@ -1322,7 +1330,7 @@ impl AdoptService {
     }
 
     fn ensure_writes_ready(&self) -> Result<(), AdoptError> {
-        if self.recovery_gate.writes_are_ready() {
+        if self.write_gate.is_product_write_open() {
             Ok(())
         } else {
             Err(AdoptError::RecoveryRequired(

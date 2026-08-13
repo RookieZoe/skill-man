@@ -1,13 +1,12 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use serde::Deserialize;
 
 use crate::core::domain::{
-    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, CatalogSeed,
-    CatalogSeedAgent, Compatibility, Health, SkillDetail, SkillId, SkillSummary, SourceKind,
+    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, Compatibility,
+    Health, SkillDetail, SkillId, SkillSummary, SourceKind,
 };
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
@@ -68,70 +67,6 @@ impl FixtureCatalogStore {
                 observed_states,
             }),
         }
-    }
-
-    pub fn runtime(library_root: &Path) -> std::io::Result<Self> {
-        let store = Self::library_desk();
-        let mut state = store
-            .state
-            .write()
-            .map_err(|_| std::io::Error::other("fixture lock poisoned"))?;
-        let fixture_root = library_root.join("fixture-entities");
-        for skill in &mut state.skills {
-            let final_entity = fixture_root.join(&skill.summary.directory_name);
-            skill.final_entity_path = final_entity.to_string_lossy().into_owned();
-            if skill.summary.health == Health::Broken {
-                continue;
-            }
-            fs::create_dir_all(&final_entity)?;
-            let skill_document = final_entity.join("SKILL.md");
-            if !skill_document.exists() {
-                fs::write(skill_document, &skill.skill_markdown)?;
-            }
-        }
-        state.expected_targets.clear();
-        let expected_targets = state
-            .skills
-            .iter()
-            .flat_map(|skill| {
-                state.agents.iter().filter_map(move |agent| {
-                    if agent.enabled_skill_ids.contains(&skill.summary.id.0) {
-                        Some((
-                            (skill.summary.id.0.clone(), agent.id.clone()),
-                            PathBuf::from(&skill.final_entity_path),
-                        ))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        state.expected_targets = expected_targets;
-        drop(state);
-        Ok(store)
-    }
-
-    pub fn catalog_seed(&self) -> Result<CatalogSeed, ActivationStoreError> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| ActivationStoreError::Unavailable("fixture lock poisoned".into()))?;
-        Ok(CatalogSeed {
-            snapshot_version: state.snapshot_version,
-            skills: state.skills.clone(),
-            agents: state
-                .agents
-                .iter()
-                .map(|agent| CatalogSeedAgent {
-                    id: AgentId(agent.id.clone()),
-                    name: agent.name.clone(),
-                    kind: agent.kind.into(),
-                    skills_path: agent.skills_path.clone(),
-                    detected: agent.detected,
-                    compatibility: agent.compatibility.into(),
-                })
-                .collect(),
-        })
     }
 }
 

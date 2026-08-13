@@ -12,6 +12,7 @@ use crate::core::git_source::{
     ResolvedGitRef, discover_skills_from_paths, git_mirror_path, parse_git_source_input,
     repo_name_from_url, resolve_git_ref, skill_document_path, validate_skill_path,
 };
+use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
 use crate::seams::activation_store::DesiredActivation;
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
@@ -23,7 +24,6 @@ use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict as StoreLibraryConflict,
     LinkImportRecord, RemoteImportRecord, RemoteInstallRecord,
 };
-use crate::seams::recovery::RecoveryGate;
 use crate::seams::source::{
     FileSource, GitSource, GitTreeEntryKind, SourceError, StagedFileSource,
 };
@@ -192,6 +192,7 @@ struct PlannedLinkImport {
     skill_id: SkillId,
     fingerprint: SkillFingerprint,
     conflict: Option<LibraryConflict>,
+    gate_generation: u64,
     created_at_millis: u128,
 }
 
@@ -206,6 +207,7 @@ struct PlannedFileImport {
     tree_snapshot: StagedTreeSnapshot,
     conflict: Option<LibraryConflict>,
     operation_id: String,
+    gate_generation: u64,
     created_at_millis: u128,
     reinstall: Option<PlannedFileReinstall>,
     /// Present for remote Installs (Import selection or Update reinstall).
@@ -281,6 +283,7 @@ struct PlannedFileImportBatch {
     staging_operation_root: PathBuf,
     staging_fingerprint: DirectoryFingerprint,
     operation_id: String,
+    gate_generation: u64,
     created_at_millis: u128,
     commit_remotes: bool,
 }
@@ -299,7 +302,7 @@ pub struct ImportService {
     next_plan_id: AtomicU64,
     next_skill_id: AtomicU64,
     plan_ttl: Duration,
-    recovery_gate: Arc<RecoveryGate>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl ImportService {
@@ -324,12 +327,12 @@ impl ImportService {
             next_plan_id: AtomicU64::new(1),
             next_skill_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            recovery_gate: Arc::new(RecoveryGate::ready()),
+            write_gate: Arc::new(WriteGate::open_for_tests()),
         }
     }
 
-    pub fn with_recovery_gate(mut self, recovery_gate: Arc<RecoveryGate>) -> Self {
-        self.recovery_gate = recovery_gate;
+    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
+        self.write_gate = write_gate;
         self
     }
 
@@ -421,6 +424,7 @@ impl ImportService {
                 skill_id,
                 fingerprint,
                 conflict: conflict.clone(),
+                gate_generation: self.write_gate.generation(),
                 created_at_millis: now,
             },
         );
@@ -447,6 +451,12 @@ impl ImportService {
             now.saturating_sub(plan.created_at_millis) < self.plan_ttl.as_millis()
         });
         let plan = plans.remove(plan_token).ok_or(ImportError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ImportError::PlanStale);
+        }
         drop(plans);
         if let Some(conflict) = plan.conflict {
             return Err(ImportError::Conflict(conflict.directory_name));
@@ -655,6 +665,7 @@ impl ImportService {
                 tree_snapshot,
                 conflict: conflict.clone(),
                 operation_id: operation_id.clone(),
+                gate_generation: self.write_gate.generation(),
                 created_at_millis,
                 reinstall: None,
                 remote: None,
@@ -677,6 +688,7 @@ impl ImportService {
             staging_operation_root,
             staging_fingerprint,
             operation_id,
+            gate_generation: self.write_gate.generation(),
             created_at_millis,
             commit_remotes: false,
         };
@@ -727,6 +739,12 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("file Import batch plan lock poisoned".into()))?
             .remove(plan_token)
             .ok_or(ImportError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: batch.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ImportError::PlanStale);
+        }
         if self
             .clock
             .monotonic_millis()
@@ -1059,6 +1077,7 @@ impl ImportService {
             tree_snapshot,
             conflict: conflict.clone(),
             operation_id,
+            gate_generation: self.write_gate.generation(),
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: None,
             remote: None,
@@ -1231,6 +1250,7 @@ impl ImportService {
             tree_snapshot,
             conflict: None,
             operation_id,
+            gate_generation: self.write_gate.generation(),
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: Some(PlannedFileReinstall {
                 existing_record: ReinstallBaseline::File(existing_record),
@@ -1289,6 +1309,12 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("file Import plan lock poisoned".into()))?
             .remove(plan_token)
             .ok_or(ImportError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ImportError::PlanStale);
+        }
         self.apply_planned_file(plan)
     }
 
@@ -1904,6 +1930,7 @@ impl ImportService {
                 tree_snapshot,
                 conflict: conflict.clone(),
                 operation_id: operation_id.clone(),
+                gate_generation: self.write_gate.generation(),
                 created_at_millis,
                 reinstall: None,
                 remote: Some(PlannedRemoteImport {
@@ -1931,6 +1958,7 @@ impl ImportService {
             staging_operation_root,
             staging_fingerprint,
             operation_id,
+            gate_generation: self.write_gate.generation(),
             created_at_millis,
             commit_remotes: true,
         };
@@ -2156,6 +2184,7 @@ impl ImportService {
             tree_snapshot,
             conflict: None,
             operation_id,
+            gate_generation: self.write_gate.generation(),
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: Some(PlannedFileReinstall {
                 existing_record: ReinstallBaseline::Remote(record.clone()),
@@ -2229,6 +2258,12 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("git reinstall plan lock poisoned".into()))?
             .remove(plan_token)
             .ok_or(ImportError::PlanNotFound)?;
+        if self.write_gate.check_plan(PlanTicket {
+            generation: plan.gate_generation,
+        }) == PlanCheck::Stale
+        {
+            return Err(ImportError::PlanStale);
+        }
         if let Some(remote) = &mut plan.remote {
             remote.abandon_changes = abandon_changes;
         }
@@ -2480,7 +2515,7 @@ impl ImportService {
     }
 
     fn ensure_writes_ready(&self) -> Result<(), ImportError> {
-        if self.recovery_gate.writes_are_ready() {
+        if self.write_gate.is_product_write_open() {
             Ok(())
         } else {
             Err(ImportError::RecoveryRequired(

@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-
-import { createFixtureCatalogClient } from "../test-fixtures/catalog";
+import { listen } from "@tauri-apps/api/event";
 
 export type CatalogFilter = "all" | "broken" | "modified" | "link" | "install";
 export type SourceKind = "link" | "remote_install" | "file_install";
@@ -9,6 +8,56 @@ export type AgentKind = "claude_preset" | "codex_preset" | "custom";
 export type Compatibility = "verified" | "unknown";
 export type ActivationObservedState =
   "present" | "missing" | "target_mismatch" | "dangling" | "occupied";
+
+export type CatalogAccess = "read_write" | "read_only";
+export type CatalogReadOnlyReason =
+  "unsupported_schema" | "integrity_failed" | "open_failed";
+
+/** Raw technical facts from the native authority, never App Copy (spec §4.7). */
+export interface BootstrapDiagnostic {
+  code: string;
+  message: string;
+}
+
+/**
+ * The closed top-level bootstrap route union (spec §4.2). React renders
+ * exactly one route per `state`; no variant is composed from booleans.
+ */
+export type BootstrapSnapshot =
+  | { state: "app_state_unavailable"; diagnostic: BootstrapDiagnostic | null }
+  | { state: "unconfigured" }
+  | { state: "legacy_detected"; path: string }
+  | {
+      state: "fixture_recovery_locked";
+      homeId: string | null;
+      path: string | null;
+    }
+  | { state: "home_candidate_pending"; path: string; operationId: string }
+  | {
+      state: "bound";
+      homeId: string;
+      catalogAccess: CatalogAccess;
+      catalogReadonlyReason: CatalogReadOnlyReason | null;
+      snapshotVersion: number;
+    }
+  | {
+      state: "home_unavailable";
+      homeId: string;
+      path: string;
+      diagnostic: BootstrapDiagnostic | null;
+    }
+  | {
+      state: "home_identity_mismatch";
+      homeId: string;
+      path: string;
+      diagnostic: BootstrapDiagnostic | null;
+    };
+
+/** `bootstrap://changed` payload: snapshot plus the write-gate generation. */
+export interface BootstrapChangedPayload {
+  snapshot: BootstrapSnapshot;
+  generation: number;
+}
 
 export interface SkillSummary {
   id: string;
@@ -425,6 +474,10 @@ export interface AdoptUndoResult {
 }
 
 export interface CatalogClient {
+  getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
+  listenBootstrapChanged(
+    callback: (payload: BootstrapChangedPayload) => void,
+  ): Promise<() => void>;
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
   listAgents(skillId: string): Promise<AgentActivation[]>;
@@ -507,6 +560,14 @@ export interface CatalogClient {
 let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
 
 const tauriCatalogClient: CatalogClient = {
+  getBootstrapSnapshot() {
+    return invoke<BootstrapSnapshot>("get_bootstrap_snapshot");
+  },
+  listenBootstrapChanged(callback) {
+    return listen<BootstrapChangedPayload>("bootstrap://changed", (event) => {
+      callback(event.payload);
+    });
+  },
   listSkills(filter) {
     return invoke<CatalogList>("list_skills", { request: { filter } });
   },
@@ -724,7 +785,39 @@ const tauriCatalogClient: CatalogClient = {
 };
 
 export function createCatalogClient(): CatalogClient {
+  // Production never falls back to fixture data (spec §2.2, §10.1): outside
+  // the Tauri runtime every catalog call fails closed and the bootstrap
+  // snapshot reports a closed failure. Tests and prototypes inject
+  // `createFixtureCatalogClient()` explicitly.
   return "__TAURI_INTERNALS__" in window
     ? tauriCatalogClient
-    : createFixtureCatalogClient();
+    : createClosedBootstrapClient();
+}
+
+const CLOSED_ERROR = {
+  code: "bootstrap_unavailable",
+  message: "Skill Man is not running in the Tauri runtime.",
+};
+
+/**
+ * The non-Tauri production client: closed bootstrap failure for the
+ * snapshot, a rejected closed error for every catalog command.
+ */
+function createClosedBootstrapClient(): CatalogClient {
+  const closed = () => Promise.reject(CLOSED_ERROR);
+  const client = {} as CatalogClient;
+  for (const key of Object.keys(tauriCatalogClient) as Array<
+    keyof CatalogClient
+  >) {
+    (client as unknown as Record<string, unknown>)[key] = closed;
+  }
+  client.getBootstrapSnapshot = async () => ({
+    state: "app_state_unavailable",
+    diagnostic: {
+      code: "no_tauri_runtime",
+      message: "Skill Man is not running in the Tauri runtime.",
+    },
+  });
+  client.listenBootstrapChanged = async () => () => {};
+  return client;
 }

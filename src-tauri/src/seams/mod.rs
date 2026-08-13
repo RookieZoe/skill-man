@@ -1,12 +1,14 @@
 pub mod activation_store;
 pub mod adopt_store;
 pub mod agent_adapter;
+pub mod app_state_store;
 pub mod app_updater;
+pub mod catalog_probe;
 pub mod catalog_store;
 pub mod clock;
 pub mod filesystem;
 pub mod import_store;
 pub mod maintenance_store;
 pub mod preferences_store;
-pub mod recovery;
 pub mod source;
+pub mod volume_identity;

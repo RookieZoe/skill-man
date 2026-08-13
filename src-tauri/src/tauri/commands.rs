@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::adopt_api::AdoptApi;
 use crate::tauri_adapter::app_update_api::AppUpdateApi;
+use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
     ActivationConflictDetailsDto, ActivationConflictRequestDto, ActivationHealthReportDto,
@@ -12,15 +13,16 @@ use crate::tauri_adapter::dto::{
     ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
     ApplyFileImportSelectionRequestDto, ApplyGitImportSelectionRequestDto,
     ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
-    ApplySkillUpdatesRequestDto, CancelActivationReplaceRequestDto, CancelActivationRequestDto,
-    CancelAdoptRequestDto, CancelAppUpdateRequestDto, CancelFileImportRequestDto,
-    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CancelRelocateLinkRequestDto,
-    CancelRemoveSkillRequestDto, CancelledAppUpdateDto, CatalogListDto, CheckAppUpdateRequestDto,
-    CheckSkillUpdatesRequestDto, CommandErrorDto, CreateAgentDirectoryRequestDto,
-    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
-    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto,
-    DownloadedAppUpdateDto, FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto,
-    FileImportResultDto, FileImportSelectionPreviewDto, FileImportSelectionResultDto,
+    ApplySkillUpdatesRequestDto, BootstrapSnapshotDto, CancelActivationReplaceRequestDto,
+    CancelActivationRequestDto, CancelAdoptRequestDto, CancelAppUpdateRequestDto,
+    CancelFileImportRequestDto, CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto,
+    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelledAppUpdateDto,
+    CatalogListDto, CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
+    CommandFailureDto, CreateAgentDirectoryRequestDto, DiscoverFileImportCollectionRequestDto,
+    DiscoverFileImportRequestDto, DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto,
+    DownloadAppUpdateRequestDto, DownloadedAppUpdateDto, FileImportCandidateDto,
+    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto,
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, GitImportDiscoveryDto,
     GitImportSelectionPreviewDto, GitImportSelectionResultDto, InstallAppUpdateRequestDto,
     LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
@@ -38,6 +40,13 @@ use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
+
+#[tauri::command]
+pub fn get_bootstrap_snapshot(
+    state: State<'_, BootstrapApi>,
+) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+    state.get_bootstrap_snapshot()
+}
 
 #[tauri::command]
 pub async fn check_app_update(

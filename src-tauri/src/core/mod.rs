@@ -1,11 +1,14 @@
 pub mod activation;
 pub mod adopt;
 pub mod app_update;
+pub mod bootstrap;
 pub mod catalog;
 pub mod domain;
 pub mod git_source;
+pub mod home;
 pub mod import;
 pub mod maintenance;
 pub mod preferences;
 pub mod startup;
 pub mod update;
+pub mod write_gate;
