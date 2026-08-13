@@ -42,7 +42,7 @@ pub struct ActivationPreview {
     pub kind: ActivationPlanKind,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
-    pub compatibility_warning: Option<String>,
+    pub compatibility_warning: Option<crate::seams::agent_adapter::CompatibilityWarning>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +81,16 @@ pub enum OccupierKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OccupierNotAdoptableReason {
+    RegularFile,
+    PointsAtManagedSkill,
+    PointsAtThisSkill,
+    NoReadableSkillMd,
+    TargetUnresolvable,
+    IdentityConflict { directory_name: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OccupierSummary {
     pub kind: OccupierKind,
     pub symlink_target: Option<PathBuf>,
@@ -89,7 +99,7 @@ pub struct OccupierSummary {
     pub directory_name: String,
     pub is_skill: bool,
     pub adoptable: bool,
-    pub not_adoptable_reason: Option<String>,
+    pub not_adoptable_reason: Option<OccupierNotAdoptableReason>,
 }
 
 /// Preview for Remove-then-replace: the occupant is moved to a journaled
@@ -593,8 +603,7 @@ impl ActivationService {
         };
         match &occupant.kind {
             OccupantKind::File { .. } => {
-                summary.not_adoptable_reason =
-                    Some("the entry is a regular file, not a Skill".into());
+                summary.not_adoptable_reason = Some(OccupierNotAdoptableReason::RegularFile);
             }
             OccupantKind::Symlink { .. } | OccupantKind::RealDirectory => {
                 match self.filesystem.inspect_link_source(&entry_path) {
@@ -610,26 +619,25 @@ impl ActivationService {
                             if inspection.final_entity_path.starts_with(&canonical_library) {
                                 summary.adoptable = false;
                                 summary.not_adoptable_reason =
-                                    Some("the entry points at a Managed Skill entity".into());
+                                    Some(OccupierNotAdoptableReason::PointsAtManagedSkill);
                             } else {
                                 let skill_target = self
                                     .filesystem
                                     .canonical_directory(&context.final_entity_path)?;
                                 if inspection.final_entity_path == skill_target {
                                     summary.adoptable = false;
-                                    summary.not_adoptable_reason = Some(
-                                        "the entry already points at this Skill's entity".into(),
-                                    );
+                                    summary.not_adoptable_reason =
+                                        Some(OccupierNotAdoptableReason::PointsAtThisSkill);
                                 }
                             }
                         } else {
                             summary.not_adoptable_reason =
-                                Some("the entry does not contain a readable SKILL.md".into());
+                                Some(OccupierNotAdoptableReason::NoReadableSkillMd);
                         }
                     }
                     Err(_) => {
                         summary.not_adoptable_reason =
-                            Some("the entry's target cannot be resolved".into());
+                            Some(OccupierNotAdoptableReason::TargetUnresolvable);
                     }
                 }
             }
@@ -649,10 +657,10 @@ impl ActivationService {
                         != summary.final_entity_path.clone().unwrap_or_default()
                     {
                         summary.adoptable = false;
-                        summary.not_adoptable_reason = Some(format!(
-                            "Managed Skill '{}' already uses this directory identity",
-                            conflict.directory_name
-                        ));
+                        summary.not_adoptable_reason =
+                            Some(OccupierNotAdoptableReason::IdentityConflict {
+                                directory_name: conflict.directory_name,
+                            });
                     }
                 }
             }

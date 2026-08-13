@@ -6,6 +6,8 @@ import type {
   FixtureRecoveryPreview,
   SafetySnapshot,
 } from "../../app/catalog-client";
+import { LanguageControl } from "../locale/LanguageControl";
+import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 
 export interface RecoveryViewProps {
   client: CatalogClient;
@@ -20,6 +22,7 @@ type BusyAction = "recover" | "continue" | "commit" | "delete" | null;
  * for the whole flow; the only writes here are the recovery module's own.
  */
 export function RecoveryView({ client }: RecoveryViewProps) {
+  const { t } = useLocale();
   const [preview, setPreview] = useState<FixtureRecoveryPreview | null>(null);
   const [snapshots, setSnapshots] = useState<SafetySnapshot[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -28,12 +31,18 @@ export function RecoveryView({ client }: RecoveryViewProps) {
   const [busy, setBusy] = useState<BusyAction>(null);
 
   const refresh = useCallback(() => {
-    client.getFixtureRecoveryPreview().then(setPreview).catch(() => {
-      setLoadFailed(true);
-    });
-    client.listSafetySnapshots().then(setSnapshots).catch(() => {
-      setSnapshots([]);
-    });
+    client
+      .getFixtureRecoveryPreview()
+      .then(setPreview)
+      .catch(() => {
+        setLoadFailed(true);
+      });
+    client
+      .listSafetySnapshots()
+      .then(setSnapshots)
+      .catch(() => {
+        setSnapshots([]);
+      });
   }, [client]);
 
   useEffect(() => {
@@ -60,10 +69,11 @@ export function RecoveryView({ client }: RecoveryViewProps) {
   if (loadFailed) {
     return (
       <section className="recovery-route" aria-labelledby="recovery-title">
-        <h1 id="recovery-title">Fixture Recovery</h1>
-        <p>The recovery state could not be read.</p>
+        <LanguageControl />
+        <h1 id="recovery-title">{t("recovery.title")}</h1>
+        <p>{t("recovery.load_failed")}</p>
         <button type="button" onClick={refresh}>
-          Retry
+          {t("recovery.retry")}
         </button>
       </section>
     );
@@ -71,8 +81,9 @@ export function RecoveryView({ client }: RecoveryViewProps) {
   if (!preview) {
     return (
       <section className="recovery-route" aria-labelledby="recovery-title">
-        <h1 id="recovery-title">Fixture Recovery</h1>
-        <p>Resolving the recovery preview…</p>
+        <LanguageControl />
+        <h1 id="recovery-title">{t("recovery.title")}</h1>
+        <p>{t("recovery.resolving")}</p>
       </section>
     );
   }
@@ -86,11 +97,12 @@ export function RecoveryView({ client }: RecoveryViewProps) {
 
   return (
     <section className="recovery-route" aria-labelledby="recovery-title">
-      <h1 id="recovery-title">Fixture Recovery</h1>
+      <LanguageControl />
+      <h1 id="recovery-title">{t("recovery.title")}</h1>
       <p className="recovery-summary">
         {preview.mode.kind === "bound_restore"
-          ? "The bound Home contains fixture test data. Recovery restores the same Home identity; it is not a Relocate."
-          : "The Legacy Home contains fixture test data. Recovery prepares a clean, unbound Home."}
+          ? t("recovery.mode.bound")
+          : t("recovery.mode.legacy")}
       </p>
       <p className="recovery-path">{preview.path}</p>
 
@@ -115,18 +127,17 @@ export function RecoveryView({ client }: RecoveryViewProps) {
                     error: { code: "recovery_step_failed" },
                     diagnostic: {
                       code: "rolled_back",
-                      message:
-                        "Recovery could not prepare the clean Home and restored the original one.",
+                      message: "",
                     },
                   } satisfies CommandFailure;
                 }
-                setNotice(
-                  "The clean Home is prepared and verified. Review the result and commit it to finish.",
-                );
+                setNotice(t("recovery.step.prepared"));
               })
             }
           >
-            {busy === "recover" ? "Recovering…" : "Recover this Home"}
+            {busy === "recover"
+              ? t("recovery.action.recovering")
+              : t("recovery.action.recover")}
           </button>
         ) : null}
         {canContinue ? (
@@ -139,7 +150,9 @@ export function RecoveryView({ client }: RecoveryViewProps) {
               )
             }
           >
-            {busy === "continue" ? "Continuing…" : "Continue recovery"}
+            {busy === "continue"
+              ? t("recovery.action.continuing")
+              : t("recovery.action.continue")}
           </button>
         ) : null}
         {canCommit ? (
@@ -152,7 +165,9 @@ export function RecoveryView({ client }: RecoveryViewProps) {
               )
             }
           >
-            {busy === "commit" ? "Committing…" : "Commit recovery result"}
+            {busy === "commit"
+              ? t("recovery.action.committing")
+              : t("recovery.action.commit")}
           </button>
         ) : null}
       </div>
@@ -172,23 +187,24 @@ function ClassificationEvidence({
 }: {
   preview: FixtureRecoveryPreview;
 }) {
+  const { t } = useLocale();
   const classification = preview.classification;
   const heading =
     classification.kind === "pure"
-      ? "Exact fixture footprint detected"
+      ? t("recovery.class.pure")
       : classification.kind === "mixed"
-        ? "Modified fixture footprint detected"
+        ? t("recovery.class.mixed")
         : classification.kind === "unknown"
-          ? "Fixture footprint could not be read"
-          : "No fixture footprint";
+          ? t("recovery.class.unknown")
+          : t("recovery.class.clean");
   const summary =
     classification.kind === "pure"
-      ? "Every checked fact matches the immutable fixture fingerprint. Only this exact shape can be recovered."
+      ? t("recovery.class.pure_body")
       : classification.kind === "mixed"
-        ? "The whole Home stays locked; a recoverable subset is never chosen."
+        ? t("recovery.class.mixed_body")
         : classification.kind === "unknown"
-          ? "The Home stays locked until every fact can be read."
-          : "The Home is clean.";
+          ? t("recovery.class.unknown_body")
+          : t("recovery.class.clean_body");
   return (
     <div className="recovery-evidence">
       <h2>{heading}</h2>
@@ -202,54 +218,67 @@ function ClassificationEvidence({
           ))}
         </ul>
       ) : null}
-      <h3>Catalog evidence</h3>
+      <h3>{t("recovery.catalog_evidence")}</h3>
       <dl className="recovery-facts">
-        <dt>Schema version</dt>
-        <dd>{preview.catalogEvidence.schemaVersion ?? "unknown"}</dd>
-        <dt>Skill rows</dt>
+        <dt>{t("recovery.schema_version")}</dt>
+        <dd>
+          {preview.catalogEvidence.schemaVersion ?? t("recovery.fact.unknown")}
+        </dd>
+        <dt>{t("recovery.skill_rows")}</dt>
         <dd>{preview.catalogEvidence.skillRowCount}</dd>
-        <dt>Agent rows</dt>
+        <dt>{t("recovery.agent_rows")}</dt>
         <dd>{preview.catalogEvidence.agentRowCount}</dd>
-        <dt>Activation rows</dt>
+        <dt>{t("recovery.activation_rows")}</dt>
         <dd>{preview.catalogEvidence.activationRowCount}</dd>
-        <dt>File source rows</dt>
+        <dt>{t("recovery.file_rows")}</dt>
         <dd>{preview.catalogEvidence.fileSourceRowCount}</dd>
-        <dt>Remote source rows</dt>
+        <dt>{t("recovery.remote_rows")}</dt>
         <dd>{preview.catalogEvidence.remoteSourceRowCount}</dd>
-        <dt>Tables</dt>
+        <dt>{t("recovery.tables")}</dt>
         <dd>
           {preview.catalogEvidence.tables.length > 0
             ? preview.catalogEvidence.tables.join(", ")
-            : "none"}
+            : t("recovery.fact.none")}
         </dd>
       </dl>
-      <h3>Tree evidence</h3>
+      <h3>{t("recovery.tree_evidence")}</h3>
       <dl className="recovery-facts">
-        <dt>fixture-entities present</dt>
-        <dd>{preview.treeEvidence.fixtureEntitiesPresent ? "yes" : "no"}</dd>
-        <dt>skill-authoring hash</dt>
-        <dd>{hashFact(preview.treeEvidence.skillAuthoringHashMatches)}</dd>
-        <dt>media-xray hash</dt>
-        <dd>{hashFact(preview.treeEvidence.mediaXrayHashMatches)}</dd>
-        <dt>fixture-entities root hash</dt>
-        <dd>{hashFact(preview.treeEvidence.rootHashMatches)}</dd>
-        <dt>legacy-audit entity present</dt>
-        <dd>{preview.treeEvidence.legacyAuditEntityPresent ? "yes" : "no"}</dd>
+        <dt>{t("recovery.fixture_present")}</dt>
+        <dd>
+          {preview.treeEvidence.fixtureEntitiesPresent
+            ? t("recovery.fact.yes")
+            : t("recovery.fact.no")}
+        </dd>
+        <dt>{t("recovery.hash_skill")}</dt>
+        <dd>{hashFact(preview.treeEvidence.skillAuthoringHashMatches, t)}</dd>
+        <dt>{t("recovery.hash_media")}</dt>
+        <dd>{hashFact(preview.treeEvidence.mediaXrayHashMatches, t)}</dd>
+        <dt>{t("recovery.hash_root")}</dt>
+        <dd>{hashFact(preview.treeEvidence.rootHashMatches, t)}</dd>
+        <dt>{t("recovery.legacy_present")}</dt>
+        <dd>
+          {preview.treeEvidence.legacyAuditEntityPresent
+            ? t("recovery.fact.yes")
+            : t("recovery.fact.no")}
+        </dd>
       </dl>
     </div>
   );
 }
 
-function hashFact(matches: boolean | null): string {
+function hashFact(matches: boolean | null, t: LocaleContextValue["t"]): string {
   if (matches === null) {
-    return "unreadable or missing";
+    return t("recovery.hash.unreadable");
   }
-  return matches ? "matches the fixture fingerprint" : "differs";
+  return matches ? t("recovery.hash.matches") : t("recovery.hash.differs");
 }
 
 function ErrorNotice({ error }: { error: CommandFailure }) {
+  const { t } = useLocale();
   const message =
-    error.diagnostic?.message ?? "The recovery command failed.";
+    error.error.code === "recovery_step_failed"
+      ? t("recovery.step.rolled_back")
+      : (error.diagnostic?.message ?? t("recovery.command_failed"));
   return (
     <div className="recovery-notice recovery-notice--error" role="alert">
       <p>{message}</p>
@@ -282,16 +311,14 @@ function SnapshotSection({
   busy: BusyAction;
   run: (action: BusyAction, operation: () => Promise<unknown>) => Promise<void>;
 }) {
+  const { t } = useLocale();
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   return (
     <div className="recovery-snapshots">
-      <h2>Safety Snapshots</h2>
-      <p>
-        Snapshots are never deleted automatically. Deleting one is permanent
-        and cannot be undone.
-      </p>
+      <h2>{t("recovery.snapshots")}</h2>
+      <p>{t("recovery.snapshots_body")}</p>
       {snapshots.length === 0 ? (
-        <p>No Safety Snapshots exist.</p>
+        <p>{t("recovery.no_snapshots")}</p>
       ) : (
         <ul>
           {snapshots.map((snapshot) => (
@@ -300,7 +327,10 @@ function SnapshotSection({
                 {snapshot.snapshotId}
               </span>
               <span className="recovery-snapshot-stats">
-                {snapshot.fileCount} files · {snapshot.totalBytes} bytes
+                {t("recovery.files_count", {
+                  count: snapshot.fileCount,
+                  bytes: snapshot.totalBytes,
+                })}
               </span>
               {confirmDelete === snapshot.snapshotId ? (
                 <span className="recovery-delete-confirm">
@@ -309,10 +339,9 @@ function SnapshotSection({
                     disabled={busy !== null}
                     onClick={() =>
                       void run("delete", async () => {
-                        const preview =
-                          await client.planDeleteSafetySnapshot(
-                            snapshot.snapshotId,
-                          );
+                        const preview = await client.planDeleteSafetySnapshot(
+                          snapshot.snapshotId,
+                        );
                         await client.applyDeleteSafetySnapshot(
                           preview.snapshotId,
                         );
@@ -320,14 +349,16 @@ function SnapshotSection({
                       })
                     }
                   >
-                    {busy === "delete" ? "Deleting…" : "Delete permanently"}
+                    {busy === "delete"
+                      ? t("recovery.deleting")
+                      : t("recovery.delete_permanent")}
                   </button>
                   <button
                     type="button"
                     disabled={busy !== null}
                     onClick={() => setConfirmDelete(null)}
                   >
-                    Cancel
+                    {t("recovery.cancel")}
                   </button>
                 </span>
               ) : (
@@ -336,7 +367,7 @@ function SnapshotSection({
                   disabled={busy !== null}
                   onClick={() => setConfirmDelete(snapshot.snapshotId)}
                 >
-                  Delete…
+                  {t("recovery.delete")}
                 </button>
               )}
             </li>

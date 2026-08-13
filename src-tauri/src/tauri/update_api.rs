@@ -1,9 +1,9 @@
 use crate::core::domain::SkillId;
 use crate::core::update::{UpdateApplyRequest, UpdateError, UpdateSelection, UpdateService};
 use crate::tauri_adapter::dto::{
-    ApplySkillUpdatesRequestDto, CheckSkillUpdatesRequestDto, CommandErrorDto,
-    PinSkillUpdatesRequestDto, PlanSkillUpdatesRequestDto, UpdateCheckReportDto, UpdatePlanDto,
-    UpdateResultDto,
+    ApplySkillUpdatesRequestDto, CheckSkillUpdatesRequestDto, CommandFailureDto, DiagnosticDto,
+    PinSkillUpdatesRequestDto, PlanSkillUpdatesRequestDto, PublicErrorDto, UpdateCheckReportDto,
+    UpdatePlanDto, UpdateResultDto,
 };
 
 pub struct UpdateApi {
@@ -18,7 +18,7 @@ impl UpdateApi {
     pub fn check_skill_updates(
         &self,
         request: CheckSkillUpdatesRequestDto,
-    ) -> Result<UpdateCheckReportDto, CommandErrorDto> {
+    ) -> Result<UpdateCheckReportDto, CommandFailureDto> {
         self.service
             .check_updates(request.force)
             .map(UpdateCheckReportDto::from)
@@ -28,7 +28,7 @@ impl UpdateApi {
     pub fn plan_skill_updates(
         &self,
         request: PlanSkillUpdatesRequestDto,
-    ) -> Result<UpdatePlanDto, CommandErrorDto> {
+    ) -> Result<UpdatePlanDto, CommandFailureDto> {
         let selections = request
             .selections
             .into_iter()
@@ -46,7 +46,7 @@ impl UpdateApi {
     pub fn apply_skill_updates(
         &self,
         request: ApplySkillUpdatesRequestDto,
-    ) -> Result<UpdateResultDto, CommandErrorDto> {
+    ) -> Result<UpdateResultDto, CommandFailureDto> {
         let requests = request
             .requests
             .into_iter()
@@ -65,7 +65,7 @@ impl UpdateApi {
     pub fn pin_skill_updates(
         &self,
         request: PinSkillUpdatesRequestDto,
-    ) -> Result<(), CommandErrorDto> {
+    ) -> Result<(), CommandFailureDto> {
         let skill_ids = request
             .skill_ids
             .into_iter()
@@ -75,25 +75,32 @@ impl UpdateApi {
     }
 }
 
-fn command_error(error: UpdateError) -> CommandErrorDto {
-    let code = match &error {
+fn command_error(error: UpdateError) -> CommandFailureDto {
+    let public_error = match &error {
         UpdateError::Import(import_error) => {
             return crate::tauri_adapter::import_api::import_command_error(import_error);
         }
-        UpdateError::Validation(_) => "validation",
-        UpdateError::Store(_) => "state_unavailable",
-        UpdateError::Source(crate::seams::source::SourceError::Git(_)) => "source_unavailable",
-        UpdateError::Source(crate::seams::source::SourceError::Validation(_)) => "validation",
+        UpdateError::Validation(_) => PublicErrorDto::Validation,
+        UpdateError::Store(_) => PublicErrorDto::StateUnavailable,
+        UpdateError::Source(crate::seams::source::SourceError::Git(_)) => {
+            PublicErrorDto::SourceUnavailable
+        }
+        UpdateError::Source(crate::seams::source::SourceError::Validation(_)) => {
+            PublicErrorDto::Validation
+        }
         UpdateError::Source(crate::seams::source::SourceError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "permission_denied"
+            PublicErrorDto::PermissionDenied
         }
-        UpdateError::Source(_) => "source_unavailable",
-        UpdateError::Internal(_) => "internal",
+        UpdateError::Source(_) => PublicErrorDto::SourceUnavailable,
+        UpdateError::Internal(_) => PublicErrorDto::Internal,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

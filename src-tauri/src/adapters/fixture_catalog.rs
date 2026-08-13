@@ -292,7 +292,8 @@ struct FixtureSkill {
     source_kind: FixtureSourceKind,
     health: FixtureHealth,
     final_entity_path: String,
-    source_label: String,
+    #[serde(default)]
+    file_source_original_path: Option<String>,
     frontmatter_name: Option<String>,
     last_activity_at: String,
     skill_markdown: String,
@@ -311,7 +312,7 @@ impl From<FixtureSkill> for SkillDetail {
                 enabled_agent_count: 0,
             },
             final_entity_path: value.final_entity_path,
-            source_label: value.source_label,
+            file_source_original_path: value.file_source_original_path,
             frontmatter_name: value.frontmatter_name,
             last_activity_at: value.last_activity_at,
             skill_markdown: value.skill_markdown,

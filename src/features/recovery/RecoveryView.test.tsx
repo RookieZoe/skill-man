@@ -86,9 +86,9 @@ test("a pure preview offers the recovery action and shows the evidence", async (
     screen.getByText("Exact fixture footprint detected"),
   ).toBeInTheDocument();
   expect(screen.getByText("skill-authoring hash")).toBeInTheDocument();
-  expect(
-    screen.getAllByText("matches the fixture fingerprint"),
-  ).toHaveLength(3);
+  expect(screen.getAllByText("matches the fixture fingerprint")).toHaveLength(
+    3,
+  );
   expect(
     screen.getByRole("button", { name: "Recover this Home" }),
   ).toBeInTheDocument();
@@ -114,14 +114,16 @@ test("the confirm-apply-commit flow drives the recovery operation", async () => 
         rolledBack: false,
       };
     }),
-    confirmFixtureRecoveryResult: vi.fn(async (): Promise<BootstrapSnapshot> => {
-      activeOperation = null;
-      const snapshot: BootstrapSnapshot = {
-        state: "legacy_detected",
-        path: "/tmp/skill-man",
-      };
-      return snapshot;
-    }),
+    confirmFixtureRecoveryResult: vi.fn(
+      async (): Promise<BootstrapSnapshot> => {
+        activeOperation = null;
+        const snapshot: BootstrapSnapshot = {
+          state: "legacy_detected",
+          path: "/tmp/skill-man",
+        };
+        return snapshot;
+      },
+    ),
   });
   const user = userEvent.setup();
   render(<RecoveryView client={client} />);
@@ -172,9 +174,7 @@ test("a mixed footprint locks the Home without recovery controls", async () => {
   expect(
     await screen.findByText("Modified fixture footprint detected"),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText("skill_row_modified:media-xray"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("skill_row_modified:media-xray")).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Recover this Home" }),
   ).not.toBeInTheDocument();
@@ -194,9 +194,9 @@ test("a rolled-back apply surfaces the failure and re-enables the flow", async (
   await user.click(
     await screen.findByRole("button", { name: "Recover this Home" }),
   );
-  expect(
-    await screen.findByRole("alert"),
-  ).toHaveTextContent(/restored the original one/i);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /restored the original one/i,
+  );
   expect(
     screen.getByRole("button", { name: "Recover this Home" }),
   ).toBeInTheDocument();
@@ -209,18 +209,14 @@ test("snapshots list with explicit two-step deletion", async () => {
   const user = userEvent.setup();
   render(<RecoveryView client={client} />);
 
-  expect(
-    await screen.findByText(snapshot.snapshotId),
-  ).toBeInTheDocument();
+  expect(await screen.findByText(snapshot.snapshotId)).toBeInTheDocument();
   expect(screen.getByText(/42 files/)).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Delete…" }));
   expect(
     screen.getByRole("button", { name: "Delete permanently" }),
   ).toBeInTheDocument();
-  await user.click(
-    screen.getByRole("button", { name: "Delete permanently" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Delete permanently" }));
   expect(client.planDeleteSafetySnapshot).toHaveBeenCalledWith(
     snapshot.snapshotId,
   );

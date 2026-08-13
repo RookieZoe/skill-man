@@ -123,7 +123,8 @@ pub struct SkillSummary {
 pub struct SkillDetail {
     pub summary: SkillSummary,
     pub final_entity_path: String,
-    pub source_label: String,
+    /// Raw Source Content: the original file Install path (never App Copy).
+    pub file_source_original_path: Option<String>,
     pub frontmatter_name: Option<String>,
     pub last_activity_at: String,
     pub skill_markdown: String,

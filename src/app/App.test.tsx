@@ -493,7 +493,7 @@ test("disables Adopt existing item when the occupier is not a Skill", async () =
       directoryName: "skill-authoring",
       isSkill: false,
       adoptable: false,
-      notAdoptableReason: "the entry is a regular file, not a Skill",
+      notAdoptableReason: { kind: "regular_file" },
     },
   });
   render(<App client={client} />);
@@ -597,8 +597,11 @@ test("Adopt conflict handoff leaves an unsafe candidate unselected", async () =>
           },
         ],
         risk: "broken",
-        riskReason:
-          "Skill symlink target must be a valid UTF-8 relative path: skill-authoring",
+        riskReason: {
+          kind: "unsafe_tree",
+          detail:
+            "Skill symlink target must be a valid UTF-8 relative path: skill-authoring",
+        },
         conflict: null,
         adoptable: false,
         suggestedAgentIds: [],
@@ -1008,8 +1011,11 @@ test("leaves an unsafe Adopt candidate unselected and shows its scan reason", as
           },
         ],
         risk: "broken",
-        riskReason:
-          "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        riskReason: {
+          kind: "unsafe_tree",
+          detail:
+            "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        },
         conflict: null,
         adoptable: false,
         suggestedAgentIds: ["claude-code", "codex"],
@@ -1287,8 +1293,11 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
           },
         ],
         risk: "broken",
-        riskReason:
-          "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        riskReason: {
+          kind: "unsafe_tree",
+          detail:
+            "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+        },
         conflict: null,
         adoptable: false,
         suggestedAgentIds: ["claude-code", "codex"],
@@ -1554,7 +1563,7 @@ test("keeps a downloaded app update visible when discard fails", async () => {
 
   expect(dialog).toBeInTheDocument();
   expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-    "无法读取更新状态。请重新启动 Skill Man 后重试。",
+    "The update state could not be read. Restart Skill Man and retry.",
   );
   expect(
     within(dialog).getByRole("button", { name: "Install and Restart" }),
@@ -1622,7 +1631,7 @@ test("shows manual app update failures in Preferences", async () => {
   await user.click(screen.getByRole("button", { name: "Check now" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "无法连接更新服务。请检查网络后重试。",
+    "Unable to reach the update service. Check your network and retry.",
   );
   expect(
     screen.getByRole("dialog", { name: "Preferences" }),
@@ -1688,7 +1697,10 @@ test("Preferences warning from the backend is shown inline", async () => {
       checkAppUpdates: true,
       checkSkillUpdates: true,
     },
-    warning: "登录时启动设置失败：login item unavailable in dev build",
+    warning: {
+      kind: "launch_at_login_failed",
+      detail: "login item unavailable in dev build",
+    },
   });
   render(<App client={client} />);
 

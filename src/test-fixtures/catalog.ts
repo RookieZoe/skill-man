@@ -12,12 +12,19 @@ import type {
   Health,
   LinkImportCandidate,
   LinkImportPreview,
+  LocaleSelection,
+  LocaleSnapshot,
   SkillDetail,
   SourceKind,
   ActivationObservedState,
 } from "../app/catalog-client";
 
-type FixtureSkill = Omit<SkillDetail, "enabledAgentCount">;
+type FixtureSkill = Omit<
+  SkillDetail,
+  "enabledAgentCount" | "fileSourceOriginalPath"
+> & {
+  fileSourceOriginalPath?: string | null;
+};
 
 interface FixtureAgent {
   id: string;
@@ -56,6 +63,22 @@ export function createFixtureCatalogClient(): CatalogClient {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
   let firstRunCompleted = true;
+  let localeSelection: LocaleSelection = "system";
+  let localeGeneration = 0;
+  const localeListeners = new Set<(payload: LocaleSnapshot) => void>();
+
+  const publishLocale = (selection: LocaleSelection) => {
+    localeGeneration += 1;
+    const payload: LocaleSnapshot = {
+      selection,
+      effectiveLocale:
+        selection === "zh-Hans" ? "zh-Hans" : selection === "en" ? "en" : "en",
+      generation: localeGeneration,
+      diagnostic: null,
+    };
+    localeListeners.forEach((listener) => listener(payload));
+    return payload;
+  };
   const detectedOverrides = new Set<string>();
   let preferences: AppPreferences = {
     launchAtLogin: false,
@@ -129,7 +152,11 @@ export function createFixtureCatalogClient(): CatalogClient {
     const enabledAgentCount = fixture.agents.filter(
       (agent) => enabledSkillIds.get(agent.id)?.includes(skill.id) ?? false,
     ).length;
-    return { ...skill, enabledAgentCount };
+    return {
+      ...skill,
+      enabledAgentCount,
+      fileSourceOriginalPath: skill.fileSourceOriginalPath ?? null,
+    };
   }
 
   return {
@@ -144,6 +171,25 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async listenBootstrapChanged() {
       return () => {};
+    },
+    async getLocaleSnapshot() {
+      return {
+        selection: localeSelection,
+        effectiveLocale: localeSelection === "zh-Hans" ? "zh-Hans" : "en",
+        generation: localeGeneration,
+        diagnostic: null,
+      };
+    },
+    async setLocaleSelection(selection) {
+      localeSelection = selection;
+      return publishLocale(selection);
+    },
+    async refreshSystemLanguages() {
+      return publishLocale("system");
+    },
+    async listenLocaleChanged(callback) {
+      localeListeners.add(callback);
+      return () => localeListeners.delete(callback);
     },
     async listSkills(filter) {
       return {
@@ -180,9 +226,7 @@ export function createFixtureCatalogClient(): CatalogClient {
         entryPath: `${agent.skillsPath}/${skill.directoryName}`,
         targetPath: skill.finalEntityPath,
         compatibilityWarning:
-          agent.kind === "custom"
-            ? "Custom Agent compatibility is unknown. Confirm this Activation explicitly."
-            : null,
+          agent.kind === "custom" ? { kind: "custom_unknown" } : null,
       };
       plans.set(planToken, preview);
       return preview;
@@ -206,9 +250,7 @@ export function createFixtureCatalogClient(): CatalogClient {
         entryPath: `${agent.skillsPath}/${skill.directoryName}`,
         targetPath: skill.finalEntityPath,
         compatibilityWarning:
-          agent.kind === "custom"
-            ? "Custom Agent compatibility is unknown. Confirm this Activation explicitly."
-            : null,
+          agent.kind === "custom" ? { kind: "custom_unknown" } : null,
       };
       plans.set(planToken, preview);
       return preview;
@@ -537,7 +579,7 @@ export function createFixtureCatalogClient(): CatalogClient {
         sourceKind: "link",
         health: "healthy",
         finalEntityPath: plan.finalEntityPath,
-        sourceLabel: `Linked local folder · ${plan.finalEntityPath}`,
+        fileSourceOriginalPath: null,
         frontmatterName: plan.directoryName,
         lastActivityAt: "2026-08-03T00:00:00Z",
         skillMarkdown: `# ${plan.displayName}\n\nLinked local Skill.\n`,

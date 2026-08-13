@@ -20,6 +20,7 @@ use skill_man_lib::tauri_adapter::app_update_api::AppUpdateApi;
 use skill_man_lib::tauri_adapter::dto::{
     AppUpdateCheckDto, CancelAppUpdateRequestDto, CancelledAppUpdateDto, CheckAppUpdateRequestDto,
     DownloadAppUpdateRequestDto, DownloadedAppUpdateDto, InstallAppUpdateRequestDto,
+    PublicErrorDto,
 };
 
 type UpdateFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AppUpdaterError>> + Send + 'a>>;
@@ -528,13 +529,13 @@ fn automatic_and_manual_check_failures_keep_the_same_typed_command_error() {
         api.check_app_update(CheckAppUpdateRequestDto { force: false }),
     )
     .expect_err("React decides whether an automatic command error is silent");
-    assert_eq!(automatic.code, "source_unavailable");
+    assert!(matches!(automatic.error, PublicErrorDto::SourceUnavailable));
 
     let manual = tauri::async_runtime::block_on(
         api.check_app_update(CheckAppUpdateRequestDto { force: true }),
     )
     .expect_err("manual check failure is shown to the user");
-    assert_eq!(manual.code, "source_unavailable");
+    assert!(matches!(manual.error, PublicErrorDto::SourceUnavailable));
 }
 
 #[test]

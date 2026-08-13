@@ -7,7 +7,6 @@ pub mod tauri_adapter;
 pub fn run() {
     use std::sync::Arc;
 
-    use ::tauri::menu::Menu;
     use ::tauri::tray::TrayIconBuilder;
     use ::tauri::{Listener, Manager, RunEvent, WindowEvent};
 
@@ -17,10 +16,12 @@ pub fn run() {
     use crate::adapters::closed_catalog::ClosedCatalogStore;
     use crate::adapters::git_source::SystemGitSource;
     use crate::adapters::local_file_source::LocalFileSource;
+    use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::sqlite::{SqliteCatalogStore, SqlitePreparedCatalogFactory};
     use crate::adapters::system_clock::SystemClock;
+    use crate::adapters::system_locale::MacOsSystemLocaleSource;
     use crate::adapters::tauri_app_updater::TauriAppUpdater;
     use crate::adapters::volume_identity::MacOsVolumeIdentitySource;
     use crate::core::activation::ActivationService;
@@ -32,6 +33,7 @@ pub fn run() {
     use crate::core::catalog::CatalogService;
     use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
     use crate::core::import::ImportService;
+    use crate::core::locale::LocaleService;
     use crate::core::maintenance::MaintenanceService;
     use crate::core::preferences::PreferencesService;
     use crate::core::startup::StartupService;
@@ -59,18 +61,23 @@ pub fn run() {
         create_agent_directory, discover_file_import, discover_file_import_collection,
         discover_git_import, discover_link_import, download_app_update,
         finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot,
-        get_fixture_recovery_preview, inspect_skill, install_app_update, list_agents,
-        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_activation,
-        plan_activation_repair, plan_activation_replace, plan_adopt, plan_delete_safety_snapshot,
-        plan_file_import, plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
-        plan_git_import_selection, plan_link_import, plan_remove_skill, plan_skill_updates,
-        relocate_link, run_activation_health_check, scan_adopt, startup_info,
+        get_fixture_recovery_preview, get_locale_snapshot, inspect_skill, install_app_update,
+        list_agents, list_safety_snapshots, list_skills, load_preferences, pin_skill_updates,
+        plan_activation, plan_activation_repair, plan_activation_replace, plan_adopt,
+        plan_delete_safety_snapshot, plan_file_import, plan_file_import_selection,
+        plan_file_reinstall, plan_fixture_recovery, plan_git_import_selection, plan_link_import,
+        plan_remove_skill, plan_skill_updates, refresh_system_languages, relocate_link,
+        run_activation_health_check, scan_adopt, set_locale_selection, startup_info,
         undo_activation_replace, undo_adopt, update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
     use crate::tauri_adapter::lifecycle::{hide_main_window, show_main_window};
+    use crate::tauri_adapter::locale_api::{
+        LOCALE_CHANGED_EVENT, LocaleApi, TauriLocaleChangedEmitter,
+    };
+    use crate::tauri_adapter::menu;
     use crate::tauri_adapter::startup_api::StartupApi;
     use crate::tauri_adapter::tray;
     use crate::tauri_adapter::update_api::UpdateApi;
@@ -86,6 +93,15 @@ pub fn run() {
 
             let filesystem = Arc::new(MacOsFileSystem::new(home_directory.clone()));
             let app_state = Arc::new(AppStateStoreFileSystem::new(state_dir.clone()));
+            // Locale authority resolves before any visible surface exists
+            // (spec §5.1 step 2, ADR-0011): it is App-level state outside any
+            // Home, so it stays readable and writable in every bootstrap
+            // state and is never touched by Restore or Abandon.
+            let locale_service = Arc::new(LocaleService::new(
+                Arc::new(LocaleStoreFileSystem::new(state_dir.clone())),
+                Arc::new(MacOsSystemLocaleSource::new(home_directory.clone())),
+            ));
+            let initial_locale = locale_service.snapshot().effective_locale;
             let volume_identity = Arc::new(MacOsVolumeIdentitySource::new());
             let catalog_probe = Arc::new(SqliteCatalogProbe::new());
             let classifier = Arc::new(SystemFixtureClassifier::new(
@@ -233,6 +249,13 @@ pub fn run() {
                     Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
                 )),
             ));
+            app.manage(LocaleApi::new(
+                (*locale_service).clone(),
+                Arc::new(TauriLocaleChangedEmitter::new(app.handle().clone())),
+            ));
+            // The service itself is managed so the run loop and listeners can
+            // resolve the current locale without a command round-trip.
+            app.manage(locale_service.clone());
             app.manage(AppUpdateApi::new(AppUpdateService::new(
                 Arc::new(TauriAppUpdater::new(app.handle().clone())),
                 preferences_store.clone(),
@@ -294,8 +317,9 @@ pub fn run() {
             // loop can refresh the tray without a command round-trip.
             app.manage(catalog_store.clone());
 
-            // Standard macOS app menu so ⌘Q / Quit work (spec §10.3).
-            app.set_menu(Menu::default(app.handle())?)?;
+            // Standard macOS app menu so ⌘Q / Quit work (spec §10.3), with
+            // Window/Help submenu titles in the effective locale (ADR-0011).
+            menu::apply_app_menu(app.handle(), initial_locale);
 
             // Apply persisted Preferences at startup: Dock accessory mode and
             // the login item survive restarts (spec §10.2). Closed states
@@ -315,7 +339,7 @@ pub fn run() {
             let initial_recent = catalog_store
                 .recently_enabled(tray::TRAY_SKILL_LIMIT)
                 .unwrap_or_default();
-            let tray_menu = tray::build_tray_menu(app.handle(), &initial_recent)?;
+            let tray_menu = tray::build_tray_menu(app.handle(), &initial_recent, initial_locale)?;
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID).menu(&tray_menu);
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
@@ -333,14 +357,32 @@ pub fn run() {
             let handle = app.handle().clone();
             let listener_handle = handle.clone();
             let tray_store = catalog_store.clone();
+            let listener_locale = locale_service.clone();
             handle.listen(tray::CATALOG_CHANGED_EVENT, move |_| {
-                tray::refresh_tray(&listener_handle, tray_store.as_ref());
+                let locale = listener_locale.snapshot().effective_locale;
+                tray::refresh_tray(&listener_handle, tray_store.as_ref(), locale);
+            });
+
+            // The locale changed: React, tray and the native menu follow the
+            // same generation (ADR-0011). The catalog is never reloaded and
+            // no sheet is remounted — only presentation surfaces refresh.
+            let locale_menu_handle = app.handle().clone();
+            let locale_listener_handle = app.handle().clone();
+            let locale_tray_store = catalog_store.clone();
+            let locale_service_for_event = locale_service.clone();
+            handle.listen(LOCALE_CHANGED_EVENT, move |_| {
+                let locale = locale_service_for_event.snapshot().effective_locale;
+                menu::apply_app_menu(&locale_menu_handle, locale);
+                tray::refresh_tray(&locale_listener_handle, locale_tray_store.as_ref(), locale);
             });
 
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
             get_bootstrap_snapshot,
+            get_locale_snapshot,
+            set_locale_selection,
+            refresh_system_languages,
             check_app_update,
             download_app_update,
             cancel_app_update,
@@ -423,8 +465,16 @@ pub fn run() {
                 api.prevent_close();
                 hide_main_window(app_handle);
             }
-            // Dock icon click reopens the window (spec §10.3).
-            RunEvent::Reopen { .. } => show_main_window(app_handle),
+            // Dock icon click reopens the window (spec §10.3) and, in System
+            // mode, re-negotiates the effective locale from the current
+            // preferred-language list (ADR-0011); the LocaleApi emits
+            // `locale://changed` when the locale actually changed.
+            RunEvent::Reopen { .. } => {
+                if let Some(api) = app_handle.try_state::<LocaleApi>() {
+                    let _ = api.refresh_system_languages();
+                }
+                show_main_window(app_handle);
+            }
             // Refreshing the tray on focus keeps the recent list honest even if
             // a catalog event was missed.
             RunEvent::WindowEvent {
@@ -433,7 +483,11 @@ pub fn run() {
                 ..
             } if label == "main" => {
                 if let Some(store) = tray_store {
-                    tray::refresh_tray(app_handle, store.as_ref());
+                    let locale = app_handle
+                        .try_state::<Arc<LocaleService>>()
+                        .map(|service| service.snapshot().effective_locale)
+                        .unwrap_or(crate::seams::locale_store::EffectiveLocale::En);
+                    tray::refresh_tray(app_handle, store.as_ref(), locale);
                 }
             }
             _ => {}

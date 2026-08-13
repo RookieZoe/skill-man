@@ -59,11 +59,31 @@ export interface BootstrapChangedPayload {
   generation: number;
 }
 
+// -- Locale Authority (spec §4.5, §6.1) --
+
+/** The persisted App-level choice; `system` negotiates on activation. */
+export type LocaleSelection = "system" | "en" | "zh-Hans";
+
+/** The resolved locale every visible surface renders in. */
+export type EffectiveLocale = "en" | "zh-Hans";
+
+/**
+ * `locale://changed` payload and the query snapshot are isomorphic (spec
+ * §4.7): selection, the effective locale, and a generation that increments
+ * on every published change.
+ */
+export interface LocaleSnapshot {
+  selection: LocaleSelection;
+  effectiveLocale: EffectiveLocale;
+  generation: number;
+  /** Raw fallback diagnostic (corrupt/unknown persisted value), never copy. */
+  diagnostic: BootstrapDiagnostic | null;
+}
+
 // -- Fixture Recovery (spec §4.4, §5.2) --
 
 export type RecoveryMode =
-  | { kind: "legacy_unbound" }
-  | { kind: "bound_restore"; homeId: string };
+  { kind: "legacy_unbound" } | { kind: "bound_restore"; homeId: string };
 
 export type FixtureClassification =
   | { kind: "pure" }
@@ -130,9 +150,43 @@ export interface DeleteSnapshotPreview {
 }
 
 export interface CommandFailure {
-  error: { code: string };
+  error: PublicError;
   diagnostic: { code: string; message: string } | null;
 }
+
+/** The closed public error union (spec §4.7): presentation maps `code` to a
+ * message key; typed fields carry Source Content only. */
+export type PublicError =
+  | { code: "validation" }
+  | { code: "not_found" }
+  | { code: "conflict"; directoryName: string }
+  | { code: "plan_stale" }
+  | { code: "permission_denied" }
+  | { code: "state_unavailable" }
+  | { code: "catalog_unavailable" }
+  | { code: "recovery_required" }
+  | { code: "source_unavailable" }
+  | { code: "target_mismatch" }
+  | { code: "disk_full"; requiredBytes: number; availableBytes: number }
+  | { code: "modified" }
+  | { code: "stale_update" }
+  | { code: "update_cancelled" }
+  | { code: "download_failed" }
+  | { code: "install_failed" }
+  | { code: "bootstrap_unavailable" }
+  | { code: "recovery_not_locked" }
+  | { code: "recovery_not_pure" }
+  | { code: "recovery_no_active_operation" }
+  | { code: "recovery_operation_already_active" }
+  | { code: "recovery_writer_active" }
+  | { code: "recovery_step_failed" }
+  | { code: "recovery_state_ambiguous" }
+  | { code: "recovery_snapshot_in_use" }
+  | { code: "recovery_state_store" }
+  | { code: "recovery_filesystem" }
+  | { code: "recovery_probe" }
+  | { code: "locale_store_unavailable" }
+  | { code: "internal" };
 
 export interface SkillSummary {
   id: string;
@@ -151,7 +205,8 @@ export interface CatalogList {
 
 export interface SkillDetail extends SkillSummary {
   finalEntityPath: string;
-  sourceLabel: string;
+  /** Raw Source Content: the original file Install path (never App Copy). */
+  fileSourceOriginalPath: string | null;
   frontmatterName: string | null;
   lastActivityAt: string;
   skillMarkdown: string;
@@ -178,8 +233,16 @@ export interface ActivationPreview {
   kind: "enable" | "disable" | "repair";
   entryPath: string;
   targetPath: string;
-  compatibilityWarning: string | null;
+  compatibilityWarning: CompatibilityWarning | null;
 }
+
+export type CompatibilityWarning =
+  | { kind: "custom_unknown" }
+  | {
+      kind: "frontmatter_mismatch";
+      frontmatterName: string;
+      directoryName: string;
+    };
 
 export type OccupierKind = "real_directory" | "symlink" | "file";
 
@@ -190,8 +253,16 @@ export interface OccupierSummary {
   directoryName: string;
   isSkill: boolean;
   adoptable: boolean;
-  notAdoptableReason: string | null;
+  notAdoptableReason: OccupierNotAdoptableReason | null;
 }
+
+export type OccupierNotAdoptableReason =
+  | { kind: "regular_file" }
+  | { kind: "points_at_managed_skill" }
+  | { kind: "points_at_this_skill" }
+  | { kind: "no_readable_skill_md" }
+  | { kind: "target_unresolvable" }
+  | { kind: "identity_conflict"; directoryName: string };
 
 export interface ActivationConflictDetails {
   skillId: string;
@@ -234,8 +305,12 @@ export interface PreferenceUpdates {
 
 export interface UpdatePreferencesResult {
   preferences: AppPreferences;
-  warning: string | null;
+  warning: PreferencesWarning | null;
 }
+
+export type PreferencesWarning =
+  | { kind: "show_in_dock_failed"; detail: string }
+  | { kind: "launch_at_login_failed"; detail: string };
 
 export type AppUpdateCheck =
   | { status: "skipped" }
@@ -484,11 +559,17 @@ export interface AdoptCandidate {
   directoryNames: string[];
   appearances: AdoptAppearance[];
   risk: AdoptRisk;
-  riskReason: string | null;
+  riskReason: AdoptRiskReason | null;
   conflict: LibraryConflict | null;
   adoptable: boolean;
   suggestedAgentIds: string[];
 }
+
+export type AdoptRiskReason =
+  | { kind: "dangling" }
+  | { kind: "outside_home"; path: string }
+  | { kind: "installer_managed"; path: string }
+  | { kind: "unsafe_tree"; detail: string };
 
 export interface AdoptScanReport {
   candidates: AdoptCandidate[];
@@ -552,6 +633,13 @@ export interface CatalogClient {
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   listenBootstrapChanged(
     callback: (payload: BootstrapChangedPayload) => void,
+  ): Promise<() => void>;
+  getLocaleSnapshot(): Promise<LocaleSnapshot>;
+  setLocaleSelection(selection: LocaleSelection): Promise<LocaleSnapshot>;
+  /** Re-negotiate the effective locale from the system preferred list. */
+  refreshSystemLanguages(): Promise<LocaleSnapshot>;
+  listenLocaleChanged(
+    callback: (payload: LocaleSnapshot) => void,
   ): Promise<() => void>;
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
@@ -633,9 +721,7 @@ export interface CatalogClient {
   getFixtureRecoveryPreview(): Promise<FixtureRecoveryPreview>;
   planFixtureRecovery(): Promise<{ planToken: string }>;
   applyFixtureRecovery(planToken: string): Promise<RecoveryResult>;
-  confirmFixtureRecoveryResult(
-    operationId: string,
-  ): Promise<BootstrapSnapshot>;
+  confirmFixtureRecoveryResult(operationId: string): Promise<BootstrapSnapshot>;
   listSafetySnapshots(): Promise<SafetySnapshot[]>;
   planDeleteSafetySnapshot(snapshotId: string): Promise<DeleteSnapshotPreview>;
   applyDeleteSafetySnapshot(planToken: string): Promise<void>;
@@ -649,6 +735,22 @@ const tauriCatalogClient: CatalogClient = {
   },
   listenBootstrapChanged(callback) {
     return listen<BootstrapChangedPayload>("bootstrap://changed", (event) => {
+      callback(event.payload);
+    });
+  },
+  getLocaleSnapshot() {
+    return invoke<LocaleSnapshot>("get_locale_snapshot");
+  },
+  setLocaleSelection(selection) {
+    return invoke<LocaleSnapshot>("set_locale_selection", {
+      request: { selection },
+    });
+  },
+  refreshSystemLanguages() {
+    return invoke<LocaleSnapshot>("refresh_system_languages");
+  },
+  listenLocaleChanged(callback) {
+    return listen<LocaleSnapshot>("locale://changed", (event) => {
       callback(event.payload);
     });
   },
@@ -934,5 +1036,24 @@ function createClosedBootstrapClient(): CatalogClient {
     },
   });
   client.listenBootstrapChanged = async () => () => {};
+  client.getLocaleSnapshot = async () => ({
+    selection: "system",
+    effectiveLocale: "en",
+    generation: 0,
+    diagnostic: null,
+  });
+  client.setLocaleSelection = async (selection) => ({
+    selection,
+    effectiveLocale: selection === "zh-Hans" ? "zh-Hans" : "en",
+    generation: 1,
+    diagnostic: null,
+  });
+  client.refreshSystemLanguages = async () => ({
+    selection: "system",
+    effectiveLocale: "en",
+    generation: 0,
+    diagnostic: null,
+  });
+  client.listenLocaleChanged = async () => () => {};
   return client;
 }

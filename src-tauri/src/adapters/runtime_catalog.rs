@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::domain::{
     AgentActivation, AgentId, CatalogFilter, Health, SkillDetail, SkillId, SkillSummary,
-    SourceKind, parse_skill_metadata,
+    parse_skill_metadata,
 };
 use crate::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
@@ -68,21 +68,10 @@ impl CatalogStore for RuntimeCatalogStore {
             }
         };
         let metadata = parse_skill_metadata(&skill_markdown);
-        let source_label = match persisted.summary.source_kind {
-            SourceKind::Link => format!(
-                "Linked local folder · {}",
-                persisted.final_entity_path.display()
-            ),
-            SourceKind::RemoteInstall => "Installed from Git".into(),
-            SourceKind::FileInstall => persisted.file_source_original_path.as_ref().map_or_else(
-                || "Installed from file".into(),
-                |path| format!("Installed from file · {path}"),
-            ),
-        };
         Ok(Some(SkillDetail {
             summary: persisted.summary,
             final_entity_path: persisted.final_entity_path.to_string_lossy().into_owned(),
-            source_label,
+            file_source_original_path: persisted.file_source_original_path,
             frontmatter_name: metadata.name,
             last_activity_at: persisted.updated_at,
             skill_markdown,

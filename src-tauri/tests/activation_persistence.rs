@@ -5,7 +5,7 @@ use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{
     ActivationObservedStateDto, ApplyActivationRequestDto, PlanActivationRepairRequestDto,
-    PlanActivationRequestDto,
+    PlanActivationRequestDto, PublicErrorDto,
 };
 use skill_man_lib::tauri_adapter::health_api::HealthApi;
 
@@ -97,7 +97,7 @@ fn tauri_activation_round_trip_persists_and_reads_back_real_filesystem_state() {
                 agent_id: "claude-code".into(),
             })
             .expect_err("Repair reports occupied entry");
-        assert_eq!(conflict.code, "conflict");
+        assert!(matches!(conflict.error, PublicErrorDto::Conflict { .. }));
         let occupied = catalog
             .list_agents("skill-authoring".into())
             .expect("read occupied Repair observation");

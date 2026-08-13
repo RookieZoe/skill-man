@@ -66,6 +66,18 @@ pub struct AdoptScanReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdoptRiskReason {
+    /// The entry is dangling: its target no longer exists.
+    Dangling,
+    /// The final entity lies outside the home directory.
+    OutsideHome { path: PathBuf },
+    /// The final entity lives in an installer-managed location.
+    InstallerManaged { path: PathBuf },
+    /// Raw filesystem validation fact (never App Copy).
+    UnsafeTree(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdoptCandidate {
     /// The canonical final entity; for Broken candidates the entry path.
     pub canonical_entity: PathBuf,
@@ -74,7 +86,7 @@ pub struct AdoptCandidate {
     pub directory_names: Vec<String>,
     pub appearances: Vec<AdoptAppearance>,
     pub risk: AdoptRisk,
-    pub risk_reason: Option<String>,
+    pub risk_reason: Option<AdoptRiskReason>,
     /// A Managed Skill already uses this identity with a different entity.
     pub conflict: Option<LibraryConflict>,
     pub adoptable: bool,
@@ -279,7 +291,7 @@ impl AdoptService {
                     directory_names: vec![entry.name.clone()],
                     appearances: Vec::new(),
                     risk: AdoptRisk::Broken,
-                    risk_reason: Some("the entry is dangling: its target no longer exists".into()),
+                    risk_reason: Some(AdoptRiskReason::Dangling),
                     conflict: None,
                     adoptable: false,
                     suggested_agent_ids: Vec::new(),
@@ -319,7 +331,7 @@ impl AdoptService {
                 None
             };
             let (risk, risk_reason) = match unsafe_tree_reason {
-                Some(reason) => (AdoptRisk::Broken, Some(reason)),
+                Some(reason) => (AdoptRisk::Broken, Some(AdoptRiskReason::UnsafeTree(reason))),
                 None => classify_risk(&entity, &canonical_home),
             };
             let shared = group.appearances.iter().any(|appearance| appearance.shared);
@@ -1347,14 +1359,13 @@ struct GroupedCandidate {
     broken_entries: Vec<crate::seams::filesystem::ScannedSkillEntry>,
 }
 
-fn classify_risk(entity: &Path, home_directory: &Path) -> (AdoptRisk, Option<String>) {
+fn classify_risk(entity: &Path, home_directory: &Path) -> (AdoptRisk, Option<AdoptRiskReason>) {
     if !entity.starts_with(home_directory) {
         return (
             AdoptRisk::External,
-            Some(format!(
-                "the final entity lies outside the home directory: {}",
-                entity.display()
-            )),
+            Some(AdoptRiskReason::OutsideHome {
+                path: entity.to_path_buf(),
+            }),
         );
     }
     const EXTERNAL_MARKERS: [&str; 4] = ["Caches", "node_modules", ".Trash", "Downloads"];
@@ -1363,10 +1374,9 @@ fn classify_risk(entity: &Path, home_directory: &Path) -> (AdoptRisk, Option<Str
             if EXTERNAL_MARKERS.iter().any(|marker| value == *marker) {
                 return (
                     AdoptRisk::External,
-                    Some(format!(
-                        "the final entity lives in an installer-managed location: {}",
-                        entity.display()
-                    )),
+                    Some(AdoptRiskReason::InstallerManaged {
+                        path: entity.to_path_buf(),
+                    }),
                 );
             }
         }

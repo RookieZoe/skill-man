@@ -18,8 +18,8 @@ use crate::tauri_adapter::dto::{
     CancelAppUpdateRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
     CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
     CancelledAppUpdateDto, CatalogListDto, CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto,
-    CommandErrorDto, CommandFailureDto, ConfirmFixtureRecoveryRequestDto,
-    CreateAgentDirectoryRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    CommandFailureDto, ConfirmFixtureRecoveryRequestDto, CreateAgentDirectoryRequestDto,
+    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto,
     DownloadedAppUpdateDto, FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto,
@@ -27,19 +27,21 @@ use crate::tauri_adapter::dto::{
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
     FixtureRecoveryPreviewDto, GitImportDiscoveryDto, GitImportSelectionPreviewDto,
     GitImportSelectionResultDto, InstallAppUpdateRequestDto, LinkImportCandidateDto,
-    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, PinSkillUpdatesRequestDto,
-    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
-    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
-    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanGitImportSelectionRequestDto,
-    PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
-    PreferenceUpdatesDto, RecoveryResultDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
-    RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto, SafetySnapshotDto,
-    SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto,
+    PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto,
+    PlanActivationRequestDto, PlanAdoptRequestDto, PlanFileImportRequestDto,
+    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto,
+    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PlanRemoveSkillRequestDto,
+    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, PreferencesWarningDto, RecoveryResultDto,
+    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
+    RemoveSkillResultDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
+    StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto,
+    UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::import_api::ImportApi;
+use crate::tauri_adapter::locale_api::LocaleApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
@@ -52,10 +54,32 @@ pub fn get_bootstrap_snapshot(
 }
 
 #[tauri::command]
+pub fn get_locale_snapshot(
+    state: State<'_, LocaleApi>,
+) -> Result<LocaleSnapshotDto, CommandFailureDto> {
+    state.get_locale_snapshot()
+}
+
+#[tauri::command]
+pub fn set_locale_selection(
+    state: State<'_, LocaleApi>,
+    request: SetLocaleSelectionRequestDto,
+) -> Result<LocaleSnapshotDto, CommandFailureDto> {
+    state.set_locale_selection(request)
+}
+
+#[tauri::command]
+pub fn refresh_system_languages(
+    state: State<'_, LocaleApi>,
+) -> Result<LocaleSnapshotDto, CommandFailureDto> {
+    state.refresh_system_languages()
+}
+
+#[tauri::command]
 pub async fn check_app_update(
     state: State<'_, AppUpdateApi>,
     request: CheckAppUpdateRequestDto,
-) -> Result<AppUpdateCheckDto, CommandErrorDto> {
+) -> Result<AppUpdateCheckDto, CommandFailureDto> {
     state.check_app_update(request).await
 }
 
@@ -63,7 +87,7 @@ pub async fn check_app_update(
 pub async fn download_app_update(
     state: State<'_, AppUpdateApi>,
     request: DownloadAppUpdateRequestDto,
-) -> Result<DownloadedAppUpdateDto, CommandErrorDto> {
+) -> Result<DownloadedAppUpdateDto, CommandFailureDto> {
     state.download_app_update(request).await
 }
 
@@ -71,7 +95,7 @@ pub async fn download_app_update(
 pub fn cancel_app_update(
     state: State<'_, AppUpdateApi>,
     request: CancelAppUpdateRequestDto,
-) -> Result<CancelledAppUpdateDto, CommandErrorDto> {
+) -> Result<CancelledAppUpdateDto, CommandFailureDto> {
     state.cancel_app_update(request)
 }
 
@@ -79,7 +103,7 @@ pub fn cancel_app_update(
 pub fn install_app_update(
     state: State<'_, AppUpdateApi>,
     request: InstallAppUpdateRequestDto,
-) -> Result<(), CommandErrorDto> {
+) -> Result<(), CommandFailureDto> {
     state.install_app_update(request)
 }
 
@@ -87,7 +111,7 @@ pub fn install_app_update(
 pub fn plan_activation(
     state: State<'_, ActivationApi>,
     request: PlanActivationRequestDto,
-) -> Result<ActivationPreviewDto, CommandErrorDto> {
+) -> Result<ActivationPreviewDto, CommandFailureDto> {
     state.plan_activation(request)
 }
 
@@ -95,7 +119,7 @@ pub fn plan_activation(
 pub fn plan_activation_repair(
     state: State<'_, ActivationApi>,
     request: PlanActivationRepairRequestDto,
-) -> Result<ActivationPreviewDto, CommandErrorDto> {
+) -> Result<ActivationPreviewDto, CommandFailureDto> {
     state.plan_activation_repair(request)
 }
 
@@ -103,7 +127,7 @@ pub fn plan_activation_repair(
 pub async fn run_activation_health_check(
     app: AppHandle,
     state: State<'_, HealthApi>,
-) -> Result<ActivationHealthReportDto, CommandErrorDto> {
+) -> Result<ActivationHealthReportDto, CommandFailureDto> {
     let result = state.run_activation_health_check()?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -113,7 +137,7 @@ pub async fn run_activation_health_check(
 pub fn relocate_link(
     state: State<'_, HealthApi>,
     request: RelocateLinkRequestDto,
-) -> Result<RelocateLinkPreviewDto, CommandErrorDto> {
+) -> Result<RelocateLinkPreviewDto, CommandFailureDto> {
     state.relocate_link(request)
 }
 
@@ -122,7 +146,7 @@ pub fn apply_relocate_link(
     app: AppHandle,
     state: State<'_, HealthApi>,
     request: ApplyRelocateLinkRequestDto,
-) -> Result<RelocateLinkResultDto, CommandErrorDto> {
+) -> Result<RelocateLinkResultDto, CommandFailureDto> {
     let result = state.apply_relocate_link(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -132,7 +156,7 @@ pub fn apply_relocate_link(
 pub fn cancel_relocate_link(
     state: State<'_, HealthApi>,
     request: CancelRelocateLinkRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_relocate_link(request)
 }
 
@@ -140,7 +164,7 @@ pub fn cancel_relocate_link(
 pub fn plan_remove_skill(
     state: State<'_, HealthApi>,
     request: PlanRemoveSkillRequestDto,
-) -> Result<RemoveSkillPreviewDto, CommandErrorDto> {
+) -> Result<RemoveSkillPreviewDto, CommandFailureDto> {
     state.plan_remove_skill(request)
 }
 
@@ -149,7 +173,7 @@ pub fn apply_remove_skill(
     app: AppHandle,
     state: State<'_, HealthApi>,
     request: ApplyRemoveSkillRequestDto,
-) -> Result<RemoveSkillResultDto, CommandErrorDto> {
+) -> Result<RemoveSkillResultDto, CommandFailureDto> {
     let result = state.apply_remove_skill(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -159,7 +183,7 @@ pub fn apply_remove_skill(
 pub fn cancel_remove_skill(
     state: State<'_, HealthApi>,
     request: CancelRemoveSkillRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_remove_skill(request)
 }
 
@@ -168,7 +192,7 @@ pub fn apply_activation(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationRequestDto,
-) -> Result<ActivationResultDto, CommandErrorDto> {
+) -> Result<ActivationResultDto, CommandFailureDto> {
     let result = state.apply_activation(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -178,14 +202,14 @@ pub fn apply_activation(
 pub fn cancel_activation(
     state: State<'_, ActivationApi>,
     request: CancelActivationRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_activation(request)
 }
 #[tauri::command]
 pub fn activation_conflict_details(
     state: State<'_, ActivationApi>,
     request: ActivationConflictRequestDto,
-) -> Result<ActivationConflictDetailsDto, CommandErrorDto> {
+) -> Result<ActivationConflictDetailsDto, CommandFailureDto> {
     state.activation_conflict_details(request)
 }
 
@@ -193,7 +217,7 @@ pub fn activation_conflict_details(
 pub fn plan_activation_replace(
     state: State<'_, ActivationApi>,
     request: PlanActivationReplaceRequestDto,
-) -> Result<ActivationReplacePreviewDto, CommandErrorDto> {
+) -> Result<ActivationReplacePreviewDto, CommandFailureDto> {
     state.plan_activation_replace(request)
 }
 
@@ -202,7 +226,7 @@ pub fn apply_activation_replace(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationReplaceRequestDto,
-) -> Result<ActivationResultDto, CommandErrorDto> {
+) -> Result<ActivationResultDto, CommandFailureDto> {
     let result = state.apply_activation_replace(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -212,7 +236,7 @@ pub fn apply_activation_replace(
 pub fn cancel_activation_replace(
     state: State<'_, ActivationApi>,
     request: CancelActivationReplaceRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_activation_replace(request)
 }
 
@@ -221,7 +245,7 @@ pub fn undo_activation_replace(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: UndoActivationReplaceRequestDto,
-) -> Result<ActivationReplaceUndoResultDto, CommandErrorDto> {
+) -> Result<ActivationReplaceUndoResultDto, CommandFailureDto> {
     let result = state.undo_activation_replace(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -231,7 +255,7 @@ pub fn undo_activation_replace(
 pub fn finalize_activation_replace(
     state: State<'_, ActivationApi>,
     request: FinalizeActivationReplaceRequestDto,
-) -> Result<(), CommandErrorDto> {
+) -> Result<(), CommandFailureDto> {
     state.finalize_activation_replace(request)
 }
 
@@ -239,7 +263,7 @@ pub fn finalize_activation_replace(
 pub fn list_skills(
     state: State<'_, CatalogApi>,
     request: ListSkillsRequestDto,
-) -> Result<CatalogListDto, CommandErrorDto> {
+) -> Result<CatalogListDto, CommandFailureDto> {
     state.list_skills(request)
 }
 
@@ -247,7 +271,7 @@ pub fn list_skills(
 pub fn inspect_skill(
     state: State<'_, CatalogApi>,
     skill_id: String,
-) -> Result<SkillDetailDto, CommandErrorDto> {
+) -> Result<SkillDetailDto, CommandFailureDto> {
     state.inspect_skill(skill_id)
 }
 
@@ -255,7 +279,7 @@ pub fn inspect_skill(
 pub fn list_agents(
     state: State<'_, CatalogApi>,
     skill_id: String,
-) -> Result<Vec<AgentActivationDto>, CommandErrorDto> {
+) -> Result<Vec<AgentActivationDto>, CommandFailureDto> {
     state.list_agents(skill_id)
 }
 
@@ -263,7 +287,7 @@ pub fn list_agents(
 pub fn discover_link_import(
     state: State<'_, ImportApi>,
     request: DiscoverLinkImportRequestDto,
-) -> Result<LinkImportCandidateDto, CommandErrorDto> {
+) -> Result<LinkImportCandidateDto, CommandFailureDto> {
     state.discover_link_import(request)
 }
 
@@ -271,7 +295,7 @@ pub fn discover_link_import(
 pub fn plan_link_import(
     state: State<'_, ImportApi>,
     request: PlanLinkImportRequestDto,
-) -> Result<LinkImportPreviewDto, CommandErrorDto> {
+) -> Result<LinkImportPreviewDto, CommandFailureDto> {
     state.plan_link_import(request)
 }
 
@@ -279,7 +303,7 @@ pub fn plan_link_import(
 pub fn apply_link_import(
     state: State<'_, ImportApi>,
     request: ApplyLinkImportRequestDto,
-) -> Result<LinkImportResultDto, CommandErrorDto> {
+) -> Result<LinkImportResultDto, CommandFailureDto> {
     state.apply_link_import(request)
 }
 
@@ -287,7 +311,7 @@ pub fn apply_link_import(
 pub fn cancel_link_import(
     state: State<'_, ImportApi>,
     request: CancelLinkImportRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_link_import(request)
 }
 
@@ -295,7 +319,7 @@ pub fn cancel_link_import(
 pub fn discover_file_import(
     state: State<'_, ImportApi>,
     request: DiscoverFileImportRequestDto,
-) -> Result<FileImportCandidateDto, CommandErrorDto> {
+) -> Result<FileImportCandidateDto, CommandFailureDto> {
     state.discover_file_import(request)
 }
 
@@ -303,7 +327,7 @@ pub fn discover_file_import(
 pub fn discover_file_import_collection(
     state: State<'_, ImportApi>,
     request: DiscoverFileImportCollectionRequestDto,
-) -> Result<FileImportDiscoveryDto, CommandErrorDto> {
+) -> Result<FileImportDiscoveryDto, CommandFailureDto> {
     state.discover_file_import_collection(request)
 }
 
@@ -311,7 +335,7 @@ pub fn discover_file_import_collection(
 pub fn plan_file_import(
     state: State<'_, ImportApi>,
     request: PlanFileImportRequestDto,
-) -> Result<FileImportPreviewDto, CommandErrorDto> {
+) -> Result<FileImportPreviewDto, CommandFailureDto> {
     state.plan_file_import(request)
 }
 
@@ -319,7 +343,7 @@ pub fn plan_file_import(
 pub fn plan_file_reinstall(
     state: State<'_, ImportApi>,
     request: PlanFileReinstallRequestDto,
-) -> Result<FileImportPreviewDto, CommandErrorDto> {
+) -> Result<FileImportPreviewDto, CommandFailureDto> {
     state.plan_file_reinstall(request)
 }
 
@@ -327,7 +351,7 @@ pub fn plan_file_reinstall(
 pub fn plan_file_import_selection(
     state: State<'_, ImportApi>,
     request: PlanFileImportSelectionRequestDto,
-) -> Result<FileImportSelectionPreviewDto, CommandErrorDto> {
+) -> Result<FileImportSelectionPreviewDto, CommandFailureDto> {
     state.plan_file_import_selection(request)
 }
 
@@ -335,7 +359,7 @@ pub fn plan_file_import_selection(
 pub fn apply_file_import(
     state: State<'_, ImportApi>,
     request: ApplyFileImportRequestDto,
-) -> Result<FileImportResultDto, CommandErrorDto> {
+) -> Result<FileImportResultDto, CommandFailureDto> {
     state.apply_file_import(request)
 }
 
@@ -343,7 +367,7 @@ pub fn apply_file_import(
 pub fn apply_file_import_selection(
     state: State<'_, ImportApi>,
     request: ApplyFileImportSelectionRequestDto,
-) -> Result<FileImportSelectionResultDto, CommandErrorDto> {
+) -> Result<FileImportSelectionResultDto, CommandFailureDto> {
     state.apply_file_import_selection(request)
 }
 
@@ -351,7 +375,7 @@ pub fn apply_file_import_selection(
 pub fn cancel_file_import(
     state: State<'_, ImportApi>,
     request: CancelFileImportRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_file_import(request)
 }
 
@@ -359,7 +383,7 @@ pub fn cancel_file_import(
 pub fn discover_git_import(
     state: State<'_, ImportApi>,
     request: DiscoverGitImportRequestDto,
-) -> Result<GitImportDiscoveryDto, CommandErrorDto> {
+) -> Result<GitImportDiscoveryDto, CommandFailureDto> {
     state.discover_git_import(request)
 }
 
@@ -367,7 +391,7 @@ pub fn discover_git_import(
 pub fn plan_git_import_selection(
     state: State<'_, ImportApi>,
     request: PlanGitImportSelectionRequestDto,
-) -> Result<GitImportSelectionPreviewDto, CommandErrorDto> {
+) -> Result<GitImportSelectionPreviewDto, CommandFailureDto> {
     state.plan_git_import_selection(request)
 }
 
@@ -375,7 +399,7 @@ pub fn plan_git_import_selection(
 pub fn apply_git_import_selection(
     state: State<'_, ImportApi>,
     request: ApplyGitImportSelectionRequestDto,
-) -> Result<GitImportSelectionResultDto, CommandErrorDto> {
+) -> Result<GitImportSelectionResultDto, CommandFailureDto> {
     state.apply_git_import_selection(request)
 }
 
@@ -383,7 +407,7 @@ pub fn apply_git_import_selection(
 pub fn cancel_git_import_selection(
     state: State<'_, ImportApi>,
     request: CancelGitImportSelectionRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_git_import_selection(request)
 }
 
@@ -391,7 +415,7 @@ pub fn cancel_git_import_selection(
 pub fn check_skill_updates(
     state: State<'_, UpdateApi>,
     request: CheckSkillUpdatesRequestDto,
-) -> Result<UpdateCheckReportDto, CommandErrorDto> {
+) -> Result<UpdateCheckReportDto, CommandFailureDto> {
     state.check_skill_updates(request)
 }
 
@@ -399,7 +423,7 @@ pub fn check_skill_updates(
 pub fn plan_skill_updates(
     state: State<'_, UpdateApi>,
     request: PlanSkillUpdatesRequestDto,
-) -> Result<UpdatePlanDto, CommandErrorDto> {
+) -> Result<UpdatePlanDto, CommandFailureDto> {
     state.plan_skill_updates(request)
 }
 
@@ -407,7 +431,7 @@ pub fn plan_skill_updates(
 pub fn apply_skill_updates(
     state: State<'_, UpdateApi>,
     request: ApplySkillUpdatesRequestDto,
-) -> Result<UpdateResultDto, CommandErrorDto> {
+) -> Result<UpdateResultDto, CommandFailureDto> {
     state.apply_skill_updates(request)
 }
 
@@ -415,12 +439,12 @@ pub fn apply_skill_updates(
 pub fn pin_skill_updates(
     state: State<'_, UpdateApi>,
     request: PinSkillUpdatesRequestDto,
-) -> Result<(), CommandErrorDto> {
+) -> Result<(), CommandFailureDto> {
     state.pin_skill_updates(request)
 }
 
 #[tauri::command]
-pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptScanReportDto, CommandErrorDto> {
+pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptScanReportDto, CommandFailureDto> {
     state.scan_adopt()
 }
 
@@ -428,7 +452,7 @@ pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptScanReportDto, Comm
 pub fn plan_adopt(
     state: State<'_, AdoptApi>,
     request: PlanAdoptRequestDto,
-) -> Result<AdoptPlanDto, CommandErrorDto> {
+) -> Result<AdoptPlanDto, CommandFailureDto> {
     state.plan_adopt(request)
 }
 
@@ -437,7 +461,7 @@ pub fn apply_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
     request: ApplyAdoptRequestDto,
-) -> Result<AdoptResultDto, CommandErrorDto> {
+) -> Result<AdoptResultDto, CommandFailureDto> {
     let result = state.apply_adopt(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -448,7 +472,7 @@ pub fn undo_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
     request: UndoAdoptRequestDto,
-) -> Result<AdoptUndoResultDto, CommandErrorDto> {
+) -> Result<AdoptUndoResultDto, CommandFailureDto> {
     let result = state.undo_adopt(request)?;
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
@@ -458,7 +482,7 @@ pub fn undo_adopt(
 pub fn finalize_adopt(
     state: State<'_, AdoptApi>,
     request: FinalizeAdoptRequestDto,
-) -> Result<(), CommandErrorDto> {
+) -> Result<(), CommandFailureDto> {
     state.finalize_adopt(request)
 }
 
@@ -466,7 +490,7 @@ pub fn finalize_adopt(
 pub fn cancel_adopt(
     state: State<'_, AdoptApi>,
     request: CancelAdoptRequestDto,
-) -> Result<bool, CommandErrorDto> {
+) -> Result<bool, CommandFailureDto> {
     state.cancel_adopt(request)
 }
 
@@ -475,7 +499,7 @@ pub fn cancel_adopt(
 #[tauri::command]
 pub fn load_preferences(
     state: State<'_, StartupApi>,
-) -> Result<AppPreferencesDto, CommandErrorDto> {
+) -> Result<AppPreferencesDto, CommandFailureDto> {
     state.load_preferences()
 }
 
@@ -484,19 +508,23 @@ pub fn update_preferences(
     app: AppHandle,
     state: State<'_, StartupApi>,
     request: PreferenceUpdatesDto,
-) -> Result<UpdatePreferencesResultDto, CommandErrorDto> {
+) -> Result<UpdatePreferencesResultDto, CommandFailureDto> {
     let result = state.update_preferences(request.clone())?;
     // Runtime side effects for the two preferences that touch the OS;
     // failures surface as a warning, the persisted value stays authoritative.
     let mut warning = None;
     if let Some(show_in_dock) = request.show_in_dock {
         if let Err(error) = lifecycle::apply_show_in_dock(&app, show_in_dock) {
-            warning = Some(format!("Dock 模式切换失败：{error}"));
+            warning = Some(PreferencesWarningDto::ShowInDockFailed {
+                detail: error.to_string(),
+            });
         }
     }
     if let Some(launch_at_login) = request.launch_at_login {
         if let Err(error) = lifecycle::apply_launch_at_login(&app, launch_at_login) {
-            warning = Some(format!("登录时启动设置失败：{error}"));
+            warning = Some(PreferencesWarningDto::LaunchAtLoginFailed {
+                detail: error.to_string(),
+            });
         }
     }
     Ok(UpdatePreferencesResultDto {
@@ -506,12 +534,12 @@ pub fn update_preferences(
 }
 
 #[tauri::command]
-pub fn startup_info(state: State<'_, StartupApi>) -> Result<StartupInfoDto, CommandErrorDto> {
+pub fn startup_info(state: State<'_, StartupApi>) -> Result<StartupInfoDto, CommandFailureDto> {
     state.startup_info()
 }
 
 #[tauri::command]
-pub fn complete_onboarding(state: State<'_, StartupApi>) -> Result<(), CommandErrorDto> {
+pub fn complete_onboarding(state: State<'_, StartupApi>) -> Result<(), CommandFailureDto> {
     state.complete_onboarding()
 }
 
@@ -519,7 +547,7 @@ pub fn complete_onboarding(state: State<'_, StartupApi>) -> Result<(), CommandEr
 pub fn create_agent_directory(
     state: State<'_, StartupApi>,
     request: CreateAgentDirectoryRequestDto,
-) -> Result<StartupInfoDto, CommandErrorDto> {
+) -> Result<StartupInfoDto, CommandFailureDto> {
     state.create_agent_directory(request)
 }
 

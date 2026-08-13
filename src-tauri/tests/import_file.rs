@@ -22,7 +22,7 @@ use skill_man_lib::tauri_adapter::dto::{
     CancelFileImportRequestDto, CatalogFilterDto, DiscoverFileImportCollectionRequestDto,
     DiscoverFileImportRequestDto, HealthDto, ListSkillsRequestDto, PlanActivationRequestDto,
     PlanFileImportRequestDto, PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
-    SourceKindDto,
+    PublicErrorDto, SourceKindDto,
 };
 use skill_man_lib::tauri_adapter::health_api::HealthApi;
 use skill_man_lib::tauri_adapter::import_api::ImportApi;
@@ -119,8 +119,9 @@ fn folder_file_import_installs_a_snapshot_at_the_stable_library_path() {
         .expect("inspect installed Skill");
     assert!(
         detail
-            .source_label
-            .contains(source.to_string_lossy().as_ref())
+            .file_source_original_path
+            .as_deref()
+            .is_some_and(|path| path.contains(source.to_string_lossy().as_ref()))
     );
 }
 
@@ -190,8 +191,9 @@ fn zip_file_import_extracts_and_installs_a_single_skill_snapshot() {
     assert_eq!(detail.source_kind, SourceKindDto::FileInstall);
     assert!(
         detail
-            .source_label
-            .contains(archive.to_string_lossy().as_ref())
+            .file_source_original_path
+            .as_deref()
+            .is_some_and(|path| path.contains(archive.to_string_lossy().as_ref()))
     );
 }
 
@@ -233,7 +235,7 @@ fn zip_file_import_rejects_parent_path_traversal_without_leaving_staging() {
             source_path: archive.to_string_lossy().into_owned(),
         })
         .expect_err("parent path traversal is rejected");
-    assert_eq!(error.code, "validation");
+    assert!(matches!(error.error, PublicErrorDto::Validation));
     assert!(!library_root.join("staging/escaped.md").exists());
     let staging_is_empty = std::fs::read_dir(library_root.join("staging"))
         .map(|mut entries| entries.next().is_none())
@@ -431,7 +433,7 @@ fn a_missing_local_file_source_is_reported_as_source_unavailable() {
         })
         .expect_err("missing source cannot be discovered");
 
-    assert_eq!(error.code, "source_unavailable");
+    assert!(matches!(error.error, PublicErrorDto::SourceUnavailable));
 }
 
 #[test]
@@ -451,7 +453,7 @@ fn folder_file_import_rejects_a_lexically_collapsed_but_dangling_symlink() {
             source_path: source.to_string_lossy().into_owned(),
         })
         .expect_err("missing path component remains dangling under POSIX resolution");
-    assert_eq!(error.code, "validation");
+    assert!(matches!(error.error, PublicErrorDto::Validation));
 }
 
 #[test]
@@ -486,7 +488,7 @@ fn zip_file_import_rejects_an_absolute_archive_path() {
             source_path: archive.to_string_lossy().into_owned(),
         })
         .expect_err("absolute ZIP path is rejected");
-    assert_eq!(error.code, "validation");
+    assert!(matches!(error.error, PublicErrorDto::Validation));
     assert!(!std::path::Path::new("/absolute-skill/SKILL.md").exists());
 }
 
@@ -535,8 +537,15 @@ fn zip_file_import_rejects_a_symlink_that_resolves_outside_the_skill() {
             source_path: archive.to_string_lossy().into_owned(),
         })
         .expect_err("out-of-Skill ZIP symlink is rejected");
-    assert_eq!(error.code, "validation");
-    assert!(error.message.contains("symlink escapes the Skill"));
+    assert!(matches!(error.error, PublicErrorDto::Validation));
+    assert!(
+        error
+            .diagnostic
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("symlink escapes the Skill")
+    );
 }
 
 #[test]
@@ -686,7 +695,11 @@ fn folder_file_import_rejects_missing_skill_invalid_identity_and_oversized_files
                 source_path: source.to_string_lossy().into_owned(),
             })
             .expect_err("invalid folder file source is rejected");
-        assert_eq!(error.code, "validation", "source: {}", source.display());
+        assert!(
+            matches!(error.error, PublicErrorDto::Validation),
+            "source: {}",
+            source.display()
+        );
         let staging_is_empty = std::fs::read_dir(library_root.join("staging"))
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(true);
@@ -728,7 +741,7 @@ fn file_import_apply_reports_plan_stale_when_the_stable_path_becomes_occupied() 
             plan_token: preview.plan_token,
         })
         .expect_err("occupied stable path invalidates Preview");
-    assert_eq!(error.code, "plan_stale");
+    assert!(matches!(error.error, PublicErrorDto::PlanStale));
     assert_eq!(
         std::fs::read_to_string(occupied.join("sentinel.txt"))
             .expect("occupied path remains untouched"),
@@ -766,7 +779,7 @@ fn zip_file_import_rejects_any_parent_component_even_when_the_path_stays_enclose
             source_path: archive.to_string_lossy().into_owned(),
         })
         .expect_err("every parent path component is rejected");
-    assert_eq!(error.code, "validation");
+    assert!(matches!(error.error, PublicErrorDto::Validation));
 }
 
 #[test]
@@ -1103,7 +1116,7 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
             plan_token: stale_preview.plan_token,
         })
         .expect_err("changed Activation invalidates reinstall preview");
-    assert_eq!(error.code, "plan_stale");
+    assert!(matches!(error.error, PublicErrorDto::PlanStale));
     assert_eq!(
         std::fs::read_to_string(stable_path.join("SKILL.md"))
             .expect("old stable entity survives stale reinstall"),
@@ -1303,7 +1316,7 @@ fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed
     .run_activation_health_check()
     .expect_err("recovery cannot compensate from an unverified original");
 
-    assert_eq!(error.code, "recovery_required");
+    assert!(matches!(error.error, PublicErrorDto::RecoveryRequired));
     assert_eq!(
         std::fs::read_to_string(stable_document).expect("recovery leaves changed path untouched"),
         "# Externally changed original\n"
@@ -1388,7 +1401,7 @@ fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
             source_path: source.to_string_lossy().into_owned(),
         })
         .expect_err("disk preflight rejects insufficient free space");
-    assert_eq!(error.code, "disk_full");
+    assert!(matches!(error.error, PublicErrorDto::DiskFull { .. }));
     assert!(
         std::fs::read_dir(library_root.join("staging"))
             .map(|mut entries| entries.next().is_none())
@@ -1429,7 +1442,10 @@ fn startup_write_gate_blocks_import_and_activation_writes() {
             source_path: source.to_string_lossy().into_owned(),
         })
         .expect_err("file Import is gated during recovery");
-    assert_eq!(import_error.code, "recovery_required");
+    assert!(matches!(
+        import_error.error,
+        PublicErrorDto::RecoveryRequired
+    ));
     let activation_error = activation
         .plan_activation(PlanActivationRequestDto {
             skill_id: "skill-authoring".into(),
@@ -1437,7 +1453,10 @@ fn startup_write_gate_blocks_import_and_activation_writes() {
             enabled: true,
         })
         .expect_err("Activation is gated during recovery");
-    assert_eq!(activation_error.code, "recovery_required");
+    assert!(matches!(
+        activation_error.error,
+        PublicErrorDto::RecoveryRequired
+    ));
     assert!(!library_root.join("staging").exists());
 }
 

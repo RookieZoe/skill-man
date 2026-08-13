@@ -8,6 +8,7 @@ pub mod fixture_recovery;
 pub mod git_source;
 pub mod home;
 pub mod import;
+pub mod locale;
 pub mod maintenance;
 pub mod preferences;
 pub mod startup;

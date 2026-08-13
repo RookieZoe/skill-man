@@ -70,9 +70,7 @@ impl BootstrapApi {
             self.write_gate
                 .transition_to(desired)
                 .map_err(|error| CommandFailureDto {
-                    error: PublicErrorDto {
-                        code: "bootstrap_unavailable".into(),
-                    },
+                    error: PublicErrorDto::BootstrapUnavailable,
                     diagnostic: Some(DiagnosticDto {
                         code: "write_gate_poisoned".into(),
                         message: error.to_string(),

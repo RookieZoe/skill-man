@@ -234,7 +234,8 @@ pub struct SkillDetailDto {
     pub health: HealthDto,
     pub enabled_agent_count: u32,
     pub final_entity_path: String,
-    pub source_label: String,
+    /// Raw Source Content: the original file Install path (never App Copy).
+    pub file_source_original_path: Option<String>,
     pub frontmatter_name: Option<String>,
     pub last_activity_at: String,
     pub skill_markdown: String,
@@ -252,7 +253,7 @@ impl From<SkillDetail> for SkillDetailDto {
             health: summary.health.into(),
             enabled_agent_count: summary.enabled_agent_count,
             final_entity_path: value.final_entity_path,
-            source_label: value.source_label,
+            file_source_original_path: value.file_source_original_path,
             frontmatter_name: value.frontmatter_name,
             last_activity_at: value.last_activity_at,
             skill_markdown: value.skill_markdown,
@@ -344,13 +345,6 @@ impl From<AgentActivation> for AgentActivationDto {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandErrorDto {
-    pub code: String,
-    pub message: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanActivationRequestDto {
@@ -390,7 +384,36 @@ pub struct ActivationPreviewDto {
     pub kind: ActivationPlanKindDto,
     pub entry_path: String,
     pub target_path: String,
-    pub compatibility_warning: Option<String>,
+    pub compatibility_warning: Option<CompatibilityWarningDto>,
+}
+
+/// Closed compatibility warnings (spec §4.7): presentation composes copy
+/// from the typed variant, never from a free string.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompatibilityWarningDto {
+    CustomUnknown,
+    FrontmatterMismatch {
+        #[serde(rename = "frontmatterName")]
+        frontmatter_name: String,
+        #[serde(rename = "directoryName")]
+        directory_name: String,
+    },
+}
+
+impl From<crate::seams::agent_adapter::CompatibilityWarning> for CompatibilityWarningDto {
+    fn from(value: crate::seams::agent_adapter::CompatibilityWarning) -> Self {
+        match value {
+            crate::seams::agent_adapter::CompatibilityWarning::CustomUnknown => Self::CustomUnknown,
+            crate::seams::agent_adapter::CompatibilityWarning::FrontmatterMismatch {
+                frontmatter_name,
+                directory_name,
+            } => Self::FrontmatterMismatch {
+                frontmatter_name,
+                directory_name,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -423,7 +446,7 @@ impl From<ActivationPreview> for ActivationPreviewDto {
             kind: value.kind.into(),
             entry_path: value.entry_path.to_string_lossy().into_owned(),
             target_path: value.target_path.to_string_lossy().into_owned(),
-            compatibility_warning: value.compatibility_warning,
+            compatibility_warning: value.compatibility_warning.map(Into::into),
         }
     }
 }
@@ -623,6 +646,37 @@ impl From<OccupierKind> for OccupierKindDto {
     }
 }
 
+/// Closed reasons why an occupier cannot be Adopted (spec §4.7).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OccupierNotAdoptableReasonDto {
+    RegularFile,
+    PointsAtManagedSkill,
+    PointsAtThisSkill,
+    NoReadableSkillMd,
+    TargetUnresolvable,
+    IdentityConflict {
+        #[serde(rename = "directoryName")]
+        directory_name: String,
+    },
+}
+
+impl From<crate::core::activation::OccupierNotAdoptableReason> for OccupierNotAdoptableReasonDto {
+    fn from(value: crate::core::activation::OccupierNotAdoptableReason) -> Self {
+        use crate::core::activation::OccupierNotAdoptableReason as Reason;
+        match value {
+            Reason::RegularFile => Self::RegularFile,
+            Reason::PointsAtManagedSkill => Self::PointsAtManagedSkill,
+            Reason::PointsAtThisSkill => Self::PointsAtThisSkill,
+            Reason::NoReadableSkillMd => Self::NoReadableSkillMd,
+            Reason::TargetUnresolvable => Self::TargetUnresolvable,
+            Reason::IdentityConflict { directory_name } => {
+                Self::IdentityConflict { directory_name }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OccupierSummaryDto {
@@ -632,7 +686,7 @@ pub struct OccupierSummaryDto {
     pub directory_name: String,
     pub is_skill: bool,
     pub adoptable: bool,
-    pub not_adoptable_reason: Option<String>,
+    pub not_adoptable_reason: Option<OccupierNotAdoptableReasonDto>,
 }
 
 impl From<OccupierSummary> for OccupierSummaryDto {
@@ -648,7 +702,7 @@ impl From<OccupierSummary> for OccupierSummaryDto {
             directory_name: value.directory_name,
             is_skill: value.is_skill,
             adoptable: value.adoptable,
-            not_adoptable_reason: value.not_adoptable_reason,
+            not_adoptable_reason: value.not_adoptable_reason.map(Into::into),
         }
     }
 }
@@ -1504,6 +1558,33 @@ impl From<AdoptAppearance> for AdoptAppearanceDto {
     }
 }
 
+/// Closed reasons for a non-safe Adopt candidate (spec §4.7); `UnsafeTree`
+/// carries the raw filesystem validation fact, never App Copy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdoptRiskReasonDto {
+    Dangling,
+    OutsideHome { path: String },
+    InstallerManaged { path: String },
+    UnsafeTree { detail: String },
+}
+
+impl From<crate::core::adopt::AdoptRiskReason> for AdoptRiskReasonDto {
+    fn from(value: crate::core::adopt::AdoptRiskReason) -> Self {
+        use crate::core::adopt::AdoptRiskReason as Reason;
+        match value {
+            Reason::Dangling => Self::Dangling,
+            Reason::OutsideHome { path } => Self::OutsideHome {
+                path: path.to_string_lossy().into_owned(),
+            },
+            Reason::InstallerManaged { path } => Self::InstallerManaged {
+                path: path.to_string_lossy().into_owned(),
+            },
+            Reason::UnsafeTree(detail) => Self::UnsafeTree { detail },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptCandidateDto {
@@ -1512,7 +1593,7 @@ pub struct AdoptCandidateDto {
     pub directory_names: Vec<String>,
     pub appearances: Vec<AdoptAppearanceDto>,
     pub risk: AdoptRiskDto,
-    pub risk_reason: Option<String>,
+    pub risk_reason: Option<AdoptRiskReasonDto>,
     pub conflict: Option<LibraryConflictDto>,
     pub adoptable: bool,
     pub suggested_agent_ids: Vec<String>,
@@ -1530,7 +1611,7 @@ impl From<AdoptCandidate> for AdoptCandidateDto {
                 .map(AdoptAppearanceDto::from)
                 .collect(),
             risk: value.risk.into(),
-            risk_reason: value.risk_reason,
+            risk_reason: value.risk_reason.map(Into::into),
             conflict: value.conflict.map(LibraryConflictDto::from),
             adoptable: value.adoptable,
             suggested_agent_ids: value
@@ -1694,9 +1775,18 @@ impl From<PreferenceUpdatesDto> for PreferenceUpdates {
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePreferencesResultDto {
     pub preferences: AppPreferencesDto,
-    /// Runtime side-effect warning (e.g. login item unavailable in a
+    /// Closed runtime side-effect warnings (e.g. login item unavailable in a
     /// non-bundled development build); the persisted value is authoritative.
-    pub warning: Option<String>,
+    /// `detail` is the raw technical fact, never App Copy.
+    pub warning: Option<PreferencesWarningDto>,
+}
+
+/// Closed Preferences side-effect warnings (spec §4.7).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PreferencesWarningDto {
+    ShowInDockFailed { detail: String },
+    LaunchAtLoginFailed { detail: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1811,19 +1901,95 @@ pub struct BootstrapChangedPayloadDto {
     pub generation: u64,
 }
 
-/// Closed command failure (spec §4.7): a typed public error plus optional raw
-/// diagnostic. Never carries free-form App Copy.
+/// The closed public error union (spec §4.7): every command failure carries
+/// a stable `code` plus typed fields where presentation needs them. App Copy
+/// never crosses this boundary — React maps each code to a message key and
+/// the optional `diagnostic` keeps the raw technical detail.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicErrorDto {
-    pub code: String,
+#[serde(
+    tag = "code",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum PublicErrorDto {
+    Validation,
+    NotFound,
+    Conflict {
+        #[serde(rename = "directoryName")]
+        directory_name: String,
+    },
+    PlanStale,
+    PermissionDenied,
+    StateUnavailable,
+    CatalogUnavailable,
+    RecoveryRequired,
+    SourceUnavailable,
+    TargetMismatch,
+    DiskFull {
+        #[serde(rename = "requiredBytes")]
+        required_bytes: u64,
+        #[serde(rename = "availableBytes")]
+        available_bytes: u64,
+    },
+    Modified,
+    StaleUpdate,
+    UpdateCancelled,
+    DownloadFailed,
+    InstallFailed,
+    BootstrapUnavailable,
+    RecoveryNotLocked,
+    RecoveryNotPure,
+    RecoveryNoActiveOperation,
+    RecoveryOperationAlreadyActive,
+    RecoveryWriterActive,
+    RecoveryStepFailed,
+    RecoveryStateAmbiguous,
+    RecoverySnapshotInUse,
+    RecoveryStateStore,
+    RecoveryFilesystem,
+    RecoveryProbe,
+    LocaleStoreUnavailable,
+    Internal,
 }
 
+/// Closed command failure (spec §4.7): a typed public error plus optional raw
+/// diagnostic. Never carries free-form App Copy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandFailureDto {
     pub error: PublicErrorDto,
     pub diagnostic: Option<DiagnosticDto>,
+}
+
+// -- Locale Authority (spec §4.5, §4.7) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLocaleSelectionRequestDto {
+    pub selection: crate::seams::locale_store::LocaleSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleSnapshotDto {
+    pub selection: crate::seams::locale_store::LocaleSelection,
+    pub effective_locale: crate::seams::locale_store::EffectiveLocale,
+    pub generation: u64,
+    pub diagnostic: Option<DiagnosticDto>,
+}
+
+impl From<crate::core::locale::LocaleSnapshot> for LocaleSnapshotDto {
+    fn from(value: crate::core::locale::LocaleSnapshot) -> Self {
+        Self {
+            selection: value.selection,
+            effective_locale: value.effective_locale,
+            generation: value.generation,
+            diagnostic: value.diagnostic.map(|diagnostic| DiagnosticDto {
+                code: diagnostic.code,
+                message: diagnostic.message,
+            }),
+        }
+    }
 }
 
 // -- Fixture Recovery (spec §4.4, §5.2) --

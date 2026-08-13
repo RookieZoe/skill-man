@@ -7,6 +7,9 @@ import type {
 } from "./catalog-client";
 import { App } from "./App";
 import { RecoveryView } from "../features/recovery/RecoveryView";
+import { LocaleProvider } from "../features/locale/LocaleProvider";
+import { LanguageControl } from "../features/locale/LanguageControl";
+import { useLocale } from "../features/locale/LocaleProvider";
 
 export interface BootstrapAppProps {
   client: CatalogClient;
@@ -47,15 +50,40 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
     };
   }, [client, refresh]);
 
+  return (
+    <LocaleProvider client={client}>
+      <BootstrapRoutes
+        client={client}
+        snapshot={snapshot}
+        loadFailed={loadFailed}
+        onRetry={refresh}
+      />
+    </LocaleProvider>
+  );
+}
+
+function BootstrapRoutes({
+  client,
+  snapshot,
+  loadFailed,
+  onRetry,
+}: {
+  client: CatalogClient;
+  snapshot: BootstrapSnapshot | null;
+  loadFailed: boolean;
+  onRetry: () => void;
+}) {
+  const { t } = useLocale();
+
   if (loadFailed) {
     return (
       <BootstrapRoute
-        title="Skill Man could not start"
-        summary="The bootstrap state could not be read. Retry to resolve it again."
-        onRetry={refresh}
+        title={t("bootstrap.failed_title")}
+        summary={t("bootstrap.failed_summary")}
+        onRetry={onRetry}
         diagnostic={{
           code: "bootstrap_command_failed",
-          message: "The bootstrap snapshot command failed.",
+          message: t("bootstrap.diagnostic_message"),
         }}
       />
     );
@@ -63,8 +91,8 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
   if (!snapshot) {
     return (
       <BootstrapRoute
-        title="Skill Man"
-        summary="Resolving the Skill Man Home…"
+        title={t("bootstrap.brand")}
+        summary={t("bootstrap.resolving")}
       />
     );
   }
@@ -74,15 +102,15 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
     case "unconfigured":
       return (
         <BootstrapRoute
-          title="Unconfigured"
-          summary="No Skill Man Home is bound yet. The binding setup completes here in the Home Binding flow."
+          title={t("bootstrap.route.unconfigured_title")}
+          summary={t("bootstrap.route.unconfigured_summary")}
         />
       );
     case "legacy_detected":
       return (
         <BootstrapRoute
-          title="Legacy Home detected"
-          summary={`A Legacy Home exists at ${snapshot.path}. It is classified read-only before the one-time transition.`}
+          title={t("bootstrap.route.legacy_title")}
+          summary={t("bootstrap.route.legacy_summary", { path: snapshot.path })}
         />
       );
     case "fixture_recovery_locked":
@@ -90,32 +118,38 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
     case "home_candidate_pending":
       return (
         <BootstrapRoute
-          title="Home candidate pending"
-          summary={`The candidate at ${snapshot.path} is awaiting its final confirmation.`}
+          title={t("bootstrap.route.candidate_title")}
+          summary={t("bootstrap.route.candidate_summary", {
+            path: snapshot.path,
+          })}
         />
       );
     case "home_unavailable":
       return (
         <BootstrapRoute
-          title="Home Unavailable"
-          summary={`The bound Home at ${snapshot.path} cannot be reached. Nothing is written or re-bound.`}
+          title={t("bootstrap.route.unavailable_title")}
+          summary={t("bootstrap.route.unavailable_summary", {
+            path: snapshot.path,
+          })}
           diagnostic={snapshot.diagnostic ?? undefined}
         />
       );
     case "home_identity_mismatch":
       return (
         <BootstrapRoute
-          title="Home Identity Mismatch"
-          summary={`The path ${snapshot.path} is not the bound Home. Its content is never treated as Bound.`}
+          title={t("bootstrap.route.mismatch_title")}
+          summary={t("bootstrap.route.mismatch_summary", {
+            path: snapshot.path,
+          })}
           diagnostic={snapshot.diagnostic ?? undefined}
         />
       );
     case "app_state_unavailable":
       return (
         <BootstrapRoute
-          title="App State Unavailable"
-          summary="The app state could not be read or is contradictory. Retry to resolve it again."
-          onRetry={refresh}
+          title={t("bootstrap.route.state_title")}
+          summary={t("bootstrap.route.state_summary")}
+          onRetry={onRetry}
           diagnostic={snapshot.diagnostic ?? undefined}
         />
       );
@@ -136,6 +170,7 @@ function BootstrapRoute({
   onRetry,
   diagnostic,
 }: BootstrapRouteProps) {
+  const { t } = useLocale();
   return (
     <main
       role="status"
@@ -145,18 +180,19 @@ function BootstrapRoute({
     >
       <h1>{title}</h1>
       <p>{summary}</p>
+      <LanguageControl />
       {onRetry ? (
         <button type="button" onClick={onRetry}>
-          Retry
+          {t("bootstrap.retry")}
         </button>
       ) : null}
       {diagnostic ? (
         <details className="bootstrap-diagnostic">
-          <summary>Technical details</summary>
+          <summary>{t("bootstrap.technical_details")}</summary>
           <dl>
-            <dt>Code</dt>
+            <dt>{t("bootstrap.code")}</dt>
             <dd>{diagnostic.code}</dd>
-            <dt>Detail</dt>
+            <dt>{t("bootstrap.detail")}</dt>
             <dd>{diagnostic.message}</dd>
           </dl>
         </details>

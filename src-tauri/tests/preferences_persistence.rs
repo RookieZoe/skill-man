@@ -12,6 +12,7 @@ use skill_man_lib::core::domain::Health;
 use skill_man_lib::core::preferences::PreferencesService;
 use skill_man_lib::core::startup::StartupService;
 use skill_man_lib::seams::catalog_store::CatalogStore;
+use skill_man_lib::seams::locale_store::EffectiveLocale;
 use skill_man_lib::seams::preferences_store::{AppPreferences, PreferenceUpdates};
 use skill_man_lib::tauri_adapter::tray::tray_skill_label;
 
@@ -170,14 +171,20 @@ fn tray_labels_show_agent_counts_and_health_suffixes() {
         health: Health::Healthy,
         enabled_agent_count: 1,
     };
-    assert_eq!(tray_skill_label(&healthy), "media-xray · 1 Agent");
+    assert_eq!(
+        tray_skill_label(&healthy, EffectiveLocale::En),
+        "media-xray · 1 Agent"
+    );
 
     let broken = skill_man_lib::core::domain::SkillSummary {
         enabled_agent_count: 2,
         health: Health::Broken,
         ..healthy.clone()
     };
-    assert_eq!(tray_skill_label(&broken), "media-xray · 2 Agents · broken");
+    assert_eq!(
+        tray_skill_label(&broken, EffectiveLocale::En),
+        "media-xray · 2 Agents · broken"
+    );
 
     let modified = skill_man_lib::core::domain::SkillSummary {
         enabled_agent_count: 0,
@@ -185,7 +192,7 @@ fn tray_labels_show_agent_counts_and_health_suffixes() {
         ..healthy.clone()
     };
     assert_eq!(
-        tray_skill_label(&modified),
+        tray_skill_label(&modified, EffectiveLocale::En),
         "media-xray · 0 Agents · modified"
     );
 }

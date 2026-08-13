@@ -124,19 +124,21 @@ impl FixtureRecoveryApi {
 }
 
 fn failure(error: &FixtureRecoveryError) -> CommandFailureDto {
-    let (code, diagnostic) = match error {
-        FixtureRecoveryError::NotLocked => ("recovery_not_locked", None),
-        FixtureRecoveryError::NotPure => ("recovery_not_pure", None),
-        FixtureRecoveryError::NoActiveOperation => ("recovery_no_active_operation", None),
+    let (error, diagnostic) = match error {
+        FixtureRecoveryError::NotLocked => (PublicErrorDto::RecoveryNotLocked, None),
+        FixtureRecoveryError::NotPure => (PublicErrorDto::RecoveryNotPure, None),
+        FixtureRecoveryError::NoActiveOperation => {
+            (PublicErrorDto::RecoveryNoActiveOperation, None)
+        }
         FixtureRecoveryError::OperationAlreadyActive { operation_id } => (
-            "recovery_operation_already_active",
+            PublicErrorDto::RecoveryOperationAlreadyActive,
             Some(DiagnosticDto {
                 code: "operation_id".into(),
                 message: operation_id.clone(),
             }),
         ),
         FixtureRecoveryError::WriterActive(message) => (
-            "recovery_writer_active",
+            PublicErrorDto::RecoveryWriterActive,
             Some(DiagnosticDto {
                 code: "wal_lock".into(),
                 message: message.clone(),
@@ -147,46 +149,43 @@ fn failure(error: &FixtureRecoveryError) -> CommandFailureDto {
             message,
             rolled_back,
         } => (
-            "recovery_step_failed",
+            PublicErrorDto::RecoveryStepFailed,
             Some(DiagnosticDto {
                 code: format!("cursor_{cursor}_rolled_back_{rolled_back}"),
                 message: message.clone(),
             }),
         ),
         FixtureRecoveryError::AmbiguousState(message) => (
-            "recovery_state_ambiguous",
+            PublicErrorDto::RecoveryStateAmbiguous,
             Some(DiagnosticDto {
                 code: "ambiguous".into(),
                 message: message.clone(),
             }),
         ),
-        FixtureRecoveryError::SnapshotInUse => ("recovery_snapshot_in_use", None),
+        FixtureRecoveryError::SnapshotInUse => (PublicErrorDto::RecoverySnapshotInUse, None),
         FixtureRecoveryError::StateStore(error) => (
-            "recovery_state_store",
+            PublicErrorDto::RecoveryStateStore,
             Some(DiagnosticDto {
                 code: "app_state".into(),
                 message: error.to_string(),
             }),
         ),
         FixtureRecoveryError::FileSystem(message) => (
-            "recovery_filesystem",
+            PublicErrorDto::RecoveryFilesystem,
             Some(DiagnosticDto {
                 code: "filesystem".into(),
                 message: message.clone(),
             }),
         ),
         FixtureRecoveryError::Probe(message) => (
-            "recovery_probe",
+            PublicErrorDto::RecoveryProbe,
             Some(DiagnosticDto {
                 code: "catalog_probe".into(),
                 message: message.clone(),
             }),
         ),
     };
-    CommandFailureDto {
-        error: PublicErrorDto { code: code.into() },
-        diagnostic,
-    }
+    CommandFailureDto { error, diagnostic }
 }
 
 impl From<&FixtureRecoveryPreview> for FixtureRecoveryPreviewDto {
@@ -296,7 +295,10 @@ mod tests {
         let failure = failure(&FixtureRecoveryError::WriterActive(
             "the SQLite WAL index is locked".into(),
         ));
-        assert_eq!(failure.error.code, "recovery_writer_active");
+        assert!(matches!(
+            failure.error,
+            super::PublicErrorDto::RecoveryWriterActive
+        ));
         assert_eq!(
             failure
                 .diagnostic

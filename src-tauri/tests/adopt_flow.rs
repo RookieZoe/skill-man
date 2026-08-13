@@ -11,7 +11,7 @@ use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::adopt::{
-    AdoptError, AdoptPlanKind, AdoptRisk, AdoptSelection, AdoptService,
+    AdoptError, AdoptPlanKind, AdoptRisk, AdoptRiskReason, AdoptSelection, AdoptService,
 };
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SkillId, SourceKind};
@@ -650,8 +650,10 @@ fn adopt_preview_rejects_an_unsafe_skill_without_moving_the_source() {
     assert!(!ask_matt.adoptable);
     assert_eq!(ask_matt.risk, AdoptRisk::Broken);
     assert_eq!(
-        ask_matt.risk_reason.as_deref(),
-        Some("Skill symlink target must be a valid UTF-8 relative path: ask-matt")
+        ask_matt.risk_reason,
+        Some(AdoptRiskReason::UnsafeTree(
+            "Skill symlink target must be a valid UTF-8 relative path: ask-matt".into()
+        ))
     );
     let plan = adopt
         .plan(&[select(&candidates, "ask-matt")])
@@ -762,9 +764,8 @@ fn adopt_migrates_a_real_directory_and_replaces_the_appearance() {
         .inspect(adopted.id.clone())
         .expect("inspect adopted Skill");
     assert!(
-        detail.source_label.contains("Installed from file"),
-        "{}",
-        detail.source_label
+        detail.file_source_original_path.is_some(),
+        "the raw file source path must survive the split DTO"
     );
     assert_eq!(detail.summary.health, Health::Healthy);
 

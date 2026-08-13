@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
-use skill_man_lib::core::activation::{ActivationError, ActivationService, OccupierKind};
+use skill_man_lib::core::activation::{
+    ActivationError, ActivationService, OccupierKind, OccupierNotAdoptableReason,
+};
 use skill_man_lib::core::domain::{ActivationObservedState, AgentId, AgentKind, SkillId};
 use skill_man_lib::seams::activation_store::{
     ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
@@ -22,7 +24,7 @@ use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::dto::{
     ActivationConflictRequestDto, ApplyActivationReplaceRequestDto,
     CancelActivationReplaceRequestDto, FinalizeActivationReplaceRequestDto,
-    PlanActivationReplaceRequestDto, UndoActivationReplaceRequestDto,
+    PlanActivationReplaceRequestDto, PublicErrorDto, UndoActivationReplaceRequestDto,
 };
 
 fn library_root(home: &Path) -> PathBuf {
@@ -200,8 +202,10 @@ fn conflict_details_block_adopt_for_library_and_same_entity_targets() {
         details
             .occupier
             .not_adoptable_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("entity"))
+            .is_some_and(|reason| matches!(
+                reason,
+                OccupierNotAdoptableReason::PointsAtManagedSkill
+            ))
     );
 }
 
@@ -793,8 +797,10 @@ fn conflict_details_block_adopt_when_an_identity_conflict_exists() {
         details
             .occupier
             .not_adoptable_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("already uses this directory identity"))
+            .is_some_and(|reason| matches!(
+                reason,
+                OccupierNotAdoptableReason::IdentityConflict { .. }
+            ))
     );
 }
 
@@ -895,7 +901,7 @@ fn tauri_adapter_exposes_typed_conflict_and_replace_results() {
             operation_id: preview.operation_id,
         })
         .expect_err("an undone operation is already finished");
-    assert_eq!(finalize_error.code, "plan_stale");
+    assert!(matches!(finalize_error.error, PublicErrorDto::PlanStale));
 }
 
 // -- Test doubles ----------------------------------------------------------

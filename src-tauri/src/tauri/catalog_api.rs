@@ -1,8 +1,8 @@
 use crate::core::catalog::{CatalogError, CatalogService};
 use crate::core::domain::SkillId;
 use crate::tauri_adapter::dto::{
-    AgentActivationDto, CatalogListDto, CommandErrorDto, ListSkillsRequestDto, SkillDetailDto,
-    SkillSummaryDto,
+    AgentActivationDto, CatalogListDto, CommandFailureDto, DiagnosticDto, ListSkillsRequestDto,
+    PublicErrorDto, SkillDetailDto, SkillSummaryDto,
 };
 
 #[derive(Clone)]
@@ -18,7 +18,7 @@ impl CatalogApi {
     pub fn list_skills(
         &self,
         request: ListSkillsRequestDto,
-    ) -> Result<CatalogListDto, CommandErrorDto> {
+    ) -> Result<CatalogListDto, CommandFailureDto> {
         let snapshot = self
             .catalog
             .list(request.filter.into())
@@ -34,7 +34,7 @@ impl CatalogApi {
         })
     }
 
-    pub fn inspect_skill(&self, skill_id: String) -> Result<SkillDetailDto, CommandErrorDto> {
+    pub fn inspect_skill(&self, skill_id: String) -> Result<SkillDetailDto, CommandFailureDto> {
         self.catalog
             .inspect(SkillId(skill_id))
             .map(SkillDetailDto::from)
@@ -44,7 +44,7 @@ impl CatalogApi {
     pub fn list_agents(
         &self,
         skill_id: String,
-    ) -> Result<Vec<AgentActivationDto>, CommandErrorDto> {
+    ) -> Result<Vec<AgentActivationDto>, CommandFailureDto> {
         self.catalog
             .list_agents(SkillId(skill_id))
             .map(|agents| agents.into_iter().map(AgentActivationDto::from).collect())
@@ -52,13 +52,16 @@ impl CatalogApi {
     }
 }
 
-fn command_error(error: CatalogError) -> CommandErrorDto {
-    let code = match error {
-        CatalogError::SkillNotFound(_) => "not_found",
-        CatalogError::Store(_) => "catalog_unavailable",
+fn command_error(error: CatalogError) -> CommandFailureDto {
+    let public_error = match error {
+        CatalogError::SkillNotFound(_) => PublicErrorDto::NotFound,
+        CatalogError::Store(_) => PublicErrorDto::CatalogUnavailable,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

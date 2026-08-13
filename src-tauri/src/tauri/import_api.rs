@@ -6,15 +6,15 @@ use crate::seams::import_store::ImportStoreError;
 use crate::tauri_adapter::dto::{
     ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
     ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, CancelFileImportRequestDto,
-    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CommandErrorDto,
-    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CommandFailureDto,
+    DiagnosticDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, FileImportCandidateDto,
     FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
     FileImportSelectionPreviewDto, FileImportSelectionResultDto, GitImportDiscoveryDto,
     GitImportSelectionPreviewDto, GitImportSelectionResultDto, LinkImportCandidateDto,
     LinkImportPreviewDto, LinkImportResultDto, PlanFileImportRequestDto,
     PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
-    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
+    PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PublicErrorDto,
 };
 
 pub struct ImportApi {
@@ -29,7 +29,7 @@ impl ImportApi {
     pub fn discover_link_import(
         &self,
         request: DiscoverLinkImportRequestDto,
-    ) -> Result<LinkImportCandidateDto, CommandErrorDto> {
+    ) -> Result<LinkImportCandidateDto, CommandFailureDto> {
         self.service
             .discover_link(&PathBuf::from(request.source_path))
             .map(LinkImportCandidateDto::from)
@@ -39,7 +39,7 @@ impl ImportApi {
     pub fn plan_link_import(
         &self,
         request: PlanLinkImportRequestDto,
-    ) -> Result<LinkImportPreviewDto, CommandErrorDto> {
+    ) -> Result<LinkImportPreviewDto, CommandFailureDto> {
         self.service
             .plan_link(&PathBuf::from(request.source_path))
             .map(LinkImportPreviewDto::from)
@@ -49,7 +49,7 @@ impl ImportApi {
     pub fn apply_link_import(
         &self,
         request: ApplyLinkImportRequestDto,
-    ) -> Result<LinkImportResultDto, CommandErrorDto> {
+    ) -> Result<LinkImportResultDto, CommandFailureDto> {
         self.service
             .apply_link(&request.plan_token)
             .map(LinkImportResultDto::from)
@@ -59,7 +59,7 @@ impl ImportApi {
     pub fn cancel_link_import(
         &self,
         request: CancelLinkImportRequestDto,
-    ) -> Result<bool, CommandErrorDto> {
+    ) -> Result<bool, CommandFailureDto> {
         self.service
             .cancel_link(&request.plan_token)
             .map_err(|error| import_command_error(&error))
@@ -68,7 +68,7 @@ impl ImportApi {
     pub fn discover_file_import(
         &self,
         request: DiscoverFileImportRequestDto,
-    ) -> Result<FileImportCandidateDto, CommandErrorDto> {
+    ) -> Result<FileImportCandidateDto, CommandFailureDto> {
         self.service
             .discover_file(&PathBuf::from(request.source_path))
             .map(FileImportCandidateDto::from)
@@ -78,7 +78,7 @@ impl ImportApi {
     pub fn discover_file_import_collection(
         &self,
         request: DiscoverFileImportCollectionRequestDto,
-    ) -> Result<FileImportDiscoveryDto, CommandErrorDto> {
+    ) -> Result<FileImportDiscoveryDto, CommandFailureDto> {
         self.service
             .discover_file_collection(&PathBuf::from(request.source_path))
             .map(FileImportDiscoveryDto::from)
@@ -88,7 +88,7 @@ impl ImportApi {
     pub fn plan_file_import(
         &self,
         request: PlanFileImportRequestDto,
-    ) -> Result<FileImportPreviewDto, CommandErrorDto> {
+    ) -> Result<FileImportPreviewDto, CommandFailureDto> {
         self.service
             .plan_file(&PathBuf::from(request.source_path))
             .map(FileImportPreviewDto::from)
@@ -98,7 +98,7 @@ impl ImportApi {
     pub fn plan_file_reinstall(
         &self,
         request: PlanFileReinstallRequestDto,
-    ) -> Result<FileImportPreviewDto, CommandErrorDto> {
+    ) -> Result<FileImportPreviewDto, CommandFailureDto> {
         self.service
             .plan_file_reinstall(&PathBuf::from(request.source_path))
             .map(FileImportPreviewDto::from)
@@ -108,7 +108,7 @@ impl ImportApi {
     pub fn plan_file_import_selection(
         &self,
         request: PlanFileImportSelectionRequestDto,
-    ) -> Result<FileImportSelectionPreviewDto, CommandErrorDto> {
+    ) -> Result<FileImportSelectionPreviewDto, CommandFailureDto> {
         self.service
             .plan_file_selection(
                 &PathBuf::from(request.source_path),
@@ -121,7 +121,7 @@ impl ImportApi {
     pub fn apply_file_import(
         &self,
         request: ApplyFileImportRequestDto,
-    ) -> Result<FileImportResultDto, CommandErrorDto> {
+    ) -> Result<FileImportResultDto, CommandFailureDto> {
         self.service
             .apply_file(&request.plan_token)
             .map(FileImportResultDto::from)
@@ -131,7 +131,7 @@ impl ImportApi {
     pub fn apply_file_import_selection(
         &self,
         request: ApplyFileImportSelectionRequestDto,
-    ) -> Result<FileImportSelectionResultDto, CommandErrorDto> {
+    ) -> Result<FileImportSelectionResultDto, CommandFailureDto> {
         self.service
             .apply_file_selection(&request.plan_token)
             .map(FileImportSelectionResultDto::from)
@@ -141,7 +141,7 @@ impl ImportApi {
     pub fn cancel_file_import(
         &self,
         request: CancelFileImportRequestDto,
-    ) -> Result<bool, CommandErrorDto> {
+    ) -> Result<bool, CommandFailureDto> {
         self.service
             .cancel_file(&request.plan_token)
             .map_err(|error| import_command_error(&error))
@@ -150,7 +150,7 @@ impl ImportApi {
     pub fn discover_git_import(
         &self,
         request: DiscoverGitImportRequestDto,
-    ) -> Result<GitImportDiscoveryDto, CommandErrorDto> {
+    ) -> Result<GitImportDiscoveryDto, CommandFailureDto> {
         self.service
             .discover_git(&request.source, request.force_full_depth)
             .map(GitImportDiscoveryDto::from)
@@ -160,7 +160,7 @@ impl ImportApi {
     pub fn plan_git_import_selection(
         &self,
         request: PlanGitImportSelectionRequestDto,
-    ) -> Result<GitImportSelectionPreviewDto, CommandErrorDto> {
+    ) -> Result<GitImportSelectionPreviewDto, CommandFailureDto> {
         self.service
             .plan_git_selection(
                 &request.source,
@@ -174,7 +174,7 @@ impl ImportApi {
     pub fn apply_git_import_selection(
         &self,
         request: ApplyGitImportSelectionRequestDto,
-    ) -> Result<GitImportSelectionResultDto, CommandErrorDto> {
+    ) -> Result<GitImportSelectionResultDto, CommandFailureDto> {
         self.service
             .apply_git_selection(&request.plan_token)
             .map(GitImportSelectionResultDto::from)
@@ -184,52 +184,80 @@ impl ImportApi {
     pub fn cancel_git_import_selection(
         &self,
         request: CancelGitImportSelectionRequestDto,
-    ) -> Result<bool, CommandErrorDto> {
+    ) -> Result<bool, CommandFailureDto> {
         self.service
             .cancel_file(&request.plan_token)
             .map_err(|error| import_command_error(&error))
     }
 }
 
-pub fn import_command_error(error: &ImportError) -> CommandErrorDto {
-    let code = match &error {
-        ImportError::Validation(_) => "validation",
-        ImportError::Conflict(_) | ImportError::Store(ImportStoreError::Conflict(_)) => "conflict",
-        ImportError::SourceUnavailable(_) => "source_unavailable",
-        ImportError::PlanStale | ImportError::PlanNotFound => "plan_stale",
-        ImportError::DiskFull { .. } => "disk_full",
-        ImportError::Modified => "modified",
-        ImportError::RecoveryRequired(_) => "recovery_required",
-        ImportError::FileSystem(FileSystemError::RecoveryRequired { .. }) => "recovery_required",
-        ImportError::FileSystem(FileSystemError::PlanStale { .. }) => "plan_stale",
+pub fn import_command_error(error: &ImportError) -> CommandFailureDto {
+    let public_error = match &error {
+        ImportError::Validation(_) => PublicErrorDto::Validation,
+        ImportError::Conflict(directory_name)
+        | ImportError::Store(ImportStoreError::Conflict(directory_name)) => {
+            PublicErrorDto::Conflict {
+                directory_name: directory_name.clone(),
+            }
+        }
+        ImportError::SourceUnavailable(_) => PublicErrorDto::SourceUnavailable,
+        ImportError::PlanStale | ImportError::PlanNotFound => PublicErrorDto::PlanStale,
+        ImportError::DiskFull {
+            required_bytes,
+            available_bytes,
+        } => PublicErrorDto::DiskFull {
+            required_bytes: *required_bytes,
+            available_bytes: *available_bytes,
+        },
+        ImportError::Modified => PublicErrorDto::Modified,
+        ImportError::RecoveryRequired(_) => PublicErrorDto::RecoveryRequired,
+        ImportError::FileSystem(FileSystemError::RecoveryRequired { .. }) => {
+            PublicErrorDto::RecoveryRequired
+        }
+        ImportError::FileSystem(FileSystemError::PlanStale { .. }) => PublicErrorDto::PlanStale,
         ImportError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "permission_denied"
+            PublicErrorDto::PermissionDenied
         }
         ImportError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::StorageFull =>
         {
-            "disk_full"
+            PublicErrorDto::DiskFull {
+                required_bytes: 0,
+                available_bytes: 0,
+            }
         }
-        ImportError::Store(_) => "state_unavailable",
-        ImportError::Source(crate::seams::source::SourceError::Validation(_)) => "validation",
+        ImportError::Store(_) => PublicErrorDto::StateUnavailable,
+        ImportError::Source(crate::seams::source::SourceError::Validation(_)) => {
+            PublicErrorDto::Validation
+        }
         ImportError::Source(crate::seams::source::SourceError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "permission_denied"
+            PublicErrorDto::PermissionDenied
         }
         ImportError::Source(crate::seams::source::SourceError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::StorageFull =>
         {
-            "disk_full"
+            PublicErrorDto::DiskFull {
+                required_bytes: 0,
+                available_bytes: 0,
+            }
         }
-        ImportError::Source(crate::seams::source::SourceError::Io { .. }) => "source_unavailable",
-        ImportError::Source(crate::seams::source::SourceError::Git(_)) => "source_unavailable",
-        ImportError::FileSystem(_) | ImportError::Internal(_) => "internal",
+        ImportError::Source(crate::seams::source::SourceError::Io { .. }) => {
+            PublicErrorDto::SourceUnavailable
+        }
+        ImportError::Source(crate::seams::source::SourceError::Git(_)) => {
+            PublicErrorDto::SourceUnavailable
+        }
+        ImportError::FileSystem(_) | ImportError::Internal(_) => PublicErrorDto::Internal,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

@@ -3,6 +3,15 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
+import {
+  useLocale,
+  type LocaleContextValue,
+} from "../features/locale/LocaleProvider";
+import {
+  errorMessageKey,
+  errorMessageParams,
+  type MessageKey,
+} from "../features/locale/messages";
 import type {
   ActivationConflictDetails,
   ActivationPreview,
@@ -25,6 +34,7 @@ import type {
   LinkImportPreview,
   LinkImportResult,
   PreferenceUpdates,
+  PreferencesWarning,
   RelocateLinkPreview,
   RelocateLinkResult,
   RemoveSkillPreview,
@@ -87,6 +97,11 @@ function isSafeAdoptCandidate(candidate: AdoptCandidate): boolean {
 }
 
 export function App({ client }: AppProps) {
+  const { t } = useLocale();
+  // Effects only render errors via `t`; a locale switch must not re-run
+  // catalog/health effects, so the current `t` is mirrored into a ref.
+  const tRef = useRef(t);
+  tRef.current = t;
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
@@ -99,9 +114,8 @@ export function App({ client }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [activationError, setActivationError] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences | null>(null);
-  const [preferencesWarning, setPreferencesWarning] = useState<string | null>(
-    null,
-  );
+  const [preferencesWarning, setPreferencesWarning] =
+    useState<PreferencesWarning | null>(null);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
   const [appUpdatePanel, setAppUpdatePanel] = useState<AppUpdatePanelState>({
@@ -193,7 +207,9 @@ export function App({ client }: AppProps) {
   const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
   const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
   const [adoptError, setAdoptError] = useState<string | null>(null);
-  const [adoptErrorHeading, setAdoptErrorHeading] = useState("Scan failed");
+  const [adoptErrorHeading, setAdoptErrorHeading] = useState<MessageKey>(
+    "app.notice.scan_failed",
+  );
   const [adoptActivity, setAdoptActivity] = useState<
     "idle" | "scanning" | "planning" | "applying" | "undoing"
   >("idle");
@@ -215,7 +231,7 @@ export function App({ client }: AppProps) {
       .catch((reason) => {
         // §10.4: a recovery_required startup is a read-only lock; browsing
         // stays available but every write is refused until recovery runs.
-        const failure = readCommandError(reason);
+        const failure = readCommandError(reason, tRef.current);
         if (current && failure.code === "recovery_required") {
           setLockNotice(failure.message);
         }
@@ -342,7 +358,7 @@ export function App({ client }: AppProps) {
         setError(null);
       })
       .catch((reason: unknown) => {
-        if (current) setError(readError(reason));
+        if (current) setError(readError(reason, tRef.current));
       })
       .finally(() => {
         if (current) setLibraryLoaded(true);
@@ -364,7 +380,7 @@ export function App({ client }: AppProps) {
         setError(null);
       })
       .catch((reason: unknown) => {
-        if (current) setError(readError(reason));
+        if (current) setError(readError(reason, tRef.current));
       });
     return () => {
       current = false;
@@ -387,7 +403,7 @@ export function App({ client }: AppProps) {
         if (!current) return;
         setAgents([]);
         setAgentsReadyForSkillId(selectedId);
-        setError(readError(reason));
+        setError(readError(reason, tRef.current));
       });
     return () => {
       current = false;
@@ -446,7 +462,7 @@ export function App({ client }: AppProps) {
     skillId: string,
     agentId: string,
   ) {
-    const failure = readCommandError(reason);
+    const failure = readCommandError(reason, t);
     if (failure.code === "conflict") {
       setActivationConflictMessage(failure.message);
       try {
@@ -474,7 +490,7 @@ export function App({ client }: AppProps) {
     try {
       await client.cancelActivation(planToken);
     } catch (reason) {
-      setActivationError(readError(reason));
+      setActivationError(readError(reason, t));
     }
   }
 
@@ -488,7 +504,7 @@ export function App({ client }: AppProps) {
       await refreshAfterActivationChange();
       setActivationPreview(null);
     } catch (reason) {
-      const failure = readCommandError(reason);
+      const failure = readCommandError(reason, t);
       try {
         setAgents(await client.listAgents(selectedId));
         setAgentsReadyForSkillId(selectedId);
@@ -545,7 +561,7 @@ export function App({ client }: AppProps) {
     setAdoptResult(null);
     setAdoptUndo(null);
     setAdoptError(null);
-    setAdoptErrorHeading("Scan failed");
+    setAdoptErrorHeading("app.notice.scan_failed");
     const runId = ++adoptRunId.current;
     setAdoptActivity("scanning");
     try {
@@ -562,7 +578,7 @@ export function App({ client }: AppProps) {
           : [],
       );
     } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
       if (runId === adoptRunId.current) setAdoptActivity("idle");
     }
@@ -576,7 +592,7 @@ export function App({ client }: AppProps) {
     try {
       setReplacePreview(await client.planActivationReplace(skillId, agentId));
     } catch (reason) {
-      setReplaceError(readError(reason));
+      setReplaceError(readError(reason, t));
     }
   }
 
@@ -595,7 +611,7 @@ export function App({ client }: AppProps) {
       setReplaceResult(result);
     } catch (reason) {
       setReplacePreview(null);
-      setReplaceError(readError(reason));
+      setReplaceError(readError(reason, t));
     } finally {
       setIsApplyingReplace(false);
     }
@@ -610,7 +626,7 @@ export function App({ client }: AppProps) {
       await refreshAfterActivationChange();
       setReplaceUndo(undo);
     } catch (reason) {
-      setReplaceError(readError(reason));
+      setReplaceError(readError(reason, t));
     } finally {
       setIsUndoingReplace(false);
     }
@@ -635,12 +651,12 @@ export function App({ client }: AppProps) {
     setReplaceError(null);
     if (planToken) {
       client.cancelActivationReplace(planToken).catch((reason) => {
-        setActivationError(readError(reason));
+        setActivationError(readError(reason, t));
       });
     }
     if (operationId) {
       client.finalizeActivationReplace(operationId).catch((reason) => {
-        setActivationError(readError(reason));
+        setActivationError(readError(reason, t));
       });
     }
   }
@@ -661,7 +677,7 @@ export function App({ client }: AppProps) {
     } catch (reason) {
       if (runId === linkImportRunId.current) {
         setLinkImportPreview(null);
-        setLinkImportError(readError(reason));
+        setLinkImportError(readError(reason, t));
       }
     } finally {
       if (runId === linkImportRunId.current) setLinkImportActivity("idle");
@@ -681,7 +697,7 @@ export function App({ client }: AppProps) {
       setLinkImportResult(result);
     } catch (reason) {
       setLinkImportPreview(null);
-      setLinkImportError(readError(reason));
+      setLinkImportError(readError(reason, t));
     } finally {
       if (runId === linkImportRunId.current) setLinkImportActivity("idle");
     }
@@ -727,7 +743,7 @@ export function App({ client }: AppProps) {
       );
     } catch (reason) {
       if (runId === gitImportRunId.current) {
-        setGitImportError(readError(reason));
+        setGitImportError(readError(reason, t));
       }
     } finally {
       if (runId === gitImportRunId.current) setGitImportActivity("idle");
@@ -754,7 +770,7 @@ export function App({ client }: AppProps) {
       setGitImportPreview(preview);
     } catch (reason) {
       if (runId === gitImportRunId.current) {
-        setGitImportError(readError(reason));
+        setGitImportError(readError(reason, t));
       }
     } finally {
       if (runId === gitImportRunId.current) setGitImportActivity("idle");
@@ -776,7 +792,7 @@ export function App({ client }: AppProps) {
       setGitImportResult(result);
     } catch (reason) {
       setGitImportPreview(null);
-      setGitImportError(readError(reason));
+      setGitImportError(readError(reason, t));
     } finally {
       if (runId === gitImportRunId.current) setGitImportActivity("idle");
     }
@@ -835,7 +851,7 @@ export function App({ client }: AppProps) {
       setUpdatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -858,7 +874,7 @@ export function App({ client }: AppProps) {
       setUpdatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -902,7 +918,7 @@ export function App({ client }: AppProps) {
       setUpdatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -927,7 +943,7 @@ export function App({ client }: AppProps) {
       setUpdatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -977,7 +993,7 @@ export function App({ client }: AppProps) {
       setRelocatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -1011,7 +1027,7 @@ export function App({ client }: AppProps) {
       setRelocatePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -1036,7 +1052,7 @@ export function App({ client }: AppProps) {
       .catch((reason) => {
         setRemovePanel((state) =>
           state.isOpen
-            ? { ...state, activity: "idle", error: readError(reason) }
+            ? { ...state, activity: "idle", error: readError(reason, t) }
             : state,
         );
       });
@@ -1082,7 +1098,7 @@ export function App({ client }: AppProps) {
       setRemovePanel((state) => ({
         ...state,
         activity: "idle",
-        error: readError(reason),
+        error: readError(reason, t),
       }));
     }
   }
@@ -1092,7 +1108,7 @@ export function App({ client }: AppProps) {
       await client.runActivationHealthCheck();
       setLockNotice(null);
     } catch (reason) {
-      setLockNotice(readCommandError(reason).message);
+      setLockNotice(readCommandError(reason, t).message);
     }
   }
 
@@ -1105,7 +1121,7 @@ export function App({ client }: AppProps) {
     setAdoptResult(null);
     setAdoptUndo(null);
     setAdoptError(null);
-    setAdoptErrorHeading("Scan failed");
+    setAdoptErrorHeading("app.notice.scan_failed");
     const runId = adoptRunId.current;
     setAdoptActivity("scanning");
     try {
@@ -1118,7 +1134,7 @@ export function App({ client }: AppProps) {
           .map((candidate) => candidate.canonicalEntity),
       );
     } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
       if (runId === adoptRunId.current) setAdoptActivity("idle");
     }
@@ -1137,7 +1153,7 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("planning");
     setAdoptError(null);
-    setAdoptErrorHeading("Preview failed");
+    setAdoptErrorHeading("app.notice.preview_failed");
     try {
       const plan = await client.planAdopt(
         adoptSelected.map((canonicalEntity) => ({
@@ -1151,7 +1167,7 @@ export function App({ client }: AppProps) {
       }
       setAdoptPlan(plan);
     } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason));
+      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
       if (runId === adoptRunId.current) setAdoptActivity("idle");
     }
@@ -1162,7 +1178,7 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("applying");
     setAdoptError(null);
-    setAdoptErrorHeading("Adopt failed");
+    setAdoptErrorHeading("app.notice.adopt_failed");
     try {
       const result = await client.applyAdopt(adoptPlan.planToken);
       setAdoptPlan(null);
@@ -1171,14 +1187,16 @@ export function App({ client }: AppProps) {
         const snapshot = await client.listSkills(filter);
         setSkills(snapshot.items);
       } catch (reason) {
-        setAdoptErrorHeading("Refresh failed");
+        setAdoptErrorHeading("app.notice.refresh_failed");
         setAdoptError(
-          `Adopt completed, but the Library refresh failed: ${readError(reason)}`,
+          t("app.notice.adopt_refresh_failed", {
+            detail: readError(reason, t),
+          }),
         );
       }
     } catch (reason) {
       setAdoptPlan(null);
-      setAdoptError(readError(reason));
+      setAdoptError(readError(reason, t));
     } finally {
       if (runId === adoptRunId.current) setAdoptActivity("idle");
     }
@@ -1189,7 +1207,7 @@ export function App({ client }: AppProps) {
     const runId = ++adoptRunId.current;
     setAdoptActivity("undoing");
     setAdoptError(null);
-    setAdoptErrorHeading("Undo failed");
+    setAdoptErrorHeading("app.notice.undo_failed");
     try {
       const undo = await client.undoAdopt(adoptResult.operationId);
       setAdoptUndo(undo);
@@ -1197,13 +1215,15 @@ export function App({ client }: AppProps) {
         const snapshot = await client.listSkills(filter);
         setSkills(snapshot.items);
       } catch (reason) {
-        setAdoptErrorHeading("Refresh failed");
+        setAdoptErrorHeading("app.notice.refresh_failed");
         setAdoptError(
-          `Undo completed, but the Library refresh failed: ${readError(reason)}`,
+          t("app.notice.undo_refresh_failed", {
+            detail: readError(reason, t),
+          }),
         );
       }
     } catch (reason) {
-      setAdoptError(readError(reason));
+      setAdoptError(readError(reason, t));
     } finally {
       if (runId === adoptRunId.current) setAdoptActivity("idle");
     }
@@ -1243,7 +1263,7 @@ export function App({ client }: AppProps) {
       setPreferences(result.preferences);
       setPreferencesWarning(result.warning);
     } catch (reason) {
-      setPreferencesError(readError(reason));
+      setPreferencesError(readError(reason, t));
     }
   }
 
@@ -1280,7 +1300,7 @@ export function App({ client }: AppProps) {
         activity: "idle",
         update: null,
         checkStatus: null,
-        error: readAppUpdateError(reason),
+        error: readAppUpdateError(reason, t),
       });
     }
   }
@@ -1303,13 +1323,13 @@ export function App({ client }: AppProps) {
     } catch (reason) {
       setAppUpdatePanel((state) =>
         state.update?.updateId === update.updateId
-          ? readCommandError(reason).code === "update_cancelled" ||
+          ? readCommandError(reason, t).code === "update_cancelled" ||
             state.activity === "cancelling"
             ? state
             : {
                 ...state,
                 activity: "available",
-                error: readAppUpdateError(reason),
+                error: readAppUpdateError(reason, t),
               }
           : state,
       );
@@ -1335,7 +1355,11 @@ export function App({ client }: AppProps) {
     } catch (reason) {
       setAppUpdatePanel((state) =>
         state.update?.updateId === update.updateId
-          ? { ...state, activity: "ready", error: readAppUpdateError(reason) }
+          ? {
+              ...state,
+              activity: "ready",
+              error: readAppUpdateError(reason, t),
+            }
           : state,
       );
     }
@@ -1373,7 +1397,7 @@ export function App({ client }: AppProps) {
           ? {
               ...state,
               activity: previousActivity,
-              error: readAppUpdateError(reason),
+              error: readAppUpdateError(reason, t),
             }
           : state,
       );
@@ -1390,7 +1414,7 @@ export function App({ client }: AppProps) {
       setOnboardingStep(0);
       setOnboardingReport(null);
     } catch (reason) {
-      setOnboardingError(readError(reason));
+      setOnboardingError(readError(reason, t));
     }
   }
 
@@ -1404,7 +1428,7 @@ export function App({ client }: AppProps) {
         setOnboardingReport(report);
         setOnboardingStep(2);
       } catch (reason) {
-        setOnboardingError(readError(reason));
+        setOnboardingError(readError(reason, t));
       } finally {
         setOnboardingActivity("idle");
       }
@@ -1419,7 +1443,7 @@ export function App({ client }: AppProps) {
       const info = await client.createAgentDirectory(agentId);
       setStartupAgents(info.agents);
     } catch (reason) {
-      setOnboardingError(readError(reason));
+      setOnboardingError(readError(reason, t));
     }
   }
 
@@ -1430,7 +1454,7 @@ export function App({ client }: AppProps) {
     try {
       await client.completeOnboarding();
     } catch (reason) {
-      setOnboardingError(readError(reason));
+      setOnboardingError(readError(reason, t));
       return;
     }
     setIsOnboardingOpen(false);
@@ -1576,7 +1600,7 @@ export function App({ client }: AppProps) {
   );
 }
 
-function readError(reason: unknown) {
+function readError(reason: unknown, t: LocaleContextValue["t"]) {
   if (reason instanceof Error) return reason.message;
   if (
     typeof reason === "object" &&
@@ -1586,10 +1610,32 @@ function readError(reason: unknown) {
   ) {
     return reason.message;
   }
-  return "The catalog could not be read.";
+  // Typed command failures (spec §4.7): no free message crosses the DTO, so
+  // presentation composes the localized summary from the closed code.
+  if (
+    typeof reason === "object" &&
+    reason !== null &&
+    "error" in reason &&
+    typeof reason.error === "object" &&
+    reason.error !== null &&
+    "code" in reason.error &&
+    typeof reason.error.code === "string"
+  ) {
+    const error = reason.error as { code: string; directoryName?: string };
+    return t(errorMessageKey(error.code), errorMessageParams(error));
+  }
+  if (
+    typeof reason === "object" &&
+    reason !== null &&
+    "code" in reason &&
+    typeof reason.code === "string"
+  ) {
+    return t(errorMessageKey(reason.code as string));
+  }
+  return t("app.error.read_failed");
 }
 
-function readCommandError(reason: unknown) {
+function readCommandError(reason: unknown, t: LocaleContextValue["t"]) {
   return {
     code:
       typeof reason === "object" &&
@@ -1598,26 +1644,26 @@ function readCommandError(reason: unknown) {
       typeof reason.code === "string"
         ? reason.code
         : "internal",
-    message: readError(reason),
+    message: readError(reason, t),
   };
 }
 
-function readAppUpdateError(reason: unknown) {
-  const { code } = readCommandError(reason);
+function readAppUpdateError(reason: unknown, t: LocaleContextValue["t"]) {
+  const { code } = readCommandError(reason, t);
   switch (code) {
     case "source_unavailable":
-      return "无法连接更新服务。请检查网络后重试。";
+      return t("app.update_error.source_unavailable");
     case "state_unavailable":
-      return "无法读取更新状态。请重新启动 Skill Man 后重试。";
+      return t("app.update_error.state_unavailable");
     case "stale_update":
-      return "这次应用更新已失效。请重新检查更新。";
+      return t("app.update_error.stale_update");
     case "download_failed":
-      return "下载或签名验证失败。请检查网络后重试。";
+      return t("app.update_error.download_failed");
     case "install_failed":
-      return "无法安装应用更新。请重新启动 Skill Man 后重试。";
+      return t("app.update_error.install_failed");
     case "update_cancelled":
-      return "应用更新已取消。";
+      return t("app.update_error.cancelled");
     default:
-      return "应用更新失败。请稍后重试。";
+      return t("app.update_error.generic");
   }
 }

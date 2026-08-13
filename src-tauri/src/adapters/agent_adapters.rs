@@ -1,6 +1,7 @@
 use crate::core::domain::{AgentKind, skill_identity_key};
 use crate::seams::agent_adapter::{
     AgentAdapterError, AgentAdapterRegistry, AgentEnableContext, AgentEnablePolicy,
+    CompatibilityWarning,
 };
 
 pub struct BuiltInAgentAdapters;
@@ -21,24 +22,18 @@ impl AgentAdapterRegistry for BuiltInAgentAdapters {
                 let compatibility_warning = context
                     .frontmatter_name
                     .filter(|name| {
-                        skill_identity_key(name)
-                            != skill_identity_key(context.directory_name)
+                        skill_identity_key(name) != skill_identity_key(context.directory_name)
                     })
-                    .map(|name| {
-                        format!(
-                            "Codex frontmatter name '{name}' differs from directory identity '{}'. Confirm this Activation explicitly.",
-                            context.directory_name
-                        )
+                    .map(|name| CompatibilityWarning::FrontmatterMismatch {
+                        frontmatter_name: name.to_owned(),
+                        directory_name: context.directory_name.to_owned(),
                     });
                 Ok(AgentEnablePolicy {
                     compatibility_warning,
                 })
             }
             AgentKind::Custom => Ok(AgentEnablePolicy {
-                compatibility_warning: Some(
-                    "Custom Agent compatibility is unknown. Confirm this Activation explicitly."
-                        .into(),
-                ),
+                compatibility_warning: Some(CompatibilityWarning::CustomUnknown),
             }),
         }
     }

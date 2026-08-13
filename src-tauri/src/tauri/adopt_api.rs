@@ -4,8 +4,8 @@ use crate::core::adopt::{AdoptError, AdoptSelection, AdoptService};
 use crate::core::domain::AgentId;
 use crate::tauri_adapter::dto::{
     AdoptPlanDto, AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto, ApplyAdoptRequestDto,
-    CancelAdoptRequestDto, CommandErrorDto, FinalizeAdoptRequestDto, PlanAdoptRequestDto,
-    UndoAdoptRequestDto,
+    CancelAdoptRequestDto, CommandFailureDto, DiagnosticDto, FinalizeAdoptRequestDto,
+    PlanAdoptRequestDto, PublicErrorDto, UndoAdoptRequestDto,
 };
 
 pub struct AdoptApi {
@@ -17,7 +17,7 @@ impl AdoptApi {
         Self { service }
     }
 
-    pub fn scan_adopt(&self) -> Result<AdoptScanReportDto, CommandErrorDto> {
+    pub fn scan_adopt(&self) -> Result<AdoptScanReportDto, CommandFailureDto> {
         self.service
             .scan()
             .map(|report| AdoptScanReportDto {
@@ -30,7 +30,7 @@ impl AdoptApi {
     pub fn plan_adopt(
         &self,
         request: PlanAdoptRequestDto,
-    ) -> Result<AdoptPlanDto, CommandErrorDto> {
+    ) -> Result<AdoptPlanDto, CommandFailureDto> {
         let selections = request
             .selections
             .into_iter()
@@ -73,7 +73,7 @@ impl AdoptApi {
     pub fn apply_adopt(
         &self,
         request: ApplyAdoptRequestDto,
-    ) -> Result<AdoptResultDto, CommandErrorDto> {
+    ) -> Result<AdoptResultDto, CommandFailureDto> {
         let result = self
             .service
             .apply(&request.plan_token)
@@ -98,7 +98,7 @@ impl AdoptApi {
     pub fn undo_adopt(
         &self,
         request: UndoAdoptRequestDto,
-    ) -> Result<AdoptUndoResultDto, CommandErrorDto> {
+    ) -> Result<AdoptUndoResultDto, CommandFailureDto> {
         let result = self
             .service
             .undo(&request.operation_id)
@@ -118,40 +118,51 @@ impl AdoptApi {
         })
     }
 
-    pub fn finalize_adopt(&self, request: FinalizeAdoptRequestDto) -> Result<(), CommandErrorDto> {
+    pub fn finalize_adopt(
+        &self,
+        request: FinalizeAdoptRequestDto,
+    ) -> Result<(), CommandFailureDto> {
         self.service
             .finalize(&request.operation_id)
             .map_err(command_error)
     }
 
-    pub fn cancel_adopt(&self, request: CancelAdoptRequestDto) -> Result<bool, CommandErrorDto> {
+    pub fn cancel_adopt(&self, request: CancelAdoptRequestDto) -> Result<bool, CommandFailureDto> {
         self.service
             .cancel(&request.plan_token)
             .map_err(command_error)
     }
 }
 
-fn command_error(error: AdoptError) -> CommandErrorDto {
-    let code = match &error {
-        AdoptError::Validation(_) => "validation",
-        AdoptError::PlanStale => "plan_stale",
-        AdoptError::PlanNotFound => "plan_stale",
-        AdoptError::RecoveryRequired(_) => "recovery_required",
-        AdoptError::Store(crate::seams::adopt_store::AdoptStoreError::Conflict(_)) => "conflict",
-        AdoptError::Store(_) => "state_unavailable",
+fn command_error(error: AdoptError) -> CommandFailureDto {
+    let public_error = match &error {
+        AdoptError::Validation(_) => PublicErrorDto::Validation,
+        AdoptError::PlanStale | AdoptError::PlanNotFound => PublicErrorDto::PlanStale,
+        AdoptError::RecoveryRequired(_) => PublicErrorDto::RecoveryRequired,
+        AdoptError::Store(crate::seams::adopt_store::AdoptStoreError::Conflict(directory_name)) => {
+            PublicErrorDto::Conflict {
+                directory_name: directory_name.clone(),
+            }
+        }
+        AdoptError::Store(_) => PublicErrorDto::StateUnavailable,
         AdoptError::FileSystem(crate::seams::filesystem::FileSystemError::RecoveryRequired {
             ..
-        }) => "recovery_required",
+        }) => PublicErrorDto::RecoveryRequired,
         AdoptError::FileSystem(crate::seams::filesystem::FileSystemError::PlanStale { .. }) => {
-            "plan_stale"
+            PublicErrorDto::PlanStale
         }
         AdoptError::FileSystem(crate::seams::filesystem::FileSystemError::Io {
             source, ..
-        }) if source.kind() == std::io::ErrorKind::PermissionDenied => "permission_denied",
-        AdoptError::FileSystem(_) | AdoptError::Internal(_) => "internal",
+        }) if source.kind() == std::io::ErrorKind::PermissionDenied => {
+            PublicErrorDto::PermissionDenied
+        }
+        AdoptError::FileSystem(_) | AdoptError::Internal(_) => PublicErrorDto::Internal,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

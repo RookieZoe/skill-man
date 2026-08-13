@@ -13,7 +13,7 @@ use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{
     ApplyActivationRequestDto, ApplyLinkImportRequestDto, CatalogFilterDto,
     DiscoverLinkImportRequestDto, ListSkillsRequestDto, PlanActivationRequestDto,
-    PlanLinkImportRequestDto, SourceKindDto,
+    PlanLinkImportRequestDto, PublicErrorDto, SourceKindDto,
 };
 use skill_man_lib::tauri_adapter::import_api::ImportApi;
 
@@ -181,7 +181,7 @@ fn library_conflict_is_visible_in_preview_and_cannot_be_applied() {
             plan_token: preview.plan_token,
         })
         .expect_err("Conflict blocks Apply");
-    assert_eq!(error.code, "conflict");
+    assert!(matches!(error.error, PublicErrorDto::Conflict { .. }));
     let after = catalog
         .list_skills(ListSkillsRequestDto {
             filter: CatalogFilterDto::All,
@@ -224,7 +224,7 @@ fn apply_reports_plan_stale_when_the_link_source_changes_after_preview() {
             plan_token: preview.plan_token,
         })
         .expect_err("changed source makes plan stale");
-    assert_eq!(error.code, "plan_stale");
+    assert!(matches!(error.error, PublicErrorDto::PlanStale));
     let skills = catalog
         .list_skills(ListSkillsRequestDto {
             filter: CatalogFilterDto::All,
@@ -288,7 +288,7 @@ fn link_identity_comes_from_the_selected_entry_and_retargeting_makes_the_plan_st
             plan_token: preview.plan_token,
         })
         .expect_err("retargeted source invalidates Preview");
-    assert_eq!(error.code, "plan_stale");
+    assert!(matches!(error.error, PublicErrorDto::PlanStale));
 }
 
 #[test]

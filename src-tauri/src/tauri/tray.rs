@@ -1,13 +1,16 @@
 //! Menu-bar tray (spec §9.4): a native quick view of recently enabled
 //! Skills plus open-main-window and Quit. The tray is rebuilt whenever the
-//! catalog changes (commands emit `catalog-changed`) or the main window
-//! regains focus, so the recent list stays honest.
+//! catalog changes (commands emit `catalog-changed`), the main window
+//! regains focus, or the locale changes (`locale://changed`), so both the
+//! recent list and the labels stay honest and localized (ADR-0011).
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter};
 
 use crate::core::domain::{Health, SkillSummary};
 use crate::seams::catalog_store::CatalogStore;
+use crate::seams::locale_store::EffectiveLocale;
+use crate::tauri_adapter::native_message::{NativeMessageKey, native_message, native_plural};
 
 pub const TRAY_ID: &str = "skill-man-tray";
 pub const TRAY_SKILL_LIMIT: u32 = 5;
@@ -23,30 +26,28 @@ pub struct TraySkillPayload {
 }
 
 /// One tray line for a recently enabled Skill: name, enabled-Agent count and
-/// a health suffix. Pure so it is unit-testable without a Tauri runtime.
-pub fn tray_skill_label(summary: &SkillSummary) -> String {
+/// a health suffix, rendered through the effective locale (ADR-0011). Pure so
+/// it is unit-testable without a Tauri runtime.
+pub fn tray_skill_label(summary: &SkillSummary, locale: EffectiveLocale) -> String {
     let suffix = match summary.health {
-        Health::Healthy => "",
-        Health::Broken => " · broken",
-        Health::Modified => " · modified",
+        Health::Healthy => String::new(),
+        Health::Broken => native_message(locale, NativeMessageKey::TrayHealthBroken, &[]),
+        Health::Modified => native_message(locale, NativeMessageKey::TrayHealthModified, &[]),
     };
-    let agents = if summary.enabled_agent_count == 1 {
-        "1 Agent".to_owned()
-    } else {
-        format!("{} Agents", summary.enabled_agent_count)
-    };
+    let agents = native_plural(locale, summary.enabled_agent_count as u64);
     format!("{} · {}{}", summary.directory_name, agents, suffix)
 }
 
 pub fn build_tray_menu(
     app: &AppHandle,
     recent: &[SkillSummary],
+    locale: EffectiveLocale,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     let header = MenuItem::with_id(
         app,
         "recent-header",
-        "Recently enabled",
+        native_message(locale, NativeMessageKey::TrayRecent, &[]),
         false,
         None::<&str>,
     )?;
@@ -55,7 +56,7 @@ pub fn build_tray_menu(
         let empty = MenuItem::with_id(
             app,
             "recent-empty",
-            "No recently enabled Skills",
+            native_message(locale, NativeMessageKey::TrayEmpty, &[]),
             false,
             None::<&str>,
         )?;
@@ -65,7 +66,7 @@ pub fn build_tray_menu(
             let item = MenuItem::with_id(
                 app,
                 format!("open-skill:{}", summary.id.0),
-                tray_skill_label(summary),
+                tray_skill_label(summary, locale),
                 true,
                 None::<&str>,
             )?;
@@ -77,23 +78,30 @@ pub fn build_tray_menu(
     let open_window = MenuItem::with_id(
         app,
         MENU_ID_OPEN_WINDOW,
-        "Open main window",
+        native_message(locale, NativeMessageKey::TrayOpenWindow, &[]),
         true,
         None::<&str>,
     )?;
     menu.append(&open_window)?;
-    let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        MENU_ID_QUIT,
+        native_message(locale, NativeMessageKey::TrayQuit, &[]),
+        true,
+        None::<&str>,
+    )?;
     menu.append(&quit)?;
     Ok(menu)
 }
 
-/// Rebuild the tray menu from the store's recently-enabled Skills. Failures
-/// are silent: the tray keeps its last good menu.
-pub fn refresh_tray(app: &AppHandle, store: &dyn CatalogStore) {
+/// Rebuild the tray menu from the store's recently-enabled Skills in the
+/// current effective locale. Failures are silent: the tray keeps its last
+/// good menu.
+pub fn refresh_tray(app: &AppHandle, store: &dyn CatalogStore, locale: EffectiveLocale) {
     let Ok(recent) = store.recently_enabled(TRAY_SKILL_LIMIT) else {
         return;
     };
-    let Ok(menu) = build_tray_menu(app, &recent) else {
+    let Ok(menu) = build_tray_menu(app, &recent, locale) else {
         return;
     };
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
@@ -103,20 +111,18 @@ pub fn refresh_tray(app: &AppHandle, store: &dyn CatalogStore) {
 
 /// Handle a tray menu event: open the window, quit, or open a Skill detail.
 pub fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
-    let id = event.id().as_ref();
-    match id {
-        MENU_ID_OPEN_WINDOW => crate::tauri_adapter::lifecycle::show_main_window(app),
-        MENU_ID_QUIT => app.exit(0),
-        _ if id.starts_with("open-skill:") => {
-            let skill_id = id.trim_start_matches("open-skill:");
-            crate::tauri_adapter::lifecycle::show_main_window(app);
-            let _ = app.emit(
-                TRAY_SKILL_EVENT,
-                TraySkillPayload {
-                    skill_id: skill_id.to_owned(),
-                },
-            );
-        }
-        _ => {}
+    let menu_id = event.id().as_ref();
+    if menu_id == MENU_ID_OPEN_WINDOW {
+        crate::tauri_adapter::lifecycle::show_main_window(app);
+    } else if menu_id == MENU_ID_QUIT {
+        app.exit(0);
+    } else if let Some(skill_id) = menu_id.strip_prefix("open-skill:") {
+        crate::tauri_adapter::lifecycle::show_main_window(app);
+        let _ = app.emit(
+            TRAY_SKILL_EVENT,
+            TraySkillPayload {
+                skill_id: skill_id.to_owned(),
+            },
+        );
     }
 }

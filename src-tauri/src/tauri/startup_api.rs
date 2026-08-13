@@ -4,8 +4,8 @@ use crate::core::startup::{StartupError, StartupService};
 use crate::seams::filesystem::FileSystemError;
 use crate::seams::preferences_store::PreferenceUpdates;
 use crate::tauri_adapter::dto::{
-    AppPreferencesDto, CommandErrorDto, CreateAgentDirectoryRequestDto, PreferenceUpdatesDto,
-    StartupInfoDto, UpdatePreferencesResultDto,
+    AppPreferencesDto, CommandFailureDto, CreateAgentDirectoryRequestDto, DiagnosticDto,
+    PreferenceUpdatesDto, PublicErrorDto, StartupInfoDto, UpdatePreferencesResultDto,
 };
 
 pub struct StartupApi {
@@ -21,7 +21,7 @@ impl StartupApi {
         }
     }
 
-    pub fn load_preferences(&self) -> Result<AppPreferencesDto, CommandErrorDto> {
+    pub fn load_preferences(&self) -> Result<AppPreferencesDto, CommandFailureDto> {
         self.preferences
             .load()
             .map(AppPreferencesDto::from)
@@ -31,7 +31,7 @@ impl StartupApi {
     pub fn update_preferences(
         &self,
         request: PreferenceUpdatesDto,
-    ) -> Result<UpdatePreferencesResultDto, CommandErrorDto> {
+    ) -> Result<UpdatePreferencesResultDto, CommandFailureDto> {
         let updates: PreferenceUpdates = request.into();
         self.preferences
             .update(updates)
@@ -44,14 +44,14 @@ impl StartupApi {
             .map_err(preferences_command_error)
     }
 
-    pub fn startup_info(&self) -> Result<StartupInfoDto, CommandErrorDto> {
+    pub fn startup_info(&self) -> Result<StartupInfoDto, CommandFailureDto> {
         self.startup
             .startup_info()
             .map(StartupInfoDto::from)
             .map_err(startup_command_error)
     }
 
-    pub fn complete_onboarding(&self) -> Result<(), CommandErrorDto> {
+    pub fn complete_onboarding(&self) -> Result<(), CommandFailureDto> {
         self.startup
             .complete_onboarding()
             .map_err(startup_command_error)
@@ -60,7 +60,7 @@ impl StartupApi {
     pub fn create_agent_directory(
         &self,
         request: CreateAgentDirectoryRequestDto,
-    ) -> Result<StartupInfoDto, CommandErrorDto> {
+    ) -> Result<StartupInfoDto, CommandFailureDto> {
         self.startup
             .create_agent_directory(&AgentId(request.agent_id))
             .and_then(|()| self.startup.startup_info())
@@ -69,26 +69,32 @@ impl StartupApi {
     }
 }
 
-fn preferences_command_error(error: PreferencesError) -> CommandErrorDto {
-    CommandErrorDto {
-        code: "state_unavailable".into(),
-        message: error.to_string(),
+fn preferences_command_error(error: PreferencesError) -> CommandFailureDto {
+    CommandFailureDto {
+        error: PublicErrorDto::StateUnavailable,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }
 
-fn startup_command_error(error: StartupError) -> CommandErrorDto {
-    let code = match &error {
-        StartupError::Validation(_) => "validation",
-        StartupError::Store(_) | StartupError::Agents(_) => "state_unavailable",
+fn startup_command_error(error: StartupError) -> CommandFailureDto {
+    let public_error = match &error {
+        StartupError::Validation(_) => PublicErrorDto::Validation,
+        StartupError::Store(_) | StartupError::Agents(_) => PublicErrorDto::StateUnavailable,
         StartupError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "permission_denied"
+            PublicErrorDto::PermissionDenied
         }
-        StartupError::FileSystem(_) => "internal",
+        StartupError::FileSystem(_) => PublicErrorDto::Internal,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

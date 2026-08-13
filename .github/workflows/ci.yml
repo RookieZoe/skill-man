@@ -43,6 +43,9 @@ jobs:
       - name: Check capability boundary
         run: npm run check:capabilities
 
+      - name: Check locale contract
+        run: npm run check:locales
+
       - name: Lint and typecheck frontend
         run: |
           npm run lint

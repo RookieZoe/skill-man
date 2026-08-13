@@ -5,8 +5,8 @@ use crate::core::maintenance::{MaintenanceError, StartupMaintenance};
 use crate::seams::filesystem::FileSystemError;
 use crate::tauri_adapter::dto::{
     ActivationHealthReportDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
-    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CommandErrorDto,
-    PlanRemoveSkillRequestDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
+    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CommandFailureDto, DiagnosticDto,
+    PlanRemoveSkillRequestDto, PublicErrorDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
     RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
 };
 
@@ -21,7 +21,7 @@ impl HealthApi {
 
     pub fn run_activation_health_check(
         &self,
-    ) -> Result<ActivationHealthReportDto, CommandErrorDto> {
+    ) -> Result<ActivationHealthReportDto, CommandFailureDto> {
         self.maintenance
             .run_activation_health_check()
             .map(ActivationHealthReportDto::from)
@@ -31,7 +31,7 @@ impl HealthApi {
     pub fn relocate_link(
         &self,
         request: RelocateLinkRequestDto,
-    ) -> Result<RelocateLinkPreviewDto, CommandErrorDto> {
+    ) -> Result<RelocateLinkPreviewDto, CommandFailureDto> {
         self.maintenance
             .relocate(
                 &SkillId(request.skill_id),
@@ -44,7 +44,7 @@ impl HealthApi {
     pub fn apply_relocate_link(
         &self,
         request: ApplyRelocateLinkRequestDto,
-    ) -> Result<RelocateLinkResultDto, CommandErrorDto> {
+    ) -> Result<RelocateLinkResultDto, CommandFailureDto> {
         self.maintenance
             .apply_relocate(&request.plan_token)
             .map(RelocateLinkResultDto::from)
@@ -54,7 +54,7 @@ impl HealthApi {
     pub fn cancel_relocate_link(
         &self,
         request: CancelRelocateLinkRequestDto,
-    ) -> Result<bool, CommandErrorDto> {
+    ) -> Result<bool, CommandFailureDto> {
         self.maintenance
             .cancel_relocate(&request.plan_token)
             .map_err(maintenance_error)
@@ -63,7 +63,7 @@ impl HealthApi {
     pub fn plan_remove_skill(
         &self,
         request: PlanRemoveSkillRequestDto,
-    ) -> Result<RemoveSkillPreviewDto, CommandErrorDto> {
+    ) -> Result<RemoveSkillPreviewDto, CommandFailureDto> {
         self.maintenance
             .plan_remove(&SkillId(request.skill_id))
             .map(RemoveSkillPreviewDto::from)
@@ -73,7 +73,7 @@ impl HealthApi {
     pub fn apply_remove_skill(
         &self,
         request: ApplyRemoveSkillRequestDto,
-    ) -> Result<RemoveSkillResultDto, CommandErrorDto> {
+    ) -> Result<RemoveSkillResultDto, CommandFailureDto> {
         self.maintenance
             .apply_remove(&request.plan_token)
             .map(RemoveSkillResultDto::from)
@@ -83,33 +83,40 @@ impl HealthApi {
     pub fn cancel_remove_skill(
         &self,
         request: CancelRemoveSkillRequestDto,
-    ) -> Result<bool, CommandErrorDto> {
+    ) -> Result<bool, CommandFailureDto> {
         self.maintenance
             .cancel_remove(&request.plan_token)
             .map_err(maintenance_error)
     }
 }
 
-fn maintenance_error(error: MaintenanceError) -> CommandErrorDto {
-    let code = match &error {
+fn maintenance_error(error: MaintenanceError) -> CommandFailureDto {
+    let public_error = match &error {
         MaintenanceError::FileSystem(FileSystemError::RecoveryRequired { .. })
-        | MaintenanceError::RecoveryRequired { .. } => "recovery_required",
+        | MaintenanceError::RecoveryRequired { .. } => PublicErrorDto::RecoveryRequired,
         MaintenanceError::FileSystem(FileSystemError::PlanStale { .. })
-        | MaintenanceError::PlanStale => "plan_stale",
+        | MaintenanceError::PlanStale => PublicErrorDto::PlanStale,
         MaintenanceError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {
-            "permission_denied"
+            PublicErrorDto::PermissionDenied
         }
-        MaintenanceError::NotLink(_) | MaintenanceError::Validation(_) => "validation",
-        MaintenanceError::SkillNotFound(_) => "not_found",
-        MaintenanceError::RecoveryInProgress => "recovery_required",
-        MaintenanceError::PlanNotFound => "plan_stale",
-        MaintenanceError::Store(_) | MaintenanceError::MaintenanceStore(_) => "state_unavailable",
-        MaintenanceError::FileSystem(_) | MaintenanceError::Internal(_) => "internal",
+        MaintenanceError::NotLink(_) | MaintenanceError::Validation(_) => {
+            PublicErrorDto::Validation
+        }
+        MaintenanceError::SkillNotFound(_) => PublicErrorDto::NotFound,
+        MaintenanceError::RecoveryInProgress => PublicErrorDto::RecoveryRequired,
+        MaintenanceError::PlanNotFound => PublicErrorDto::PlanStale,
+        MaintenanceError::Store(_) | MaintenanceError::MaintenanceStore(_) => {
+            PublicErrorDto::StateUnavailable
+        }
+        MaintenanceError::FileSystem(_) | MaintenanceError::Internal(_) => PublicErrorDto::Internal,
     };
-    CommandErrorDto {
-        code: code.into(),
-        message: error.to_string(),
+    CommandFailureDto {
+        error: public_error,
+        diagnostic: Some(DiagnosticDto {
+            code: "command_error".into(),
+            message: error.to_string(),
+        }),
     }
 }

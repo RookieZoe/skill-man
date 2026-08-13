@@ -13,6 +13,8 @@ import type {
   ActivationReplacePreview,
   ActivationReplaceUndoResult,
   ActivationResult,
+  AdoptRisk,
+  AdoptRiskReason,
   AdoptPlan,
   AdoptResult,
   AdoptScanReport,
@@ -20,28 +22,35 @@ import type {
   AgentActivation,
   AppPreferences,
   CatalogFilter,
+  CompatibilityWarning,
   GitImportDiscovery,
   GitImportSelectionPreview,
   GitImportSelectionResult,
   Health,
   LinkImportPreview,
   LinkImportResult,
+  OccupierNotAdoptableReason,
   OccupierKind,
   OccupierSummary,
   PreferenceUpdates,
+  PreferencesWarning,
   SkillDetail,
   SkillSummary,
   SourceKind,
   StartupAgent,
 } from "../../app/catalog-client";
+import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
+import { LanguageControl } from "../locale/LanguageControl";
+import type { MessageKey } from "../locale/messages";
+import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
 
-const filters: Array<{ value: CatalogFilter; label: string }> = [
-  { value: "all", label: "All" },
-  { value: "broken", label: "Broken" },
-  { value: "modified", label: "Modified" },
-  { value: "link", label: "Link" },
-  { value: "install", label: "Install" },
+const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
+  { value: "all", labelKey: "library.filter.all" },
+  { value: "broken", labelKey: "library.filter.broken" },
+  { value: "modified", labelKey: "library.filter.modified" },
+  { value: "link", labelKey: "library.filter.link" },
+  { value: "install", labelKey: "library.filter.install" },
 ];
 
 export type LayoutMode = "wide" | "mid" | "narrow";
@@ -113,7 +122,7 @@ interface LibraryDeskProps {
   adoptResult: AdoptResult | null;
   adoptUndo: AdoptUndoResult | null;
   adoptError: string | null;
-  adoptErrorHeading: string;
+  adoptErrorHeading: MessageKey;
   adoptActivity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
@@ -152,7 +161,7 @@ interface LibraryDeskProps {
   onCloseAdopt: () => void;
   isPreferencesOpen: boolean;
   preferences: AppPreferences | null;
-  preferencesWarning: string | null;
+  preferencesWarning: PreferencesWarning | null;
   preferencesError: string | null;
   appUpdatePanel: AppUpdatePanelState;
   isOnboardingOpen: boolean;
@@ -291,6 +300,7 @@ export function LibraryDesk({
   onCreateAgentDirectory,
   onFinishOnboardingWithAdopt,
 }: LibraryDeskProps) {
+  const { t } = useLocale();
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
     layoutModeForWidth(window.innerWidth),
   );
@@ -440,7 +450,7 @@ export function LibraryDesk({
       data-active-pane={activePane}
     >
       <a className="skip-link" href="#skill-detail">
-        Skip to Skill detail
+        {t("library.skip_to_detail")}
       </a>
       <Toolbar
         layoutMode={layoutMode}
@@ -453,25 +463,21 @@ export function LibraryDesk({
       <div className="notice-region">
         {error ? (
           <div className="global-notice" role="alert">
-            <strong>Library unavailable</strong>
+            <strong>{t("library.notice.unavailable")}</strong>
             <span>{error}</span>
           </div>
         ) : null}
         {lockNotice ? (
           <div className="global-notice global-notice--locked" role="alert">
-            <strong>Recovery required — writes locked</strong>
+            <strong>{t("library.notice.recovery_locked")}</strong>
             <span>{lockNotice}</span>
-            <span>
-              Browsing stays available. Repair the cause (permissions or the
-              interrupted operation), then retry recovery; check the app logs
-              for the failing operation id.
-            </span>
+            <span>{t("library.notice.recovery_locked_body")}</span>
             <button
               type="button"
               className="repair-button"
               onClick={onRetryRecovery}
             >
-              Retry recovery
+              {t("library.notice.retry_recovery")}
             </button>
           </div>
         ) : null}
@@ -479,7 +485,11 @@ export function LibraryDesk({
       <div className="app-background" inert={hasOverlay ? true : undefined}>
         <div className="library-desk">
           {layoutMode === "narrow" ? (
-            <div className="pane-nav" role="group" aria-label="Pane navigation">
+            <div
+              className="pane-nav"
+              role="group"
+              aria-label={t("library.pane.label")}
+            >
               {(["library", "detail", "agents"] as const).map((pane) => (
                 <button
                   type="button"
@@ -488,10 +498,10 @@ export function LibraryDesk({
                   onClick={() => setActivePane(pane)}
                 >
                   {pane === "library"
-                    ? "Library"
+                    ? t("library.pane.library")
                     : pane === "detail"
-                      ? "Skill"
-                      : "Agents"}
+                      ? t("library.pane.skill")
+                      : t("library.pane.agents")}
                 </button>
               ))}
             </div>
@@ -690,6 +700,7 @@ function Toolbar({
   onAdopt: () => void;
   onOpenPreferences: () => void;
 }) {
+  const { t } = useLocale();
   return (
     <header className="toolbar">
       <div className="product-mark" aria-hidden="true">
@@ -698,15 +709,18 @@ function Toolbar({
         <span />
       </div>
       <div className="toolbar-title">
-        <strong>Skill Man</strong>
-        <span>Library Desk</span>
+        <strong>{t("library.toolbar.brand")}</strong>
+        <span>{t("library.toolbar.desk")}</span>
       </div>
-      <div className="toolbar-actions" aria-label="Library actions">
+      <div
+        className="toolbar-actions"
+        aria-label={t("library.toolbar.actions_label")}
+      >
         <button type="button" className="toolbar-button" disabled>
-          Health check
+          {t("library.toolbar.health_check")}
         </button>
         <button type="button" className="toolbar-button" onClick={onAdopt}>
-          Adopt
+          {t("library.toolbar.adopt")}
         </button>
         {layoutMode === "mid" ? (
           <button
@@ -717,7 +731,7 @@ function Toolbar({
             aria-controls="agent-inspector-dialog"
             onClick={onToggleAgentDrawer}
           >
-            Agents
+            {t("library.toolbar.agents")}
           </button>
         ) : null}
         <button
@@ -726,13 +740,13 @@ function Toolbar({
           className="primary-button"
           onClick={onImport}
         >
-          Import
+          {t("library.toolbar.import")}
         </button>
         <button
           id="preferences-trigger"
           type="button"
           className="icon-button"
-          aria-label="Preferences"
+          aria-label={t("library.toolbar.preferences")}
           onClick={onOpenPreferences}
         >
           <SettingsIcon />
@@ -757,21 +771,27 @@ function LibrarySidebar({
   onFilter,
   onSelect,
 }: LibrarySidebarProps) {
+  const { t } = useLocale();
   return (
-    <nav className="library-sidebar" aria-label="Library">
+    <nav className="library-sidebar" aria-label={t("library.sidebar.label")}>
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">Managed</span>
-          <h1>Library</h1>
+          <span className="eyebrow">{t("library.sidebar.managed")}</span>
+          <h1>{t("library.sidebar.label")}</h1>
         </div>
         <span
           className="count-badge"
-          aria-label={`${skills.length} visible Skills`}
+          aria-label={t("library.sidebar.visible_count", {
+            count: skills.length,
+          })}
         >
           {skills.length}
         </span>
       </div>
-      <div className="filter-strip" aria-label="Filter Library">
+      <div
+        className="filter-strip"
+        aria-label={t("library.sidebar.filter_label")}
+      >
         {filters.map((item) => (
           <button
             type="button"
@@ -780,7 +800,7 @@ function LibrarySidebar({
             key={item.value}
             onClick={() => onFilter(item.value)}
           >
-            {item.label}
+            {t(item.labelKey)}
           </button>
         ))}
       </div>
@@ -802,7 +822,9 @@ function LibrarySidebar({
               </span>
               <span
                 className="agent-count"
-                aria-label={`${skill.enabledAgentCount} Agents`}
+                aria-label={t("library.sidebar.agent_count", {
+                  count: skill.enabledAgentCount,
+                })}
               >
                 {skill.enabledAgentCount}
               </span>
@@ -810,8 +832,8 @@ function LibrarySidebar({
           ))
         ) : (
           <div className="empty-list">
-            <span>No matching Skills</span>
-            <small>Choose another filter to continue browsing.</small>
+            <span>{t("library.sidebar.empty")}</span>
+            <small>{t("library.sidebar.empty_hint")}</small>
           </div>
         )}
       </div>
@@ -850,15 +872,20 @@ function SkillDetailPanel({
   removePanel: RemovePanelState;
   onOpenRemove: () => void;
 }) {
+  const { t, locale } = useLocale();
   return (
-    <main id="skill-detail" className="skill-detail" aria-label="Skill detail">
+    <main
+      id="skill-detail"
+      className="skill-detail"
+      aria-label={t("library.detail.label")}
+    >
       {detail ? (
         <>
           <div className="detail-heading">
             <div className="detail-badges">
               <HealthBadge health={detail.health} />
               <span className="source-badge">
-                {sourceKindLabel(detail.sourceKind)}
+                {sourceKindLabel(detail.sourceKind, t)}
               </span>
             </div>
             <h2>{detail.directoryName}</h2>
@@ -880,31 +907,32 @@ function SkillDetailPanel({
               }
               onClick={onOpenRemove}
             >
-              Remove…
+              {t("library.detail.remove")}
             </button>
           </div>
           <dl className="metadata-grid">
             <div>
-              <dt>Source</dt>
-              <dd>{detail.sourceLabel}</dd>
+              <dt>{t("library.detail.source")}</dt>
+              <dd>{sourceDetailLabel(t, detail)}</dd>
             </div>
             <div>
-              <dt>Final entity</dt>
+              <dt>{t("library.detail.final_entity")}</dt>
               <dd className="path-value">{detail.finalEntityPath}</dd>
             </div>
             <div>
-              <dt>Directory identity</dt>
+              <dt>{t("library.detail.directory_identity")}</dt>
               <dd>{detail.directoryName}</dd>
             </div>
             <div>
-              <dt>Last activity</dt>
-              <dd>{formatActivity(detail.lastActivityAt)}</dd>
+              <dt>{t("library.detail.last_activity")}</dt>
+              <dd>{formatDateTime(locale, detail.lastActivityAt)}</dd>
             </div>
           </dl>
           {detail.frontmatterName &&
           detail.frontmatterName !== detail.directoryName ? (
             <p className="name-notice">
-              Agent-visible name: <code>{detail.frontmatterName}</code>
+              {t("library.detail.agent_visible_name")}{" "}
+              <code>{detail.frontmatterName}</code>
             </p>
           ) : null}
           {detail.sourceKind === "remote_install" ? (
@@ -925,26 +953,23 @@ function SkillDetailPanel({
                 <span className="document-dot" />
                 <h3 id="preview-title">SKILL.md</h3>
               </div>
-              <span>Read only</span>
+              <span>{t("library.detail.read_only")}</span>
             </div>
             <pre>{detail.skillMarkdown}</pre>
           </section>
         </>
       ) : error ? (
         <div className="detail-state detail-state--error" role="alert">
-          <h2>Skill detail unavailable</h2>
-          <p>
-            The Catalog error is preserved above; this pane is unavailable, not
-            loading.
-          </p>
+          <h2>{t("library.detail.unavailable")}</h2>
+          <p>{t("library.detail.unavailable_body")}</p>
         </div>
       ) : libraryEmpty ? (
         <div className="detail-state">
-          <h2>Empty Library</h2>
-          <p>Import or Adopt a Skill to begin; this is not a loading state.</p>
+          <h2>{t("library.detail.empty")}</h2>
+          <p>{t("library.detail.empty_body")}</p>
         </div>
       ) : (
-        <LoadingPanel label="Loading Skill detail" />
+        <LoadingPanel label={t("library.detail.loading")} />
       )}
     </main>
   );
@@ -969,6 +994,7 @@ function UpdateSection({
   onPinUpdate: () => void;
   onReselectPathChange: (path: string) => void;
 }) {
+  const { t } = useLocale();
   const isBusy = updatePanel.activity !== "idle";
   const item = updatePanel.report?.groups
     .flatMap((group) => group.items)
@@ -984,18 +1010,18 @@ function UpdateSection({
   return (
     <section className="update-section" aria-labelledby="update-title">
       <div className="update-toolbar">
-        <h3 id="update-title">Updates</h3>
+        <h3 id="update-title">{t("library.update.title")}</h3>
         {!hasChecked ? (
           <button type="button" disabled={isBusy} onClick={onCheckUpdates}>
             {updatePanel.activity === "checking"
-              ? "Checking"
-              : "Check for updates"}
+              ? t("library.update.checking")
+              : t("library.update.check")}
           </button>
         ) : null}
       </div>
       {updatePanel.error ? (
         <div className="activation-error" role="alert">
-          <strong>Update check failed</strong>
+          <strong>{t("library.update.failed")}</strong>
           <span>{updatePanel.error}</span>
         </div>
       ) : null}
@@ -1003,25 +1029,23 @@ function UpdateSection({
         <div className="update-status">
           {item.hasUpdate ? (
             <p className="update-available" role="status">
-              Update available: <code>{shortCommit(item.currentCommit)}</code> →{" "}
+              {t("library.update.available")}{" "}
+              <code>{shortCommit(item.currentCommit)}</code> →{" "}
               <code>{shortCommit(item.resolvedCommit)}</code>
             </p>
           ) : (
-            <p role="status">This Skill is up to date.</p>
+            <p role="status">{t("library.update.up_to_date")}</p>
           )}
           {item.upstreamPathGone ? (
             <div className="update-path-gone" role="alert">
-              <strong>The upstream Skill path no longer exists</strong>
-              <span>
-                Choose the new location inside the repository, keep the current
-                version, or Remove the Skill later.
-              </span>
+              <strong>{t("library.update.path_gone")}</strong>
+              <span>{t("library.update.path_gone_body")}</span>
               <div className="reselect-row">
                 <input
                   type="text"
                   value={reselectPath}
                   placeholder="packages/skills/new-name"
-                  aria-label="New repository path"
+                  aria-label={t("library.update.path_label")}
                   onChange={(event) =>
                     onReselectPathChange(event.currentTarget.value)
                   }
@@ -1032,13 +1056,13 @@ function UpdateSection({
                   onClick={() => onPlanUpdate(reselectPath.trim())}
                 >
                   {updatePanel.activity === "planning"
-                    ? "Planning"
-                    : "Reselect and update"}
+                    ? t("library.update.planning")
+                    : t("library.update.reselect")}
                 </button>
                 <button type="button" disabled={isBusy} onClick={onPinUpdate}>
                   {updatePanel.activity === "pinning"
-                    ? "Pinning"
-                    : "Keep current version"}
+                    ? t("library.update.pinning")
+                    : t("library.update.keep")}
                 </button>
               </div>
             </div>
@@ -1053,11 +1077,8 @@ function UpdateSection({
                 <>
                   {planItem.modified ? (
                     <p className="update-modified" role="alert">
-                      <strong>Local changes detected</strong>
-                      <span>
-                        Updating will abandon the local modifications to this
-                        Skill.
-                      </span>
+                      <strong>{t("library.update.modified_heading")}</strong>
+                      <span>{t("library.update.modified_body")}</span>
                     </p>
                   ) : null}
                   <div className="reselect-row">
@@ -1067,17 +1088,17 @@ function UpdateSection({
                       onClick={() => onApplyUpdate(planItem.modified)}
                     >
                       {updatePanel.activity === "applying"
-                        ? "Updating"
+                        ? t("library.update.updating")
                         : planItem.modified
-                          ? "Abandon changes and update"
-                          : "Update"}
+                          ? t("library.update.abandon")
+                          : t("library.update.update")}
                     </button>
                     <button
                       type="button"
                       disabled={isBusy}
                       onClick={() => onPlanUpdate(null)}
                     >
-                      Cancel
+                      {t("library.update.cancel")}
                     </button>
                   </div>
                 </>
@@ -1090,13 +1111,15 @@ function UpdateSection({
                 disabled={isBusy}
                 onClick={() => onPlanUpdate(null)}
               >
-                {updatePanel.activity === "planning" ? "Planning" : "Update"}
+                {updatePanel.activity === "planning"
+                  ? t("library.update.planning")
+                  : t("library.update.update")}
               </button>
               {item.modified ? null : (
                 <button type="button" disabled={isBusy} onClick={onPinUpdate}>
                   {updatePanel.activity === "pinning"
-                    ? "Pinning"
-                    : "Keep current version"}
+                    ? t("library.update.pinning")
+                    : t("library.update.keep")}
                 </button>
               )}
             </div>
@@ -1109,13 +1132,16 @@ function UpdateSection({
               role="status"
             >
               {resultItem.updated
-                ? "Update applied."
-                : `Update failed: ${resultItem.error ?? "unknown error"}`}
+                ? t("library.update.applied")
+                : t("library.update.failed_with", {
+                    detail:
+                      resultItem.error ?? t("library.update.failed_unknown"),
+                  })}
             </p>
           ) : null}
         </div>
       ) : (
-        <p role="status">This Skill is not tracked for updates.</p>
+        <p role="status">{t("library.update.not_tracked")}</p>
       )}
     </section>
   );
@@ -1148,12 +1174,13 @@ function AgentInspector({
   onRequest: (agentId: string, enabled: boolean) => void;
   onRepair: (agentId: string) => void;
 }) {
+  const { t } = useLocale();
   return (
     <aside
       ref={ref}
       id={dialog ? "agent-inspector-dialog" : undefined}
       className="agent-inspector"
-      aria-label="Enable by Agent"
+      aria-label={t("library.activation.enable_by_agent")}
       role={dialog ? "dialog" : undefined}
       aria-modal={dialog ? true : undefined}
       // Constant tabindex keeps the focused element stable across breakpoint
@@ -1162,23 +1189,21 @@ function AgentInspector({
     >
       <div className="panel-heading inspector-heading">
         <div>
-          <span className="eyebrow">Activation</span>
-          <h2>Enable by Agent</h2>
+          <span className="eyebrow">{t("library.activation.eyebrow")}</span>
+          <h2>{t("library.activation.enable_by_agent")}</h2>
         </div>
       </div>
-      <p className="inspector-intro">
-        Preview each change before Skill Man updates the Agent directory.
-      </p>
+      <p className="inspector-intro">{t("library.activation.intro")}</p>
       {error ? (
         <div className="activation-error" role="alert">
-          <strong>Activation unchanged</strong>
+          <strong>{t("library.activation.unchanged")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
       <div className="agent-list">
         {detail && isChecking ? (
           <div className="activation-checking" role="status">
-            Checking desired Activations…
+            {t("library.activation.checking")}
           </div>
         ) : detail ? (
           agents.map((agent) => {
@@ -1203,7 +1228,10 @@ function AgentInspector({
                       id={activationControlId(detail.id, agent.id)}
                       type="checkbox"
                       role="switch"
-                      aria-label={`Enable ${detail.directoryName} for ${agent.name}`}
+                      aria-label={t("library.activation.enable_label", {
+                        skill: detail.directoryName,
+                        agent: agent.name,
+                      })}
                       checked={agent.desiredEnabled}
                       disabled={!agent.detected || isPending || isApplying}
                       onChange={(event) =>
@@ -1217,11 +1245,13 @@ function AgentInspector({
                   <span
                     className={`agent-state agent-state--${activationTone(agent)}`}
                   >
-                    {isPending ? "Preparing preview" : activationLabel(agent)}
+                    {isPending
+                      ? t("library.activation.preparing")
+                      : activationLabel(agent, t)}
                   </span>
                   {agent.compatibility === "unknown" ? (
                     <span className="compatibility-note">
-                      Compatibility unknown
+                      {t("library.activation.compat_unknown")}
                     </span>
                   ) : null}
                   {agent.detected &&
@@ -1236,8 +1266,8 @@ function AgentInspector({
                       onClick={() => onRepair(agent.id)}
                     >
                       {agent.observedState === "occupied"
-                        ? "Conflict"
-                        : "Repair"}
+                        ? t("library.activation.conflict")
+                        : t("library.activation.repair")}
                     </button>
                   ) : null}
                 </div>
@@ -1246,14 +1276,14 @@ function AgentInspector({
           })
         ) : (
           <div className="inspector-empty">
-            <span>No Skill selected</span>
-            <small>Activation controls stay unavailable.</small>
+            <span>{t("library.activation.no_selection")}</span>
+            <small>{t("library.activation.no_selection_body")}</small>
           </div>
         )}
       </div>
       <div className="inspector-footnote">
         <LockIcon />
-        <span>Every Activation change requires a preview.</span>
+        <span>{t("library.activation.footnote")}</span>
       </div>
     </aside>
   );
@@ -1280,7 +1310,7 @@ function AdoptSheet({
   result: AdoptResult | null;
   undo: AdoptUndoResult | null;
   error: string | null;
-  errorHeading: string;
+  errorHeading: MessageKey;
   activity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onToggle: (canonicalEntity: string, checked: boolean) => void;
   onPlan: () => void;
@@ -1288,6 +1318,7 @@ function AdoptSheet({
   onUndo: () => void;
   onClose: () => void;
 }) {
+  const { t, tPlural } = useLocale();
   const isBusy = activity !== "idle";
   const candidates = report?.candidates ?? [];
   const step = result ? "result" : plan ? "preview" : report ? "scan" : "scan";
@@ -1303,29 +1334,34 @@ function AdoptSheet({
         className="activation-sheet import-sheet adopt-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Adopt untracked Skills"
+        aria-label={t("library.adopt.dialog_label")}
       >
-        <ol className="import-progress" aria-label="Adopt progress">
+        <ol
+          className="import-progress"
+          aria-label={t("library.adopt.progress_label")}
+        >
           {(["scan", "preview", "result"] as const).map((stepName) => (
             <li
               key={stepName}
               aria-current={step === stepName ? "step" : undefined}
             >
-              {capitalize(stepName)}
+              {t(`library.adopt.step.${stepName}` as MessageKey)}
             </li>
           ))}
         </ol>
         {result ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Adopt complete</span>
+              <span className="eyebrow">
+                {t("library.adopt.complete_eyebrow")}
+              </span>
               <h2>
-                {result.items.filter((item) => item.adopted).length} of{" "}
-                {result.items.length} Skills adopted
+                {t("library.adopt.complete_title", {
+                  adopted: result.items.filter((item) => item.adopted).length,
+                  total: result.items.length,
+                })}
               </h2>
-              <p>
-                Adopted Skills are Managed and enabled on their target Agents.
-              </p>
+              <p>{t("library.adopt.complete_body")}</p>
             </div>
             <ul className="git-import-results">
               {result.items.map((item) => (
@@ -1333,10 +1369,15 @@ function AdoptSheet({
                   <span>
                     <strong>{item.directoryName}</strong>{" "}
                     {item.adopted ? (
-                      <span className="candidate-clear">Adopted</span>
+                      <span className="candidate-clear">
+                        {t("library.adopt.adopted")}
+                      </span>
                     ) : (
                       <span className="candidate-conflict">
-                        Failed: {item.error ?? "unknown error"}
+                        {t("library.adopt.failed", {
+                          detail:
+                            item.error ?? t("library.adopt.failed_unknown"),
+                        })}
                       </span>
                     )}
                   </span>
@@ -1353,19 +1394,22 @@ function AdoptSheet({
                 role="status"
               >
                 {undo.items.every((item) => item.undone)
-                  ? "Batch undone: original locations and entries restored."
+                  ? t("library.adopt.undone")
                   : undo.items
                       .filter((item) => !item.undone)
-                      .map(
-                        (item) =>
-                          `${item.directoryName}: ${item.error ?? "unknown error"}`,
+                      .map((item) =>
+                        t("library.adopt.undo_item", {
+                          name: item.directoryName,
+                          detail:
+                            item.error ?? t("library.adopt.failed_unknown"),
+                        }),
                       )
                       .join(" · ")}
               </div>
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>{errorHeading}</strong>
+                <strong>{t(errorHeading)}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -1377,26 +1421,26 @@ function AdoptSheet({
                   disabled={isBusy}
                   onClick={onUndo}
                 >
-                  {activity === "undoing" ? "Undoing" : "Undo this batch"}
+                  {activity === "undoing"
+                    ? t("library.adopt.undoing")
+                    : t("library.adopt.undo")}
                 </button>
               ) : null}
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Close
+                {t("library.adopt.close")}
               </button>
             </div>
           </>
         ) : plan ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Adopt preview</span>
+              <span className="eyebrow">
+                {t("library.adopt.preview_eyebrow")}
+              </span>
               <h2>
-                Preview {plan.items.length} Skill
-                {plan.items.length === 1 ? "" : "s"}
+                {tPlural("library.adopt.preview_count", plan.items.length)}
               </h2>
-              <p>
-                Each Skill is its own transaction; a failure rolls back only
-                that Skill.
-              </p>
+              <p>{t("library.adopt.preview_body")}</p>
             </div>
             <ul className="git-import-candidates git-import-preview-list">
               {plan.items.map((item) => (
@@ -1405,14 +1449,16 @@ function AdoptSheet({
                     <strong>{item.directoryName}</strong>
                     <span className="candidate-path">
                       {item.kind === "migrate"
-                        ? "moves into Library"
-                        : "registered as Link"}{" "}
+                        ? t("library.adopt.migrates")
+                        : t("library.adopt.links")}{" "}
                       ·{" "}
                       {item.targetAgents.length > 0
-                        ? `enables on ${item.targetAgents
-                            .map((agent) => agent.name)
-                            .join(", ")}`
-                        : "one Activation"}
+                        ? t("library.adopt.enables_on", {
+                            agents: item.targetAgents
+                              .map((agent) => agent.name)
+                              .join(", "),
+                          })
+                        : t("library.adopt.one_activation")}
                     </span>
                   </div>
                   {item.error ? (
@@ -1420,20 +1466,22 @@ function AdoptSheet({
                       {item.error}
                     </span>
                   ) : (
-                    <span className="candidate-clear">Ready</span>
+                    <span className="candidate-clear">
+                      {t("library.adopt.ready")}
+                    </span>
                   )}
                 </li>
               ))}
             </ul>
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>{errorHeading}</strong>
+                <strong>{t(errorHeading)}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Cancel
+                {t("library.adopt.cancel")}
               </button>
               <button
                 type="button"
@@ -1441,20 +1489,18 @@ function AdoptSheet({
                 disabled={!plan.canApply || isBusy}
                 onClick={onApply}
               >
-                {isBusy ? "Adopting" : "Adopt"}
+                {isBusy
+                  ? t("library.adopt.adopting")
+                  : t("library.adopt.apply")}
               </button>
             </div>
           </>
         ) : (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Adopt</span>
-              <h2>Untracked Skills</h2>
-              <p>
-                Scan Agent and shared directories. Safe candidates are
-                pre-selected; external, Broken and conflicting ones require
-                attention.
-              </p>
+              <span className="eyebrow">{t("library.adopt.scan_eyebrow")}</span>
+              <h2>{t("library.adopt.scan_title")}</h2>
+              <p>{t("library.adopt.scan_body")}</p>
             </div>
             <ul className="git-import-candidates">
               {candidates.map((candidate) => (
@@ -1475,15 +1521,29 @@ function AdoptSheet({
                       <strong>{candidate.directoryName}</strong>
                       <span className="candidate-path">
                         {candidate.risk === "broken"
-                          ? `Broken · ${candidate.riskReason ?? "target missing"}`
+                          ? t("library.adopt.risk.broken", {
+                              reason: adoptRiskReasonText(
+                                t,
+                                candidate.risk,
+                                candidate.riskReason,
+                              ),
+                            })
                           : candidate.risk === "external"
-                            ? "External · " +
-                              (candidate.riskReason ?? "outside home")
+                            ? t("library.adopt.risk.external", {
+                                reason: adoptRiskReasonText(
+                                  t,
+                                  candidate.risk,
+                                  candidate.riskReason,
+                                ),
+                              })
                             : candidate.conflict
-                              ? `Conflict with "${candidate.conflict.directoryName}"`
-                              : `${candidate.appearances.length} appearance${
-                                  candidate.appearances.length === 1 ? "" : "s"
-                                }`}
+                              ? t("library.adopt.risk.conflict", {
+                                  name: candidate.conflict.directoryName,
+                                })
+                              : tPlural(
+                                  "library.adopt.risk.appearances",
+                                  candidate.appearances.length,
+                                )}
                       </span>
                     </span>
                   </label>
@@ -1491,22 +1551,22 @@ function AdoptSheet({
               ))}
             </ul>
             {candidates.length === 0 && !isBusy ? (
-              <p role="status">No untracked Skills found.</p>
+              <p role="status">{t("library.adopt.none")}</p>
             ) : null}
             {report?.truncated ? (
               <p className="candidate-conflict" role="status">
-                Candidate list truncated; Rescan after adopting to reveal more.
+                {t("library.adopt.truncated")}
               </p>
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>{errorHeading}</strong>
+                <strong>{t(errorHeading)}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Cancel
+                {t("library.adopt.cancel")}
               </button>
               <button
                 type="button"
@@ -1514,7 +1574,9 @@ function AdoptSheet({
                 disabled={selected.length === 0 || isBusy || report === null}
                 onClick={onPlan}
               >
-                {activity === "planning" ? "Preparing" : "Preview Adopt"}
+                {activity === "planning"
+                  ? t("library.adopt.preparing")
+                  : t("library.adopt.preview_button")}
               </button>
             </div>
           </>
@@ -1577,6 +1639,7 @@ function LinkImportSheet({
   onApplyGitImport: () => void;
   onOpenImportedGitSkill: (skillId: string) => void;
 }) {
+  const { t } = useLocale();
   const [sourcePath, setSourcePath] = useState("");
   const sourceInput = useRef<HTMLInputElement>(null);
   const primaryButton = useRef<HTMLButtonElement>(null);
@@ -1643,20 +1706,25 @@ function LinkImportSheet({
         aria-modal="true"
         aria-label={
           result
-            ? "Link Import result"
+            ? t("library.import.dialog_link")
             : gitImportResult
-              ? "Import result"
-              : `Import ${isGit ? "from Git" : "Link"}`
+              ? t("library.import.dialog_git")
+              : isGit
+                ? t("library.import.dialog_from_git")
+                : t("library.import.dialog_link_import")
         }
       >
-        <ol className="import-progress" aria-label="Import progress">
+        <ol
+          className="import-progress"
+          aria-label={t("library.import.progress_label")}
+        >
           {(["source", "discover", "preview", "result"] as const).map(
             (step) => (
               <li
                 key={step}
                 aria-current={currentStep === step ? "step" : undefined}
               >
-                {capitalize(step)}
+                {t(`library.import.step.${step}` as MessageKey)}
               </li>
             ),
           )}
@@ -1686,29 +1754,32 @@ function LinkImportSheet({
         ) : result ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Import complete</span>
-              <h2>{result.directoryName} is Managed</h2>
-              <p>
-                The source remains in place. Library stores its Link as a SQLite
-                pointer.
-              </p>
+              <span className="eyebrow">
+                {t("library.import.complete_eyebrow")}
+              </span>
+              <h2>
+                {t("library.import.link_managed", {
+                  name: result.directoryName,
+                })}
+              </h2>
+              <p>{t("library.import.link_managed_body")}</p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.import.final_entity")}</dt>
                 <dd>{result.finalEntityPath}</dd>
               </div>
               <div>
-                <dt>Library storage</dt>
-                <dd>SQLite pointer only</dd>
+                <dt>{t("library.import.storage")}</dt>
+                <dd>{t("library.import.pointer_only")}</dd>
               </div>
             </dl>
             <div className="activation-sheet-actions import-result-actions">
               <button type="button" disabled={isApplying} onClick={onClose}>
-                Close
+                {t("library.import.close")}
               </button>
               <button type="button" onClick={onOpenImportedSkill}>
-                View in Library
+                {t("library.import.view_in_library")}
               </button>
               <button
                 ref={primaryButton}
@@ -1716,60 +1787,60 @@ function LinkImportSheet({
                 className="activation-confirm-button"
                 onClick={onOpenImportedSkill}
               >
-                Enable by Agent
+                {t("library.import.enable_by_agent")}
               </button>
             </div>
           </>
         ) : preview ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Link preview</span>
-              <h2>Preview {preview.directoryName}</h2>
-              <p>
-                Import this folder by reference. No Skill files will be copied
-                into Library.
-              </p>
+              <span className="eyebrow">
+                {t("library.import.link_preview_eyebrow")}
+              </span>
+              <h2>
+                {t("library.import.preview_name", {
+                  name: preview.directoryName,
+                })}
+              </h2>
+              <p>{t("library.import.link_preview_body")}</p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>Selected source</dt>
+                <dt>{t("library.import.selected_source")}</dt>
                 <dd>{preview.sourceEntryPath}</dd>
               </div>
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.import.final_entity")}</dt>
                 <dd>{preview.finalEntityPath}</dd>
               </div>
               <div>
-                <dt>Library storage</dt>
-                <dd>SQLite pointer only</dd>
+                <dt>{t("library.import.storage")}</dt>
+                <dd>{t("library.import.pointer_only")}</dd>
               </div>
             </dl>
             <div className="activation-warning import-risk" role="status">
-              <strong>Review imported instructions</strong>
-              <span>
-                This source&apos;s SKILL.md can become instructions for every
-                Agent you enable.
-              </span>
+              <strong>{t("library.import.review_instructions")}</strong>
+              <span>{t("library.import.review_link_body")}</span>
             </div>
             {preview.conflict ? (
               <div className="import-conflict" role="alert">
-                <strong>Library Conflict</strong>
+                <strong>{t("library.import.conflict_heading")}</strong>
                 <span>
-                  Managed Skill “{preview.conflict.directoryName}” already uses
-                  this directory identity. Rename the source, Remove the
-                  existing Skill, or cancel.
+                  {t("library.import.conflict_body", {
+                    name: preview.conflict.directoryName,
+                  })}
                 </span>
               </div>
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Import unchanged</strong>
+                <strong>{t("library.import.unchanged")}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isApplying} onClick={onClose}>
-                Cancel
+                {t("library.import.cancel")}
               </button>
               <button
                 ref={primaryButton}
@@ -1778,23 +1849,26 @@ function LinkImportSheet({
                 disabled={!preview.canApply || isRunning}
                 onClick={onApply}
               >
-                {isRunning ? "Importing" : `Import ${preview.directoryName}`}
+                {isRunning
+                  ? t("library.import.importing")
+                  : t("library.import.import_button", {
+                      name: preview.directoryName,
+                    })}
               </button>
             </div>
           </>
         ) : (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Import · Link</span>
-              <h2>Link a local Skill</h2>
-              <p>
-                Choose a development folder containing a readable SKILL.md. The
-                folder stays at its source.
-              </p>
+              <span className="eyebrow">
+                {t("library.import.link_eyebrow")}
+              </span>
+              <h2>{t("library.import.link_title")}</h2>
+              <p>{t("library.import.link_body")}</p>
             </div>
             <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
             <label className="import-source-field">
-              <span>Local folder path</span>
+              <span>{t("library.import.local_path")}</span>
               <input
                 ref={sourceInput}
                 type="text"
@@ -1806,13 +1880,13 @@ function LinkImportSheet({
             </label>
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Source unavailable</strong>
+                <strong>{t("library.import.source_unavailable")}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isApplying} onClick={onClose}>
-                Cancel
+                {t("library.import.cancel")}
               </button>
               <button
                 ref={primaryButton}
@@ -1821,7 +1895,9 @@ function LinkImportSheet({
                 disabled={!sourcePath.trim() || isRunning}
                 onClick={() => onPreview(sourcePath)}
               >
-                {isDiscovering ? "Checking source" : "Preview Link"}
+                {isDiscovering
+                  ? t("library.import.checking_source")
+                  : t("library.import.preview_link")}
               </button>
             </div>
           </>
@@ -1838,21 +1914,26 @@ function SourceKindSwitch({
   kind: ImportKind;
   onKindChange: (kind: ImportKind) => void;
 }) {
+  const { t } = useLocale();
   return (
-    <div className="import-kind-switch" role="group" aria-label="Import source">
+    <div
+      className="import-kind-switch"
+      role="group"
+      aria-label={t("library.import.source_label")}
+    >
       <button
         type="button"
         aria-pressed={kind === "link"}
         onClick={() => onKindChange("link")}
       >
-        Link local folder
+        {t("library.import.link_local")}
       </button>
       <button
         type="button"
         aria-pressed={kind === "git"}
         onClick={() => onKindChange("git")}
       >
-        Install from Git
+        {t("library.import.install_git")}
       </button>
     </div>
   );
@@ -1899,6 +1980,7 @@ function GitImportFlow({
   primaryButton: React.RefObject<HTMLButtonElement | null>;
   sourceInput: React.RefObject<HTMLInputElement | null>;
 }) {
+  const { t, tPlural } = useLocale();
   const isBusy = activity !== "idle";
   const candidates = discovery?.candidates ?? [];
   const selectedCount = selected.length;
@@ -1907,17 +1989,19 @@ function GitImportFlow({
     return (
       <>
         <div className="activation-sheet-heading">
-          <span className="eyebrow">Import complete</span>
-          <h2>{result.items.length} Skills are Managed</h2>
+          <span className="eyebrow">
+            {t("library.import.complete_eyebrow")}
+          </span>
+          <h2>
+            {tPlural("library.import.git_complete_title", result.items.length)}
+          </h2>
           <p>
-            Installed from {preview?.repoUrl ?? discovery?.repoUrl ?? "Git"} at
-            commit{" "}
-            <code>
-              {shortCommit(
+            {t("library.import.git_installed", {
+              source: preview?.repoUrl ?? discovery?.repoUrl ?? "Git",
+              commit: shortCommit(
                 preview?.resolvedCommit ?? discovery?.resolvedCommit ?? "",
-              )}
-            </code>
-            .
+              ),
+            })}
           </p>
         </div>
         <ul className="git-import-results">
@@ -1928,14 +2012,14 @@ function GitImportFlow({
                 type="button"
                 onClick={() => onOpenImportedSkill(item.skillId)}
               >
-                View in Library
+                {t("library.import.view_in_library")}
               </button>
             </li>
           ))}
         </ul>
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
-            Close
+            {t("library.import.close")}
           </button>
         </div>
       </>
@@ -1947,10 +2031,11 @@ function GitImportFlow({
     return (
       <>
         <div className="activation-sheet-heading">
-          <span className="eyebrow">Import preview</span>
+          <span className="eyebrow">
+            {t("library.import.git_preview_eyebrow")}
+          </span>
           <h2>
-            Preview {preview.items.length} Skill
-            {preview.items.length === 1 ? "" : "s"}
+            {tPlural("library.import.preview_count", preview.items.length)}
           </h2>
           <p>
             {preview.repoUrl} ·{" "}
@@ -1963,44 +2048,42 @@ function GitImportFlow({
               <div>
                 <strong>{item.directoryName}</strong>
                 <span className="candidate-path">
-                  {item.skillPath || "repo root"}
+                  {item.skillPath || t("library.import.repo_root")}
                 </span>
               </div>
               {item.conflict ? (
                 <span className="candidate-conflict" role="alert">
-                  Conflict with “{item.conflict.directoryName}”
+                  {t("library.import.conflict_with", {
+                    name: item.conflict.directoryName,
+                  })}
                 </span>
               ) : (
-                <span className="candidate-clear">Ready</span>
+                <span className="candidate-clear">
+                  {t("library.adopt.ready")}
+                </span>
               )}
             </li>
           ))}
         </ul>
         {blocked ? (
           <div className="import-conflict" role="alert">
-            <strong>Library Conflict</strong>
-            <span>
-              One or more selected Skills already exist in the Library. Rename
-              or Remove the existing Skills, or cancel.
-            </span>
+            <strong>{t("library.import.conflict_heading")}</strong>
+            <span>{t("library.import.git_conflict_body")}</span>
           </div>
         ) : null}
         <div className="activation-warning import-risk" role="status">
-          <strong>Review imported instructions</strong>
-          <span>
-            These SKILL.md files can become instructions for every Agent you
-            enable.
-          </span>
+          <strong>{t("library.import.review_instructions")}</strong>
+          <span>{t("library.import.review_git_body")}</span>
         </div>
         {error ? (
           <div className="activation-error" role="alert">
-            <strong>Import unchanged</strong>
+            <strong>{t("library.import.unchanged")}</strong>
             <span>{error}</span>
           </div>
         ) : null}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
-            Cancel
+            {t("library.import.cancel")}
           </button>
           <button
             ref={primaryButton}
@@ -2010,8 +2093,8 @@ function GitImportFlow({
             onClick={onApply}
           >
             {isBusy
-              ? "Importing"
-              : `Install ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
+              ? t("library.import.importing")
+              : tPlural("library.import.install_count", selectedCount)}
           </button>
         </div>
       </>
@@ -2022,14 +2105,14 @@ function GitImportFlow({
     return (
       <>
         <div className="activation-sheet-heading">
-          <span className="eyebrow">Discover</span>
-          <h2>
-            {candidates.length} Skill{candidates.length === 1 ? "" : "s"} found
-          </h2>
+          <span className="eyebrow">
+            {t("library.import.discover_eyebrow")}
+          </span>
+          <h2>{tPlural("library.import.found_count", candidates.length)}</h2>
           <p>
             {discovery.repoUrl} ·{" "}
             <code>{shortCommit(discovery.resolvedCommit)}</code>
-            {discovery.truncated ? " · list truncated" : ""}
+            {discovery.truncated ? t("library.import.list_truncated") : ""}
           </p>
         </div>
         <ul className="git-import-candidates">
@@ -2049,7 +2132,7 @@ function GitImportFlow({
                 <span>
                   <strong>{candidate.directoryName}</strong>
                   <span className="candidate-path">
-                    {candidate.skillPath || "repo root"}
+                    {candidate.skillPath || t("library.import.repo_root")}
                   </span>
                 </span>
               </label>
@@ -2058,13 +2141,13 @@ function GitImportFlow({
         </ul>
         {error ? (
           <div className="activation-error" role="alert">
-            <strong>Discovery failed</strong>
+            <strong>{t("library.import.discovery_failed")}</strong>
             <span>{error}</span>
           </div>
         ) : null}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
-            Cancel
+            {t("library.import.cancel")}
           </button>
           <button
             ref={primaryButton}
@@ -2074,8 +2157,8 @@ function GitImportFlow({
             onClick={onPlan}
           >
             {activity === "planning"
-              ? "Preparing"
-              : `Preview ${selectedCount} Skill${selectedCount === 1 ? "" : "s"}`}
+              ? t("library.adopt.preparing")
+              : tPlural("library.import.preview_count", selectedCount)}
           </button>
         </div>
       </>
@@ -2085,16 +2168,13 @@ function GitImportFlow({
   return (
     <>
       <div className="activation-sheet-heading">
-        <span className="eyebrow">Import · Git</span>
-        <h2>Install from Git</h2>
-        <p>
-          Public HTTPS repository. Skill Man discovers Skills, stages them, and
-          tracks updates for the branch you install.
-        </p>
+        <span className="eyebrow">{t("library.import.git_eyebrow")}</span>
+        <h2>{t("library.import.git_title")}</h2>
+        <p>{t("library.import.git_body")}</p>
       </div>
       <SourceKindSwitch kind="git" onKindChange={onKindChange} />
       <label className="import-source-field">
-        <span>Repository URL or owner/repo</span>
+        <span>{t("library.import.repo_label")}</span>
         <input
           ref={sourceInput}
           type="text"
@@ -2113,17 +2193,17 @@ function GitImportFlow({
             onForceFullDepthChange(event.currentTarget.checked)
           }
         />
-        <span>Force full-depth scan (slow repos)</span>
+        <span>{t("library.import.force_full_depth")}</span>
       </label>
       {error ? (
         <div className="activation-error" role="alert">
-          <strong>Source unavailable</strong>
+          <strong>{t("library.import.source_unavailable")}</strong>
           <span>{error}</span>
         </div>
       ) : null}
       <div className="activation-sheet-actions">
         <button type="button" disabled={isBusy} onClick={onClose}>
-          Cancel
+          {t("library.import.cancel")}
         </button>
         <button
           ref={primaryButton}
@@ -2133,8 +2213,8 @@ function GitImportFlow({
           onClick={() => onDiscover(source, forceFullDepth)}
         >
           {activity === "discovering"
-            ? "Fetching repository"
-            : "Discover Skills"}
+            ? t("library.import.fetching")
+            : t("library.import.discover_button")}
         </button>
       </div>
     </>
@@ -2152,7 +2232,8 @@ function ActivationPreviewSheet({
   onApply: () => void;
   onCancel: () => void;
 }) {
-  const action = capitalize(preview.kind);
+  const { t } = useLocale();
+  const action = t(`library.activation.kind.${preview.kind}` as MessageKey);
   const cancelButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
 
@@ -2194,34 +2275,44 @@ function ActivationPreviewSheet({
         className="activation-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label={`Preview ${action}`}
+        aria-label={t("library.activation_preview.dialog", { action })}
       >
         <div className="activation-sheet-heading">
-          <span className="eyebrow">Activation preview</span>
+          <span className="eyebrow">
+            {t("library.activation_preview.eyebrow")}
+          </span>
           <h2>
             {action} {preview.skillDirectoryName}
           </h2>
           <p>
             {preview.kind === "repair"
-              ? "Recreate one missing managed Activation in"
-              : `${preview.enabled ? "Create" : "Remove"} one managed Activation in`}{" "}
-            {preview.agentName}.
+              ? t("library.activation_preview.recreate", {
+                  agent: preview.agentName,
+                })
+              : t(
+                  preview.enabled
+                    ? "library.activation_preview.create"
+                    : "library.activation_preview.remove",
+                  { agent: preview.agentName },
+                )}
           </p>
         </div>
         <dl className="activation-paths">
           <div>
-            <dt>Agent entry</dt>
+            <dt>{t("library.activation_preview.agent_entry")}</dt>
             <dd>{preview.entryPath}</dd>
           </div>
           <div>
-            <dt>Final entity</dt>
+            <dt>{t("library.activation_preview.final_entity")}</dt>
             <dd>{preview.targetPath}</dd>
           </div>
         </dl>
         {preview.compatibilityWarning ? (
           <div className="activation-warning" role="status">
-            <strong>Compatibility confirmation</strong>
-            <span>{preview.compatibilityWarning}</span>
+            <strong>{t("library.activation_preview.compat_confirm")}</strong>
+            <span>
+              {compatibilityWarningText(t, preview.compatibilityWarning)}
+            </span>
           </div>
         ) : null}
         <div className="activation-sheet-actions">
@@ -2231,7 +2322,7 @@ function ActivationPreviewSheet({
             disabled={isApplying}
             onClick={onCancel}
           >
-            Cancel
+            {t("library.activation_preview.cancel")}
           </button>
           <button
             ref={confirmButton}
@@ -2240,7 +2331,12 @@ function ActivationPreviewSheet({
             disabled={isApplying}
             onClick={onApply}
           >
-            {isApplying ? "Applying" : `${action} in ${preview.agentName}`}
+            {isApplying
+              ? t("library.activation_preview.applying")
+              : t("library.activation_preview.apply", {
+                  action,
+                  agent: preview.agentName,
+                })}
           </button>
         </div>
       </section>
@@ -2277,6 +2373,7 @@ function ActivationConflictSheet({
   onUndoReplace: () => void;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   const isBusy = isApplying || isUndoing;
   const sheet = useRef<HTMLElement>(null);
   const replaceButton = useRef<HTMLButtonElement>(null);
@@ -2333,43 +2430,43 @@ function ActivationConflictSheet({
         className="activation-sheet activation-conflict-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Activation conflict"
+        aria-label={t("library.conflict.dialog")}
       >
         {step === "conflict" ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Conflict</span>
-              <h2>Activation path is occupied</h2>
-              <p>
-                Skill Man found existing content at the expected Agent entry and
-                left it unchanged. Choose how to resolve it.
-              </p>
+              <span className="eyebrow">{t("library.conflict.eyebrow")}</span>
+              <h2>{t("library.conflict.title")}</h2>
+              <p>{t("library.conflict.body")}</p>
             </div>
             {message ? (
               <p className="activation-conflict-detail">{message}</p>
             ) : null}
             <dl className="activation-paths">
               <div>
-                <dt>Agent entry</dt>
+                <dt>{t("library.conflict.agent_entry")}</dt>
                 <dd>{details.entryPath}</dd>
               </div>
               <div>
-                <dt>Would point to</dt>
+                <dt>{t("library.conflict.would_point_to")}</dt>
                 <dd>{details.targetPath}</dd>
               </div>
             </dl>
             <div className="conflict-occupier">
-              <strong>{occupierHeading(occupier)}</strong>
-              <span>{occupierDescription(occupier)}</span>
+              <strong>{occupierHeading(occupier, t)}</strong>
+              <span>{occupierDescription(occupier, t)}</span>
               {occupier.adoptable ? null : occupier.notAdoptableReason ? (
                 <small className="candidate-conflict" role="status">
-                  {occupier.notAdoptableReason}
+                  {occupierNotAdoptableReasonText(
+                    t,
+                    occupier.notAdoptableReason,
+                  )}
                 </small>
               ) : null}
             </div>
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Replace unchanged</strong>
+                <strong>{t("library.conflict.replace_unchanged")}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -2380,7 +2477,7 @@ function ActivationConflictSheet({
                 disabled={isBusy}
                 onClick={onClose}
               >
-                Cancel
+                {t("library.conflict.cancel")}
               </button>
               <button
                 type="button"
@@ -2391,7 +2488,7 @@ function ActivationConflictSheet({
                     : undefined
                 }
               >
-                Adopt existing item
+                {t("library.conflict.adopt_existing")}
               </button>
               <button
                 ref={replaceButton}
@@ -2400,45 +2497,52 @@ function ActivationConflictSheet({
                 disabled={isBusy}
                 onClick={onPlanReplace}
               >
-                Remove then replace
+                {t("library.conflict.remove_then_replace")}
               </button>
             </div>
           </>
         ) : step === "preview" && replacePreview ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Replace</span>
-              <h2>Remove then replace {replacePreview.skillDirectoryName}</h2>
+              <span className="eyebrow">
+                {t("library.conflict.preview_eyebrow")}
+              </span>
+              <h2>
+                {t("library.conflict.preview_title", {
+                  name: replacePreview.skillDirectoryName,
+                })}
+              </h2>
               <p>
-                The occupying item is moved to a temporary backup before the
-                Activation is created in {replacePreview.agentName}.
+                {t("library.conflict.preview_body", {
+                  agent: replacePreview.agentName,
+                })}
               </p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>Agent entry</dt>
+                <dt>{t("library.activation_preview.agent_entry")}</dt>
                 <dd>{replacePreview.entryPath}</dd>
               </div>
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.activation_preview.final_entity")}</dt>
                 <dd>{replacePreview.targetPath}</dd>
               </div>
               <div>
-                <dt>Temporary backup</dt>
+                <dt>{t("library.conflict.temp_backup")}</dt>
                 <dd>{replacePreview.backupPath}</dd>
               </div>
             </dl>
             <div className="activation-warning" role="status">
-              <strong>Explicit confirmation required</strong>
+              <strong>{t("library.conflict.confirm_heading")}</strong>
               <span>
-                The existing {occupierKindLabel(replacePreview.occupantKind)} is
-                backed up while this window is open and is discarded when it
-                closes. Undo restores it before you close.
+                {t("library.conflict.confirm_body", {
+                  kind: occupierKindLabel(replacePreview.occupantKind, t),
+                })}
               </span>
             </div>
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Replace unchanged</strong>
+                <strong>{t("library.conflict.replace_unchanged")}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -2449,7 +2553,7 @@ function ActivationConflictSheet({
                 disabled={isBusy}
                 onClick={onClose}
               >
-                Cancel
+                {t("library.conflict.cancel")}
               </button>
               <button
                 ref={replaceButton}
@@ -2458,19 +2562,20 @@ function ActivationConflictSheet({
                 disabled={isBusy}
                 onClick={onApplyReplace}
               >
-                {isApplying ? "Replacing" : "Remove and replace"}
+                {isApplying
+                  ? t("library.conflict.replacing")
+                  : t("library.conflict.replace_button")}
               </button>
             </div>
           </>
         ) : (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Replace complete</span>
-              <h2>Activation created</h2>
-              <p>
-                The Skill is enabled for this Agent. The previous item stays in
-                its temporary backup while this window is open.
-              </p>
+              <span className="eyebrow">
+                {t("library.conflict.result_eyebrow")}
+              </span>
+              <h2>{t("library.conflict.result_title")}</h2>
+              <p>{t("library.conflict.result_body")}</p>
             </div>
             {replaceUndo ? (
               <div
@@ -2480,13 +2585,16 @@ function ActivationConflictSheet({
                 role="status"
               >
                 {replaceUndo.undone
-                  ? "Previous item restored to its original location."
-                  : `Previous item not restored: ${replaceUndo.error ?? "unknown reason"}`}
+                  ? t("library.conflict.undo_restored")
+                  : t("library.conflict.undo_failed", {
+                      detail:
+                        replaceUndo.error ?? t("library.conflict.undo_unknown"),
+                    })}
               </div>
             ) : null}
             {error ? (
               <div className="activation-error" role="alert">
-                <strong>Replace unchanged</strong>
+                <strong>{t("library.conflict.replace_unchanged")}</strong>
                 <span>{error}</span>
               </div>
             ) : null}
@@ -2497,7 +2605,7 @@ function ActivationConflictSheet({
                 disabled={isBusy}
                 onClick={onClose}
               >
-                Close
+                {t("library.conflict.close")}
               </button>
               {!replaceUndo ? (
                 <button
@@ -2507,7 +2615,9 @@ function ActivationConflictSheet({
                   disabled={isBusy}
                   onClick={onUndoReplace}
                 >
-                  {isUndoing ? "Restoring" : "Restore previous item"}
+                  {isUndoing
+                    ? t("library.conflict.restoring")
+                    : t("library.conflict.restore_button")}
                 </button>
               ) : null}
             </div>
@@ -2518,44 +2628,64 @@ function ActivationConflictSheet({
   );
 }
 
-function occupierHeading(occupier: OccupierSummary) {
+function occupierHeading(
+  occupier: OccupierSummary,
+  t: LocaleContextValue["t"],
+) {
   if (occupier.isSkill) {
-    return `${occupier.directoryName} · untracked Skill`;
+    return t("library.conflict.occupier_skill", {
+      name: occupier.directoryName,
+    });
   }
-  return `${occupier.directoryName} · ${occupierKindLabel(occupier.kind)}`;
+  return t("library.conflict.occupier_kind", {
+    name: occupier.directoryName,
+    kind: occupierKindLabel(occupier.kind, t),
+  });
 }
 
-function occupierDescription(occupier: OccupierSummary) {
+function occupierDescription(
+  occupier: OccupierSummary,
+  t: LocaleContextValue["t"],
+) {
   if (occupier.finalEntityPath) {
-    return `Resolves to ${occupier.finalEntityPath}`;
+    return t("library.conflict.resolves_to", {
+      path: occupier.finalEntityPath,
+    });
   }
   if (occupier.symlinkTarget) {
-    return `Symlink to ${occupier.symlinkTarget}`;
+    return t("library.conflict.symlink_to", {
+      path: occupier.symlinkTarget,
+    });
   }
-  return "Existing content at the entry.";
+  return t("library.conflict.entry_content");
 }
 
-function occupierKindLabel(kind: OccupierKind) {
-  if (kind === "real_directory") return "real directory";
-  if (kind === "symlink") return "symlink";
-  return "file";
+function occupierKindLabel(kind: OccupierKind, t: LocaleContextValue["t"]) {
+  if (kind === "real_directory")
+    return t("library.conflict.kind.real_directory");
+  if (kind === "symlink") return t("library.conflict.kind.symlink");
+  return t("library.conflict.kind.file");
 }
 
 // -- First-run onboarding (spec §8.7) ---------------------------------------
 
-const onboardingSteps = [
+const onboardingSteps: Array<{
+  titleKey: MessageKey;
+  bodyKey: MessageKey;
+  note?: string;
+}> = [
   {
-    title: "Create the Library",
-    body: "Skill Man keeps every Managed Skill in a fixed app-owned location. It never reuses Agent convention directories.",
+    titleKey: "library.onboarding.step1_title",
+    bodyKey: "library.onboarding.step1_body",
     note: "~/Library/Application Support/skill-man",
   },
   {
-    title: "Check Agent Presets",
-    body: "Claude Code and Codex presets always show. Missing directories are only marked; they are never created without your explicit confirmation.",
+    titleKey: "library.onboarding.step2_title",
+    bodyKey: "library.onboarding.step2_body",
   },
   {
-    title: "Scan existing Skills",
-    body: "A read-only full scan of Agent and shared directories. Nothing is Adopted, moved or overwritten by the scan.",
+    titleKey: "library.onboarding.step3_title",
+    bodyKey: "library.onboarding.step3_body",
   },
 ];
 
@@ -2580,6 +2710,7 @@ function OnboardingSheet({
   onCreateDirectory: (agentId: string) => void;
   onFinishWithAdopt: () => void;
 }) {
+  const { t, tPlural } = useLocale();
   const closeButton = useRef<HTMLButtonElement>(null);
   const advanceButton = useRef<HTMLButtonElement>(null);
   const isScanning = activity === "scanning";
@@ -2610,12 +2741,15 @@ function OnboardingSheet({
         className="activation-sheet onboarding-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Welcome to Skill Man"
+        aria-label={t("library.onboarding.welcome")}
       >
-        <div className="onboarding-progress" aria-label="First-run progress">
+        <div
+          className="onboarding-progress"
+          aria-label={t("library.onboarding.progress")}
+        >
           {onboardingSteps.map((item, index) => (
             <span
-              key={item.title}
+              key={item.titleKey}
               className={index <= step ? "onboarding-progress-dot--active" : ""}
             >
               {index + 1}
@@ -2623,14 +2757,16 @@ function OnboardingSheet({
           ))}
         </div>
         <div className="activation-sheet-heading">
-          <span className="eyebrow">First run · {step + 1} of 3</span>
-          <h2>{current.title}</h2>
-          <p>{current.body}</p>
+          <span className="eyebrow">
+            {t("library.onboarding.first_run", { step: step + 1 })}
+          </span>
+          <h2>{t(current.titleKey)}</h2>
+          <p>{t(current.bodyKey)}</p>
         </div>
         {step === 0 && current.note ? (
           <dl className="activation-paths">
             <div>
-              <dt>Library</dt>
+              <dt>{t("library.pane.library")}</dt>
               <dd>{current.note}</dd>
             </div>
           </dl>
@@ -2647,16 +2783,20 @@ function OnboardingSheet({
                   <small>{agent.skillsPath}</small>
                 </span>
                 {agent.detected ? (
-                  <span className="candidate-clear">Detected</span>
+                  <span className="candidate-clear">
+                    {t("library.onboarding.detected")}
+                  </span>
                 ) : (
                   <>
-                    <span className="candidate-conflict">Not detected</span>
+                    <span className="candidate-conflict">
+                      {t("library.onboarding.not_detected")}
+                    </span>
                     <button
                       type="button"
                       disabled={isScanning}
                       onClick={() => onCreateDirectory(agent.id)}
                     >
-                      Create directory
+                      {t("library.onboarding.create_dir")}
                     </button>
                   </>
                 )}
@@ -2667,13 +2807,11 @@ function OnboardingSheet({
         {step === 2 ? (
           <div className="onboarding-scan">
             {isScanning ? (
-              <p role="status">Scanning Agent and shared directories…</p>
+              <p role="status">{t("library.onboarding.scanning")}</p>
             ) : report ? (
               <>
                 <p role="status">
-                  {candidates.length} Untracked Skill
-                  {candidates.length === 1 ? "" : "s"} found. Nothing changed
-                  yet.
+                  {tPlural("library.onboarding.untracked", candidates.length)}
                 </p>
                 <ul className="git-import-candidates">
                   {candidates.map((candidate) => (
@@ -2682,26 +2820,36 @@ function OnboardingSheet({
                         <strong>{candidate.directoryName}</strong>
                         <span className="candidate-path">
                           {candidate.risk === "broken"
-                            ? `Broken · ${candidate.riskReason ?? "target missing"}`
+                            ? t("library.adopt.risk.broken", {
+                                reason: adoptRiskReasonText(
+                                  t,
+                                  candidate.risk,
+                                  candidate.riskReason,
+                                ),
+                              })
                             : candidate.risk === "external"
-                              ? "External · " +
-                                (candidate.riskReason ?? "outside home")
+                              ? t("library.adopt.risk.external", {
+                                  reason: adoptRiskReasonText(
+                                    t,
+                                    candidate.risk,
+                                    candidate.riskReason,
+                                  ),
+                                })
                               : candidate.conflict
-                                ? `Conflict with "${candidate.conflict.directoryName}"`
-                                : `${candidate.appearances.length} appearance${
-                                    candidate.appearances.length === 1
-                                      ? ""
-                                      : "s"
-                                  }`}
+                                ? t("library.adopt.risk.conflict", {
+                                    name: candidate.conflict.directoryName,
+                                  })
+                                : tPlural(
+                                    "library.adopt.risk.appearances",
+                                    candidate.appearances.length,
+                                  )}
                         </span>
                       </span>
                     </li>
                   ))}
                 </ul>
                 {candidates.length === 0 ? (
-                  <p role="status">
-                    No untracked Skills found — nothing to adopt.
-                  </p>
+                  <p role="status">{t("library.onboarding.none")}</p>
                 ) : null}
               </>
             ) : null}
@@ -2709,7 +2857,7 @@ function OnboardingSheet({
         ) : null}
         {error ? (
           <div className="activation-error" role="alert">
-            <strong>Onboarding unchanged</strong>
+            <strong>{t("library.onboarding.unchanged")}</strong>
             <span>{error}</span>
           </div>
         ) : null}
@@ -2720,7 +2868,7 @@ function OnboardingSheet({
             disabled={isScanning}
             onClick={onSkip}
           >
-            Skip setup
+            {t("library.onboarding.skip")}
           </button>
           {step < 2 ? (
             <button
@@ -2730,7 +2878,9 @@ function OnboardingSheet({
               disabled={isScanning}
               onClick={onAdvance}
             >
-              {isScanning ? "Scanning" : "Continue"}
+              {isScanning
+                ? t("library.onboarding.scanning_short")
+                : t("library.onboarding.continue")}
             </button>
           ) : (
             <>
@@ -2741,7 +2891,7 @@ function OnboardingSheet({
                 disabled={!report || isScanning}
                 onClick={onFinishWithAdopt}
               >
-                Review Adopt candidates
+                {t("library.onboarding.review_adopt")}
               </button>
             </>
           )}
@@ -2755,28 +2905,28 @@ function OnboardingSheet({
 
 const preferenceRows: Array<{
   key: keyof AppPreferences;
-  title: string;
-  note: string;
+  titleKey: MessageKey;
+  noteKey: MessageKey;
 }> = [
   {
     key: "launchAtLogin",
-    title: "Launch at login",
-    note: "Starts in the background without opening the main window.",
+    titleKey: "library.preferences.launch_at_login",
+    noteKey: "library.preferences.launch_at_login_note",
   },
   {
     key: "showInDock",
-    title: "Show in Dock",
-    note: "Turn off to run as a menu-bar accessory app.",
+    titleKey: "library.preferences.show_in_dock",
+    noteKey: "library.preferences.show_in_dock_note",
   },
   {
     key: "checkAppUpdates",
-    title: "Check for app updates",
-    note: "At most once per day; installation always asks first.",
+    titleKey: "library.preferences.check_app_updates",
+    noteKey: "library.preferences.check_app_updates_note",
   },
   {
     key: "checkSkillUpdates",
-    title: "Check for Skill updates",
-    note: "Tracked Git installs only; updates are never applied automatically.",
+    titleKey: "library.preferences.check_skill_updates",
+    noteKey: "library.preferences.check_skill_updates_note",
   },
 ];
 
@@ -2790,13 +2940,14 @@ function PreferencesSheet({
   onClose,
 }: {
   preferences: AppPreferences | null;
-  warning: string | null;
+  warning: PreferencesWarning | null;
   error: string | null;
   appUpdatePanel: AppUpdatePanelState;
   onToggle: (updates: PreferenceUpdates) => void;
   onCheckAppUpdate: () => void;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   const closeButton = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
@@ -2822,28 +2973,26 @@ function PreferencesSheet({
         className="activation-sheet preferences-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Preferences"
+        aria-label={t("library.preferences.dialog")}
       >
         <div className="activation-sheet-heading">
-          <span className="eyebrow">Preferences</span>
-          <h2>Settings</h2>
-          <p>
-            Exactly four switches. Library path, theme, language and
-            notifications are not configurable in the MVP.
-          </p>
+          <span className="eyebrow">{t("library.preferences.eyebrow")}</span>
+          <h2>{t("library.preferences.title")}</h2>
+          <p>{t("library.preferences.body")}</p>
         </div>
+        <LanguageControl />
         <div className="preference-list">
           {preferenceRows.map((row) => (
             <label className="preference-row" key={row.key}>
               <span>
-                <strong>{row.title}</strong>
-                <small>{row.note}</small>
+                <strong>{t(row.titleKey)}</strong>
+                <small>{t(row.noteKey)}</small>
               </span>
               <span className="switch-control switch-control--interactive">
                 <input
                   type="checkbox"
                   role="switch"
-                  aria-label={row.title}
+                  aria-label={t(row.titleKey)}
                   checked={preferences?.[row.key] ?? false}
                   disabled={preferences === null}
                   onChange={(event) =>
@@ -2857,10 +3006,8 @@ function PreferencesSheet({
         </div>
         <div className="app-update-check">
           <span>
-            <strong>App updates</strong>
-            <small>
-              Check the signed latest release without changing your preference.
-            </small>
+            <strong>{t("library.preferences.app_updates")}</strong>
+            <small>{t("library.preferences.app_updates_note")}</small>
           </span>
           <button
             id="app-update-check-trigger"
@@ -2868,37 +3015,39 @@ function PreferencesSheet({
             disabled={appUpdatePanel.activity === "checking"}
             onClick={onCheckAppUpdate}
           >
-            {appUpdatePanel.activity === "checking" ? "Checking…" : "Check now"}
+            {appUpdatePanel.activity === "checking"
+              ? t("library.preferences.checking")
+              : t("library.preferences.check_now")}
           </button>
         </div>
         {appUpdatePanel.checkStatus ? (
           <div className="app-update-check-result" role="status">
             {appUpdatePanel.checkStatus === "up_to_date"
-              ? "Skill Man is up to date."
-              : "The update check was skipped."}
+              ? t("library.preferences.up_to_date")
+              : t("library.preferences.skipped")}
           </div>
         ) : null}
         {appUpdatePanel.error && appUpdatePanel.update === null ? (
           <div className="activation-error" role="alert">
-            <strong>Could not check for app updates</strong>
+            <strong>{t("library.preferences.check_failed")}</strong>
             <span>{appUpdatePanel.error}</span>
           </div>
         ) : null}
         {warning ? (
           <div className="activation-warning" role="status">
-            <strong>Applied with a warning</strong>
-            <span>{warning}</span>
+            <strong>{t("library.preferences.applied_warning")}</strong>
+            <span>{preferencesWarningText(t, warning)}</span>
           </div>
         ) : null}
         {error ? (
           <div className="activation-error" role="alert">
-            <strong>Preferences unchanged</strong>
+            <strong>{t("library.preferences.unchanged")}</strong>
             <span>{error}</span>
           </div>
         ) : null}
         <div className="activation-sheet-actions">
           <button ref={closeButton} type="button" onClick={onClose}>
-            Done
+            {t("library.preferences.done")}
           </button>
         </div>
       </section>
@@ -2917,6 +3066,7 @@ function AppUpdateSheet({
   onInstall: () => void;
   onClose: () => void;
 }) {
+  const { t, locale } = useLocale();
   const cancelButton = useRef<HTMLButtonElement>(null);
   const primaryButton = useRef<HTMLButtonElement>(null);
   const update = panel.update;
@@ -2971,36 +3121,42 @@ function AppUpdateSheet({
         className="activation-sheet app-update-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="App update available"
+        aria-label={t("library.app_update.dialog")}
       >
         <div className="activation-sheet-heading">
-          <span className="eyebrow">App update available</span>
-          <h2>Version {update.version}</h2>
-          <p>Current version {update.currentVersion}</p>
+          <span className="eyebrow">{t("library.app_update.eyebrow")}</span>
+          <h2>
+            {t("library.app_update.version", { version: update.version })}
+          </h2>
+          <p>
+            {t("library.app_update.current", {
+              version: update.currentVersion,
+            })}
+          </p>
         </div>
         <dl className="app-update-details">
           <div>
-            <dt>Archive size</dt>
-            <dd>{formatDownloadSize(update.downloadSizeBytes)}</dd>
+            <dt>{t("library.app_update.archive_size")}</dt>
+            <dd>{formatByteSize(locale, update.downloadSizeBytes)}</dd>
           </div>
           <div>
-            <dt>Release notes</dt>
-            <dd>{update.releaseNotes || "No release notes provided."}</dd>
+            <dt>{t("library.app_update.release_notes")}</dt>
+            <dd>{update.releaseNotes || t("library.app_update.no_notes")}</dd>
           </div>
         </dl>
         {panel.activity === "downloading" ? (
           <div className="app-update-progress" role="status">
-            Downloading and verifying the signed archive…
+            {t("library.app_update.downloading")}
           </div>
         ) : null}
         {isReady ? (
           <div className="app-update-ready" role="status">
-            Download verified. Install and restart Skill Man now?
+            {t("library.app_update.ready")}
           </div>
         ) : null}
         {panel.error ? (
           <div className="activation-error" role="alert">
-            <strong>App update failed</strong>
+            <strong>{t("library.app_update.failed")}</strong>
             <span>{panel.error}</span>
           </div>
         ) : null}
@@ -3012,12 +3168,12 @@ function AppUpdateSheet({
             onClick={onClose}
           >
             {isCancelling
-              ? "Cancelling…"
+              ? t("library.app_update.cancelling")
               : panel.activity === "downloading"
-                ? "Cancel download"
+                ? t("library.app_update.cancel_download")
                 : isReady
-                  ? "Later"
-                  : "Not now"}
+                  ? t("library.app_update.later")
+                  : t("library.app_update.not_now")}
           </button>
           <button
             ref={primaryButton}
@@ -3027,32 +3183,19 @@ function AppUpdateSheet({
             onClick={isReady ? onInstall : onDownload}
           >
             {isCancelling
-              ? "Cancelling…"
+              ? t("library.app_update.cancelling")
               : panel.activity === "downloading"
-                ? "Downloading…"
+                ? t("library.app_update.downloading_btn")
                 : panel.activity === "installing"
-                  ? "Installing…"
+                  ? t("library.app_update.installing")
                   : isReady
-                    ? "Install and Restart"
-                    : "Download update"}
+                    ? t("library.app_update.install_restart")
+                    : t("library.app_update.download_update")}
           </button>
         </div>
       </section>
     </div>
   );
-}
-
-function formatDownloadSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} bytes`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  const precision = value >= 10 ? 0 : 1;
-  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function RemoveSheet({
@@ -3064,6 +3207,7 @@ function RemoveSheet({
   onApply: () => void;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   const isBusy = panel.activity !== "idle";
   const confirmButton = useRef<HTMLButtonElement>(null);
 
@@ -3097,67 +3241,73 @@ function RemoveSheet({
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Remove Managed Skill"
+        aria-label={t("library.remove.dialog")}
       >
         {panel.result ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Remove complete</span>
-              <h2>{panel.result.directoryName} left the Library</h2>
-              <p>The catalog entry and every Activation are gone.</p>
+              <span className="eyebrow">
+                {t("library.remove.complete_eyebrow")}
+              </span>
+              <h2>
+                {t("library.remove.complete_title", {
+                  name: panel.result.directoryName,
+                })}
+              </h2>
+              <p>{t("library.remove.complete_body")}</p>
             </div>
             <div className="activation-sheet-actions">
               <button ref={confirmButton} type="button" onClick={onClose}>
-                Close
+                {t("library.remove.close")}
               </button>
             </div>
           </>
         ) : panel.activity === "planning" ? (
-          <LoadingPanel label="Preparing Remove preview" />
+          <LoadingPanel label={t("library.remove.preparing")} />
         ) : preview ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Remove preview</span>
-              <h2>Remove {preview.directoryName}</h2>
-              <p>
-                Every Activation is disabled first, then the Library entry is
-                deleted.
-              </p>
+              <span className="eyebrow">
+                {t("library.remove.preview_eyebrow")}
+              </span>
+              <h2>
+                {t("library.remove.preview_title", {
+                  name: preview.directoryName,
+                })}
+              </h2>
+              <p>{t("library.remove.preview_body")}</p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.remove.final_entity")}</dt>
                 <dd>{preview.finalEntityPath}</dd>
               </div>
               <div>
-                <dt>Entity handling</dt>
+                <dt>{t("library.remove.entity_handling")}</dt>
                 <dd>
                   {isInstall
-                    ? "The Install entity inside Library is deleted"
-                    : "The external Link entity is kept in place"}
+                    ? t("library.remove.entity_deleted")
+                    : t("library.remove.entity_kept")}
                 </dd>
               </div>
               <div>
-                <dt>Activations to disable</dt>
+                <dt>{t("library.remove.activations")}</dt>
                 <dd>{preview.activationCount}</dd>
               </div>
             </dl>
             <div className="activation-warning" role="status">
-              <strong>This cannot be undone from the result window</strong>
-              <span>
-                The operation audit is archived, but the Skill leaves the
-                Library once removed.
-              </span>
+              <strong>{t("library.remove.no_undo")}</strong>
+              <span>{t("library.remove.no_undo_body")}</span>
             </div>
             {panel.error ? (
               <div className="activation-error" role="alert">
-                <strong>Remove unchanged</strong>
+                <strong>{t("library.remove.unchanged")}</strong>
                 <span>{panel.error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Cancel
+                {t("library.remove.cancel")}
               </button>
               <button
                 ref={confirmButton}
@@ -3166,7 +3316,11 @@ function RemoveSheet({
                 disabled={isBusy}
                 onClick={onApply}
               >
-                {isBusy ? "Removing" : `Remove ${preview.directoryName}`}
+                {isBusy
+                  ? t("library.remove.removing")
+                  : t("library.remove.button", {
+                      name: preview.directoryName,
+                    })}
               </button>
             </div>
           </>
@@ -3174,13 +3328,13 @@ function RemoveSheet({
           <>
             {panel.error ? (
               <div className="activation-error" role="alert">
-                <strong>Remove unavailable</strong>
+                <strong>{t("library.remove.unavailable")}</strong>
                 <span>{panel.error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button ref={confirmButton} type="button" onClick={onClose}>
-                Close
+                {t("library.remove.close")}
               </button>
             </div>
           </>
@@ -3199,17 +3353,20 @@ function HealthNotice({
   relocatePanel: RelocatePanelState;
   onOpenRelocate: () => void;
 }) {
+  const { t } = useLocale();
   const broken = detail.health === "broken";
   const isBrokenLink = broken && detail.sourceKind === "link";
   return (
     <div className={`health-notice health-notice--${detail.health}`}>
       <strong>
-        {broken ? "Source unavailable" : "Local changes detected"}
+        {broken
+          ? t("library.health.source_unavailable")
+          : t("library.health.local_changes")}
       </strong>
       <span>
         {broken
-          ? "The Library entry remains Managed, but its final entity cannot be read."
-          : "This Install no longer matches its recorded content hash."}
+          ? t("library.health.broken_body")
+          : t("library.health.modified_body")}
       </span>
       {isBrokenLink ? (
         <button
@@ -3218,7 +3375,7 @@ function HealthNotice({
           disabled={relocatePanel.isOpen}
           onClick={onOpenRelocate}
         >
-          Relocate…
+          {t("library.health.relocate")}
         </button>
       ) : null}
     </div>
@@ -3238,6 +3395,7 @@ function RelocateSheet({
   onApply: () => void;
   onClose: () => void;
 }) {
+  const { t, tPlural } = useLocale();
   const isBusy = panel.activity !== "idle";
   const step = panel.result ? "result" : panel.preview ? "preview" : "source";
   const sourceInput = useRef<HTMLInputElement>(null);
@@ -3270,74 +3428,87 @@ function RelocateSheet({
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Relocate Broken Link"
+        aria-label={t("library.relocate.dialog")}
       >
-        <ol className="import-progress" aria-label="Relocate progress">
+        <ol
+          className="import-progress"
+          aria-label={t("library.relocate.progress")}
+        >
           {(["source", "preview", "result"] as const).map((stepName) => (
             <li
               key={stepName}
               aria-current={step === stepName ? "step" : undefined}
             >
-              {capitalize(stepName)}
+              {t(`library.relocate.step.${stepName}` as MessageKey)}
             </li>
           ))}
         </ol>
         {panel.result ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Relocation complete</span>
-              <h2>{panel.result.directoryName} is healthy again</h2>
+              <span className="eyebrow">
+                {t("library.relocate.complete_eyebrow")}
+              </span>
+              <h2>
+                {t("library.relocate.complete_title", {
+                  name: panel.result.directoryName,
+                })}
+              </h2>
               <p>
-                The Link pointer and {panel.result.activationCount} Activation
-                {panel.result.activationCount === 1 ? "" : "s"} now point at the
-                relocated source.
+                {tPlural(
+                  "library.relocate.complete_body",
+                  panel.result.activationCount,
+                )}
               </p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.relocate.final_entity")}</dt>
                 <dd>{panel.result.finalEntityPath}</dd>
               </div>
             </dl>
             <div className="activation-sheet-actions">
               <button type="button" onClick={onClose}>
-                Close
+                {t("library.relocate.close")}
               </button>
             </div>
           </>
         ) : panel.preview ? (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Relocate preview</span>
-              <h2>Relocate {panel.preview.directoryName}</h2>
-              <p>
-                The new source must keep the same directory identity and
-                frontmatter name. Activations are repointed to the new entity.
-              </p>
+              <span className="eyebrow">
+                {t("library.relocate.preview_eyebrow")}
+              </span>
+              <h2>
+                {t("library.relocate.preview_title", {
+                  name: panel.preview.directoryName,
+                })}
+              </h2>
+              <p>{t("library.relocate.preview_body")}</p>
             </div>
             <dl className="activation-paths">
               <div>
-                <dt>New source</dt>
+                <dt>{t("library.relocate.new_source")}</dt>
                 <dd>{panel.preview.sourceEntryPath}</dd>
               </div>
               <div>
-                <dt>Final entity</dt>
+                <dt>{t("library.relocate.final_entity")}</dt>
                 <dd>{panel.preview.finalEntityPath}</dd>
               </div>
               <div>
-                <dt>Activations to update</dt>
+                <dt>{t("library.relocate.activations")}</dt>
                 <dd>{panel.preview.activationCount}</dd>
               </div>
             </dl>
             {panel.error ? (
               <div className="activation-error" role="alert">
-                <strong>Relocation unchanged</strong>
+                <strong>{t("library.relocate.unchanged")}</strong>
                 <span>{panel.error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Cancel
+                {t("library.relocate.cancel")}
               </button>
               <button
                 type="button"
@@ -3345,22 +3516,23 @@ function RelocateSheet({
                 disabled={isBusy}
                 onClick={onApply}
               >
-                {isBusy ? "Relocating" : "Relocate"}
+                {isBusy
+                  ? t("library.relocate.relocating")
+                  : t("library.relocate.apply")}
               </button>
             </div>
           </>
         ) : (
           <>
             <div className="activation-sheet-heading">
-              <span className="eyebrow">Relocate · Broken Link</span>
-              <h2>Find the Skill again</h2>
-              <p>
-                Choose the moved source directory. SKILL.md must be readable and
-                the directory identity and frontmatter name must match.
-              </p>
+              <span className="eyebrow">
+                {t("library.relocate.source_eyebrow")}
+              </span>
+              <h2>{t("library.relocate.find_title")}</h2>
+              <p>{t("library.relocate.find_body")}</p>
             </div>
             <label className="import-source-field">
-              <span>New source path</span>
+              <span>{t("library.relocate.path_label")}</span>
               <input
                 ref={sourceInput}
                 type="text"
@@ -3374,13 +3546,13 @@ function RelocateSheet({
             </label>
             {panel.error ? (
               <div className="activation-error" role="alert">
-                <strong>Source rejected</strong>
+                <strong>{t("library.relocate.rejected")}</strong>
                 <span>{panel.error}</span>
               </div>
             ) : null}
             <div className="activation-sheet-actions">
               <button type="button" disabled={isBusy} onClick={onClose}>
-                Cancel
+                {t("library.relocate.cancel")}
               </button>
               <button
                 ref={confirmButton}
@@ -3390,8 +3562,8 @@ function RelocateSheet({
                 onClick={() => onPreview(panel.sourcePath)}
               >
                 {panel.activity === "previewing"
-                  ? "Checking source"
-                  : "Preview Relocate"}
+                  ? t("library.relocate.checking")
+                  : t("library.relocate.preview_button")}
               </button>
             </div>
           </>
@@ -3417,17 +3589,110 @@ function StatusDot({ health }: { health: Health }) {
 }
 
 function HealthBadge({ health }: { health: Health }) {
+  const { t } = useLocale();
   return (
     <span className={`health-badge health-badge--${health}`}>
-      {capitalize(health)}
+      {t(`library.health.badge.${health}` as MessageKey)}
     </span>
   );
 }
 
-function sourceKindLabel(sourceKind: SourceKind) {
-  if (sourceKind === "link") return "Link";
-  if (sourceKind === "remote_install") return "Git Install";
-  return "File Install";
+function sourceKindLabel(sourceKind: SourceKind, t: LocaleContextValue["t"]) {
+  if (sourceKind === "link") return t("library.source_kind.link");
+  if (sourceKind === "remote_install") return t("library.source_kind.git");
+  return t("library.source_kind.file");
+}
+
+/** The detail-panel Source row: App Copy composed from the source kind and
+ * raw Source Content fields (spec §4.7 — never a native-composed label). */
+function sourceDetailLabel(
+  t: LocaleContextValue["t"],
+  detail: SkillDetail,
+): string {
+  if (detail.sourceKind === "link") {
+    return t("library.source.link", { path: detail.finalEntityPath });
+  }
+  if (detail.sourceKind === "remote_install") {
+    return t("library.source.git");
+  }
+  return detail.fileSourceOriginalPath
+    ? t("library.source.file_path", { path: detail.fileSourceOriginalPath })
+    : t("library.source.file");
+}
+
+function compatibilityWarningText(
+  t: LocaleContextValue["t"],
+  warning: CompatibilityWarning,
+): string {
+  switch (warning.kind) {
+    case "custom_unknown":
+      return t("library.activation_preview.compat_custom");
+    case "frontmatter_mismatch":
+      return t("library.activation_preview.compat_mismatch", {
+        name: warning.frontmatterName,
+        directory: warning.directoryName,
+      });
+  }
+}
+
+function occupierNotAdoptableReasonText(
+  t: LocaleContextValue["t"],
+  reason: OccupierNotAdoptableReason,
+): string {
+  switch (reason.kind) {
+    case "regular_file":
+      return t("library.conflict.reason.regular_file");
+    case "points_at_managed_skill":
+      return t("library.conflict.reason.points_at_managed");
+    case "points_at_this_skill":
+      return t("library.conflict.reason.points_at_this");
+    case "no_readable_skill_md":
+      return t("library.conflict.reason.no_skill_md");
+    case "target_unresolvable":
+      return t("library.conflict.reason.unresolvable");
+    case "identity_conflict":
+      return t("library.conflict.reason.identity_conflict", {
+        name: reason.directoryName,
+      });
+  }
+}
+
+function adoptRiskReasonText(
+  t: LocaleContextValue["t"],
+  risk: AdoptRisk,
+  reason: AdoptRiskReason | null,
+): string {
+  if (risk === "broken") {
+    if (reason?.kind === "dangling") return t("library.adopt.risk.dangling");
+    if (reason?.kind === "unsafe_tree") return reason.detail;
+    return t("library.adopt.risk.broken_missing");
+  }
+  if (risk === "external") {
+    if (reason?.kind === "outside_home") {
+      return t("library.adopt.risk.outside_home", { path: reason.path });
+    }
+    if (reason?.kind === "installer_managed") {
+      return t("library.adopt.risk.installer_managed", { path: reason.path });
+    }
+    return t("library.adopt.risk.external_outside");
+  }
+  return "";
+}
+
+function preferencesWarningText(
+  t: LocaleContextValue["t"],
+  warning: PreferencesWarning,
+): string {
+  switch (warning.kind) {
+    case "show_in_dock_failed":
+      return warning.detail
+        ? `${t("library.preferences.warning.show_in_dock")} ${warning.detail}`
+        : t("library.preferences.warning.show_in_dock");
+    case "launch_at_login_failed":
+      return warning.detail
+        ? `${t("library.preferences.warning.launch_at_login")} ${warning.detail}`
+        : t("library.preferences.warning.launch_at_login");
+  }
 }
 
 function activationTone(agent: AgentActivation) {
@@ -3443,22 +3708,14 @@ function activationRepairControlId(skillId: string, agentId: string) {
   return `activation-repair-${skillId}-${agentId}`;
 }
 
-function activationLabel(agent: AgentActivation) {
-  if (!agent.desiredEnabled) return "Disabled";
-  if (agent.observedState === "present") return "Enabled · Present";
-  return `Enabled · ${capitalize(agent.observedState.replaceAll("_", " "))}`;
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function formatActivity(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+function activationLabel(agent: AgentActivation, t: LocaleContextValue["t"]) {
+  if (!agent.desiredEnabled) return t("library.activation.state.disabled");
+  if (agent.observedState === "present") {
+    return t("library.activation.state.enabled_present");
+  }
+  return t("library.activation.state.enabled", {
+    state: t(
+      `library.activation.observed.${agent.observedState}` as MessageKey,
+    ),
+  });
 }
