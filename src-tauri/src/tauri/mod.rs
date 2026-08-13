@@ -5,6 +5,7 @@ pub mod bootstrap_api;
 pub mod catalog_api;
 pub mod commands;
 pub mod dto;
+pub mod fixture_recovery_api;
 pub mod health_api;
 pub mod import_api;
 pub mod lifecycle;

@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::core::fixture_recovery::{FixtureClassifier, FixtureShapeMode};
 use crate::core::home::{BoundHome, HomeId, HomeMarker};
 use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGateState};
 use crate::seams::app_state_store::AppStateStore;
@@ -149,6 +150,7 @@ pub struct BootstrapService {
     volume: Arc<dyn VolumeIdentitySource>,
     probe: Arc<dyn CatalogProbe>,
     filesystem: Arc<dyn FileSystem>,
+    classifier: Arc<dyn FixtureClassifier>,
     config: BootstrapConfig,
     /// The most recently verified Bound Home; populated only when `inspect`
     /// resolves to `Bound` and used by composition to open the writable
@@ -165,6 +167,7 @@ impl BootstrapService {
         volume: Arc<dyn VolumeIdentitySource>,
         probe: Arc<dyn CatalogProbe>,
         filesystem: Arc<dyn FileSystem>,
+        classifier: Arc<dyn FixtureClassifier>,
         config: BootstrapConfig,
     ) -> Self {
         Self {
@@ -172,6 +175,7 @@ impl BootstrapService {
             volume,
             probe,
             filesystem,
+            classifier,
             config,
             verified: RwLock::new(None),
             open_failure: RwLock::new(None),
@@ -239,6 +243,17 @@ impl BootstrapService {
                 .path_is_directory(&self.config.default_home_path)
                 .unwrap_or(false);
             if legacy_exists {
+                // §5.1 step 7: fixture classification precedes the legacy
+                // transition; any footprint keeps the recovery lock.
+                let classification = self
+                    .classifier
+                    .classify(&self.config.default_home_path, FixtureShapeMode::Legacy);
+                if classification.is_contaminated() {
+                    return BootstrapSnapshot::FixtureRecoveryLocked {
+                        home_id: None,
+                        path: Some(self.config.default_home_path.clone()),
+                    };
+                }
                 return BootstrapSnapshot::LegacyDetected {
                     path: self.config.default_home_path.clone(),
                 };
@@ -381,6 +396,16 @@ impl BootstrapService {
             };
         }
 
+        // §5.1 step 7: a verified Bound Home with a fixture footprint keeps
+        // the recovery lock (Bound Restore mode) instead of opening.
+        let classification = self.classifier.classify(&path, FixtureShapeMode::Bound);
+        if classification.is_contaminated() {
+            return BootstrapSnapshot::FixtureRecoveryLocked {
+                home_id: Some(home_id),
+                path: Some(path),
+            };
+        }
+
         let mut catalog_access =
             if schema_version > crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION {
                 CatalogAccess::ReadOnly {
@@ -439,6 +464,9 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::adapters::macos_fs::MacOsFileSystem;
+    use crate::core::fixture_recovery::{
+        FixtureClassification, FixtureClassifier, FixtureShapeMode,
+    };
     use crate::core::home::VolumeIdentity;
     use crate::seams::app_state_store::{
         AppStateFiles, AppStateStoreError, HomeBindingFile, HomeBindingRecord, RecoveryLedgerFile,
@@ -480,6 +508,15 @@ mod tests {
         fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError> {
             let mut state = self.state.lock().unwrap();
             state.binding = binding.clone();
+            Ok(())
+        }
+
+        fn write_recovery_ledger(
+            &self,
+            ledger: &RecoveryLedgerFile,
+        ) -> Result<(), AppStateStoreError> {
+            let mut state = self.state.lock().unwrap();
+            state.recovery_ledger = ledger.clone();
             Ok(())
         }
     }
@@ -527,6 +564,18 @@ mod tests {
                 .cloned()
                 .map(Ok)
                 .unwrap_or(Ok(CatalogProbeReport::absent()))
+        }
+    }
+
+    struct FixedClassifier(FixtureClassification);
+
+    impl FixtureClassifier for FixedClassifier {
+        fn classify(
+            &self,
+            _home_root: &std::path::Path,
+            _mode: FixtureShapeMode,
+        ) -> FixtureClassification {
+            self.0.clone()
         }
     }
 
@@ -586,6 +635,7 @@ mod tests {
             Arc::new(volume),
             Arc::new(probe),
             Arc::new(filesystem),
+            Arc::new(FixedClassifier(FixtureClassification::Clean)),
             BootstrapConfig {
                 state_dir: marker_dir.join("state"),
                 default_home_path: marker_dir.join("default-home"),
@@ -665,6 +715,7 @@ mod tests {
             snapshot_path: None,
             prepared_path: None,
             manifest_hash: None,
+            external_probe: None,
             cursor: None,
             commit_point: None,
             created_at: "2026-08-01T00:00:00Z".into(),
@@ -715,6 +766,90 @@ mod tests {
             }
             other => panic!("expected LegacyDetected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn contaminated_legacy_path_is_fixture_recovery_locked() {
+        let files = AppStateFiles {
+            binding: HomeBindingFile::empty(),
+            recovery_ledger: RecoveryLedgerFile::empty(),
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
+        filesystem
+            .create_directory(&dir.path().join("default-home"))
+            .expect("legacy dir");
+        let service = BootstrapService::new(
+            Arc::new(MemoryAppStateStore::new(files)),
+            Arc::new(FixedVolumeIdentitySource {
+                volume: None,
+                fail: false,
+            }),
+            Arc::new(MemoryCatalogProbe::new(CatalogProbeReport::absent())),
+            Arc::new(filesystem),
+            Arc::new(FixedClassifier(FixtureClassification::Mixed {
+                reasons: vec!["fixture_entities_missing".into()],
+            })),
+            BootstrapConfig {
+                state_dir: dir.path().join("state"),
+                default_home_path: dir.path().join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        match service.inspect() {
+            BootstrapSnapshot::FixtureRecoveryLocked { home_id, path } => {
+                assert!(home_id.is_none(), "Legacy lock carries no Home identity");
+                assert_eq!(path, Some(dir.path().join("default-home")));
+            }
+            other => panic!("expected FixtureRecoveryLocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contaminated_bound_home_is_fixture_recovery_locked() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
+        filesystem.create_directory(&home).expect("home dir");
+        filesystem
+            .write_utf8_file(&home.join(HomeMarker::FILE_NAME), &valid_marker())
+            .expect("marker file");
+        let service = BootstrapService::new(
+            Arc::new(MemoryAppStateStore::new(bound_files(&home))),
+            Arc::new(FixedVolumeIdentitySource {
+                volume: Some(VolumeIdentity {
+                    fsid: "fsid-1".into(),
+                    uuid: "uuid-1".into(),
+                }),
+                fail: false,
+            }),
+            Arc::new(MemoryCatalogProbe::new(probe_report(
+                5,
+                Some(matching_identity()),
+            ))),
+            Arc::new(filesystem),
+            Arc::new(FixedClassifier(FixtureClassification::Pure)),
+            BootstrapConfig {
+                state_dir: dir.path().join("state"),
+                default_home_path: dir.path().join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        match service.inspect() {
+            BootstrapSnapshot::FixtureRecoveryLocked { home_id, path } => {
+                assert_eq!(
+                    home_id.as_ref().map(|id| id.0.as_str()),
+                    Some(HOME_ID),
+                    "Bound lock carries the bound identity"
+                );
+                assert_eq!(path, Some(home));
+            }
+            other => panic!("expected FixtureRecoveryLocked, got {other:?}"),
+        }
+        assert!(
+            service.verified_bound_home().is_none(),
+            "a locked Home never yields the writable value object"
+        );
     }
 
     #[test]

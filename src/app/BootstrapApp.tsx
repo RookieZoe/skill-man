@@ -6,6 +6,7 @@ import type {
   CatalogClient,
 } from "./catalog-client";
 import { App } from "./App";
+import { RecoveryView } from "../features/recovery/RecoveryView";
 
 export interface BootstrapAppProps {
   client: CatalogClient;
@@ -85,12 +86,7 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
         />
       );
     case "fixture_recovery_locked":
-      return (
-        <BootstrapRoute
-          title="Fixture Recovery Lock"
-          summary="Regular writes are closed until Fixture Recovery resolves the Home."
-        />
-      );
+      return <RecoveryView client={client} />;
     case "home_candidate_pending":
       return (
         <BootstrapRoute

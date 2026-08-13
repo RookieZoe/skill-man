@@ -39,6 +39,38 @@ impl AppStateStoreFileSystem {
             ))),
         }
     }
+
+    /// The tmp → full write → fsync → atomic rename → parent fsync protocol
+    /// (§3.2): a kill at any point leaves either the old file or the complete
+    /// new one, never a torn write.
+    fn write_atomic(&self, file_name: &str, json: String) -> Result<(), AppStateStoreError> {
+        let target = self.state_dir.join(file_name);
+        let tmp = self.state_dir.join(format!("{file_name}.tmp"));
+        fs::create_dir_all(&self.state_dir).map_err(|error| {
+            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
+        })?;
+        let mut file = File::create(&tmp)
+            .map_err(|error| AppStateStoreError::WriteFailed(format!("{tmp:?}: {error}")))?;
+        file.write_all(json.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| AppStateStoreError::WriteFailed(format!("{tmp:?}: {error}")))?;
+        drop(file);
+        fs::rename(&tmp, &target).map_err(|error| {
+            AppStateStoreError::WriteFailed(format!(
+                "{} → {}: {error}",
+                tmp.display(),
+                target.display()
+            ))
+        })?;
+        // Parent fsync makes the rename durable (the commit point).
+        let dir = File::open(&self.state_dir).map_err(|error| {
+            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
+        })?;
+        dir.sync_all().map_err(|error| {
+            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
+        })?;
+        Ok(())
+    }
 }
 
 impl AppStateStore for AppStateStoreFileSystem {
@@ -74,34 +106,15 @@ impl AppStateStore for AppStateStoreFileSystem {
     }
 
     fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError> {
-        let target = self.state_dir.join(HOME_BINDING_FILE_NAME);
-        let tmp = self.state_dir.join(format!("{HOME_BINDING_FILE_NAME}.tmp"));
-        fs::create_dir_all(&self.state_dir).map_err(|error| {
-            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
-        })?;
         let json = serde_json::to_string_pretty(binding)
             .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
-        let mut file = File::create(&tmp)
-            .map_err(|error| AppStateStoreError::WriteFailed(format!("{tmp:?}: {error}")))?;
-        file.write_all(json.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|error| AppStateStoreError::WriteFailed(format!("{tmp:?}: {error}")))?;
-        drop(file);
-        fs::rename(&tmp, &target).map_err(|error| {
-            AppStateStoreError::WriteFailed(format!(
-                "{} → {}: {error}",
-                tmp.display(),
-                target.display()
-            ))
-        })?;
-        // Parent fsync makes the rename durable (the binding commit point).
-        let dir = File::open(&self.state_dir).map_err(|error| {
-            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
-        })?;
-        dir.sync_all().map_err(|error| {
-            AppStateStoreError::WriteFailed(format!("{}: {error}", self.state_dir.display()))
-        })?;
-        Ok(())
+        self.write_atomic(HOME_BINDING_FILE_NAME, json)
+    }
+
+    fn write_recovery_ledger(&self, ledger: &RecoveryLedgerFile) -> Result<(), AppStateStoreError> {
+        let json = serde_json::to_string_pretty(ledger)
+            .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
+        self.write_atomic(RECOVERY_LEDGER_FILE_NAME, json)
     }
 }
 

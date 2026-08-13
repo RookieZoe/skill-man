@@ -4,6 +4,7 @@ pub mod app_update;
 pub mod bootstrap;
 pub mod catalog;
 pub mod domain;
+pub mod fixture_recovery;
 pub mod git_source;
 pub mod home;
 pub mod import;

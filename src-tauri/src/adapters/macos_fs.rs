@@ -13,12 +13,12 @@ use crate::seams::filesystem::{
     ActivationEntrySnapshot, ActivationRecoveryBaseline, ActivationReplaceJournal,
     ActivationReplacePhase, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
     AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
-    DirectoryFingerprint, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
-    FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
-    LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry, RelocateJournal,
-    RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry, RemoveJournal,
-    RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, SkillFingerprint, StagedEntryKind,
-    StagedTreeEntry, StagedTreeSnapshot,
+    DirectoryEntry, DirectoryFingerprint, FileImportJournal, FileImportJournalPhase,
+    FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind,
+    LinkSourceHop, LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry,
+    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry,
+    RemoveJournal, RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, SkillFingerprint,
+    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -634,6 +634,192 @@ impl FileSystem for MacOsFileSystem {
                 source,
             }),
         }
+    }
+
+    fn create_directory_all(&self, path: &Path) -> Result<(), FileSystemError> {
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "create directory tree",
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the recovery path already exists",
+                ),
+            });
+        }
+        fs::create_dir_all(path).map_err(|source| FileSystemError::Io {
+            operation: "create directory tree",
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn rename_directory(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "rename directory",
+                path: to.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the rename destination already exists",
+                ),
+            });
+        }
+        if !fs::symlink_metadata(from)
+            .map_err(|source| FileSystemError::Io {
+                operation: "rename directory",
+                path: from.to_path_buf(),
+                source,
+            })?
+            .is_dir()
+        {
+            return Err(FileSystemError::Io {
+                operation: "rename directory",
+                path: from.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the rename source is not a directory",
+                ),
+            });
+        }
+        fs::rename(from, to).map_err(|source| FileSystemError::Io {
+            operation: "rename directory",
+            path: from.to_path_buf(),
+            source,
+        })
+    }
+
+    fn fsync_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        let dir = fs::File::open(path).map_err(|source| FileSystemError::Io {
+            operation: "fsync directory",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        dir.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "fsync directory",
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn remove_recovery_artifact(
+        &self,
+        artifact: &Path,
+        home_root: &Path,
+    ) -> Result<(), FileSystemError> {
+        let Some(home_name) = home_root.file_name() else {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: home_root.to_path_buf(),
+            });
+        };
+        let Some(artifact_name) = artifact.file_name() else {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: artifact.to_path_buf(),
+            });
+        };
+        let name = artifact_name.to_string_lossy();
+        let prefix = format!("{}.snapshot-", home_name.to_string_lossy());
+        let prepared_prefix = format!("{}.prepared-", home_name.to_string_lossy());
+        let op_id = name
+            .strip_prefix(&prefix)
+            .or_else(|| name.strip_prefix(&prepared_prefix));
+        let Some(op_id) = op_id else {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: artifact.to_path_buf(),
+            });
+        };
+        if op_id.is_empty()
+            || op_id.contains('/')
+            || op_id.contains(std::path::MAIN_SEPARATOR)
+            || artifact.parent() != home_root.parent()
+        {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: artifact.to_path_buf(),
+            });
+        }
+        fs::remove_dir_all(artifact).map_err(|source| FileSystemError::Io {
+            operation: "remove recovery artifact",
+            path: artifact.to_path_buf(),
+            source,
+        })
+    }
+
+    /// SQLite's WAL-index protocol uses POSIX record locks (`fcntl`), so the
+    /// probe must use `F_SETLK` — `flock` would never see a SQLite writer.
+    /// An exclusive lock over the whole shm file conflicts with any lock any
+    /// other process holds on the index (readers included); failing to
+    /// acquire one is therefore proof enough to stop quiesce fail-closed.
+    fn try_lock_wal_index_exclusive(&self, shm_path: &Path) -> Result<bool, FileSystemError> {
+        if !fs::symlink_metadata(shm_path).is_ok() {
+            // No WAL index: no SQLite connection can be active in WAL mode.
+            return Ok(true);
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(shm_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open WAL-index for lock probe",
+                path: shm_path.to_path_buf(),
+                source,
+            })?;
+        let mut lock = libc::flock {
+            l_type: libc::F_WRLCK,
+            l_whence: libc::SEEK_SET as i16,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut lock) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EACCES) | Some(libc::EAGAIN) => Ok(false),
+            _ => Err(FileSystemError::Io {
+                operation: "probe WAL-index lock",
+                path: shm_path.to_path_buf(),
+                source: error,
+            }),
+        }
+    }
+
+    fn list_directory(&self, path: &Path) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+        let mut entries: Vec<DirectoryEntry> = fs::read_dir(path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "list directory",
+                path: path.to_path_buf(),
+                source,
+            })?
+            .map(|entry| {
+                let entry = entry.map_err(|source| FileSystemError::Io {
+                    operation: "list directory",
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                let metadata = entry.metadata().map_err(|source| FileSystemError::Io {
+                    operation: "list directory",
+                    path: entry.path(),
+                    source,
+                })?;
+                Ok(DirectoryEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    is_directory: metadata.is_dir(),
+                    len: metadata.len(),
+                })
+            })
+            .collect::<Result<Vec<_>, FileSystemError>>()?;
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    fn tree_hash_excluding(
+        &self,
+        path: &Path,
+        excluded: &[String],
+    ) -> Result<String, FileSystemError> {
+        tree_hash_at_excluding(path, excluded)
     }
 
     fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
@@ -3245,7 +3431,22 @@ fn tree_hash_at(root: &Path) -> Result<String, FileSystemError> {
     Ok(staged_tree_snapshot_at(root)?.content_hash)
 }
 
+/// Tree hash that skips files whose name is in `excluded` (SQLite WAL/SHM
+/// sidecars are derived artifacts — the recovery manifest must not depend on
+/// whether a read-only probe recreated them). Directories and symlinks are
+/// never excluded.
+fn tree_hash_at_excluding(root: &Path, excluded: &[String]) -> Result<String, FileSystemError> {
+    Ok(staged_tree_snapshot_at_filtered(root, excluded)?.content_hash)
+}
+
 fn staged_tree_snapshot_at(root: &Path) -> Result<StagedTreeSnapshot, FileSystemError> {
+    staged_tree_snapshot_at_filtered(root, &[])
+}
+
+fn staged_tree_snapshot_at_filtered(
+    root: &Path,
+    excluded: &[String],
+) -> Result<StagedTreeSnapshot, FileSystemError> {
     let original_root = root.to_path_buf();
     let root_metadata = fs::symlink_metadata(root).map_err(|source| FileSystemError::Io {
         operation: "inspect Skill root",
@@ -3274,6 +3475,13 @@ fn staged_tree_snapshot_at(root: &Path) -> Result<StagedTreeSnapshot, FileSystem
     let mut snapshot_entries = Vec::with_capacity(entries.len());
     let mut total_file_bytes = 0_u64;
     for relative_path in entries {
+        if excluded.iter().any(|name| {
+            relative_path
+                .file_name()
+                .is_some_and(|file_name| file_name == name.as_str())
+        }) {
+            continue;
+        }
         let absolute_path = root.join(&relative_path);
         let metadata =
             fs::symlink_metadata(&absolute_path).map_err(|source| FileSystemError::Io {

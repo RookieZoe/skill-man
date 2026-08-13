@@ -19,7 +19,7 @@ pub fn run() {
     use crate::adapters::local_file_source::LocalFileSource;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
-    use crate::adapters::sqlite::SqliteCatalogStore;
+    use crate::adapters::sqlite::{SqliteCatalogStore, SqlitePreparedCatalogFactory};
     use crate::adapters::system_clock::SystemClock;
     use crate::adapters::tauri_app_updater::TauriAppUpdater;
     use crate::adapters::volume_identity::MacOsVolumeIdentitySource;
@@ -30,6 +30,7 @@ pub fn run() {
         BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
     };
     use crate::core::catalog::CatalogService;
+    use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
     use crate::core::import::ImportService;
     use crate::core::maintenance::MaintenanceService;
     use crate::core::preferences::PreferencesService;
@@ -49,21 +50,24 @@ pub fn run() {
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
         activation_conflict_details, apply_activation, apply_activation_replace, apply_adopt,
-        apply_file_import, apply_file_import_selection, apply_git_import_selection,
-        apply_link_import, apply_relocate_link, apply_remove_skill, apply_skill_updates,
-        cancel_activation, cancel_activation_replace, cancel_adopt, cancel_app_update,
-        cancel_file_import, cancel_git_import_selection, cancel_link_import, cancel_relocate_link,
-        cancel_remove_skill, check_app_update, check_skill_updates, complete_onboarding,
+        apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
+        apply_fixture_recovery, apply_git_import_selection, apply_link_import, apply_relocate_link,
+        apply_remove_skill, apply_skill_updates, cancel_activation, cancel_activation_replace,
+        cancel_adopt, cancel_app_update, cancel_file_import, cancel_git_import_selection,
+        cancel_link_import, cancel_relocate_link, cancel_remove_skill, check_app_update,
+        check_skill_updates, complete_onboarding, confirm_fixture_recovery_result,
         create_agent_directory, discover_file_import, discover_file_import_collection,
         discover_git_import, discover_link_import, download_app_update,
-        finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot, inspect_skill,
-        install_app_update, list_agents, list_skills, load_preferences, pin_skill_updates,
-        plan_activation, plan_activation_repair, plan_activation_replace, plan_adopt,
-        plan_file_import, plan_file_import_selection, plan_file_reinstall,
+        finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot,
+        get_fixture_recovery_preview, inspect_skill, install_app_update, list_agents,
+        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_activation,
+        plan_activation_repair, plan_activation_replace, plan_adopt, plan_delete_safety_snapshot,
+        plan_file_import, plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
         plan_git_import_selection, plan_link_import, plan_remove_skill, plan_skill_updates,
         relocate_link, run_activation_health_check, scan_adopt, startup_info,
         undo_activation_replace, undo_adopt, update_preferences,
     };
+    use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
     use crate::tauri_adapter::lifecycle::{hide_main_window, show_main_window};
@@ -84,16 +88,34 @@ pub fn run() {
             let app_state = Arc::new(AppStateStoreFileSystem::new(state_dir.clone()));
             let volume_identity = Arc::new(MacOsVolumeIdentitySource::new());
             let catalog_probe = Arc::new(SqliteCatalogProbe::new());
+            let classifier = Arc::new(SystemFixtureClassifier::new(
+                catalog_probe.clone(),
+                filesystem.clone(),
+                catalog_file_name.clone(),
+            ));
             let write_gate = Arc::new(WriteGate::new(WriteGateState::Closed {
                 reason: ClosedReason::Unconfigured,
             }));
             let bootstrap = Arc::new(BootstrapService::new(
-                app_state,
+                app_state.clone(),
                 volume_identity,
-                catalog_probe,
+                catalog_probe.clone(),
                 filesystem.clone(),
+                classifier,
                 BootstrapConfig {
-                    state_dir,
+                    state_dir: state_dir.clone(),
+                    default_home_path: default_home_path.clone(),
+                    catalog_file_name: catalog_file_name.clone(),
+                },
+            ));
+            let recovery_service = Arc::new(FixtureRecoveryService::new(
+                app_state.clone(),
+                catalog_probe.clone(),
+                filesystem.clone(),
+                Arc::new(SqlitePreparedCatalogFactory),
+                bootstrap.clone(),
+                BootstrapConfig {
+                    state_dir: state_dir.clone(),
                     default_home_path: default_home_path.clone(),
                     catalog_file_name: catalog_file_name.clone(),
                 },
@@ -199,6 +221,17 @@ pub fn run() {
                 bootstrap.clone(),
                 write_gate.clone(),
                 Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
+            ));
+            app.manage(FixtureRecoveryApi::new(
+                recovery_service,
+                // A second BootstrapApi instance over the same service and
+                // gate; used only to publish `bootstrap://changed` after a
+                // recovery commit transitions the top-level route.
+                Arc::new(BootstrapApi::new(
+                    bootstrap.clone(),
+                    write_gate.clone(),
+                    Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
+                )),
             ));
             app.manage(AppUpdateApi::new(AppUpdateService::new(
                 Arc::new(TauriAppUpdater::new(app.handle().clone())),
@@ -362,7 +395,14 @@ pub fn run() {
             update_preferences,
             startup_info,
             complete_onboarding,
-            create_agent_directory
+            create_agent_directory,
+            get_fixture_recovery_preview,
+            plan_fixture_recovery,
+            apply_fixture_recovery,
+            confirm_fixture_recovery_result,
+            list_safety_snapshots,
+            plan_delete_safety_snapshot,
+            apply_delete_safety_snapshot
         ])
         .build(::tauri::generate_context!())
         .expect("Skill Man runtime failed");

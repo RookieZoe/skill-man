@@ -16,6 +16,7 @@ use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::core::bootstrap::{
     BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
 };
+use skill_man_lib::core::fixture_recovery::{FixtureClassifier, SystemFixtureClassifier};
 use skill_man_lib::core::home::{HomeId, HomeMarker, VolumeIdentity};
 use skill_man_lib::core::write_gate::{ReadOnlyReason, WriteGateState};
 use skill_man_lib::seams::app_state_store::AppStateStore;
@@ -39,12 +40,21 @@ fn bootstrap_for(home: &BoundTestHome, volume: Option<VolumeIdentity>) -> Bootst
         Arc::new(FixedVolumeIdentity(volume)),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+        classifier_for(home.path()),
         BootstrapConfig {
             state_dir: home.state_dir.clone(),
             default_home_path: home.library_root.clone(),
             catalog_file_name: common::CATALOG_FILE_NAME.into(),
         },
     )
+}
+
+fn classifier_for(dir: &std::path::Path) -> Arc<dyn FixtureClassifier> {
+    Arc::new(SystemFixtureClassifier::new(
+        Arc::new(SqliteCatalogProbe::new()),
+        Arc::new(MacOsFileSystem::new(dir.to_path_buf())),
+        common::CATALOG_FILE_NAME.into(),
+    ))
 }
 
 fn test_volume() -> VolumeIdentity {
@@ -66,6 +76,7 @@ fn fresh_machine_is_unconfigured_with_zero_home_artifacts() {
         Arc::new(FixedVolumeIdentity(None)),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+        classifier_for(dir.path()),
         BootstrapConfig {
             state_dir,
             default_home_path: home.clone(),
@@ -213,6 +224,7 @@ fn corrupt_catalog_reports_the_real_diagnostic_and_never_serves_fixture_skills()
         Arc::new(FixedVolumeIdentity(Some(test_volume()))),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+        classifier_for(dir.path()),
         BootstrapConfig {
             state_dir: dir
                 .path()
@@ -273,6 +285,7 @@ fn legacy_path_without_binding_is_legacy_detected_read_only() {
         Arc::new(FixedVolumeIdentity(None)),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+        classifier_for(dir.path()),
         BootstrapConfig {
             state_dir: dir
                 .path()
@@ -308,6 +321,7 @@ fn invalid_locator_is_app_state_unavailable_not_unconfigured() {
         Arc::new(FixedVolumeIdentity(None)),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+        classifier_for(dir.path()),
         BootstrapConfig {
             state_dir: dir
                 .path()
@@ -373,6 +387,7 @@ fn unbound_catalog_identity_is_home_identity_mismatch() {
         Arc::new(FixedVolumeIdentity(Some(test_volume()))),
         Arc::new(SqliteCatalogProbe::new()),
         Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+        classifier_for(dir.path()),
         BootstrapConfig {
             state_dir: dir
                 .path()

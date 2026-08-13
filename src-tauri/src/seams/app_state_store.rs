@@ -119,6 +119,11 @@ pub struct RecoveryOperationRecord {
     pub snapshot_path: Option<PathBuf>,
     pub prepared_path: Option<PathBuf>,
     pub manifest_hash: Option<String>,
+    /// Targeted lstat probe of the external app-state directory (excluding
+    /// the ledger itself), taken before the operation mutates the Home and
+    /// re-checked at promote/verify/commit (§5.2 "external tree unchanged").
+    #[serde(default)]
+    pub external_probe: Option<String>,
     pub cursor: Option<String>,
     pub commit_point: Option<String>,
     pub created_at: String,
@@ -204,6 +209,11 @@ pub trait AppStateStore: Send + Sync {
     /// Atomically persists the locator. Used by the Home Binding flow to
     /// commit a binding and by Abandon to move `current` into history.
     fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError>;
+
+    /// Atomically persists the recovery ledger (same protocol as the
+    /// locator). Every durable cursor of a recovery operation goes through
+    /// here — the ledger is the single commit point for the state machine.
+    fn write_recovery_ledger(&self, ledger: &RecoveryLedgerFile) -> Result<(), AppStateStoreError>;
 }
 
 #[cfg(test)]

@@ -32,6 +32,9 @@ use crate::seams::maintenance_store::{
 };
 use crate::seams::preferences_store::PreferencesStoreError;
 
+mod prepared;
+pub use prepared::SqlitePreparedCatalogFactory;
+
 pub const CURRENT_SCHEMA_VERSION: u32 = CURRENT_CATALOG_SCHEMA_VERSION;
 
 const INITIAL_SCHEMA: &str = r#"

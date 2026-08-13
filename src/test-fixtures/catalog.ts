@@ -619,6 +619,39 @@ export function createFixtureCatalogClient(): CatalogClient {
     async cancelAdopt() {
       return false;
     },
+    async getFixtureRecoveryPreview() {
+      return fixtureUnsupported(
+        "Fixture Recovery is not available in the preview fixture",
+      );
+    },
+    async planFixtureRecovery() {
+      return fixtureUnsupported(
+        "Fixture Recovery is not available in the preview fixture",
+      );
+    },
+    async applyFixtureRecovery() {
+      return fixtureUnsupported(
+        "Fixture Recovery is not available in the preview fixture",
+      );
+    },
+    async confirmFixtureRecoveryResult() {
+      return fixtureUnsupported(
+        "Fixture Recovery is not available in the preview fixture",
+      );
+    },
+    async listSafetySnapshots() {
+      return [];
+    },
+    async planDeleteSafetySnapshot() {
+      return fixtureUnsupported(
+        "Safety Snapshot deletion is not available in the preview fixture",
+      );
+    },
+    async applyDeleteSafetySnapshot() {
+      return fixtureUnsupported(
+        "Safety Snapshot deletion is not available in the preview fixture",
+      );
+    },
   };
 }
 

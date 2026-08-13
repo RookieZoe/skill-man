@@ -59,6 +59,81 @@ export interface BootstrapChangedPayload {
   generation: number;
 }
 
+// -- Fixture Recovery (spec §4.4, §5.2) --
+
+export type RecoveryMode =
+  | { kind: "legacy_unbound" }
+  | { kind: "bound_restore"; homeId: string };
+
+export type FixtureClassification =
+  | { kind: "pure" }
+  | { kind: "mixed"; reasons: string[] }
+  | { kind: "unknown"; reasons: string[] }
+  | { kind: "clean" };
+
+export interface CatalogEvidence {
+  tables: string[];
+  schemaVersion: number | null;
+  firstRunCompletedAt: string | null;
+  skillRowCount: number;
+  agentRowCount: number;
+  activationRowCount: number;
+  fileSourceRowCount: number;
+  remoteSourceRowCount: number;
+}
+
+export interface TreeEvidence {
+  fixtureEntitiesPresent: boolean;
+  skillAuthoringHashMatches: boolean | null;
+  mediaXrayHashMatches: boolean | null;
+  rootHashMatches: boolean | null;
+  legacyAuditEntityPresent: boolean;
+}
+
+export interface ActiveRecoveryOperation {
+  operationId: string;
+  cursor: string | null;
+  snapshotPath: string | null;
+  preparedPath: string | null;
+}
+
+export interface FixtureRecoveryPreview {
+  mode: RecoveryMode;
+  path: string;
+  classification: FixtureClassification;
+  catalogEvidence: CatalogEvidence;
+  treeEvidence: TreeEvidence;
+  canPreview: boolean;
+  activeOperation: ActiveRecoveryOperation | null;
+}
+
+export interface RecoveryResult {
+  operationId: string;
+  awaitingCommit: boolean;
+  rolledBack: boolean;
+}
+
+export interface SafetySnapshot {
+  snapshotId: string;
+  path: string;
+  manifestHash: string | null;
+  fileCount: number;
+  totalBytes: number;
+  takenAt: string | null;
+}
+
+export interface DeleteSnapshotPreview {
+  snapshotId: string;
+  path: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+export interface CommandFailure {
+  error: { code: string };
+  diagnostic: { code: string; message: string } | null;
+}
+
 export interface SkillSummary {
   id: string;
   directoryName: string;
@@ -555,6 +630,15 @@ export interface CatalogClient {
   undoAdopt(operationId: string): Promise<AdoptUndoResult>;
   finalizeAdopt(operationId: string): Promise<void>;
   cancelAdopt(planToken: string): Promise<boolean>;
+  getFixtureRecoveryPreview(): Promise<FixtureRecoveryPreview>;
+  planFixtureRecovery(): Promise<{ planToken: string }>;
+  applyFixtureRecovery(planToken: string): Promise<RecoveryResult>;
+  confirmFixtureRecoveryResult(
+    operationId: string,
+  ): Promise<BootstrapSnapshot>;
+  listSafetySnapshots(): Promise<SafetySnapshot[]>;
+  planDeleteSafetySnapshot(snapshotId: string): Promise<DeleteSnapshotPreview>;
+  applyDeleteSafetySnapshot(planToken: string): Promise<void>;
 }
 
 let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
@@ -781,6 +865,37 @@ const tauriCatalogClient: CatalogClient = {
   },
   cancelAdopt(planToken) {
     return invoke<boolean>("cancel_adopt", { request: { planToken } });
+  },
+  getFixtureRecoveryPreview() {
+    return invoke<FixtureRecoveryPreview>("get_fixture_recovery_preview");
+  },
+  planFixtureRecovery() {
+    return invoke<{ planToken: string }>("plan_fixture_recovery", {
+      request: {},
+    });
+  },
+  applyFixtureRecovery(planToken) {
+    return invoke<RecoveryResult>("apply_fixture_recovery", {
+      request: { planToken },
+    });
+  },
+  confirmFixtureRecoveryResult(operationId) {
+    return invoke<BootstrapSnapshot>("confirm_fixture_recovery_result", {
+      request: { operationId },
+    });
+  },
+  listSafetySnapshots() {
+    return invoke<SafetySnapshot[]>("list_safety_snapshots");
+  },
+  planDeleteSafetySnapshot(snapshotId) {
+    return invoke<DeleteSnapshotPreview>("plan_delete_safety_snapshot", {
+      request: { planToken: snapshotId },
+    });
+  },
+  applyDeleteSafetySnapshot(planToken) {
+    return invoke<void>("apply_delete_safety_snapshot", {
+      request: { planToken },
+    });
   },
 };
 

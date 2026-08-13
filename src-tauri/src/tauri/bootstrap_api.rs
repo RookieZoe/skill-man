@@ -238,6 +238,13 @@ mod tests {
         ) -> Result<(), crate::seams::app_state_store::AppStateStoreError> {
             Ok(())
         }
+
+        fn write_recovery_ledger(
+            &self,
+            _ledger: &crate::seams::app_state_store::RecoveryLedgerFile,
+        ) -> Result<(), crate::seams::app_state_store::AppStateStoreError> {
+            Ok(())
+        }
     }
 
     struct FixedVolume(Option<crate::core::home::VolumeIdentity>);
@@ -315,6 +322,7 @@ mod tests {
         let filesystem = Arc::new(crate::adapters::macos_fs::MacOsFileSystem::new(
             dir.path().to_path_buf(),
         ));
+        let classifier = Arc::new(crate::core::fixture_recovery::FixedCleanClassifier);
         let service = Arc::new(BootstrapService::new(
             Arc::new(PathAppStateStore(home.clone())),
             Arc::new(FixedVolume(Some(crate::core::home::VolumeIdentity {
@@ -335,6 +343,7 @@ mod tests {
                 snapshot_version: Some(7),
             })),
             filesystem,
+            classifier,
             BootstrapConfig {
                 state_dir: PathBuf::from("/tmp/state"),
                 default_home_path: PathBuf::from("/tmp/default-home"),

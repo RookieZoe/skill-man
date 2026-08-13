@@ -17,6 +17,14 @@ pub struct DirectoryFingerprint {
     pub inode: u64,
 }
 
+/// One immediate directory entry, as listed by `FileSystem::list_directory`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub is_directory: bool,
+    pub len: u64,
+}
+
 /// The content occupying an Activation entry when Remove-then-replace is
 /// planned. The snapshot identifies the entry before it is moved to backup;
 /// same-volume moves preserve device+inode so the moved object can be
@@ -1069,6 +1077,119 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "directory existence checks are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Create a directory and all missing ancestors. Used for the prepared
+    /// Home layout; a path that already exists is an error (never reuse).
+    fn create_directory_all(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "create directory tree",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory creation is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Atomically rename a directory to a same-volume sibling that must not
+    /// exist. The recovery module uses this for the whole-Home snapshot and
+    /// the prepared-Home promote.
+    fn rename_directory(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
+        let _ = (from, to);
+        Err(FileSystemError::Io {
+            operation: "rename directory",
+            path: from.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory rename is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// fsync a directory so a completed rename is durable (spec §3.2
+    /// protocol; the recovery snapshot/promote/commit protocol relies on it).
+    fn fsync_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "fsync directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory fsync is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Remove an app-created recovery artifact — a `<home>.snapshot-<op>` or
+    /// `<home>.prepared-<op>` sibling of `home_root`. Bounded: the adapter
+    /// verifies the artifact is a direct sibling with the exact generated
+    /// name pattern; anything else is refused.
+    fn remove_recovery_artifact(
+        &self,
+        artifact: &Path,
+        home_root: &Path,
+    ) -> Result<(), FileSystemError> {
+        let _ = (artifact, home_root);
+        Err(FileSystemError::Io {
+            operation: "remove recovery artifact",
+            path: artifact.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "recovery artifact removal is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Prove no other process holds a SQLite WAL-index lock on `shm_path`:
+    /// try to acquire an exclusive advisory lock without blocking.
+    /// `Ok(true)` = lock acquired (no writer), `Ok(false)` = busy (a writer
+    /// may be active), `Err` = cannot probe (fail closed, treat as busy).
+    fn try_lock_wal_index_exclusive(&self, shm_path: &Path) -> Result<bool, FileSystemError> {
+        let _ = shm_path;
+        Err(FileSystemError::Io {
+            operation: "probe WAL-index lock",
+            path: shm_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "WAL-index lock probing is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// List one directory level. The recovery module scans the Home's parent
+    /// for Safety Snapshot siblings and probes the external app-state
+    /// directory; entries are returned sorted by name.
+    fn list_directory(&self, path: &Path) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "list directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory listing is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Tree hash that skips files whose name is in `excluded` (SQLite
+    /// WAL/SHM sidecars are derived artifacts; the recovery manifest must
+    /// not depend on whether a read-only probe recreated them).
+    fn tree_hash_excluding(
+        &self,
+        path: &Path,
+        excluded: &[String],
+    ) -> Result<String, FileSystemError> {
+        let _ = (path, excluded);
+        Err(FileSystemError::Io {
+            operation: "hash tree excluding sidecars",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "excluded tree hashing is not supported by this filesystem",
             ),
         })
     }

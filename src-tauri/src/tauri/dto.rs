@@ -1298,38 +1298,10 @@ impl From<UpdateCheckItem> for UpdateCheckItemDto {
     }
 }
 
-/// Spec §5.3: persisted times may be integer epoch, DTOs always output RFC 3339.
-fn epoch_seconds_to_rfc3339(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let seconds_of_day = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        seconds_of_day / 3_600,
-        (seconds_of_day % 3_600) / 60,
-        seconds_of_day % 60,
-    )
-}
-
-/// Howard Hinnant's civil-from-days algorithm (proleptic Gregorian calendar).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month as u32, day as u32)
-}
+// Spec §5.3: persisted times may be integer epoch, DTOs always output
+// RFC 3339. The formatter lives in the recovery core (single source of
+// truth shared by the ledger and the DTO layer).
+use crate::core::fixture_recovery::epoch_seconds_to_rfc3339;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1852,6 +1824,132 @@ pub struct PublicErrorDto {
 pub struct CommandFailureDto {
     pub error: PublicErrorDto,
     pub diagnostic: Option<DiagnosticDto>,
+}
+
+// -- Fixture Recovery (spec §4.4, §5.2) --
+
+/// Which Home shape the recovery operates on.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum RecoveryModeDto {
+    LegacyUnbound,
+    BoundRestore { home_id: String },
+}
+
+/// The closed fixture classification; `mixed`/`unknown` carry the stable
+/// deviation codes the UI renders (never free-form App Copy).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FixtureClassificationDto {
+    Pure,
+    Mixed { reasons: Vec<String> },
+    Unknown { reasons: Vec<String> },
+    Clean,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEvidenceDto {
+    pub tables: Vec<String>,
+    pub schema_version: Option<u32>,
+    pub first_run_completed_at: Option<String>,
+    pub skill_row_count: u64,
+    pub agent_row_count: u64,
+    pub activation_row_count: u64,
+    pub file_source_row_count: u64,
+    pub remote_source_row_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeEvidenceDto {
+    pub fixture_entities_present: bool,
+    pub skill_authoring_hash_matches: Option<bool>,
+    pub media_xray_hash_matches: Option<bool>,
+    pub root_hash_matches: Option<bool>,
+    pub legacy_audit_entity_present: bool,
+}
+
+/// The active recovery operation, when the lock is held by one.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveRecoveryOperationDto {
+    pub operation_id: String,
+    pub cursor: Option<String>,
+    pub snapshot_path: Option<String>,
+    pub prepared_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixtureRecoveryPreviewDto {
+    pub mode: RecoveryModeDto,
+    pub path: String,
+    pub classification: FixtureClassificationDto,
+    pub catalog_evidence: CatalogEvidenceDto,
+    pub tree_evidence: TreeEvidenceDto,
+    pub can_preview: bool,
+    pub active_operation: Option<ActiveRecoveryOperationDto>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFixtureRecoveryRequestDto {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixtureRecoveryPlanDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyFixtureRecoveryRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryResultDto {
+    pub operation_id: String,
+    pub awaiting_commit: bool,
+    pub rolled_back: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmFixtureRecoveryRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetySnapshotDto {
+    pub snapshot_id: String,
+    pub path: String,
+    pub manifest_hash: Option<String>,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub taken_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSafetySnapshotRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSnapshotPreviewDto {
+    pub snapshot_id: String,
+    pub path: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
 }
 
 impl From<StartupInfo> for StartupInfoDto {

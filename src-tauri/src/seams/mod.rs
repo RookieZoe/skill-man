@@ -10,5 +10,6 @@ pub mod filesystem;
 pub mod import_store;
 pub mod maintenance_store;
 pub mod preferences_store;
+pub mod prepared_catalog;
 pub mod source;
 pub mod volume_identity;

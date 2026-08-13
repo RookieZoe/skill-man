@@ -9,6 +9,7 @@ import {
   type BootstrapChangedPayload,
   type BootstrapSnapshot,
   type CatalogClient,
+  type FixtureRecoveryPreview,
 } from "./catalog-client";
 
 function clientWithSnapshot(snapshot: BootstrapSnapshot): CatalogClient {
@@ -36,6 +37,51 @@ test("unconfigured snapshot renders the Unconfigured route", async () => {
 
   const route = await screen.findByRole("status");
   expect(route).toHaveTextContent("Unconfigured");
+  expect(
+    screen.queryByRole("navigation", { name: "Library" }),
+  ).not.toBeInTheDocument();
+});
+
+test("fixture_recovery_locked renders the Fixture Recovery route", async () => {
+  const client = clientWithSnapshot({
+    state: "fixture_recovery_locked",
+    homeId: null,
+    path: "/tmp/skill-man",
+  });
+  const preview: FixtureRecoveryPreview = {
+    mode: { kind: "legacy_unbound" },
+    path: "/tmp/skill-man",
+    classification: { kind: "pure" },
+    catalogEvidence: {
+      tables: ["activations", "agents", "catalog_meta", "preferences"],
+      schemaVersion: 4,
+      firstRunCompletedAt: null,
+      skillRowCount: 3,
+      agentRowCount: 3,
+      activationRowCount: 0,
+      fileSourceRowCount: 0,
+      remoteSourceRowCount: 0,
+    },
+    treeEvidence: {
+      fixtureEntitiesPresent: true,
+      skillAuthoringHashMatches: true,
+      mediaXrayHashMatches: true,
+      rootHashMatches: true,
+      legacyAuditEntityPresent: false,
+    },
+    canPreview: true,
+    activeOperation: null,
+  };
+  client.getFixtureRecoveryPreview = vi.fn(async () => preview);
+  client.listSafetySnapshots = vi.fn(async () => []);
+  render(<BootstrapApp client={client} />);
+
+  expect(
+    await screen.findByRole("heading", { name: "Fixture Recovery" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Recover this Home" }),
+  ).toBeInTheDocument();
   expect(
     screen.queryByRole("navigation", { name: "Library" }),
   ).not.toBeInTheDocument();
