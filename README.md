@@ -56,6 +56,6 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-The browser-only surface remains fixture-backed. Native mode treats SQLite and the app-owned Library as authoritative, and keeps filesystem, Git, updater, and lifecycle capabilities behind typed Rust adapters.
+The browser-only development surface is fixture-backed. Native bootstrap still contains the legacy fixture seed path; the [vNext implementation spec](docs/vnext-implementation-spec.md) defines its removal and the cutover to strict real-data authority. Filesystem, Git, updater, and lifecycle capabilities remain behind typed Rust adapters.
 
-Architecture and product language are defined in [the MVP implementation spec](docs/mvp-implementation-spec.md), [CONTEXT.md](CONTEXT.md), and the [release manual](docs/release.md).
+Architecture and product language are defined in [the vNext implementation spec](docs/vnext-implementation-spec.md), [CONTEXT.md](CONTEXT.md), and the [release manual](docs/release.md). The [MVP implementation spec](docs/mvp-implementation-spec.md) remains a historical baseline for unchanged behavior.

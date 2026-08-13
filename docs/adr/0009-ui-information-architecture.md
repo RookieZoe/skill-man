@@ -1,5 +1,10 @@
 # 主窗口与菜单栏的信息架构
 
+> **部分取代。** Library Desk 的信息架构继续有效；窗口断点、滚动归属与
+> overlay 行为由[窗口自适应布局决策](https://github.com/RookieZoe/skill-man/issues/36)
+> 取代，locale/Preferences 结论由
+> [ADR-0011](0011-interface-locale-and-message-ownership.md) 取代。
+
 Skill Man 的主窗口采用 **Library Desk**：以 Library 中的 Managed Skill 为第一视角，使用 Skill 列表、详情与按 Agent Activation 检查器组成三栏工作台。用户从目录名识别 Skill，在同一详情上下文中查看来源、健康状态与只读内容，并对每个 Agent 独立 Enable / Disable。该基线由 [Wayfinder #6 的 A/B/C 原型评审](https://github.com/RookieZoe/skill-man/issues/6) 选定；B 的 Agent-first switchboard 与 C 的 attention queue 不进入首个 spec。
 
 选择 A 是因为它最直接表达现有领域模型：Skill 身份=目录名，Library 是唯一可信源，Activation 是每个 Agent 目录中直指实体的符号链接。它能同时覆盖浏览、诊断与高频开关；Agent 支持、Conflict、Broken、Modified、Import 和 Adopt 则作为当前详情、弹层或明确事务流程进入，而不改变主心智模型。视觉方向遵循评审后的 Apple Liquid Glass：SF Pro、系统灰、Apple 蓝与低对比分隔线；玻璃材质只用于 toolbar、sidebar、inspector、sheet 和菜单栏面板，正文与表格保持清晰。

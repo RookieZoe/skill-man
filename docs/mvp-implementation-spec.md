@@ -1,10 +1,14 @@
 # Skill Man MVP 可开工实施 Spec
 
-> 状态：Draft
+> 状态：Historical baseline
 >
 > 目标读者：负责从零实现 Skill Man MVP 的开发 agent、维护者与测试者。
 >
 > 权威来源：[CONTEXT.md](../CONTEXT.md)、[ADR-0001 至 ADR-0009](adr/)、[Agent Skills 加载研究](research/2026-07-20-agent-skills-loading.md)、[macOS 技术栈研究](research/2026-07-20-macos-tech-stack.md)、[Wayfinder 地图](https://github.com/RookieZoe/skill-man/issues/1)。本文件汇总这些决议并补充可执行的工程设计；如有冲突，以领域词汇和 ADR 为准。
+>
+> vNext 的生产数据、Home Binding、locale、响应布局与 Adopt 来源模型已由
+> [Skill Man vNext 实施 Spec](vnext-implementation-spec.md) 取代。本文件只在
+> vNext Spec 明确保留的未变更范围内继续有效。
 
 ## 1. 摘要与完成标准
 

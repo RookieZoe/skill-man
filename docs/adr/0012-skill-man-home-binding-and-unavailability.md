@@ -17,7 +17,7 @@ Skill Man 需要一个统一的 Home:它承载 Catalog 持久化内容与恢复�
 | `<Home>/staging/` | 操作暂存 | 瞬态,启动清理 |
 | `<Home>/fixture-entities/` | 仅污染的 Legacy Home 存在;恢复后消失 | — |
 
-`remotes/` 与 `skills/` 同级、互不为父子;remote-id 的解析与认领规则由 Adopt 来源分类决策定案,本 ADR 只定布局。
+`remotes/` 与 `skills/` 同级、互不为父子;remote_id、provenance-only parent、per-Skill Remote Binding 与认领规则由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 定案,本 ADR 只定布局。
 
 ## 2. App-level 状态目录与 bootstrap locator
 

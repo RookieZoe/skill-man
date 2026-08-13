@@ -178,6 +178,46 @@ _Avoid_: Wild, 野生, External
 把一个 Untracked skill 收编为 Managed 的动作(移入 Library 或登记到 Library,并在原处按规则处理)。
 _Avoid_: Import(收编存量用 Adopt;Import 只用于新增入库), 收编(叙述可用,命名用 Adopt)
 
+**Verified Remote Source**:
+由外部 lock 线索、最终实体、规范化 remote、requested ref、resolved commit、仓库内 Skill 路径与本地/远端 tree 共同形成可复核闭环的来源。外部 lock 只是 provenance hint;只有闭环成立,Adopt 才能把当前内容认领为 Remote Install。
+_Avoid_: Trusted lock, Lock-managed Skill
+
+**Remote Source Parent**:
+Library 中代表一个 remote repository 的稳定来源聚合;内部 remote_id 不随 URL 重命名、requested ref 或 resolved commit 改变。它只承载 durable provenance 与所属 Skill 清单;requested ref、resolved commit、skillPath 和内容 baseline 属于各 Skill,Git mirror 属于可重建 cache,Skill 实体只存在于 `skills/`。
+_Avoid_: Git checkout, Worktree, Mirror
+
+**Remote Binding**:
+一个 Remote Install 对其 Remote Source Parent 的独立版本关系,记录 requested ref、Verification Anchor、skillPath 与 remote/content baseline。Remote Source Parent 没有单一当前 commit;同一 remote 的多个 Skill 可位于不同 commit,fetch 可共享,Preview 与提交按 Skill 独立。
+_Avoid_: Parent version, Repository checkout
+
+**Verification Anchor**:
+Adopt 验证时在 requested ref 可达历史中确定、且其 skillPath tree 与外部 lock hash 和本地内容形成闭环的 Git commit。它是后续 materialize/update 的确定锚点,不冒充外部 installer 未记录的原始安装 commit;若多个 commits 的 Skill tree 相同,使用最新匹配 commit并明确标记原安装 commit 未知。新 Remote Install 仍直接记录实际 resolved commit。
+_Avoid_: Original install commit, Guessed commit
+
+**Provenance Conflict**:
+外部 lock 声称某个 Skill 有 remote 来源,但来源闭环缺失或证据矛盾的 Adopt 状态。它默认保持 Untracked 并阻止自动降级;用户查看证据后可显式忽略该 lock,再按 Local Link 路径处理。
+_Avoid_: Invalid lock(只描述文件,没有表达领域阻塞状态), Local Skill
+
+**Verification Deferred**:
+外部 lock 的结构与已知证据尚未矛盾,但网络离线、认证失败或 remote 服务暂时故障使 Verified Remote Source 闭环暂时无法完成的 Adopt 状态。它保持 Untracked,可 Retry 或由用户显式忽略 lock 后转 Local Link;不得自动降级。
+_Avoid_: Provenance Conflict, Offline Skill
+
+**Local Source**:
+未被认定为 Verified Remote Source、由用户继续拥有的 Skill 最终实体。Adopt 以 Link 认领;实体必须位于 Skill Man Home、Agent/shared skills 根与 installer-managed 根之外,否则先由用户显式选择稳定位置并完成可回滚迁出。
+_Avoid_: Unverified Remote, File Install
+
+**Ownership Handoff**:
+Verified Remote Source 从外部 installer 转交给 Skill Man 的显式 Adopt 边界。每个 Skill 独立提交:保持当前字节、使 Home 内实体与 Catalog/Activation 生效,并以 compare-and-swap 退出对应外部 lock 所有权;任何一步失败都回滚该 Skill,外部状态并发变化则停止剩余未提交项。
+_Avoid_: Import, Sync
+
+**Ownership Conflict**:
+Ownership Handoff 后外部 installer 又为同一 Skill 身份创建 lock 条目或实体的状态。Skill Man 保留既有 Managed Skill,不自动合并、覆盖或重新接管;用户必须明确保留哪一方后再移除或重新 Adopt。
+_Avoid_: Update available, Activation Conflict
+
+**Remote Source Identity Conflict**:
+Remote Source Parent 的 `source.json` 与 Catalog parent row 缺失或不一致,无法证明同一 remote_id 与 canonical URL 的状态。影响范围限于该 parent:子 Skill 可读并可 Disable/Remove,但 Update、新 Remote Binding 与 alias 变更 fail closed,直到通过 remote 与全部子 binding 重新验证。
+_Avoid_: HomeIdentityMismatch, Catalog ReadOnly
+
 **Agent**:
 一个 AI 编码工具(如 Claude Code、Codex),它从约定的 skills 目录加载 skill。Skill Man 以「名称 + 目录路径」描述一个 Agent;内置 Claude Code / Codex 两个 Agent Preset,也支持自定义。
 
