@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420",
+    "matrix:layout": "vite --port 1420 --open '/?matrix=layout'",
     "build": "npm run build:web",
     "build:web": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",

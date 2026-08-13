@@ -76,14 +76,41 @@ button:active:not(:disabled) {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-rows: 58px auto minmax(0, 1fr);
+  overflow: hidden;
   background: var(--canvas);
 }
 
+.app-shell > .toolbar {
+  grid-row: 1;
+}
+
+.app-shell > .notice-region {
+  grid-row: 2;
+}
+
+.app-shell > .app-background {
+  grid-row: 3;
+}
+
 .app-background {
-  display: contents;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.notice-region {
+  min-height: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.notice-region:empty {
+  display: none;
 }
 
 .skip-link {
@@ -245,29 +272,263 @@ button:active:not(:disabled) {
 }
 
 .library-sidebar,
-.skill-detail,
-.agent-inspector {
+.skill-detail {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+}
+
+.agent-drawer {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  background: var(--inspector);
+}
+
+.agent-drawer-backdrop {
+  display: none;
 }
 
 .library-sidebar {
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-right: 1px solid var(--divider);
   background: var(--sidebar);
 }
 
 .skill-detail {
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--space-10) clamp(28px, 4vw, 58px) 56px;
   background: var(--surface-raised);
 }
 
 .agent-inspector {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--space-6) var(--space-4);
   border-left: 1px solid var(--divider);
   background: var(--inspector);
+}
+
+.detail-state {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+.detail-state h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 680;
+}
+
+.detail-state p {
+  max-width: 34ch;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.detail-state--error h2 {
+  color: var(--broken);
+}
+
+.inspector-empty {
+  padding: var(--space-4);
+  color: var(--text-tertiary);
+  background: oklch(99% 0.003 250 / 0.76);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.inspector-empty span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-secondary);
+  font-weight: 620;
+}
+
+.pane-nav {
+  display: none;
+}
+
+/* -- Pinned Workbench breakpoints (spec §7; 1060 / 760) -- */
+/* Wide: three visible panes, each owns its vertical scroll. */
+.app-shell[data-layout-mode="wide"] .library-desk {
+  grid-template-columns: minmax(236px, 0.82fr) minmax(430px, 1.6fr) minmax(
+      258px,
+      0.88fr
+    );
+}
+
+/* Mid: Library + Skill detail stay visible; Agent Inspector becomes a
+   right-side modal drawer with its own scroll. */
+.app-shell[data-layout-mode="mid"] .library-desk {
+  grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.72fr);
+  position: relative;
+}
+
+.app-shell[data-layout-mode="mid"] .agent-drawer {
+  position: absolute;
+  z-index: 14;
+  inset: 0;
+  display: block;
+  background: transparent;
+  pointer-events: none;
+}
+
+.app-shell[data-layout-mode="mid"] .agent-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  display: none;
+  background: oklch(22% 0.015 250 / 0.22);
+}
+
+.app-shell[data-layout-mode="mid"] .agent-drawer[data-open="true"] {
+  pointer-events: auto;
+}
+
+.app-shell[data-layout-mode="mid"]
+  .agent-drawer[data-open="true"]
+  .agent-drawer-backdrop {
+  display: block;
+}
+
+.app-shell[data-layout-mode="mid"] .agent-inspector {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(340px, 46%);
+  border-left: 1px solid var(--divider);
+  box-shadow: -16px 0 34px oklch(28% 0.02 250 / 0.22);
+  transform: translateX(106%);
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform 150ms ease;
+}
+
+.app-shell[data-layout-mode="mid"]
+  .agent-drawer[data-open="true"]
+  .agent-inspector {
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* Narrow: defensive single-pane navigation below the native minimum. */
+.app-shell[data-layout-mode="narrow"] {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.app-shell[data-layout-mode="narrow"] .toolbar {
+  min-height: 58px;
+  flex-wrap: wrap;
+  padding-block: var(--space-3);
+}
+
+.app-shell[data-layout-mode="narrow"] .toolbar-actions {
+  width: 100%;
+  order: 2;
+  margin-left: 42px;
+  overflow-x: auto;
+}
+
+.app-shell[data-layout-mode="narrow"] .library-desk {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.app-shell[data-layout-mode="narrow"] .pane-nav {
+  display: flex;
+  gap: 3px;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--divider);
+  background: var(--surface);
+}
+
+.app-shell[data-layout-mode="narrow"] .pane-nav button {
+  min-height: 28px;
+  padding: 0 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 580;
+}
+
+.app-shell[data-layout-mode="narrow"] .pane-nav button[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px oklch(20% 0.02 250 / 0.08);
+}
+
+.app-shell[data-layout-mode="narrow"] .library-sidebar,
+.app-shell[data-layout-mode="narrow"] .skill-detail,
+.app-shell[data-layout-mode="narrow"] .agent-drawer {
+  display: none;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 0;
+}
+
+.app-shell[data-layout-mode="narrow"] .agent-drawer-backdrop {
+  display: none;
+}
+
+.app-shell[data-layout-mode="narrow"] .agent-inspector {
+  position: static;
+  width: auto;
+  height: 100%;
+  border-left: 0;
+  box-shadow: none;
+  transform: none;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.app-shell[data-layout-mode="narrow"][data-active-pane="library"]
+  .library-sidebar {
+  display: flex;
+}
+
+.app-shell[data-layout-mode="narrow"][data-active-pane="detail"] .skill-detail {
+  display: block;
+}
+
+.app-shell[data-layout-mode="narrow"][data-active-pane="agents"] .agent-drawer {
+  display: grid;
+}
+
+.app-shell[data-layout-mode="narrow"] .library-sidebar {
+  padding-bottom: var(--space-3);
+}
+
+.app-shell[data-layout-mode="narrow"] .skill-detail {
+  padding: var(--space-8) var(--space-5);
+}
+
+.app-shell[data-layout-mode="narrow"] .agent-inspector {
+  padding: var(--space-6) var(--space-5) 48px;
+}
+
+.app-shell[data-layout-mode="narrow"] .metadata-grid {
+  grid-template-columns: 1fr;
 }
 
 .panel-heading {
@@ -1132,57 +1393,6 @@ button:active:not(:disabled) {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-  }
-}
-
-@media (max-width: 860px) {
-  body {
-    overflow: auto;
-  }
-
-  .app-shell {
-    min-height: 100vh;
-    grid-template-rows: auto auto 1fr;
-  }
-
-  .toolbar {
-    min-height: 58px;
-    flex-wrap: wrap;
-    padding-block: var(--space-3);
-  }
-
-  .toolbar-actions {
-    width: 100%;
-    order: 2;
-    margin-left: 42px;
-    overflow-x: auto;
-  }
-
-  .library-desk {
-    display: block;
-  }
-
-  .library-sidebar,
-  .skill-detail,
-  .agent-inspector {
-    overflow: visible;
-    border: 0;
-  }
-
-  .library-sidebar {
-    padding-bottom: var(--space-3);
-  }
-
-  .skill-detail {
-    padding: var(--space-8) var(--space-5);
-  }
-
-  .agent-inspector {
-    padding: var(--space-6) var(--space-5) 48px;
-  }
-
-  .metadata-grid {
-    grid-template-columns: 1fr;
   }
 }
 

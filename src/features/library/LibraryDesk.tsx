@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type Ref } from "react";
 
 import type {
   AppUpdatePanelState,
@@ -44,9 +44,22 @@ const filters: Array<{ value: CatalogFilter; label: string }> = [
   { value: "install", label: "Install" },
 ];
 
+export type LayoutMode = "wide" | "mid" | "narrow";
+type PaneKey = "library" | "detail" | "agents";
+
+export const WIDE_BREAKPOINT = 1060;
+export const MID_BREAKPOINT = 760;
+
+export function layoutModeForWidth(width: number): LayoutMode {
+  if (width >= WIDE_BREAKPOINT) return "wide";
+  if (width >= MID_BREAKPOINT) return "mid";
+  return "narrow";
+}
+
 interface LibraryDeskProps {
   filter: CatalogFilter;
   skills: SkillSummary[];
+  libraryEmpty: boolean;
   selectedId: string | null;
   detail: SkillDetail | null;
   agents: AgentActivation[];
@@ -164,6 +177,7 @@ interface LibraryDeskProps {
 export function LibraryDesk({
   filter,
   skills,
+  libraryEmpty,
   selectedId,
   detail,
   agents,
@@ -277,6 +291,13 @@ export function LibraryDesk({
   onCreateAgentDirectory,
   onFinishOnboardingWithAdopt,
 }: LibraryDeskProps) {
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
+    layoutModeForWidth(window.innerWidth),
+  );
+  const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
+  const [activePane, setActivePane] = useState<PaneKey>("library");
+  const agentInspectorRef = useRef<HTMLElement | null>(null);
+  const pendingDrawerFocus = useRef(false);
   const lastOverlay = useRef<
     "activation" | "import" | "preferences" | "appUpdate" | null
   >(null);
@@ -292,6 +313,74 @@ export function LibraryDesk({
   const hasAppUpdateOverlay =
     Boolean(appUpdatePanel.update) && !hasOtherOverlay;
   const hasOverlay = hasOtherOverlay || hasAppUpdateOverlay;
+  const isAgentDrawerModal = layoutMode === "mid" && agentDrawerOpen;
+
+  useEffect(() => {
+    function onResize() {
+      setLayoutMode((mode) => {
+        const next = layoutModeForWidth(window.innerWidth);
+        return next === mode ? mode : next;
+      });
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isAgentDrawerModal) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (hasOverlay) return;
+      if (event.key === "Escape" && !isApplyingActivation) {
+        event.preventDefault();
+        setAgentDrawerOpen(false);
+        document.getElementById("agent-drawer-trigger")?.focus();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const inspector = agentInspectorRef.current;
+      if (!inspector) return;
+      const focusable = Array.from(
+        inspector.querySelectorAll<HTMLElement>(
+          "input, button, select, textarea, [tabindex]",
+        ),
+      ).filter((element) => {
+        if (element.getAttribute("tabindex") === "-1") return false;
+        if (
+          element instanceof HTMLButtonElement ||
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLSelectElement ||
+          element instanceof HTMLTextAreaElement
+        ) {
+          return !element.disabled;
+        }
+        return true;
+      });
+      if (focusable.length === 0) {
+        event.preventDefault();
+        inspector.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [hasOverlay, isAgentDrawerModal, isApplyingActivation]);
+
+  useLayoutEffect(() => {
+    if (isAgentDrawerModal && pendingDrawerFocus.current) {
+      pendingDrawerFocus.current = false;
+      agentInspectorRef.current?.focus();
+    }
+  }, [isAgentDrawerModal]);
+
   useLayoutEffect(() => {
     if (hasActivationOverlay) {
       lastOverlay.current = "activation";
@@ -329,17 +418,39 @@ export function LibraryDesk({
     isPreferencesOpen,
   ]);
 
+  function toggleAgentDrawer() {
+    const next = !agentDrawerOpen;
+    setAgentDrawerOpen(next);
+    if (next) {
+      pendingDrawerFocus.current = true;
+    } else {
+      document.getElementById("agent-drawer-trigger")?.focus();
+    }
+  }
+
+  function closeAgentDrawer() {
+    setAgentDrawerOpen(false);
+    document.getElementById("agent-drawer-trigger")?.focus();
+  }
+
   return (
-    <div className="app-shell">
-      <div className="app-background" inert={hasOverlay ? true : undefined}>
-        <a className="skip-link" href="#skill-detail">
-          Skip to Skill detail
-        </a>
-        <Toolbar
-          onImport={onOpenLinkImport}
-          onAdopt={onOpenAdopt}
-          onOpenPreferences={onOpenPreferences}
-        />
+    <div
+      className="app-shell"
+      data-layout-mode={layoutMode}
+      data-active-pane={activePane}
+    >
+      <a className="skip-link" href="#skill-detail">
+        Skip to Skill detail
+      </a>
+      <Toolbar
+        layoutMode={layoutMode}
+        agentDrawerOpen={agentDrawerOpen}
+        onToggleAgentDrawer={toggleAgentDrawer}
+        onImport={onOpenLinkImport}
+        onAdopt={onOpenAdopt}
+        onOpenPreferences={onOpenPreferences}
+      />
+      <div className="notice-region">
         {error ? (
           <div className="global-notice" role="alert">
             <strong>Library unavailable</strong>
@@ -364,16 +475,41 @@ export function LibraryDesk({
             </button>
           </div>
         ) : null}
+      </div>
+      <div className="app-background" inert={hasOverlay ? true : undefined}>
         <div className="library-desk">
+          {layoutMode === "narrow" ? (
+            <div className="pane-nav" role="group" aria-label="Pane navigation">
+              {(["library", "detail", "agents"] as const).map((pane) => (
+                <button
+                  type="button"
+                  key={pane}
+                  aria-pressed={activePane === pane}
+                  onClick={() => setActivePane(pane)}
+                >
+                  {pane === "library"
+                    ? "Library"
+                    : pane === "detail"
+                      ? "Skill"
+                      : "Agents"}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <LibrarySidebar
             filter={filter}
             skills={skills}
             selectedId={selectedId}
             onFilter={onFilter}
-            onSelect={onSelect}
+            onSelect={(skillId) => {
+              if (layoutMode === "narrow") setActivePane("detail");
+              onSelect(skillId);
+            }}
           />
           <SkillDetailPanel
             detail={detail}
+            error={error}
+            libraryEmpty={libraryEmpty}
             updatePanel={updatePanel}
             reselectPath={reselectPath}
             relocatePanel={relocatePanel}
@@ -386,16 +522,34 @@ export function LibraryDesk({
             removePanel={removePanel}
             onOpenRemove={onOpenRemove}
           />
-          <AgentInspector
-            detail={detail}
-            agents={agents}
-            error={activationError}
-            pendingAgentId={pendingAgentId}
-            isApplying={isApplyingActivation}
-            isChecking={isCheckingActivations}
-            onRequest={onRequestActivation}
-            onRepair={onRequestActivationRepair}
-          />
+          <div
+            className="agent-drawer"
+            data-open={isAgentDrawerModal ? "true" : undefined}
+          >
+            <div
+              className="agent-drawer-backdrop"
+              onMouseDown={(event) => {
+                if (
+                  event.currentTarget === event.target &&
+                  !isApplyingActivation
+                ) {
+                  closeAgentDrawer();
+                }
+              }}
+            />
+            <AgentInspector
+              ref={agentInspectorRef}
+              dialog={isAgentDrawerModal}
+              detail={detail}
+              agents={agents}
+              error={activationError}
+              pendingAgentId={pendingAgentId}
+              isApplying={isApplyingActivation}
+              isChecking={isCheckingActivations}
+              onRequest={onRequestActivation}
+              onRepair={onRequestActivationRepair}
+            />
+          </div>
         </div>
       </div>
       {activationPreview ? (
@@ -522,10 +676,16 @@ export function LibraryDesk({
 }
 
 function Toolbar({
+  layoutMode,
+  agentDrawerOpen,
+  onToggleAgentDrawer,
   onImport,
   onAdopt,
   onOpenPreferences,
 }: {
+  layoutMode: LayoutMode;
+  agentDrawerOpen: boolean;
+  onToggleAgentDrawer: () => void;
   onImport: () => void;
   onAdopt: () => void;
   onOpenPreferences: () => void;
@@ -548,6 +708,18 @@ function Toolbar({
         <button type="button" className="toolbar-button" onClick={onAdopt}>
           Adopt
         </button>
+        {layoutMode === "mid" ? (
+          <button
+            id="agent-drawer-trigger"
+            type="button"
+            className="toolbar-button"
+            aria-expanded={agentDrawerOpen}
+            aria-controls="agent-inspector-dialog"
+            onClick={onToggleAgentDrawer}
+          >
+            Agents
+          </button>
+        ) : null}
         <button
           id="link-import-trigger"
           type="button"
@@ -649,6 +821,8 @@ function LibrarySidebar({
 
 function SkillDetailPanel({
   detail,
+  error,
+  libraryEmpty,
   updatePanel,
   reselectPath,
   relocatePanel,
@@ -662,6 +836,8 @@ function SkillDetailPanel({
   onOpenRemove,
 }: {
   detail: SkillDetail | null;
+  error: string | null;
+  libraryEmpty: boolean;
   updatePanel: UpdatePanelState;
   reselectPath: string;
   relocatePanel: RelocatePanelState;
@@ -754,6 +930,19 @@ function SkillDetailPanel({
             <pre>{detail.skillMarkdown}</pre>
           </section>
         </>
+      ) : error ? (
+        <div className="detail-state detail-state--error" role="alert">
+          <h2>Skill detail unavailable</h2>
+          <p>
+            The Catalog error is preserved above; this pane is unavailable, not
+            loading.
+          </p>
+        </div>
+      ) : libraryEmpty ? (
+        <div className="detail-state">
+          <h2>Empty Library</h2>
+          <p>Import or Adopt a Skill to begin; this is not a loading state.</p>
+        </div>
       ) : (
         <LoadingPanel label="Loading Skill detail" />
       )}
@@ -937,6 +1126,8 @@ function shortCommit(commit: string) {
 }
 
 function AgentInspector({
+  ref,
+  dialog,
   detail,
   agents,
   error,
@@ -946,6 +1137,8 @@ function AgentInspector({
   onRequest,
   onRepair,
 }: {
+  ref: Ref<HTMLElement | null>;
+  dialog: boolean;
   detail: SkillDetail | null;
   agents: AgentActivation[];
   error: string | null;
@@ -956,7 +1149,17 @@ function AgentInspector({
   onRepair: (agentId: string) => void;
 }) {
   return (
-    <aside className="agent-inspector" aria-label="Enable by Agent">
+    <aside
+      ref={ref}
+      id={dialog ? "agent-inspector-dialog" : undefined}
+      className="agent-inspector"
+      aria-label="Enable by Agent"
+      role={dialog ? "dialog" : undefined}
+      aria-modal={dialog ? true : undefined}
+      // Constant tabindex keeps the focused element stable across breakpoint
+      // changes: Chrome blurs an element whose tabindex attribute is removed.
+      tabIndex={-1}
+    >
       <div className="panel-heading inspector-heading">
         <div>
           <span className="eyebrow">Activation</span>
@@ -1041,7 +1244,12 @@ function AgentInspector({
               </div>
             );
           })
-        ) : null}
+        ) : (
+          <div className="inspector-empty">
+            <span>No Skill selected</span>
+            <small>Activation controls stay unavailable.</small>
+          </div>
+        )}
       </div>
       <div className="inspector-footnote">
         <LockIcon />

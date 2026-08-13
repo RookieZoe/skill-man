@@ -5,8 +5,40 @@ import { BootstrapApp } from "./app/BootstrapApp";
 import { createCatalogClient } from "./app/catalog-client";
 import "./styles.css";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <BootstrapApp client={createCatalogClient()} />
-  </StrictMode>,
-);
+const params = new URLSearchParams(window.location.search);
+const showLayoutMatrix =
+  import.meta.env.DEV && params.get("matrix") === "layout";
+const showLayoutMatrixFrame =
+  import.meta.env.DEV && params.get("matrix") === "layout-frame";
+
+const root = createRoot(document.getElementById("root")!);
+
+async function renderApplication() {
+  if (showLayoutMatrix) {
+    const { LayoutMatrix } = await import("./dev/layout-matrix/LayoutMatrix");
+    root.render(
+      <StrictMode>
+        <LayoutMatrix />
+      </StrictMode>,
+    );
+    return;
+  }
+  if (showLayoutMatrixFrame) {
+    const { LayoutMatrixFrame } =
+      await import("./dev/layout-matrix/LayoutMatrixFrame");
+    root.render(
+      <StrictMode>
+        <LayoutMatrixFrame />
+      </StrictMode>,
+    );
+    return;
+  }
+
+  root.render(
+    <StrictMode>
+      <BootstrapApp client={createCatalogClient()} />
+    </StrictMode>,
+  );
+}
+
+void renderApplication();

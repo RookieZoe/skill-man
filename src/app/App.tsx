@@ -89,6 +89,7 @@ function isSafeAdoptCandidate(candidate: AdoptCandidate): boolean {
 export function App({ client }: AppProps) {
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [agents, setAgents] = useState<AgentActivation[]>([]);
@@ -342,6 +343,9 @@ export function App({ client }: AppProps) {
       })
       .catch((reason: unknown) => {
         if (current) setError(readError(reason));
+      })
+      .finally(() => {
+        if (current) setLibraryLoaded(true);
       });
     return () => {
       current = false;
@@ -1451,6 +1455,7 @@ export function App({ client }: AppProps) {
     <LibraryDesk
       filter={filter}
       skills={skills}
+      libraryEmpty={libraryLoaded && skills.length === 0}
       selectedId={selectedId}
       detail={detail}
       agents={agents}
