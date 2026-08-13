@@ -18,6 +18,16 @@
 | Fixture Recovery | Fixture Recovery | 测试数据恢复 |
 | Safety Snapshot | Safety Snapshot | 安全快照 |
 | Fixture Recovery Lock | Fixture Recovery Lock | 测试数据恢复锁定 |
+| Unconfigured | Unconfigured | 未配置 |
+| Home Candidate | Home candidate | 候选主目录 |
+| Bound Home | Bound Home | 已绑定主目录 |
+| Reconnect Same Home | Reconnect Same Home | 重新连接同一主目录 |
+| Restore Bound Home | Restore Bound Home | 恢复已绑定主目录 |
+| Abandon Home and Start New | Abandon Home and Start New | 放弃主目录并重新开始 |
+| HomeUnavailable | Home Unavailable | 主目录不可用 |
+| HomeIdentityMismatch | Home Identity Mismatch | 主目录身份不匹配 |
+| AppStateUnavailable | App State Unavailable | 应用状态不可用 |
+| Catalog ReadOnly | Catalog read-only | 技能库只读 |
 | Agent | Agent | 智能体 |
 | Agent Preset | Agent preset | 智能体预设 |
 | Import | Import | 导入 |
@@ -75,6 +85,58 @@ _Avoid_: Migration backup, Undo backup
 **Fixture Recovery Lock**:
 检测到 fixture 污染或恢复状态不确定时,在用户确认、验证并提交 Fixture Recovery 前禁止全部常规产品写操作的状态;Fixture Recovery 自身经确认的受控写入是唯一例外。它与 Catalog 因 schema 或权限问题进入的 ReadOnly 访问状态不同。
 _Avoid_: ReadOnly, RecoveryRequired
+
+**Unconfigured**:
+首次绑定前的顶层状态:没有 Home Binding,App 只提供绑定向导与 App-level 状态;取消或未完成绑定不产生任何 Home 内容。
+_Avoid_: First Run, 首次运行
+
+**Home Candidate**:
+首次绑定流程中已通过只读校验、等待用户显式确认并原子提交的候选路径;确认前不创建任何 Home 内容。
+_Avoid_: chosen path, 所选路径
+
+**Bound Home**:
+已建立不可变 Home Binding、身份校验通过的 Home;绑定后不存在 Preferences 改址、Relocate 或普通 re-home。
+_Avoid_: active Library, 当前主目录
+
+**Reconnect Same Home**:
+HomeUnavailable / HomeIdentityMismatch 下由用户显式发起、对同一 home_id 重新校验并恢复正常访问的动作;不属于 Relocate。
+_Avoid_: Retry mount, 重新挂载
+
+**Restore Bound Home**:
+同一 home_id 下,对内容验证失败的 Bound Home 执行 Fixture Recovery 状态机、以 Safety Snapshot 可逆恢复内容的动作;不属于 Relocate。
+_Avoid_: Reset, 重置主目录
+
+**Abandon Home and Start New**:
+产生新 Home Identity 的唯一高摩擦逃生口:输入确认、不删除旧 Home、不清理旧 Activation,旧 home_id 永久记入 locator 历史。
+_Avoid_: Delete Home, 删除主目录
+
+**HomeUnavailable**:
+Home Binding 存在但 Home 无法访问(卷离线、权限丢失、目录消失)的顶层状态:fail-closed,不写不绑,只读能力按实际可用性提供。
+_Avoid_: Missing, Offline
+
+**HomeIdentityMismatch**:
+路径可达但 binding、Home marker、Catalog 与卷身份不一致的顶层状态:现场内容绝不视为 Bound Home,唯一逃生口是 Abandon。
+_Avoid_: Wrong Home, 换了目录
+
+**AppStateUnavailable**:
+App-level 状态目录或 bootstrap locator 不可读、损坏或自相矛盾时的顶层状态:既不当作 Unconfigured 也不当作 Bound,禁止产品写与新建绑定。
+_Avoid_: Corrupted state, 状态损坏
+
+**Home Identity (home_id)**:
+逻辑 Home 身份:首次初始化生成的稳定标识(UUID v4),同时记录在 bootstrap locator、Home marker 与 Catalog SQLite 中;绑定、Reconnect、Restore 与 Abandon 都以它而非路径字符串为判定基准。
+_Avoid_: Home UUID, Home path
+
+**bootstrap locator**:
+Home 外(状态目录中)的最小持久记录,是绑定状态的唯一 truth;记录 home_id、路径、卷身份与 abandoned 历史,以 tmp→fsync→rename→parent fsync 原子提交。
+_Avoid_: Home setting, bookmark, 路径设置
+
+**Home marker**:
+Home 根部的身份文件,记录 home_id 与卷身份;与 bootstrap locator、Catalog SQLite 三方一致才证明同一 Home。
+_Avoid_: home.json, 身份文件
+
+**Catalog ReadOnly**:
+Catalog 因 Home 不可用或 schema/权限问题进入的只读访问状态;与 Fixture Recovery Lock 不同,后者禁止全部常规产品写并走专用恢复流程。
+_Avoid_: Locked catalog, 只读锁定
 
 **Import**:
 把一个 skill 收入 Library 的动作。两种方式:Link(引用本地目录)、Install(安装,实体进 Library)。
