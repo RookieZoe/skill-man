@@ -293,7 +293,10 @@ test("ownership conflict reason renders as a closed conflict verdict", () => {
     report([
       candidate({
         verdict: "conflict",
-        reason: { kind: "ownership_conflict", managedDirectoryName: "networking" },
+        reason: {
+          kind: "ownership_conflict",
+          managedDirectoryName: "networking",
+        },
         selectable: false,
         adoptable: false,
       }),

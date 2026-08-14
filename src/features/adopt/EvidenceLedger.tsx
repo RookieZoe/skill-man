@@ -142,9 +142,15 @@ export function EvidenceLedger({
         aria-modal="true"
         aria-label={t("library.adopt.dialog_label")}
       >
-        <ol className="import-progress" aria-label={t("library.adopt.progress_label")}>
+        <ol
+          className="import-progress"
+          aria-label={t("library.adopt.progress_label")}
+        >
           {(["scan", "preview", "result"] as const).map((stepName) => (
-            <li key={stepName} aria-current={step === stepName ? "step" : undefined}>
+            <li
+              key={stepName}
+              aria-current={step === stepName ? "step" : undefined}
+            >
               {t(`library.adopt.step.${stepName}` as MessageKey)}
             </li>
           ))}
@@ -296,10 +302,7 @@ function LedgerCandidate({
   const { t, tPlural } = useLocale();
   const id = `adopt-candidate-${candidate.directoryName}`;
   return (
-    <section
-      className="adopt-ledger-candidate"
-      aria-labelledby={`${id}-name`}
-    >
+    <section className="adopt-ledger-candidate" aria-labelledby={`${id}-name`}>
       {/* Column 1: candidate context */}
       <div className="adopt-ledger-col adopt-ledger-context">
         <h3 id={`${id}-name`} className="adopt-candidate-name">
@@ -326,10 +329,7 @@ function LedgerCandidate({
               checked={selected}
               disabled={isBusy}
               onChange={(event) =>
-                onToggle(
-                  candidate.canonicalEntity,
-                  event.currentTarget.checked,
-                )
+                onToggle(candidate.canonicalEntity, event.currentTarget.checked)
               }
             />
             <span>
@@ -369,10 +369,7 @@ function LedgerCandidate({
                 ) : null}
               </p>
               {appearance.chain.hops.map((hop, hopIndex) => (
-                <p
-                  key={`${hop.path}-${hopIndex}`}
-                  className="adopt-hop"
-                >
+                <p key={`${hop.path}-${hopIndex}`} className="adopt-hop">
                   <span className="adopt-hop-index">
                     {t("library.adopt.chain.hop", {
                       number: hopIndex + 1,
@@ -655,7 +652,10 @@ function LedgerCandidate({
                 checked={branch === "convert_to_local_link"}
                 disabled={isBusy || !selected}
                 onChange={() =>
-                  onSetBranch(candidate.canonicalEntity, "convert_to_local_link")
+                  onSetBranch(
+                    candidate.canonicalEntity,
+                    "convert_to_local_link",
+                  )
                 }
               />
               {t("library.adopt.modified.convert_to_link")}
@@ -706,7 +706,9 @@ function LedgerPlan({
               </span>
             </div>
             {item.applyable ? (
-              <span className="candidate-clear">{t("library.adopt.ready")}</span>
+              <span className="candidate-clear">
+                {t("library.adopt.ready")}
+              </span>
             ) : (
               <span className="candidate-warning">
                 {t("library.adopt.plan.handoff_pending")}
@@ -781,8 +783,7 @@ function LedgerResult({
               ) : (
                 <span className="candidate-conflict">
                   {t("library.adopt.failed", {
-                    detail:
-                      item.error ?? t("library.adopt.failed_unknown"),
+                    detail: item.error ?? t("library.adopt.failed_unknown"),
                   })}
                 </span>
               )}
@@ -806,8 +807,7 @@ function LedgerResult({
                 .map((item) =>
                   t("library.adopt.undo_item", {
                     name: item.directoryName,
-                    detail:
-                      item.error ?? t("library.adopt.failed_unknown"),
+                    detail: item.error ?? t("library.adopt.failed_unknown"),
                   }),
                 )
                 .join(" · ")}

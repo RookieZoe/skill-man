@@ -898,7 +898,7 @@ fn adopt_apply_rejects_a_source_changed_after_preview_without_writing() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "changed-after-preview")],
+            vec![select(candidates, "changed-after-preview")],
         ))
         .expect("Preview Adopt");
     std::fs::write(source.join("SKILL.md"), "# Changed\n").expect("change source after Preview");
@@ -942,7 +942,7 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "symlinked-staging")],
+            vec![select(candidates, "symlinked-staging")],
         ))
         .expect("Preview Adopt");
 
@@ -1035,7 +1035,7 @@ fn gate_transition_makes_an_adopt_plan_stale() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "gate-stale-skill")],
+            vec![select(candidates, "gate-stale-skill")],
         ))
         .expect("Preview Adopt");
     assert!(plan.can_apply);
@@ -1100,7 +1100,7 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     let stable_plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "stable-adopt")],
+            vec![select(candidates, "stable-adopt")],
         ))
         .expect("Preview stable Adopt");
     let stable_result = adopt
@@ -1109,7 +1109,7 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "blocked-apply")],
+            vec![select(candidates, "blocked-apply")],
         ))
         .expect("Preview Adopt");
 
@@ -1188,7 +1188,7 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "done-write-failure")],
+            vec![select(candidates, "done-write-failure")],
         ))
         .expect("Preview Adopt");
 
@@ -1238,7 +1238,7 @@ fn adopt_registers_external_symlinks_as_links() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "ext-foo")]))
+        .plan(&plan_request(&report, vec![select(candidates, "ext-foo")]))
         .expect("plan Adopt");
     assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLink);
     assert_eq!(
@@ -1540,7 +1540,7 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     let plan = adopt
         .plan(&plan_request(
             &report,
-            vec![select(&candidates, "undo-fault")],
+            vec![select(candidates, "undo-fault")],
         ))
         .expect("plan Adopt");
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");

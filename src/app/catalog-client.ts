@@ -702,7 +702,7 @@ export interface AdoptLockEvidence {
 export interface AdoptRemoteEvidence {
   canonicalUrl: string;
   requestedRef: string;
-  refKind: string;
+  refKind: "head" | "branch" | "tag" | "commit";
   anchorCommit: string;
   originalInstallCommitKnown: boolean;
   skillPath: string;
@@ -749,9 +749,7 @@ export interface AdoptEvidenceReport {
 }
 
 export type ModifiedBranch =
-  | "keep_current"
-  | "discard_to_anchor"
-  | "convert_to_local_link";
+  "keep_current" | "discard_to_anchor" | "convert_to_local_link";
 
 export interface AdoptSelection {
   canonicalEntity: string;

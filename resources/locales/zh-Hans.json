@@ -498,7 +498,7 @@
   "bootstrap.home.mode_copy": "Legacy Home 将被复制到该路径；原始位置保持不动，且永远不会被自动删除。",
   "bootstrap.home.available_space": "可用空间：{bytes}",
   "bootstrap.home.confirm_bind": "绑定 Home",
-  "bootstrap.home.use_default": "使用默认位置（~/Library/Application Support/skill-man）",
+  "bootstrap.home.use_default": "使用默认位置",
   "bootstrap.home.use_default_legacy": "使用默认位置（{path}）",
   "bootstrap.home.choose": "选择其他位置…",
   "bootstrap.home.continue": "继续",

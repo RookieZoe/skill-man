@@ -115,7 +115,10 @@ impl Harness {
     }
 }
 
-fn lock_json(entries: &[(&str, &str, String, Option<&str>, String, String)]) -> String {
+/// (name, sourceType, sourceUrl, ref, skillPath, hash)
+type LockRow<'a> = (&'a str, &'a str, String, Option<&'a str>, String, String);
+
+fn lock_json(entries: &[LockRow<'_>]) -> String {
     // Callers pass String temporaries via .as_str(); the array lives for the
     // call duration only.
     // (name, sourceType, sourceUrl, ref, skillPath, hash)
@@ -865,7 +868,10 @@ fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
     let remote = candidate.remote.as_ref().expect("remote evidence");
     assert_eq!(remote.canonical_url, url);
     assert_eq!(remote.requested_ref, "HEAD");
-    assert_eq!(remote.ref_kind, "head");
+    assert_eq!(
+        remote.ref_kind,
+        skill_man_lib::seams::remote_provider::RefDisposition::Head
+    );
     assert!(remote.provider_hash_matched);
     assert!(remote.trees_match);
     assert_eq!(remote.remote_tree_hash, remote.local_tree_hash);
@@ -884,7 +890,7 @@ fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
         lock.lock_fingerprint,
         format!("{:x}", {
             use sha2::Digest;
-            sha2::Sha256::digest(std::fs::read(&harness.lock_path()).expect("lock bytes"))
+            sha2::Sha256::digest(std::fs::read(harness.lock_path()).expect("lock bytes"))
         })
     );
     let plan = adopt
@@ -938,7 +944,10 @@ fn pinned_tag_anchor_is_exact_and_known() {
         .expect("candidate");
     assert_eq!(candidate.verdict, AdoptVerdict::Verified);
     let remote = candidate.remote.as_ref().expect("remote evidence");
-    assert_eq!(remote.ref_kind, "tag");
+    assert_eq!(
+        remote.ref_kind,
+        skill_man_lib::seams::remote_provider::RefDisposition::Tag
+    );
     assert!(remote.original_install_commit_known);
 }
 

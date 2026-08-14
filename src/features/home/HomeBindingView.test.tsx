@@ -96,11 +96,13 @@ test("Choose… uses the injected directory picker", async () => {
     } as CommandFailure;
   });
   const pickDirectory = vi.fn(async () => "/Users/test/My Home");
-  renderView({ state: "unconfigured" }, { prepareHome: prepare }, pickDirectory);
-
-  await userEvent.click(
-    await screen.findByRole("button", { name: /Choose/ }),
+  renderView(
+    { state: "unconfigured" },
+    { prepareHome: prepare },
+    pickDirectory,
   );
+
+  await userEvent.click(await screen.findByRole("button", { name: /Choose/ }));
   await waitFor(() => expect(pickDirectory).toHaveBeenCalledTimes(1));
   await waitFor(() =>
     expect(prepare).toHaveBeenCalledWith("/Users/test/My Home"),
@@ -123,7 +125,9 @@ test("candidate rejection renders the typed reason with diagnostics", async () =
     await screen.findByRole("button", { name: /Use Default/ }),
   );
   expect(
-    await screen.findByRole("heading", { name: "Home setup could not complete" }),
+    await screen.findByRole("heading", {
+      name: "Home setup could not complete",
+    }),
   ).toBeInTheDocument();
   expect(
     screen.getByText("This location cannot be used as a Skill Man Home."),
@@ -155,12 +159,8 @@ test("legacy detected explains the one-time transition and binds in place", asyn
   expect(
     await screen.findByText(/A Legacy Home was found/),
   ).toBeInTheDocument();
-  await userEvent.click(
-    screen.getByRole("button", { name: /Use Default/ }),
-  );
-  expect(
-    await screen.findByText(/bound in place/),
-  ).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /Use Default/ }));
+  expect(await screen.findByText(/bound in place/)).toBeInTheDocument();
 });
 
 test("pending candidate routes to Continue and Cancel", async () => {
@@ -218,11 +218,11 @@ test("non-cancellable error is shown and back returns to the route", async () =>
     { cancelCandidate: cancel },
   );
 
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Cancel" }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   expect(
-    await screen.findByText("This setup cannot be cancelled: the location contains content that was not created by it."),
+    await screen.findByText(
+      "This setup cannot be cancelled: the location contains content that was not created by it.",
+    ),
   ).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(

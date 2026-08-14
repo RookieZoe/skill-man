@@ -1171,7 +1171,6 @@ button:active:not(:disabled) {
   text-wrap: pretty;
 }
 
-
 /* Evidence Ledger (spec §8.1): three columns, default fully expanded,
    reviewable at the 760×520 minimum; the dialog body owns the scroll. */
 .adopt-ledger-sheet {

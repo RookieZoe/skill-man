@@ -29,6 +29,14 @@ use std::path::PathBuf;
 
 use super::*;
 
+/// Lock + remote classification result for one candidate (spec §8.2).
+type LockClassification = (
+    AdoptVerdict,
+    Option<AdoptVerdictReason>,
+    Option<AdoptLockEvidence>,
+    Option<AdoptRemoteEvidence>,
+);
+
 /// Closed evidence verdicts (spec §8.2). `selectable` candidates carry an
 /// explicit Include control; Blocked/Deferred/Excluded never do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +127,7 @@ pub struct AdoptLockEvidence {
 pub struct AdoptRemoteEvidence {
     pub canonical_url: String,
     pub requested_ref: String,
-    pub ref_kind: String,
+    pub ref_kind: crate::seams::remote_provider::RefDisposition,
     pub anchor_commit: String,
     pub original_install_commit_known: bool,
     pub skill_path: String,
@@ -450,7 +458,7 @@ impl AdoptService {
                 Some(self.excluded_candidate(&entry, &final_entity));
             return;
         }
-        if final_entity.starts_with(&self.seam_canonical_root(&self.library_root)) {
+        if final_entity.starts_with(self.seam_canonical_root(&self.library_root)) {
             return;
         }
         if !self
@@ -766,15 +774,7 @@ impl AdoptService {
         installer_root: &Path,
         local_tree_hash: &str,
         workspaces: &mut HashMap<String, PathBuf>,
-    ) -> Result<
-        (
-            AdoptVerdict,
-            Option<AdoptVerdictReason>,
-            Option<AdoptLockEvidence>,
-            Option<AdoptRemoteEvidence>,
-        ),
-        AdoptError,
-    > {
+    ) -> Result<LockClassification, AdoptError> {
         // File-level faults block every candidate the lock's installer root
         // governs (ADR-0013 §2.1). The default lock at
         // `~/.agents/.skill-lock.json` is the only one governing the
@@ -983,12 +983,7 @@ impl AdoptService {
         let remote = AdoptRemoteEvidence {
             canonical_url: request.canonical_url,
             requested_ref: request.requested_ref,
-            ref_kind: match facts.disposition {
-                crate::seams::remote_provider::RefDisposition::Head => "head".into(),
-                crate::seams::remote_provider::RefDisposition::Branch => "branch".into(),
-                crate::seams::remote_provider::RefDisposition::Tag => "tag".into(),
-                crate::seams::remote_provider::RefDisposition::Commit => "commit".into(),
-            },
+            ref_kind: facts.disposition,
             anchor_commit: facts.anchor.anchor_commit,
             original_install_commit_known: facts.anchor.original_install_commit_known,
             skill_path: request.skill_path,

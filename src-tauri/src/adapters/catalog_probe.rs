@@ -48,7 +48,7 @@ impl CatalogProbe for SqliteCatalogProbe {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| map_query_error(error))?;
+            .map_err(map_query_error)?;
         let Some(schema_version) = schema_version else {
             return Ok(CatalogProbeReport {
                 exists: true,

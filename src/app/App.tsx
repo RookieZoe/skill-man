@@ -198,7 +198,9 @@ export function App({ client }: AppProps) {
   const [lockNotice, setLockNotice] = useState<string | null>(null);
   const [reselectPath, setReselectPath] = useState("");
   const [isAdoptOpen, setIsAdoptOpen] = useState(false);
-  const [adoptReport, setAdoptReport] = useState<AdoptEvidenceReport | null>(null);
+  const [adoptReport, setAdoptReport] = useState<AdoptEvidenceReport | null>(
+    null,
+  );
   const [adoptSelections, setAdoptSelections] = useState<
     Record<string, AdoptSelection>
   >({});

@@ -6891,15 +6891,15 @@ mod tests {
         );
         assert!(matches!(
             &chain.hops[0].kind,
-            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("../second-link")
+            EvidenceChainHopKind::Symlink { target } if *target == Path::new("../second-link")
         ));
         assert!(matches!(
             &chain.hops[1].kind,
-            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("first-link")
+            EvidenceChainHopKind::Symlink { target } if *target == Path::new("first-link")
         ));
         assert!(matches!(
             &chain.hops[2].kind,
-            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("shared/networking")
+            EvidenceChainHopKind::Symlink { target } if *target == Path::new("shared/networking")
         ));
         for hop in &chain.hops {
             assert!(hop.device != 0 || hop.inode != 0);

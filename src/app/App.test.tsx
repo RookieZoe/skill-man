@@ -10,8 +10,7 @@ function evidenceCandidate(
   canonicalEntity: string,
   overrides: Partial<AdoptEvidenceCandidate> = {},
 ): AdoptEvidenceCandidate {
-  const directoryName =
-    canonicalEntity.split("/").pop() ?? canonicalEntity;
+  const directoryName = canonicalEntity.split("/").pop() ?? canonicalEntity;
   return {
     canonicalEntity,
     directoryName,
@@ -47,9 +46,7 @@ function evidenceCandidate(
   };
 }
 
-function evidenceReport(
-  candidates: AdoptEvidenceCandidate[],
-): {
+function evidenceReport(candidates: AdoptEvidenceCandidate[]): {
   generation: number;
   truncated: boolean;
   lockFiles: never[];
@@ -610,9 +607,7 @@ test("Adopt existing item hands off to the Adopt flow with nothing selected", as
     name: /Include/,
   });
   expect(checkbox).not.toBeChecked();
-  expect(
-    screen.getByRole("button", { name: "Preview Adopt" }),
-  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Preview Adopt" })).toBeDisabled();
 });
 
 test("Adopt conflict handoff leaves an unsafe candidate unselected", async () => {
@@ -655,9 +650,7 @@ test("Adopt conflict handoff leaves an unsafe candidate unselected", async () =>
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
-  expect(
-    within(dialog).queryByRole("checkbox"),
-  ).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(dialog).toHaveTextContent("No selection control");
   expect(
     within(dialog).getByRole("button", { name: "Preview Adopt" }),
@@ -978,9 +971,7 @@ test("labels an Adopt preview failure separately from a scan failure", async () 
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   client.scanAdopt = async () =>
-    evidenceReport([
-      evidenceCandidate("~/.claude/skills/prompt-linter"),
-    ]);
+    evidenceReport([evidenceCandidate("~/.claude/skills/prompt-linter")]);
   client.planAdopt = async () => {
     throw {
       code: "validation",
@@ -1036,9 +1027,7 @@ test("leaves an unsafe Adopt candidate unselected and shows its scan reason", as
     name: "Adopt untracked Skills",
   });
 
-  expect(
-    within(dialog).queryByRole("checkbox"),
-  ).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(dialog).toHaveTextContent(
     "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
   );

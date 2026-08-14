@@ -106,7 +106,10 @@ fn cli_hash_at(repo: &Path, commit: &str, skill_path: &str) -> String {
     skill_man_lib::adapters::remote_provider::cli_skill_folder_hash(&destination).expect("cli hash")
 }
 
-fn lock_json(entries: &[(&str, &str, String, Option<&str>, String, String)]) -> String {
+/// (name, sourceType, sourceUrl, ref, skillPath, hash)
+type LockRow<'a> = (&'a str, &'a str, String, Option<&'a str>, String, String);
+
+fn lock_json(entries: &[LockRow<'_>]) -> String {
     let rendered = entries
         .iter()
         .map(|(name, source_type, url, reference, skill_path, hash)| {
@@ -229,7 +232,7 @@ impl Harness {
 
 /// The lock file bytes with a fixed extra top-level field, to prove the CAS
 /// rewrite preserves unknown JSON.
-fn lock_json_with_extra(entries: &[(&str, &str, String, Option<&str>, String, String)]) -> String {
+fn lock_json_with_extra(entries: &[LockRow<'_>]) -> String {
     let mut value: serde_json::Value =
         serde_json::from_str(&lock_json(entries)).expect("lock JSON");
     value

@@ -269,7 +269,7 @@ fn write_ledger(composition: &Composition, ledger: &RecoveryLedgerFile) {
 /// Simulate a crash with the given operation and cursor state plus whatever
 /// artifacts the scenario needs.
 fn crash_operation(
-    composition: &Composition,
+    _composition: &Composition,
     operation_id: &str,
     kind: &str,
     home_id: &str,
@@ -485,11 +485,10 @@ fn prepare_leaves_zero_artifacts_when_rejected() {
 #[test]
 fn cancel_of_interrupted_fresh_candidate_leaves_zero_artifacts() {
     let composition = compose(Some(volume()));
-    let candidate = composition
+    composition
         .binding
         .prepare_home(&composition.default_home)
         .expect("prepare");
-    let token = candidate.token.clone();
 
     // Simulate a crash right after the artifacts were created: the ledger
     // cursor is `created` and the Home exists.

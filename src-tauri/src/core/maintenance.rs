@@ -280,7 +280,6 @@ impl MaintenanceService {
     /// closed the Undo window. No long-term double owner or no-owner.
     fn recover_handoff_operations(&self, library_root: &Path) -> Result<(), MaintenanceError> {
         let journals = self.filesystem.list_handoff_journals(library_root)?;
-        let remotes_root = library_root.join("remotes");
         for mut journal in journals {
             let journal_view = journal.clone();
             for item in &mut journal.items {
@@ -297,9 +296,9 @@ impl MaintenanceService {
                         // CAS is the commit point; CAS 后只 roll-forward).
                         let releases_lock = !item.lock_path.as_os_str().is_empty();
                         let cas_happened = if releases_lock {
-                            self.filesystem
+                            !self
+                                .filesystem
                                 .lock_entry_present(&item.lock_path, &item.lock_entry_name)?
-                                == false
                         } else {
                             false
                         };

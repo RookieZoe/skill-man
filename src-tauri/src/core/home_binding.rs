@@ -438,14 +438,14 @@ impl HomeBindingService {
             };
             if !self
                 .filesystem
-                .path_is_directory(&parent)
+                .path_is_directory(parent)
                 .map_err(|error| HomeBindingError::Filesystem(error.to_string()))?
             {
                 return Err(self.invalid(CandidateInvalidReason::ParentMissing, &normalized));
             }
             if !self
                 .filesystem
-                .path_is_writable(&parent)
+                .path_is_writable(parent)
                 .map_err(|error| HomeBindingError::Filesystem(error.to_string()))?
             {
                 return Err(self.invalid(CandidateInvalidReason::ParentNotWritable, &normalized));

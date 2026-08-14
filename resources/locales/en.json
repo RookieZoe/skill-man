@@ -499,7 +499,7 @@
   "bootstrap.home.mode_copy": "Your Legacy Home is copied to this path; the original is left untouched and is never deleted.",
   "bootstrap.home.available_space": "Available space: {bytes}",
   "bootstrap.home.confirm_bind": "Bind Home",
-  "bootstrap.home.use_default": "Use Default (~/Library/Application Support/skill-man)",
+  "bootstrap.home.use_default": "Use Default",
   "bootstrap.home.use_default_legacy": "Use Default ({path})",
   "bootstrap.home.choose": "Choose…",
   "bootstrap.home.continue": "Continue",

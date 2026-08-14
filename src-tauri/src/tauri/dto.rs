@@ -1878,13 +1878,35 @@ impl From<crate::core::adopt::AdoptLockEvidence> for AdoptLockEvidenceDto {
     }
 }
 
+/// The requested ref disposition (spec §8.1): closed states mirroring
+/// `RefDisposition`, never free-form strings (ADR-0011).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKindDto {
+    Head,
+    Branch,
+    Tag,
+    Commit,
+}
+
+impl From<crate::seams::remote_provider::RefDisposition> for RefKindDto {
+    fn from(value: crate::seams::remote_provider::RefDisposition) -> Self {
+        match value {
+            crate::seams::remote_provider::RefDisposition::Head => RefKindDto::Head,
+            crate::seams::remote_provider::RefDisposition::Branch => RefKindDto::Branch,
+            crate::seams::remote_provider::RefDisposition::Tag => RefKindDto::Tag,
+            crate::seams::remote_provider::RefDisposition::Commit => RefKindDto::Commit,
+        }
+    }
+}
+
 /// The remote side of a closed loop (spec §8.1).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptRemoteEvidenceDto {
     pub canonical_url: String,
     pub requested_ref: String,
-    pub ref_kind: String,
+    pub ref_kind: RefKindDto,
     pub anchor_commit: String,
     pub original_install_commit_known: bool,
     pub skill_path: String,
@@ -1901,7 +1923,7 @@ impl From<crate::core::adopt::AdoptRemoteEvidence> for AdoptRemoteEvidenceDto {
         Self {
             canonical_url: value.canonical_url,
             requested_ref: value.requested_ref,
-            ref_kind: value.ref_kind,
+            ref_kind: value.ref_kind.into(),
             anchor_commit: value.anchor_commit,
             original_install_commit_known: value.original_install_commit_known,
             skill_path: value.skill_path,

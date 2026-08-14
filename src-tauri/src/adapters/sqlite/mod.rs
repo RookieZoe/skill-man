@@ -54,7 +54,7 @@ impl LegacyCatalogMigrator for SqliteLegacyCatalogMigrator {
         path: &Path,
         identity: &CatalogHomeIdentity,
     ) -> Result<PathBuf, LegacyMigrationError> {
-        SqliteCatalogStore::migrate_with_identity(path, identity).map(|backup| backup)
+        SqliteCatalogStore::migrate_with_identity(path, identity)
     }
 }
 
@@ -3336,6 +3336,7 @@ mod tests {
             .expect("create v5 schema");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn seed_v5_remote_skill(
         connection: &Connection,
         skill_id: &str,
