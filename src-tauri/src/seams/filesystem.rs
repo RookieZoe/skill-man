@@ -410,6 +410,70 @@ pub struct ScannedSkillEntry {
     pub dangling: bool,
 }
 
+/// One step of a bounded evidence chain walk (spec §8.1). The walk records
+/// every hop with its raw symlink target and entry identity; a failure stops
+/// at the exact hop without guessing a final entity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EvidenceChainHopKind {
+    /// A real directory component on the path to the entity.
+    Directory,
+    /// A symlink component; `target` is the raw target text as stored on
+    /// disk, never resolved or rewritten.
+    Symlink { target: PathBuf },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceChainHop {
+    pub path: PathBuf,
+    pub kind: EvidenceChainHopKind,
+    pub device: u64,
+    pub inode: u64,
+}
+
+/// Closed reasons why a chain walk stops before a final entity (spec §8.1):
+/// every one yields a Blocked verdict and never a partial fingerprint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChainFault {
+    /// The target of the hop does not exist.
+    Dangling { at: PathBuf },
+    /// The walk revisited a symlink it already followed.
+    Cycle { at: PathBuf },
+    /// The walk exceeded the bounded hop limit (16).
+    HopLimit { at: PathBuf },
+    /// A path component or symlink target is not valid UTF-8.
+    NonUtf8 { at: PathBuf },
+    /// A component could not be inspected or read.
+    ReadFailed { at: PathBuf, detail: String },
+    /// A component exists but is not a directory.
+    NotDirectory { at: PathBuf },
+    /// The entry changed identity while it was being walked (TOCTOU).
+    IdentityReplaced { at: PathBuf },
+}
+
+/// The read-only result of walking one Adopt appearance to its final entity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceChain {
+    pub entry_path: PathBuf,
+    pub entry_device: u64,
+    pub entry_inode: u64,
+    /// Hops in walk order; the first hop is the entry itself when it is a
+    /// symlink.
+    pub hops: Vec<EvidenceChainHop>,
+    /// The resolved final entity; `None` while `fault` is present.
+    pub final_entity: Option<PathBuf>,
+    pub fault: Option<ChainFault>,
+}
+
+/// One skill-named entry discovered in an Adopt scan source, with its full
+/// evidence chain (spec §8.1). Non-UTF-8 entry names are reported as a
+/// `NonUtf8` fault at the entry hop instead of being silently skipped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedSkillEvidence {
+    pub entry_path: PathBuf,
+    pub name: String,
+    pub chain: EvidenceChain,
+}
+
 #[derive(Debug, Error)]
 pub enum FileSystemError {
     #[error("{operation} failed for '{}': {source}", path.display())]
@@ -739,6 +803,29 @@ pub trait FileSystem: Send + Sync {
     /// with `dangling = true` and no final entity. Files are skipped.
     fn scan_skills_directory(&self, path: &Path)
     -> Result<Vec<ScannedSkillEntry>, FileSystemError>;
+
+    /// Walk one Adopt appearance to its final entity with full per-hop
+    /// evidence (spec §8.1): bounded at 16 hops, cycle-detecting, and
+    /// failing at the exact hop on dangling/cycle/hop-limit/non-UTF-8/read
+    /// errors or identity replacement. Never produces a partial fingerprint.
+    fn inspect_evidence_chain(&self, path: &Path) -> Result<EvidenceChain, FileSystemError>;
+
+    /// Enumerate the Skill entries of an Adopt scan source with their full
+    /// evidence chains; a non-UTF-8 entry name yields a `NonUtf8` fault
+    /// entry instead of being dropped.
+    fn scan_skills_evidence(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<ScannedSkillEvidence>, FileSystemError>;
+
+    /// Create a disposable temp workspace for read-only Adopt verification
+    /// (remote mirrors and materialized subtrees). The caller MUST discard
+    /// it with `discard_temp_workspace`.
+    fn create_temp_workspace(&self, purpose: &str) -> Result<PathBuf, FileSystemError>;
+
+    /// Remove a temp workspace created by `create_temp_workspace`; refuses
+    /// to remove anything outside the Skill Man temp namespace.
+    fn discard_temp_workspace(&self, path: &Path) -> Result<(), FileSystemError>;
 
     /// Create an Agent skills directory at a configured path (explicit
     /// user-confirmed onboarding action, spec §8.7); the path must not exist.

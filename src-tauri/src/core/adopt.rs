@@ -1,22 +1,21 @@
-//! Adopt module (ADR-0005): scan Untracked Skills in Agent and shared
-//! directories, plan per-Skill transactions, apply them with a durable
-//! journal, and undo a whole batch before the result window closes.
-//!
-//! Every candidate is one Skill with one canonical final entity. Real
-//! directories migrate into the Library (file Install); symlinks whose final
-//! entity lies outside every Agent directory register as Links. Shared
-//! entries (`~/.agents/skills`) are split into per-Agent Activations. Each
-//! Skill is its own transaction: a failure rolls back only that Skill.
+//! Adopt module (ADR-0005, ADR-0013, spec §8): the read-only evidence
+//! ledger scan/plan (see `adopt_evidence`) classifies every candidate as
+//! Local / Verified / Modified / Conflict / Deferred / Blocked / Excluded
+//! and freezes evidence generation-bound plans; `apply` executes stable
+//! Local Link registrations with the durable per-Skill journal machinery
+//! below, and `undo`/`finalize` close the result window. Real-directory
+//! migration and lock/Home ownership changes were superseded by the vNext
+//! Local Link model and the Ownership Handoff ticket respectively.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::core::domain::{AgentId, AgentKind, SkillId, parse_skill_metadata, skill_identity_key};
+use crate::core::domain::{AgentId, AgentKind, SkillId, parse_skill_metadata};
 use crate::core::import::LibraryConflict;
 use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
 use crate::seams::adopt_store::{
@@ -26,9 +25,17 @@ use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceKind as JournalAppearanceKind,
     AdoptAppearanceStep, AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind,
-    AdoptJournalPhase, DirectoryFingerprint, FileSystem, FileSystemError, LinkSourceEntryKind,
-    StagedTreeSnapshot,
+    AdoptJournalPhase, DirectoryFingerprint, FileSystem, FileSystemError, StagedTreeSnapshot,
 };
+use crate::seams::installer_lock_store::{
+    EmptyInstallerLockStore, InstallerLockError, InstallerLockStore,
+};
+use crate::seams::remote_provider::{
+    RemoteProvider, RemoteProviderError, UnavailableRemoteProvider,
+};
+
+mod adopt_evidence;
+pub use adopt_evidence::*;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 const DISK_SPACE_RESERVE_BYTES: u64 = 100 * 1024 * 1024;
@@ -50,82 +57,11 @@ pub struct AdoptAppearance {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AdoptRisk {
-    None,
-    /// The entity lives outside the home directory or in an installer-managed
-    /// location; adoptable only with explicit confirmation.
-    External,
-    /// The entry is dangling: no final entity exists, so it cannot be Adopted.
-    Broken,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AdoptScanReport {
-    pub candidates: Vec<AdoptCandidate>,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AdoptRiskReason {
-    /// The entry is dangling: its target no longer exists.
-    Dangling,
-    /// The final entity lies outside the home directory.
-    OutsideHome { path: PathBuf },
-    /// The final entity lives in an installer-managed location.
-    InstallerManaged { path: PathBuf },
-    /// Raw filesystem validation fact (never App Copy).
-    UnsafeTree(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdoptCandidate {
-    /// The canonical final entity; for Broken candidates the entry path.
-    pub canonical_entity: PathBuf,
-    /// Product identity: the lexicographically first directory name.
-    pub directory_name: String,
-    pub directory_names: Vec<String>,
-    pub appearances: Vec<AdoptAppearance>,
-    pub risk: AdoptRisk,
-    pub risk_reason: Option<AdoptRiskReason>,
-    /// A Managed Skill already uses this identity with a different entity.
-    pub conflict: Option<LibraryConflict>,
-    pub adoptable: bool,
-    /// For shared candidates: detected Agents that read the shared directory.
-    pub suggested_agent_ids: Vec<AgentId>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdoptPlanKind {
     /// The entity is moved into the Library (file Install).
     Migrate,
     /// The entity stays outside; the Library records a pointer (Link).
     Link,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdoptSelection {
-    pub canonical_entity: PathBuf,
-    /// Overrides the suggested Agents for shared candidates.
-    pub agent_ids: Vec<AgentId>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdoptPlanItem {
-    pub directory_name: String,
-    pub canonical_entity: PathBuf,
-    pub kind: AdoptPlanKind,
-    pub final_entity_path: PathBuf,
-    pub appearances: Vec<AdoptAppearance>,
-    pub target_agents: Vec<AdoptAgent>,
-    pub adoptable: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdoptPlan {
-    pub plan_token: String,
-    pub items: Vec<AdoptPlanItem>,
-    pub can_apply: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,6 +107,8 @@ pub enum AdoptError {
     #[error(transparent)]
     Store(#[from] AdoptStoreError),
     #[error(transparent)]
+    Lock(#[from] InstallerLockError),
+    #[error(transparent)]
     FileSystem(#[from] FileSystemError),
     #[error("internal Adopt error: {0}")]
     Internal(String),
@@ -194,6 +132,18 @@ struct PlannedAdoptItem {
     journal: AdoptJournalItem,
 }
 
+/// The per-item input the durable batch machinery needs; produced by the
+/// evidence plan for stable Local Link intents.
+#[derive(Clone)]
+struct PlanInputItem {
+    directory_name: String,
+    kind: AdoptPlanKind,
+    canonical_entity: PathBuf,
+    final_entity_path: PathBuf,
+    appearances: Vec<AdoptAppearance>,
+    target_agents: Vec<AdoptAgent>,
+}
+
 #[derive(Clone)]
 struct PlannedAdoptBatch {
     operation_id: String,
@@ -207,12 +157,17 @@ pub struct AdoptService {
     store: Arc<dyn AdoptStore>,
     filesystem: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
+    lock_store: Arc<dyn InstallerLockStore>,
+    remote_provider: Arc<dyn RemoteProvider>,
     library_root: PathBuf,
     home_directory: PathBuf,
     plans: Mutex<HashMap<String, PlannedAdoptBatch>>,
+    evidence_plans: Mutex<HashMap<String, EvidencePlannedBatch>>,
     applied: Mutex<HashMap<String, PlannedAdoptBatch>>,
     next_plan_id: AtomicU64,
     next_skill_id: AtomicU64,
+    evidence_generation: AtomicU64,
+    last_report: Mutex<Option<AdoptEvidenceReport>>,
     plan_ttl: Duration,
     write_gate: Arc<WriteGate>,
 }
@@ -230,12 +185,21 @@ impl AdoptService {
             store,
             filesystem,
             clock,
+            // Fail closed by default: without an explicit lock store the
+            // scan sees no lock declarations (Local verdicts); without an
+            // explicit provider no remote verification can fabricate
+            // evidence. The composition root wires the system adapters.
+            lock_store: Arc::new(EmptyInstallerLockStore),
+            remote_provider: Arc::new(UnavailableRemoteProvider),
             library_root,
             home_directory,
             plans: Mutex::new(HashMap::new()),
+            evidence_plans: Mutex::new(HashMap::new()),
             applied: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             next_skill_id: AtomicU64::new(1),
+            evidence_generation: AtomicU64::new(0),
+            last_report: Mutex::new(None),
             plan_ttl: DEFAULT_PLAN_TTL,
             write_gate: Arc::new(WriteGate::open_for_tests()),
         }
@@ -246,282 +210,31 @@ impl AdoptService {
         self
     }
 
-    /// Scan every detected Agent skills directory plus the shared/legacy
-    /// source (`~/.agents/skills`), grouping entries by canonical final
-    /// entity. Library-owned entries, dot-prefixed entries and Codex's
-    /// `.system` are excluded; entries without a readable SKILL.md are not
-    /// candidates. The report is truncated at `MAX_ADOPT_SKILLS` with the
-    /// truncation flagged (spec §6.6), never silently.
-    pub fn scan(&self) -> Result<AdoptScanReport, AdoptError> {
-        let agents = self.store.list_agents()?;
-        // The canonical home (e.g. /private/var on macOS) is the boundary for
-        // external-risk classification; canonical entities always live under it.
-        let canonical_home = self
-            .home_directory
-            .canonicalize()
-            .unwrap_or_else(|_| self.home_directory.clone());
-        let mut grouped: BTreeMap<PathBuf, GroupedCandidate> = BTreeMap::new();
-        for agent in &agents {
-            if !agent.detected {
-                continue;
-            }
-            for entry in self.filesystem.scan_skills_directory(&agent.skills_path)? {
-                self.accumulate(entry, Some(agent), false, &mut grouped)?;
-            }
-        }
-        let shared_dir = self.home_directory.join(".agents").join("skills");
-        for entry in self.filesystem.scan_skills_directory(&shared_dir)? {
-            self.accumulate(entry, None, true, &mut grouped)?;
-        }
-        let suggested = agents
-            .iter()
-            .filter(|agent| {
-                agent.detected
-                    && matches!(agent.kind, AgentKind::ClaudePreset | AgentKind::CodexPreset)
-            })
-            .map(|agent| agent.agent_id.clone())
-            .collect::<Vec<_>>();
-        let mut candidates = Vec::new();
-        for (entity, group) in grouped {
-            if !group.broken_entries.is_empty() {
-                let entry = &group.broken_entries[0];
-                candidates.push(AdoptCandidate {
-                    canonical_entity: entity,
-                    directory_name: entry.name.clone(),
-                    directory_names: vec![entry.name.clone()],
-                    appearances: Vec::new(),
-                    risk: AdoptRisk::Broken,
-                    risk_reason: Some(AdoptRiskReason::Dangling),
-                    conflict: None,
-                    adoptable: false,
-                    suggested_agent_ids: Vec::new(),
-                });
-                continue;
-            }
-            let directory_names = group.directory_names.iter().cloned().collect::<Vec<_>>();
-            let directory_name = directory_names[0].clone();
-            let conflict = self
-                .store
-                .find_library_conflict(&skill_identity_key(&directory_name))?
-                .filter(|conflict| conflict.final_entity_path != entity)
-                .map(|conflict| LibraryConflict {
-                    existing_skill_id: conflict.skill_id,
-                    directory_name: conflict.directory_name,
-                });
-            let requires_migration = group
-                .appearances
-                .iter()
-                .any(|appearance| appearance.kind == AdoptAppearanceKind::RealDirectory)
-                || agents
-                    .iter()
-                    .any(|agent| entity.starts_with(&agent.skills_path));
-            let unsafe_tree_reason = if requires_migration {
-                self.filesystem
-                    .staged_tree_snapshot(&entity)
-                    .map_err(|error| error.to_string())
-                    .and_then(|snapshot| {
-                        crate::core::import::validate_staged_tree(
-                            self.filesystem.as_ref(),
-                            &snapshot,
-                        )
-                        .map_err(|error| error.to_string())
-                    })
-                    .err()
-            } else {
-                None
-            };
-            let (risk, risk_reason) = match unsafe_tree_reason {
-                Some(reason) => (AdoptRisk::Broken, Some(AdoptRiskReason::UnsafeTree(reason))),
-                None => classify_risk(&entity, &canonical_home),
-            };
-            let shared = group.appearances.iter().any(|appearance| appearance.shared);
-            candidates.push(AdoptCandidate {
-                canonical_entity: entity,
-                directory_name,
-                directory_names,
-                appearances: group.appearances,
-                risk,
-                risk_reason,
-                conflict: conflict.clone(),
-                adoptable: conflict.is_none() && risk != AdoptRisk::Broken,
-                suggested_agent_ids: if shared {
-                    suggested.clone()
-                } else {
-                    Vec::new()
-                },
-            });
-        }
-        candidates.sort_by(|left, right| left.directory_name.cmp(&right.directory_name));
-        let truncated = candidates.len() > MAX_ADOPT_SKILLS;
-        candidates.truncate(MAX_ADOPT_SKILLS);
-        Ok(AdoptScanReport {
-            candidates,
-            truncated,
-        })
+    pub fn with_lock_store(mut self, lock_store: Arc<dyn InstallerLockStore>) -> Self {
+        self.lock_store = lock_store;
+        self
     }
 
-    fn accumulate(
-        &self,
-        entry: crate::seams::filesystem::ScannedSkillEntry,
-        agent: Option<&AdoptAgent>,
-        shared: bool,
-        grouped: &mut BTreeMap<PathBuf, GroupedCandidate>,
-    ) -> Result<(), AdoptError> {
-        if entry.name.starts_with('.') {
-            return Ok(());
-        }
-        if let Some(agent) = agent {
-            if agent.kind == AgentKind::CodexPreset && entry.name == ".system" {
-                return Ok(());
-            }
-        }
-        let Some(final_entity) = entry.final_entity_path.clone() else {
-            grouped
-                .entry(entry.entry_path.clone())
-                .or_default()
-                .broken_entries
-                .push(entry);
-            return Ok(());
-        };
-        if final_entity.starts_with(&self.library_root) {
-            return Ok(());
-        }
-        if !self.filesystem.skill_directory_is_readable(&final_entity)? {
-            return Ok(());
-        }
-        let group = grouped.entry(final_entity).or_default();
-        group.directory_names.insert(entry.name.clone());
-        group.appearances.push(AdoptAppearance {
-            entry_path: entry.entry_path,
-            kind: match entry.kind {
-                LinkSourceEntryKind::Directory => AdoptAppearanceKind::RealDirectory,
-                LinkSourceEntryKind::Symlink { target } => AdoptAppearanceKind::Symlink {
-                    original_target: target,
-                },
-            },
-            agent_id: agent.map(|agent| agent.agent_id.clone()),
-            shared,
-        });
-        Ok(())
-    }
-
-    /// Preview an Adopt batch: re-scan, validate and fingerprint every source,
-    /// but do not mutate the source, staging, journal or catalog. Apply repeats
-    /// the preflight and persists its intent before the first filesystem write.
-    pub fn plan(&self, selections: &[AdoptSelection]) -> Result<AdoptPlan, AdoptError> {
-        self.ensure_writes_ready()?;
-        let agents = self.store.list_agents()?;
-        let candidates = self.scan()?.candidates;
-        let mut planned = Vec::with_capacity(selections.len());
-        let mut can_apply = true;
-        for selection in selections {
-            let Some(candidate) = candidates
-                .iter()
-                .find(|candidate| candidate.canonical_entity == selection.canonical_entity)
-            else {
-                planned.push(AdoptPlanItem {
-                    directory_name: String::new(),
-                    canonical_entity: selection.canonical_entity.clone(),
-                    kind: AdoptPlanKind::Migrate,
-                    final_entity_path: PathBuf::new(),
-                    appearances: Vec::new(),
-                    target_agents: Vec::new(),
-                    adoptable: false,
-                    error: Some("the candidate disappeared since the scan; rescan first".into()),
-                });
-                can_apply = false;
-                continue;
-            };
-            if !candidate.adoptable {
-                planned.push(AdoptPlanItem {
-                    directory_name: candidate.directory_name.clone(),
-                    canonical_entity: candidate.canonical_entity.clone(),
-                    kind: AdoptPlanKind::Migrate,
-                    final_entity_path: PathBuf::new(),
-                    appearances: candidate.appearances.clone(),
-                    target_agents: Vec::new(),
-                    adoptable: false,
-                    error: Some(if candidate.risk == AdoptRisk::Broken {
-                        "Broken entries cannot be Adopted; repair or remove them first".into()
-                    } else if let Some(conflict) = &candidate.conflict {
-                        format!(
-                            "Managed Skill '{}' already uses this directory identity",
-                            conflict.directory_name
-                        )
-                    } else {
-                        "this candidate is not adoptable".into()
-                    }),
-                });
-                can_apply = false;
-                continue;
-            }
-            let inside_agent_dir = agents.iter().any(|agent| {
-                agent.detected && candidate.canonical_entity.starts_with(&agent.skills_path)
-            });
-            let has_real_directory = candidate
-                .appearances
-                .iter()
-                .any(|appearance| appearance.kind == AdoptAppearanceKind::RealDirectory);
-            let kind = if has_real_directory || inside_agent_dir {
-                AdoptPlanKind::Migrate
-            } else {
-                AdoptPlanKind::Link
-            };
-            let final_entity_path = if matches!(kind, AdoptPlanKind::Migrate) {
-                self.library_root
-                    .join("skills")
-                    .join(&candidate.directory_name)
-            } else {
-                candidate.canonical_entity.clone()
-            };
-            let target_agents = if candidate
-                .appearances
-                .iter()
-                .any(|appearance| appearance.shared)
-            {
-                let ids = if selection.agent_ids.is_empty() {
-                    candidate.suggested_agent_ids.clone()
-                } else {
-                    selection.agent_ids.clone()
-                };
-                agents
-                    .iter()
-                    .filter(|agent| ids.contains(&agent.agent_id))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            planned.push(AdoptPlanItem {
-                directory_name: candidate.directory_name.clone(),
-                canonical_entity: candidate.canonical_entity.clone(),
-                kind,
-                final_entity_path,
-                appearances: candidate.appearances.clone(),
-                target_agents,
-                adoptable: true,
-                error: None,
-            });
-        }
-        if !can_apply {
-            return Ok(AdoptPlan {
-                plan_token: String::new(),
-                items: planned,
-                can_apply: false,
-            });
-        }
-        self.build_planned_batch(planned, &agents)
+    pub fn with_remote_provider(mut self, remote_provider: Arc<dyn RemoteProvider>) -> Self {
+        self.remote_provider = remote_provider;
+        self
     }
 
     fn build_planned_batch(
         &self,
-        items: Vec<AdoptPlanItem>,
+        plan_token: &str,
+        items: Vec<PlanInputItem>,
         agents: &[AdoptAgent],
-    ) -> Result<AdoptPlan, AdoptError> {
+    ) -> Result<PlannedAdoptBatch, AdoptError> {
+        // The operation id derives from the plan token so every plan maps to
+        // exactly one durable operation id (deterministic under a fixed
+        // clock, stable across plan/batch registration).
+        let plan_number = plan_token
+            .strip_prefix("adopt-plan-")
+            .unwrap_or("0");
         let operation_id = format!(
-            "adopt-{}-{}",
-            self.clock.unix_epoch_nanos(),
-            self.next_plan_id.fetch_add(1, Ordering::Relaxed)
+            "adopt-{}-{plan_number}",
+            self.clock.unix_epoch_nanos()
         );
         let staging_operation_root = self.library_root.join("staging").join(&operation_id);
         let mut planned_items = Vec::with_capacity(items.len());
@@ -681,29 +394,6 @@ impl AdoptService {
                 .map(|item| item.journal.clone())
                 .collect(),
         };
-        let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
-        let plan_token = format!("adopt-plan-{plan_number}");
-        let plan_items = planned_items
-            .iter()
-            .map(|item| AdoptPlanItem {
-                directory_name: item.directory_name.clone(),
-                canonical_entity: item.canonical_entity.clone(),
-                kind: item.kind,
-                final_entity_path: item.final_entity_path.clone(),
-                appearances: item.appearances.clone(),
-                target_agents: agents
-                    .iter()
-                    .filter(|agent| {
-                        item.activations
-                            .iter()
-                            .any(|activation| activation.agent_id == agent.agent_id.0)
-                    })
-                    .cloned()
-                    .collect(),
-                adoptable: true,
-                error: None,
-            })
-            .collect();
         let batch = PlannedAdoptBatch {
             operation_id,
             items: planned_items,
@@ -715,29 +405,32 @@ impl AdoptService {
             .plans
             .lock()
             .map_err(|_| AdoptError::Internal("Adopt plan lock poisoned".into()))?;
-        plans.insert(plan_token.clone(), batch);
-        Ok(AdoptPlan {
-            plan_token,
-            items: plan_items,
-            can_apply: true,
-        })
+        plans.insert(plan_token.to_owned(), batch.clone());
+        Ok(batch)
     }
 
-    /// Discard a read-only Preview. Apply owns all staging and journal writes.
-    pub fn cancel(&self, plan_token: &str) -> Result<bool, AdoptError> {
-        let batch = self
-            .plans
-            .lock()
-            .map_err(|_| AdoptError::Internal("Adopt plan lock poisoned".into()))?
-            .remove(plan_token);
-        Ok(batch.is_some())
-    }
-
-    /// Apply the planned batch. Each Skill is its own transaction with its
+    /// Apply a plan. Evidence plans are freeze-checked first (any rescan or
+    /// external change makes them stale before any write), then the durable
+    /// per-Skill machinery runs: each Skill is its own transaction with its
     /// own rollback; failures leave the other Skills (and their Activations)
     /// intact.
     pub fn apply(&self, plan_token: &str) -> Result<AdoptResult, AdoptError> {
         self.ensure_writes_ready()?;
+        // Evidence dispatch: re-verify the frozen world for every applyable
+        // item before the first write (spec §8.1 TOCTOU row).
+        {
+            let mut evidence_plans = self
+                .evidence_plans
+                .lock()
+                .map_err(|_| AdoptError::Internal("Adopt evidence plan lock poisoned".into()))?;
+            if let Some(batch) = evidence_plans.remove(plan_token) {
+                for item in &batch.items {
+                    if matches!(item.intent, AdoptPlanIntent::LocalLink) {
+                        self.recheck_frozen_evidence(&item.frozen)?;
+                    }
+                }
+            }
+        }
         let mut plans = self
             .plans
             .lock()
@@ -1352,69 +1045,8 @@ impl AdoptService {
     }
 }
 
-#[derive(Default)]
-struct GroupedCandidate {
-    directory_names: BTreeSet<String>,
-    appearances: Vec<AdoptAppearance>,
-    broken_entries: Vec<crate::seams::filesystem::ScannedSkillEntry>,
-}
-
-fn classify_risk(entity: &Path, home_directory: &Path) -> (AdoptRisk, Option<AdoptRiskReason>) {
-    if !entity.starts_with(home_directory) {
-        return (
-            AdoptRisk::External,
-            Some(AdoptRiskReason::OutsideHome {
-                path: entity.to_path_buf(),
-            }),
-        );
-    }
-    const EXTERNAL_MARKERS: [&str; 4] = ["Caches", "node_modules", ".Trash", "Downloads"];
-    for component in entity.components() {
-        if let Component::Normal(value) = component {
-            if EXTERNAL_MARKERS.iter().any(|marker| value == *marker) {
-                return (
-                    AdoptRisk::External,
-                    Some(AdoptRiskReason::InstallerManaged {
-                        path: entity.to_path_buf(),
-                    }),
-                );
-            }
-        }
-    }
-    (AdoptRisk::None, None)
-}
-
 fn adopt_validation(error: crate::core::import::ImportError) -> AdoptError {
     AdoptError::Validation(error.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::classify_risk;
-    use std::path::Path;
 
-    #[test]
-    fn risk_classifies_external_and_managed_locations() {
-        let home = Path::new("/Users/test");
-        assert_eq!(
-            classify_risk(Path::new("/Users/test/.claude/skills/foo"), home).0,
-            super::AdoptRisk::None
-        );
-        assert_eq!(
-            classify_risk(Path::new("/Users/other/.claude/skills/foo"), home).0,
-            super::AdoptRisk::External
-        );
-        assert_eq!(
-            classify_risk(Path::new("/Users/test/Library/Caches/installer/foo"), home).0,
-            super::AdoptRisk::External
-        );
-        assert_eq!(
-            classify_risk(Path::new("/Users/test/projects/node_modules/foo"), home).0,
-            super::AdoptRisk::External
-        );
-        assert_eq!(
-            classify_risk(Path::new("/Users/test/projects/foo"), home).0,
-            super::AdoptRisk::None
-        );
-    }
-}

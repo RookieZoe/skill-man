@@ -13,12 +13,13 @@ use crate::seams::filesystem::{
     ActivationEntrySnapshot, ActivationRecoveryBaseline, ActivationReplaceJournal,
     ActivationReplacePhase, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
     AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
-    DirectoryEntry, DirectoryFingerprint, FileImportJournal, FileImportJournalPhase,
-    FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind,
-    LinkSourceHop, LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry,
-    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry,
-    RemoveJournal, RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, SkillFingerprint,
-    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
+    ChainFault, DirectoryEntry, DirectoryFingerprint, EvidenceChain, EvidenceChainHop,
+    EvidenceChainHopKind, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
+    FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
+    LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry, RelocateJournal,
+    RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry, RemoveJournal,
+    RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
+    SkillFingerprint, StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -2652,6 +2653,134 @@ impl FileSystem for MacOsFileSystem {
         Ok(entries)
     }
 
+    fn inspect_evidence_chain(
+        &self,
+        path: &Path,
+    ) -> Result<EvidenceChain, FileSystemError> {
+        resolve_evidence_chain(path)
+    }
+
+    fn scan_skills_evidence(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<ScannedSkillEvidence>, FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        let mut entries = Vec::new();
+        let directory = match fs::read_dir(&path) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Adopt evidence scan source",
+                    path,
+                    source,
+                });
+            }
+        };
+        for entry in directory {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Adopt evidence scan source",
+                path: path.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&entry_path).map_err(|source| FileSystemError::Io {
+                    operation: "inspect Adopt evidence scan entry",
+                    path: entry_path.clone(),
+                    source,
+                })?;
+            if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let name = match entry_path.file_name().and_then(|name| name.to_str()) {
+                Some(name) => name.to_owned(),
+                None => {
+                    let display_name = entry_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    entries.push(ScannedSkillEvidence {
+                        entry_path: entry_path.clone(),
+                        name: display_name,
+                        chain: EvidenceChain {
+                            entry_path: entry_path.clone(),
+                            entry_device: metadata.dev(),
+                            entry_inode: metadata.ino(),
+                            hops: Vec::new(),
+                            final_entity: None,
+                            fault: Some(ChainFault::NonUtf8 { at: entry_path }),
+                        },
+                    });
+                    continue;
+                }
+            };
+            let chain = resolve_evidence_chain(&entry_path)?;
+            entries.push(ScannedSkillEvidence {
+                entry_path,
+                name,
+                chain,
+            });
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    fn create_temp_workspace(&self, purpose: &str) -> Result<PathBuf, FileSystemError> {
+        let safe_purpose: String = purpose
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "skill-man-{safe_purpose}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).map_err(|source| FileSystemError::Io {
+            operation: "create Adopt evidence temp workspace",
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
+    fn discard_temp_workspace(&self, path: &Path) -> Result<(), FileSystemError> {
+        let normalized = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
+        let canonical_temp = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        if !normalized.starts_with(&canonical_temp) {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            });
+        }
+        let name = normalized
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.starts_with("skill-man-") {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            });
+        }
+        fs::remove_dir_all(&normalized).map_err(|source| FileSystemError::Io {
+            operation: "discard Adopt evidence temp workspace",
+            path: normalized,
+            source,
+        })
+    }
+
     fn stage_external_directory(
         &self,
         source: &Path,
@@ -3527,6 +3656,179 @@ fn resolve_link_source_directory(
         }
     }
     Ok((resolved, symlink_chain))
+}
+
+/// Full per-hop evidence walk (spec §8.1): bounded at 16 hops,
+/// cycle-detecting, and stopping at the exact failing hop on dangling,
+/// cycle, hop-limit, non-UTF-8, read errors, non-directory components or
+/// entry identity replacement. Never guesses a final entity; `fault` is set
+/// exactly when no final entity was proven.
+///
+/// The entry's parent is canonicalized before walking so system plumbing
+/// symlinks (macOS `/var -> private/var`) never appear as hops; the chain
+/// records only the appearance's own symlinks and their targets. Cycle
+/// detection uses the *active* expansion chain (the symlinks whose targets
+/// are still being consumed), so a shared absolute prefix like `/var` is
+/// followed again legally while `a -> b -> a` stops at the repeat.
+pub(crate) fn resolve_evidence_chain(
+    source_path: &Path,
+) -> Result<EvidenceChain, FileSystemError> {
+    let entry_metadata = fs::symlink_metadata(source_path).map_err(|source| FileSystemError::Io {
+        operation: "inspect Adopt evidence entry",
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    let Some(entry_name) = source_path.file_name() else {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: source_path.to_path_buf(),
+        });
+    };
+    let entry_name = entry_name.to_os_string();
+    let canonical_start = match source_path.parent() {
+        Some(parent) => fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+        None => PathBuf::from("/"),
+    };
+    let mut hops: Vec<EvidenceChainHop> = Vec::new();
+    let mut active: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    let mut pending: VecDeque<_> = owned_components(Path::new(&entry_name)).into();
+    // Walk starts at the canonical parent (system symlinks such as macOS
+    // `/var -> private/var` never become hops) and only the entry name's
+    // own components are resolved from there.
+    let mut resolved = canonical_start;
+    let fault = walk_evidence_components(
+        &mut pending,
+        &mut resolved,
+        &mut hops,
+        &mut active,
+        0,
+    );
+    Ok(EvidenceChain {
+        entry_path: source_path.to_path_buf(),
+        entry_device: entry_metadata.dev(),
+        entry_inode: entry_metadata.ino(),
+        hops,
+        final_entity: if fault.is_none() {
+            Some(resolved)
+        } else {
+            None
+        },
+        fault,
+    })
+}
+
+/// Walk the pending path components, expanding symlinks recursively.
+/// Returns `Some(fault)` exactly when the walk must stop; the hop count and
+/// recursion depth are bounded by `MAX_LINK_SOURCE_DEPTH`.
+fn walk_evidence_components(
+    pending: &mut VecDeque<OwnedPathComponent>,
+    resolved: &mut PathBuf,
+    hops: &mut Vec<EvidenceChainHop>,
+    active: &mut std::collections::HashSet<(u64, u64)>,
+    depth: usize,
+) -> Option<ChainFault> {
+    while let Some(component) = pending.pop_front() {
+        match component {
+            OwnedPathComponent::Root => *resolved = PathBuf::from("/"),
+            OwnedPathComponent::Parent => {
+                resolved.pop();
+            }
+            OwnedPathComponent::Normal(value) => {
+                if value.to_str().is_none() {
+                    return Some(ChainFault::NonUtf8 {
+                        at: resolved.join(&value),
+                    });
+                }
+                let candidate = resolved.join(&value);
+                let metadata = match fs::symlink_metadata(&candidate) {
+                    Ok(metadata) => metadata,
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        return Some(ChainFault::Dangling { at: candidate });
+                    }
+                    Err(source) => {
+                        return Some(ChainFault::ReadFailed {
+                            at: candidate.clone(),
+                            detail: source.to_string(),
+                        });
+                    }
+                };
+                if metadata.file_type().is_symlink() {
+                    if depth == MAX_LINK_SOURCE_DEPTH {
+                        return Some(ChainFault::HopLimit { at: candidate });
+                    }
+                    let target = match fs::read_link(&candidate) {
+                        Ok(target) => target,
+                        Err(source) => {
+                            return Some(ChainFault::ReadFailed {
+                                at: candidate.clone(),
+                                detail: source.to_string(),
+                            });
+                        }
+                    };
+                    if target.to_str().is_none() {
+                        return Some(ChainFault::NonUtf8 {
+                            at: candidate.clone(),
+                        });
+                    }
+                    let identity = (metadata.dev(), metadata.ino());
+                    if !active.insert(identity) {
+                        return Some(ChainFault::Cycle { at: candidate.clone() });
+                    }
+                    // TOCTOU guard: the entry must not have been replaced
+                    // while its target was being read.
+                    match fs::symlink_metadata(&candidate) {
+                        Ok(rechecked)
+                            if rechecked.dev() == metadata.dev()
+                                && rechecked.ino() == metadata.ino() => {}
+                        Ok(_) => {
+                            return Some(ChainFault::IdentityReplaced {
+                                at: candidate.clone(),
+                            });
+                        }
+                        Err(source) => {
+                            return Some(ChainFault::ReadFailed {
+                                at: candidate.clone(),
+                                detail: source.to_string(),
+                            });
+                        }
+                    }
+                    hops.push(EvidenceChainHop {
+                        path: candidate.clone(),
+                        kind: EvidenceChainHopKind::Symlink {
+                            target: target.clone(),
+                        },
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    });
+                    // Kernel semantics: resolve the symlink target fully
+                    // (nested walk consumes ONLY the target components) and
+                    // then continue the rest of the path in the outer walk.
+                    // The nested scope makes the active chain equal the
+                    // recursion stack, so a legal re-entry of a completed
+                    // prefix (e.g. an absolute target re-entering macOS
+                    // `/var`) is never mistaken for `a -> b -> a` cycle.
+                    let mut expanded: VecDeque<_> = owned_components(&target).into();
+                    let inner = walk_evidence_components(
+                        &mut expanded,
+                        resolved,
+                        hops,
+                        active,
+                        depth + 1,
+                    );
+                    active.remove(&identity);
+                    if inner.is_some() {
+                        return inner;
+                    }
+                    debug_assert!(expanded.is_empty());
+                } else {
+                    if !metadata.is_dir() {
+                        return Some(ChainFault::NotDirectory { at: candidate });
+                    }
+                    *resolved = candidate;
+                }
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn read_skill_document_at(path: &Path) -> Result<String, FileSystemError> {
@@ -5911,5 +6213,216 @@ mod tests {
             fs::read_to_string(source.join("late.txt")).expect("late content remains"),
             "must survive\n"
         );
+    }
+
+    #[test]
+    fn evidence_chain_records_every_hop_and_the_final_entity() {
+        let root = tempfile::tempdir().expect("temporary chain root");
+        let shared = root.path().join("shared");
+        let final_entity = shared.join("networking");
+        fs::create_dir_all(&final_entity).expect("create final entity");
+        fs::write(final_entity.join("SKILL.md"), "# Networking\n").expect("write Skill");
+        let first_link = root.path().join("first-link");
+        let second_link = root.path().join("second-link");
+        std::os::unix::fs::symlink("shared/networking", &first_link)
+            .expect("create first symlink");
+        std::os::unix::fs::symlink("first-link", &second_link).expect("create second symlink");
+        let entry = root.path().join("agents").join("networking");
+        fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
+        std::os::unix::fs::symlink("../second-link", &entry).expect("create entry symlink");
+
+        let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
+        assert_eq!(chain.fault, None);
+        assert_eq!(
+            chain.final_entity,
+            Some(final_entity.canonicalize().expect("canonical final entity"))
+        );
+        assert_eq!(chain.hops.len(), 3);
+        assert_eq!(
+            chain.hops[0].path,
+            entry
+                .parent()
+                .expect("entry parent")
+                .canonicalize()
+                .expect("canonical entry parent")
+                .join("networking")
+        );
+        assert!(matches!(
+            &chain.hops[0].kind,
+            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("../second-link")
+        ));
+        assert!(matches!(
+            &chain.hops[1].kind,
+            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("first-link")
+        ));
+        assert!(matches!(
+            &chain.hops[2].kind,
+            EvidenceChainHopKind::Symlink { target } if *target == PathBuf::from("shared/networking")
+        ));
+        for hop in &chain.hops {
+            assert!(hop.device != 0 || hop.inode != 0);
+        }
+    }
+
+    #[test]
+    fn evidence_chain_dangling_stops_at_the_exact_hop() {
+        let root = tempfile::tempdir().expect("temporary dangling root");
+        let entry = root.path().join("agents").join("ghost");
+        fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
+        std::os::unix::fs::symlink("../missing", &entry).expect("create dangling entry symlink");
+
+        let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
+        assert!(matches!(chain.fault, Some(ChainFault::Dangling { .. })));
+        assert_eq!(
+            chain
+                .fault
+                .as_ref()
+                .and_then(|fault| match fault {
+                    ChainFault::Dangling { at } => at.file_name(),
+                    _ => None,
+                }),
+            Some(std::ffi::OsStr::new("missing"))
+        );
+        assert_eq!(chain.final_entity, None);
+        assert_eq!(chain.hops.len(), 1);
+    }
+
+    #[test]
+    fn evidence_chain_cycle_stops_before_revisiting() {
+        let root = tempfile::tempdir().expect("temporary cycle root");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::os::unix::fs::symlink("second", &first).expect("create first symlink");
+        std::os::unix::fs::symlink("first", &second).expect("create second symlink");
+        let entry = root.path().join("agents").join("loop");
+        fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
+        std::os::unix::fs::symlink("../first", &entry).expect("create entry symlink");
+
+        let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
+        assert!(matches!(chain.fault, Some(ChainFault::Cycle { .. })));
+        assert_eq!(chain.final_entity, None);
+    }
+
+    #[test]
+    fn evidence_chain_hop_limit_stops_at_16_hops() {
+        let root = tempfile::tempdir().expect("temporary hop-limit root");
+        let real = root.path().join("real-dir");
+        fs::create_dir_all(&real).expect("create real destination");
+        for index in 0..20 {
+            let link = root.path().join(format!("hop-{index}"));
+            let target = if index == 19 {
+                String::from("real-dir")
+            } else {
+                format!("hop-{}", index + 1)
+            };
+            std::os::unix::fs::symlink(&target, &link).expect("create chained symlink");
+        }
+        let entry = root.path().join("agents").join("deep");
+        fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
+        std::os::unix::fs::symlink("../hop-0", &entry).expect("create entry symlink");
+
+        let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
+        assert!(matches!(chain.fault, Some(ChainFault::HopLimit { .. })));
+        assert_eq!(chain.final_entity, None);
+        assert_eq!(chain.hops.len(), 16);
+    }
+
+    #[test]
+    fn evidence_chain_symlink_to_file_is_not_a_directory() {
+        let root = tempfile::tempdir().expect("temporary file-target root");
+        let file = root.path().join("plain.txt");
+        fs::write(&file, "not a directory\n").expect("write plain file");
+        let entry = root.path().join("agents").join("file-skill");
+        fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
+        std::os::unix::fs::symlink("../plain.txt", &entry).expect("create entry symlink");
+
+        let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
+        assert!(matches!(chain.fault, Some(ChainFault::NotDirectory { .. })));
+        assert_eq!(chain.final_entity, None);
+    }
+
+    #[test]
+    fn evidence_chain_real_directory_has_no_hops() {
+        let root = tempfile::tempdir().expect("temporary directory root");
+        let entity = root.path().join("real-skill");
+        fs::create_dir_all(&entity).expect("create entity");
+        fs::write(entity.join("SKILL.md"), "# Real\n").expect("write Skill");
+
+        let chain = resolve_evidence_chain(&entity).expect("resolve evidence chain");
+        assert_eq!(chain.fault, None);
+        assert_eq!(
+            chain.final_entity,
+            Some(entity.canonicalize().expect("canonical entity"))
+        );
+        assert!(chain.hops.is_empty());
+        assert_eq!(chain.entry_path, entity);
+    }
+
+    #[test]
+    fn scan_skills_evidence_and_non_utf8_symlink_targets() {
+        let root = tempfile::tempdir().expect("temporary scan root");
+        let skills_dir = root.path().join("skills");
+        fs::create_dir_all(&skills_dir).expect("create skills directory");
+        let normal = skills_dir.join("normal-skill");
+        fs::create_dir_all(&normal).expect("create normal skill");
+        fs::write(normal.join("SKILL.md"), "# Normal\n").expect("write normal Skill");
+        // APFS rejects non-UTF-8 entry names, but symlink *targets* are raw
+        // data: a target with invalid UTF-8 must stop the walk at that hop.
+        let non_utf8_target = OsString::from_vec(vec![0x62, 0x61, 0x64, 0xff, 0x74, 0x67, 0x74]);
+        let broken = skills_dir.join("broken-skill");
+        std::os::unix::fs::symlink(&non_utf8_target, &broken).expect("create non-UTF-8 symlink");
+
+        let entries = MacOsFileSystem::new(root.path().to_path_buf())
+            .scan_skills_evidence(&skills_dir)
+            .expect("scan skills evidence");
+        assert_eq!(entries.len(), 2);
+        let fault_entry = entries
+            .iter()
+            .find(|entry| entry.chain.fault.is_some())
+            .expect("fault entry present");
+        assert!(matches!(
+            &fault_entry.chain.fault,
+            Some(ChainFault::NonUtf8 { at }) if at.file_name().and_then(|name| name.to_str()) == Some("broken-skill")
+        ));
+        assert_eq!(fault_entry.chain.final_entity, None);
+        // The failing hop itself is never recorded as a hop: the fault stops
+        // the walk at the exact path without a partial chain.
+        assert!(fault_entry.chain.hops.is_empty());
+        let healthy = entries
+            .iter()
+            .find(|entry| entry.chain.fault.is_none())
+            .expect("healthy entry present");
+        assert_eq!(healthy.name, "normal-skill");
+        assert_eq!(
+            healthy.chain.final_entity,
+            Some(normal.canonicalize().expect("canonical normal skill"))
+        );
+    }
+
+    #[test]
+    fn temp_workspace_is_created_and_discarded() {
+        let filesystem = MacOsFileSystem::new(PathBuf::from("/tmp"));
+        let workspace = filesystem
+            .create_temp_workspace("adopt-evidence-test")
+            .expect("create temp workspace");
+        assert!(workspace.is_dir());
+        assert!(workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("skill-man-")));
+        filesystem
+            .discard_temp_workspace(&workspace)
+            .expect("discard temp workspace");
+        assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn temp_workspace_discard_refuses_paths_outside_the_namespace() {
+        let filesystem = MacOsFileSystem::new(PathBuf::from("/tmp"));
+        let root = tempfile::tempdir().expect("temporary discard root");
+        assert!(filesystem
+            .discard_temp_workspace(root.path())
+            .is_err_and(|error| matches!(error, FileSystemError::InvalidConfiguredPath { .. })));
+        assert!(root.path().exists());
     }
 }

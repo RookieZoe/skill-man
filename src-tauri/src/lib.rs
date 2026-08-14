@@ -17,7 +17,9 @@ pub fn run() {
     use crate::adapters::local_file_source::LocalFileSource;
     use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
+    use crate::adapters::remote_provider::SystemRemoteProvider;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
+    use crate::adapters::system_installer_lock_store::SystemInstallerLockStore;
     use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
@@ -361,9 +363,19 @@ pub fn run() {
                     filesystem.clone(),
                     Arc::new(SystemClock::new()),
                     resolved_library_root.clone(),
-                    home_directory,
+                    home_directory.clone(),
                 )
-                .with_write_gate(write_gate.clone()),
+                .with_write_gate(write_gate.clone())
+                // The evidence ledger's lock discovery and remote
+                // verification seams (spec §4.6): strict v3 parse and
+                // fingerprint plus GitHub/GitLab/generic HTTPS Git
+                // providers, all read-only during scan/plan.
+                .with_lock_store(Arc::new(SystemInstallerLockStore::new(
+                    home_directory,
+                )))
+                .with_remote_provider(Arc::new(SystemRemoteProvider::new(
+                    Arc::new(SystemGitSource::new()),
+                ))),
             ));
             app.manage(ActivationApi::new(
                 ActivationService::new(

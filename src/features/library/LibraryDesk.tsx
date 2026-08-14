@@ -13,12 +13,12 @@ import type {
   ActivationReplacePreview,
   ActivationReplaceUndoResult,
   ActivationResult,
-  AdoptRisk,
-  AdoptRiskReason,
+  AdoptEvidenceReport,
   AdoptPlan,
   AdoptResult,
-  AdoptScanReport,
+  AdoptSelection,
   AdoptUndoResult,
+  ModifiedBranch,
   AgentActivation,
   AppPreferences,
   CatalogFilter,
@@ -39,6 +39,7 @@ import type {
   SourceKind,
   StartupAgent,
 } from "../../app/catalog-client";
+import { EvidenceLedger } from "../adopt/EvidenceLedger";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
 import type { MessageKey } from "../locale/messages";
@@ -116,8 +117,8 @@ interface LibraryDeskProps {
   lockNotice: string | null;
   onRetryRecovery: () => void;
   isAdoptOpen: boolean;
-  adoptReport: AdoptScanReport | null;
-  adoptSelected: string[];
+  adoptReport: AdoptEvidenceReport | null;
+  adoptSelections: Record<string, AdoptSelection>;
   adoptPlan: AdoptPlan | null;
   adoptResult: AdoptResult | null;
   adoptUndo: AdoptUndoResult | null;
@@ -131,7 +132,7 @@ interface LibraryDeskProps {
   onApplyActivation: () => void;
   onCancelActivation: () => void;
   onCloseActivationConflict: () => void;
-  onAdoptFromConflict: (canonicalEntity: string) => void;
+  onAdoptFromConflict: () => void;
   onPlanReplace: () => void;
   onApplyReplace: () => void;
   onUndoReplace: () => void;
@@ -154,7 +155,12 @@ interface LibraryDeskProps {
   onPinSkillUpdate: () => void;
   onReselectPathChange: (path: string) => void;
   onOpenAdopt: () => void;
+  onRescanAdopt: () => void;
   onToggleAdoptCandidate: (canonicalEntity: string, checked: boolean) => void;
+  onSetAdoptBranch: (
+    canonicalEntity: string,
+    modifiedBranch: ModifiedBranch,
+  ) => void;
   onPlanAdopt: () => void;
   onApplyAdopt: () => void;
   onUndoAdopt: () => void;
@@ -167,7 +173,7 @@ interface LibraryDeskProps {
   isOnboardingOpen: boolean;
   onboardingStep: number;
   onboardingAgents: StartupAgent[];
-  onboardingReport: AdoptScanReport | null;
+  onboardingReport: AdoptEvidenceReport | null;
   onboardingActivity: "idle" | "scanning";
   onboardingError: string | null;
   onOpenPreferences: () => void;
@@ -264,7 +270,7 @@ export function LibraryDesk({
   onReselectPathChange,
   isAdoptOpen,
   adoptReport,
-  adoptSelected,
+  adoptSelections,
   adoptPlan,
   adoptResult,
   adoptUndo,
@@ -272,7 +278,9 @@ export function LibraryDesk({
   adoptErrorHeading,
   adoptActivity,
   onOpenAdopt,
+  onRescanAdopt,
   onToggleAdoptCandidate,
+  onSetAdoptBranch,
   onPlanAdopt,
   onApplyAdopt,
   onUndoAdopt,
@@ -604,9 +612,9 @@ export function LibraryDesk({
         />
       ) : null}
       {isAdoptOpen ? (
-        <AdoptSheet
+        <EvidenceLedger
           report={adoptReport}
-          selected={adoptSelected}
+          selections={adoptSelections}
           plan={adoptPlan}
           result={adoptResult}
           undo={adoptUndo}
@@ -614,6 +622,8 @@ export function LibraryDesk({
           errorHeading={adoptErrorHeading}
           activity={adoptActivity}
           onToggle={onToggleAdoptCandidate}
+          onSetBranch={onSetAdoptBranch}
+          onRescan={onRescanAdopt}
           onPlan={onPlanAdopt}
           onApply={onApplyAdopt}
           onUndo={onUndoAdopt}
@@ -1286,303 +1296,6 @@ function AgentInspector({
         <span>{t("library.activation.footnote")}</span>
       </div>
     </aside>
-  );
-}
-
-function AdoptSheet({
-  report,
-  selected,
-  plan,
-  result,
-  undo,
-  error,
-  errorHeading,
-  activity,
-  onToggle,
-  onPlan,
-  onApply,
-  onUndo,
-  onClose,
-}: {
-  report: AdoptScanReport | null;
-  selected: string[];
-  plan: AdoptPlan | null;
-  result: AdoptResult | null;
-  undo: AdoptUndoResult | null;
-  error: string | null;
-  errorHeading: MessageKey;
-  activity: "idle" | "scanning" | "planning" | "applying" | "undoing";
-  onToggle: (canonicalEntity: string, checked: boolean) => void;
-  onPlan: () => void;
-  onApply: () => void;
-  onUndo: () => void;
-  onClose: () => void;
-}) {
-  const { t, tPlural } = useLocale();
-  const isBusy = activity !== "idle";
-  const candidates = report?.candidates ?? [];
-  const step = result ? "result" : plan ? "preview" : report ? "scan" : "scan";
-
-  return (
-    <div
-      className="activation-sheet-backdrop"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target && !isBusy) onClose();
-      }}
-    >
-      <section
-        className="activation-sheet import-sheet adopt-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("library.adopt.dialog_label")}
-      >
-        <ol
-          className="import-progress"
-          aria-label={t("library.adopt.progress_label")}
-        >
-          {(["scan", "preview", "result"] as const).map((stepName) => (
-            <li
-              key={stepName}
-              aria-current={step === stepName ? "step" : undefined}
-            >
-              {t(`library.adopt.step.${stepName}` as MessageKey)}
-            </li>
-          ))}
-        </ol>
-        {result ? (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">
-                {t("library.adopt.complete_eyebrow")}
-              </span>
-              <h2>
-                {t("library.adopt.complete_title", {
-                  adopted: result.items.filter((item) => item.adopted).length,
-                  total: result.items.length,
-                })}
-              </h2>
-              <p>{t("library.adopt.complete_body")}</p>
-            </div>
-            <ul className="git-import-results">
-              {result.items.map((item) => (
-                <li key={item.directoryName}>
-                  <span>
-                    <strong>{item.directoryName}</strong>{" "}
-                    {item.adopted ? (
-                      <span className="candidate-clear">
-                        {t("library.adopt.adopted")}
-                      </span>
-                    ) : (
-                      <span className="candidate-conflict">
-                        {t("library.adopt.failed", {
-                          detail:
-                            item.error ?? t("library.adopt.failed_unknown"),
-                        })}
-                      </span>
-                    )}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            {undo ? (
-              <div
-                className={
-                  undo.items.every((item) => item.undone)
-                    ? "update-result-ok"
-                    : "update-result-fail"
-                }
-                role="status"
-              >
-                {undo.items.every((item) => item.undone)
-                  ? t("library.adopt.undone")
-                  : undo.items
-                      .filter((item) => !item.undone)
-                      .map((item) =>
-                        t("library.adopt.undo_item", {
-                          name: item.directoryName,
-                          detail:
-                            item.error ?? t("library.adopt.failed_unknown"),
-                        }),
-                      )
-                      .join(" · ")}
-              </div>
-            ) : null}
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t(errorHeading)}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              {result.undoAvailable && !undo ? (
-                <button
-                  type="button"
-                  className="activation-confirm-button"
-                  disabled={isBusy}
-                  onClick={onUndo}
-                >
-                  {activity === "undoing"
-                    ? t("library.adopt.undoing")
-                    : t("library.adopt.undo")}
-                </button>
-              ) : null}
-              <button type="button" disabled={isBusy} onClick={onClose}>
-                {t("library.adopt.close")}
-              </button>
-            </div>
-          </>
-        ) : plan ? (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">
-                {t("library.adopt.preview_eyebrow")}
-              </span>
-              <h2>
-                {tPlural("library.adopt.preview_count", plan.items.length)}
-              </h2>
-              <p>{t("library.adopt.preview_body")}</p>
-            </div>
-            <ul className="git-import-candidates git-import-preview-list">
-              {plan.items.map((item) => (
-                <li key={item.directoryName}>
-                  <div>
-                    <strong>{item.directoryName}</strong>
-                    <span className="candidate-path">
-                      {item.kind === "migrate"
-                        ? t("library.adopt.migrates")
-                        : t("library.adopt.links")}{" "}
-                      ·{" "}
-                      {item.targetAgents.length > 0
-                        ? t("library.adopt.enables_on", {
-                            agents: item.targetAgents
-                              .map((agent) => agent.name)
-                              .join(", "),
-                          })
-                        : t("library.adopt.one_activation")}
-                    </span>
-                  </div>
-                  {item.error ? (
-                    <span className="candidate-conflict" role="alert">
-                      {item.error}
-                    </span>
-                  ) : (
-                    <span className="candidate-clear">
-                      {t("library.adopt.ready")}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t(errorHeading)}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              <button type="button" disabled={isBusy} onClick={onClose}>
-                {t("library.adopt.cancel")}
-              </button>
-              <button
-                type="button"
-                className="activation-confirm-button"
-                disabled={!plan.canApply || isBusy}
-                onClick={onApply}
-              >
-                {isBusy
-                  ? t("library.adopt.adopting")
-                  : t("library.adopt.apply")}
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">{t("library.adopt.scan_eyebrow")}</span>
-              <h2>{t("library.adopt.scan_title")}</h2>
-              <p>{t("library.adopt.scan_body")}</p>
-            </div>
-            <ul className="git-import-candidates">
-              {candidates.map((candidate) => (
-                <li key={candidate.canonicalEntity}>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(candidate.canonicalEntity)}
-                      disabled={!candidate.adoptable || isBusy}
-                      onChange={(event) =>
-                        onToggle(
-                          candidate.canonicalEntity,
-                          event.currentTarget.checked,
-                        )
-                      }
-                    />
-                    <span>
-                      <strong>{candidate.directoryName}</strong>
-                      <span className="candidate-path">
-                        {candidate.risk === "broken"
-                          ? t("library.adopt.risk.broken", {
-                              reason: adoptRiskReasonText(
-                                t,
-                                candidate.risk,
-                                candidate.riskReason,
-                              ),
-                            })
-                          : candidate.risk === "external"
-                            ? t("library.adopt.risk.external", {
-                                reason: adoptRiskReasonText(
-                                  t,
-                                  candidate.risk,
-                                  candidate.riskReason,
-                                ),
-                              })
-                            : candidate.conflict
-                              ? t("library.adopt.risk.conflict", {
-                                  name: candidate.conflict.directoryName,
-                                })
-                              : tPlural(
-                                  "library.adopt.risk.appearances",
-                                  candidate.appearances.length,
-                                )}
-                      </span>
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-            {candidates.length === 0 && !isBusy ? (
-              <p role="status">{t("library.adopt.none")}</p>
-            ) : null}
-            {report?.truncated ? (
-              <p className="candidate-conflict" role="status">
-                {t("library.adopt.truncated")}
-              </p>
-            ) : null}
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t(errorHeading)}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              <button type="button" disabled={isBusy} onClick={onClose}>
-                {t("library.adopt.cancel")}
-              </button>
-              <button
-                type="button"
-                className="activation-confirm-button"
-                disabled={selected.length === 0 || isBusy || report === null}
-                onClick={onPlan}
-              >
-                {activity === "planning"
-                  ? t("library.adopt.preparing")
-                  : t("library.adopt.preview_button")}
-              </button>
-            </div>
-          </>
-        )}
-      </section>
-    </div>
   );
 }
 
@@ -2702,7 +2415,7 @@ function OnboardingSheet({
 }: {
   step: number;
   agents: StartupAgent[];
-  report: AdoptScanReport | null;
+  report: AdoptEvidenceReport | null;
   activity: "idle" | "scanning";
   error: string | null;
   onSkip: () => void;
@@ -2819,30 +2532,12 @@ function OnboardingSheet({
                       <span>
                         <strong>{candidate.directoryName}</strong>
                         <span className="candidate-path">
-                          {candidate.risk === "broken"
-                            ? t("library.adopt.risk.broken", {
-                                reason: adoptRiskReasonText(
-                                  t,
-                                  candidate.risk,
-                                  candidate.riskReason,
-                                ),
-                              })
-                            : candidate.risk === "external"
-                              ? t("library.adopt.risk.external", {
-                                  reason: adoptRiskReasonText(
-                                    t,
-                                    candidate.risk,
-                                    candidate.riskReason,
-                                  ),
-                                })
-                              : candidate.conflict
-                                ? t("library.adopt.risk.conflict", {
-                                    name: candidate.conflict.directoryName,
-                                  })
-                                : tPlural(
-                                    "library.adopt.risk.appearances",
-                                    candidate.appearances.length,
-                                  )}
+                          {t(
+                            `library.adopt.verdict.${candidate.verdict}` as MessageKey,
+                          )}
+                          {candidate.requiresRelocation
+                            ? t("library.adopt.relocation_required")
+                            : ""}
                         </span>
                       </span>
                     </li>
@@ -3655,28 +3350,6 @@ function occupierNotAdoptableReasonText(
         name: reason.directoryName,
       });
   }
-}
-
-function adoptRiskReasonText(
-  t: LocaleContextValue["t"],
-  risk: AdoptRisk,
-  reason: AdoptRiskReason | null,
-): string {
-  if (risk === "broken") {
-    if (reason?.kind === "dangling") return t("library.adopt.risk.dangling");
-    if (reason?.kind === "unsafe_tree") return reason.detail;
-    return t("library.adopt.risk.broken_missing");
-  }
-  if (risk === "external") {
-    if (reason?.kind === "outside_home") {
-      return t("library.adopt.risk.outside_home", { path: reason.path });
-    }
-    if (reason?.kind === "installer_managed") {
-      return t("library.adopt.risk.installer_managed", { path: reason.path });
-    }
-    return t("library.adopt.risk.external_outside");
-  }
-  return "";
 }
 
 function preferencesWarningText(

@@ -13,8 +13,8 @@ use skill_man_lib::seams::activation_store::{
 };
 use skill_man_lib::seams::filesystem::{
     ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceStep, AdoptJournal,
-    DirectoryFingerprint, FileImportRecoveryBaseline, FileSystem, FileSystemError,
-    ScannedSkillEntry, SkillFingerprint, StagedTreeSnapshot,
+    DirectoryFingerprint, EvidenceChain, FileImportRecoveryBaseline, FileSystem, FileSystemError,
+    ScannedSkillEntry, ScannedSkillEvidence, SkillFingerprint, StagedTreeSnapshot,
 };
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::dto::{ApplyActivationRequestDto, PlanActivationRequestDto};
@@ -1210,6 +1210,34 @@ impl FileSystem for FailingCompensationFileSystem {
         path: &std::path::Path,
     ) -> Result<Vec<ScannedSkillEntry>, FileSystemError> {
         self.delegate.scan_skills_directory(path)
+    }
+
+    fn inspect_evidence_chain(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<EvidenceChain, FileSystemError> {
+        self.delegate.inspect_evidence_chain(path)
+    }
+
+    fn scan_skills_evidence(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<ScannedSkillEvidence>, FileSystemError> {
+        self.delegate.scan_skills_evidence(path)
+    }
+
+    fn create_temp_workspace(
+        &self,
+        purpose: &str,
+    ) -> Result<std::path::PathBuf, FileSystemError> {
+        self.delegate.create_temp_workspace(purpose)
+    }
+
+    fn discard_temp_workspace(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), FileSystemError> {
+        self.delegate.discard_temp_workspace(path)
     }
 
     fn stage_external_directory(

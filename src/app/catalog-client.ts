@@ -605,41 +605,150 @@ export interface UpdateResult {
   items: UpdateItemResult[];
 }
 
-export type AdoptRisk = "none" | "external" | "broken";
+export type AdoptVerdict =
+  | "local"
+  | "verified"
+  | "modified"
+  | "conflict"
+  | "deferred"
+  | "blocked"
+  | "excluded";
 
-export interface AdoptAppearance {
+export type ChainFault =
+  | { kind: "dangling"; at: string }
+  | { kind: "cycle"; at: string }
+  | { kind: "hop_limit"; at: string }
+  | { kind: "non_utf8"; at: string }
+  | { kind: "read_failed"; at: string; detail: string }
+  | { kind: "not_directory"; at: string }
+  | { kind: "identity_replaced"; at: string };
+
+export type LockFileFault =
+  | { kind: "not_utf8" }
+  | { kind: "invalid_json"; detail: string }
+  | { kind: "unsupported_version"; version: number }
+  | { kind: "duplicate_key"; key: string };
+
+export type AdoptVerdictReason =
+  | { kind: "no_lock" }
+  | { kind: "duplicate_lock_owner"; otherLockPath: string }
+  | { kind: "lock_file_fault"; lockPath: string; fault: LockFileFault }
+  | { kind: "lock_entry_fault"; lockPath: string; reason: string }
+  | { kind: "entity_not_at_installer_root"; expected: string }
+  | { kind: "remote_conflict"; detail: string }
+  | { kind: "identity_conflict"; names: string[] }
+  | { kind: "library_conflict"; directoryName: string }
+  | { kind: "remote_unavailable"; detail: string }
+  | { kind: "chain_fault"; fault: ChainFault }
+  | { kind: "unreadable_entity"; detail: string }
+  | { kind: "fixture_entity" };
+
+export interface EvidenceChainHop {
+  path: string;
+  kind: string;
+  device: number;
+  inode: number;
+}
+
+export interface EvidenceChain {
+  entryPath: string;
+  entryDevice: number;
+  entryInode: number;
+  hops: EvidenceChainHop[];
+  finalEntity: string | null;
+  fault: ChainFault | null;
+}
+
+export interface AdoptAppearanceEvidence {
   entryPath: string;
   kind: "real_directory" | "symlink";
   agentId: string | null;
   shared: boolean;
+  originalTarget: string | null;
+  chain: EvidenceChain;
 }
 
-export interface AdoptCandidate {
+/** The strict lock entry as raw Source Content (spec §6.3). */
+export interface LockEntry {
+  name: string;
+  sourceType: string;
+  source: string;
+  sourceUrl: string;
+  requestedRef: string | null;
+  skillPath: string;
+  skillFolderHash: string;
+  installedAt: string | null;
+  updatedAt: string | null;
+  pluginName: string | null;
+}
+
+export interface AdoptLockEvidence {
+  lockPath: string;
+  lockFingerprint: string;
+  entryName: string;
+  entry: LockEntry | null;
+  entryFault: string | null;
+  fileFault: LockFileFault | null;
+}
+
+export interface AdoptRemoteEvidence {
+  canonicalUrl: string;
+  requestedRef: string;
+  refKind: string;
+  anchorCommit: string;
+  originalInstallCommitKnown: boolean;
+  skillPath: string;
+  providerHash: string;
+  providerHashMatched: boolean;
+  remoteTreeHash: string;
+  localTreeHash: string;
+  treesMatch: boolean;
+  defaultBranch: string | null;
+}
+
+export interface AdoptLockFile {
+  path: string;
+  fingerprint: string;
+  byteLen: number;
+  version: number;
+  fault: LockFileFault | null;
+  entryNames: string[];
+  entryFaults: { name: string; reason: string }[];
+}
+
+export interface AdoptEvidenceCandidate {
   canonicalEntity: string;
   directoryName: string;
   directoryNames: string[];
-  appearances: AdoptAppearance[];
-  risk: AdoptRisk;
-  riskReason: AdoptRiskReason | null;
-  conflict: LibraryConflict | null;
+  appearances: AdoptAppearanceEvidence[];
+  verdict: AdoptVerdict;
+  reason: AdoptVerdictReason | null;
+  lock: AdoptLockEvidence | null;
+  remote: AdoptRemoteEvidence | null;
+  localTreeHash: string | null;
+  requiresRelocation: boolean;
+  selectable: boolean;
   adoptable: boolean;
+  conflict: LibraryConflict | null;
   suggestedAgentIds: string[];
 }
 
-export type AdoptRiskReason =
-  | { kind: "dangling" }
-  | { kind: "outside_home"; path: string }
-  | { kind: "installer_managed"; path: string }
-  | { kind: "unsafe_tree"; detail: string };
-
-export interface AdoptScanReport {
-  candidates: AdoptCandidate[];
+export interface AdoptEvidenceReport {
+  generation: number;
+  candidates: AdoptEvidenceCandidate[];
+  lockFiles: AdoptLockFile[];
   truncated: boolean;
 }
+
+export type ModifiedBranch =
+  | "keep_current"
+  | "discard_to_anchor"
+  | "convert_to_local_link";
 
 export interface AdoptSelection {
   canonicalEntity: string;
   agentIds: string[];
+  modifiedBranch?: ModifiedBranch;
 }
 
 export interface AdoptTargetAgent {
@@ -647,19 +756,27 @@ export interface AdoptTargetAgent {
   name: string;
 }
 
+export type AdoptPlanIntent =
+  | "local_link"
+  | "local_link_with_move"
+  | "remote_install_keep_current"
+  | "remote_install_discard_modified"
+  | "remote_install_convert_to_link";
+
 export interface AdoptPlanItem {
   directoryName: string;
   canonicalEntity: string;
-  kind: "migrate" | "link";
+  intent: AdoptPlanIntent;
   finalEntityPath: string;
-  appearances: AdoptAppearance[];
+  appearances: AdoptAppearanceEvidence[];
   targetAgents: AdoptTargetAgent[];
-  adoptable: boolean;
+  applyable: boolean;
   error: string | null;
 }
 
 export interface AdoptPlan {
   planToken: string;
+  evidenceGeneration: number;
   items: AdoptPlanItem[];
   canApply: boolean;
 }
@@ -784,8 +901,11 @@ export interface CatalogClient {
     abandonChanges: boolean,
   ): Promise<UpdateResult>;
   pinSkillUpdates(skillIds: string[]): Promise<void>;
-  scanAdopt(): Promise<AdoptScanReport>;
-  planAdopt(selections: AdoptSelection[]): Promise<AdoptPlan>;
+  scanAdopt(): Promise<AdoptEvidenceReport>;
+  planAdopt(
+    evidenceGeneration: number,
+    selections: AdoptSelection[],
+  ): Promise<AdoptPlan>;
   applyAdopt(planToken: string): Promise<AdoptResult>;
   undoAdopt(operationId: string): Promise<AdoptUndoResult>;
   finalizeAdopt(operationId: string): Promise<void>;
@@ -1058,10 +1178,12 @@ const tauriCatalogClient: CatalogClient = {
     });
   },
   scanAdopt() {
-    return invoke<AdoptScanReport>("scan_adopt");
+    return invoke<AdoptEvidenceReport>("scan_adopt");
   },
-  planAdopt(selections) {
-    return invoke<AdoptPlan>("plan_adopt", { request: { selections } });
+  planAdopt(evidenceGeneration, selections) {
+    return invoke<AdoptPlan>("plan_adopt", {
+      request: { evidenceGeneration, selections },
+    });
   },
   applyAdopt(planToken) {
     return invoke<AdoptResult>("apply_adopt", { request: { planToken } });

@@ -192,6 +192,10 @@ const allowlist = new Set([
   "recent-header",
   "recent-empty",
   "open-skill:",
+  // Technical identity tokens of the evidence ledger (spec §8.1): raw
+  // device/inode facts, never App Copy.
+  "dev=",
+  "ino=",
   "open-window",
   "quit",
 ]);

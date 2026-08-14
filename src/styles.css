@@ -1171,6 +1171,232 @@ button:active:not(:disabled) {
   text-wrap: pretty;
 }
 
+
+/* Evidence Ledger (spec §8.1): three columns, default fully expanded,
+   reviewable at the 760×520 minimum; the dialog body owns the scroll. */
+.adopt-ledger-sheet {
+  width: min(100%, 1240px);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+.adopt-ledger-heading {
+  padding-bottom: var(--space-3);
+}
+
+.adopt-ledger-body {
+  overflow: auto;
+  padding: 0 var(--space-4) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.adopt-ledger-candidate {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 260px;
+  gap: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  align-items: start;
+}
+
+.adopt-ledger-col {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.adopt-ledger-context h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 15px;
+}
+
+.adopt-ledger-context p,
+.adopt-ledger-chain p,
+.adopt-ledger-verdict p {
+  margin: var(--space-1) 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.adopt-ledger-chain h4,
+.adopt-ledger-verdict h4 {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.adopt-chain-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.adopt-chain-list li {
+  margin-bottom: var(--space-2);
+}
+
+.adopt-hop-index {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.adopt-hop {
+  padding-left: var(--space-3);
+}
+
+.adopt-source-content {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.adopt-hop-target {
+  color: var(--text-secondary);
+}
+
+.adopt-hop-identity {
+  color: var(--text-tertiary);
+}
+
+.adopt-evidence-block {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.adopt-fact-list {
+  margin: var(--space-1) 0;
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 2px var(--space-2);
+  font-size: 12px;
+}
+
+.adopt-fact-list dt {
+  color: var(--text-secondary);
+}
+
+.adopt-fact-list dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.adopt-verdict {
+  font-weight: 700;
+}
+
+.adopt-verdict-local {
+  color: var(--accent);
+}
+
+.adopt-verdict-verified {
+  color: var(--success, oklch(65% 0.16 150));
+}
+
+.adopt-verdict-modified {
+  color: var(--warning, oklch(78% 0.14 85));
+}
+
+.adopt-verdict-conflict,
+.adopt-verdict-blocked {
+  color: var(--danger, oklch(62% 0.2 25));
+}
+
+.adopt-verdict-deferred {
+  color: var(--text-secondary);
+}
+
+.adopt-verdict-excluded {
+  color: var(--text-tertiary);
+}
+
+.adopt-reason {
+  color: var(--text-secondary);
+}
+
+.candidate-warning {
+  color: var(--warning, oklch(78% 0.14 85));
+}
+
+.candidate-blocked {
+  color: var(--danger, oklch(62% 0.2 25));
+}
+
+.candidate-clear {
+  color: var(--success, oklch(65% 0.16 150));
+}
+
+.adopt-include-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-weight: 600;
+}
+
+.adopt-branch-fieldset {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: 12px;
+}
+
+.adopt-branch-fieldset legend {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.adopt-branch-fieldset label {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.adopt-plan-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.adopt-ledger-actions {
+  border-top: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 1060px) {
+  .adopt-ledger-candidate {
+    grid-template-columns: 170px minmax(0, 1fr);
+  }
+
+  .adopt-ledger-verdict {
+    grid-column: 1 / -1;
+    border-top: 1px dashed var(--border-subtle);
+    padding-top: var(--space-3);
+  }
+}
+
+@media (max-width: 760px) {
+  .adopt-ledger-candidate {
+    grid-template-columns: 1fr;
+  }
+
+  .adopt-ledger-chain {
+    border-top: 1px dashed var(--border-subtle);
+    padding-top: var(--space-3);
+  }
+}
+
 .activation-paths {
   margin: 0;
   padding: 0 var(--space-6);

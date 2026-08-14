@@ -11,9 +11,10 @@ use skill_man_lib::core::maintenance::MaintenanceService;
 use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
 use skill_man_lib::seams::filesystem::{
     ActivationEntrySnapshot, AdoptActivationStep, AdoptAppearanceStep, AdoptJournal,
-    DirectoryFingerprint, FileImportJournal, FileImportJournalItem, FileImportJournalPhase,
-    FileImportRecoveryBaseline, FileReplacement, FileSystem, FileSystemError, LinkSourceSnapshot,
-    ScannedSkillEntry, SkillFingerprint, StagedTreeSnapshot,
+    DirectoryFingerprint, EvidenceChain, FileImportJournal, FileImportJournalItem,
+    FileImportJournalPhase, FileImportRecoveryBaseline, FileReplacement, FileSystem,
+    FileSystemError, LinkSourceSnapshot, ScannedSkillEntry, ScannedSkillEvidence, SkillFingerprint,
+    StagedTreeSnapshot,
 };
 use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
@@ -1613,6 +1614,34 @@ impl FileSystem for LowSpaceFileSystem {
         path: &std::path::Path,
     ) -> Result<Vec<ScannedSkillEntry>, FileSystemError> {
         self.delegate.scan_skills_directory(path)
+    }
+
+    fn inspect_evidence_chain(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<EvidenceChain, FileSystemError> {
+        self.delegate.inspect_evidence_chain(path)
+    }
+
+    fn scan_skills_evidence(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<ScannedSkillEvidence>, FileSystemError> {
+        self.delegate.scan_skills_evidence(path)
+    }
+
+    fn create_temp_workspace(
+        &self,
+        purpose: &str,
+    ) -> Result<std::path::PathBuf, FileSystemError> {
+        self.delegate.create_temp_workspace(purpose)
+    }
+
+    fn discard_temp_workspace(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), FileSystemError> {
+        self.delegate.discard_temp_workspace(path)
     }
 
     fn stage_external_directory(

@@ -13,7 +13,7 @@ use skill_man_lib::seams::locale_store::{
     EffectiveLocale, LocaleSelection, LocaleStore, SystemLocaleSource,
 };
 use skill_man_lib::tauri_adapter::dto::{
-    AdoptRiskReasonDto, CommandFailureDto, CompatibilityWarningDto, DiagnosticDto,
+    ChainFaultDto, CommandFailureDto, CompatibilityWarningDto, DiagnosticDto,
     LocaleSnapshotDto, OccupierNotAdoptableReasonDto, PreferencesWarningDto, PublicErrorDto,
     SetLocaleSelectionRequestDto, SkillDetailDto,
 };
@@ -211,15 +211,20 @@ fn dto_serialization_contract_is_camel_case_and_closed() {
     assert_eq!(json["kind"], "identity_conflict");
     assert_eq!(json["directoryName"], "x");
 
-    let json = serde_json::to_value(AdoptRiskReasonDto::UnsafeTree {
-        detail: "Skill symlink target must be a valid UTF-8 relative path".into(),
+    let json = serde_json::to_value(ChainFaultDto::HopLimit {
+        at: "/Users/zoe/.agents/skills/loop".into(),
     })
     .expect("serialize");
-    assert_eq!(json["kind"], "unsafe_tree");
-    assert_eq!(
-        json["detail"],
-        "Skill symlink target must be a valid UTF-8 relative path"
-    );
+    assert_eq!(json["kind"], "hop_limit");
+    assert_eq!(json["at"], "/Users/zoe/.agents/skills/loop");
+
+    let json = serde_json::to_value(ChainFaultDto::ReadFailed {
+        at: "/Users/zoe/.agents/skills/broken".into(),
+        detail: "Permission denied".into(),
+    })
+    .expect("serialize");
+    assert_eq!(json["kind"], "read_failed");
+    assert_eq!(json["detail"], "Permission denied");
 
     let json = serde_json::to_value(PreferencesWarningDto::ShowInDockFailed {
         detail: "raw".into(),

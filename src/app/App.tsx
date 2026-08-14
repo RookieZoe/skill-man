@@ -18,11 +18,12 @@ import type {
   ActivationReplacePreview,
   ActivationReplaceUndoResult,
   ActivationResult,
-  AdoptCandidate,
+  AdoptEvidenceReport,
   AdoptPlan,
   AdoptResult,
-  AdoptScanReport,
+  AdoptSelection,
   AdoptUndoResult,
+  ModifiedBranch,
   AgentActivation,
   AppPreferences,
   AvailableAppUpdate,
@@ -92,10 +93,6 @@ export interface AppUpdatePanelState {
   error: string | null;
 }
 
-function isSafeAdoptCandidate(candidate: AdoptCandidate): boolean {
-  return candidate.adoptable && candidate.risk === "none";
-}
-
 export function App({ client }: AppProps) {
   const { t } = useLocale();
   // Effects only render errors via `t`; a locale switch must not re-run
@@ -129,7 +126,7 @@ export function App({ client }: AppProps) {
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingReport, setOnboardingReport] =
-    useState<AdoptScanReport | null>(null);
+    useState<AdoptEvidenceReport | null>(null);
   const [onboardingActivity, setOnboardingActivity] = useState<
     "idle" | "scanning"
   >("idle");
@@ -201,8 +198,10 @@ export function App({ client }: AppProps) {
   const [lockNotice, setLockNotice] = useState<string | null>(null);
   const [reselectPath, setReselectPath] = useState("");
   const [isAdoptOpen, setIsAdoptOpen] = useState(false);
-  const [adoptReport, setAdoptReport] = useState<AdoptScanReport | null>(null);
-  const [adoptSelected, setAdoptSelected] = useState<string[]>([]);
+  const [adoptReport, setAdoptReport] = useState<AdoptEvidenceReport | null>(null);
+  const [adoptSelections, setAdoptSelections] = useState<
+    Record<string, AdoptSelection>
+  >({});
   const [adoptPlan, setAdoptPlan] = useState<AdoptPlan | null>(null);
   const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
   const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
@@ -545,8 +544,9 @@ export function App({ client }: AppProps) {
   // -- Activation Conflict: Adopt existing item / Remove then replace / Cancel
 
   /** Adopt the occupying item instead of replacing it: hand off to the Adopt
-   *  flow with that candidate pre-selected. */
-  async function adoptFromConflict(canonicalEntity: string) {
+   *  flow; the ledger opens with nothing selected (viewing is never
+   *  selecting). */
+  async function adoptFromConflict() {
     setActivationConflict(null);
     setActivationConflictMessage(null);
     setReplacePreview(null);
@@ -556,7 +556,7 @@ export function App({ client }: AppProps) {
     setReplaceError(null);
     setIsAdoptOpen(true);
     setAdoptReport(null);
-    setAdoptSelected([]);
+    setAdoptSelections({});
     setAdoptPlan(null);
     setAdoptResult(null);
     setAdoptUndo(null);
@@ -568,15 +568,8 @@ export function App({ client }: AppProps) {
       const report = await client.scanAdopt();
       if (runId !== adoptRunId.current) return;
       setAdoptReport(report);
-      setAdoptSelected(
-        report.candidates.some(
-          (candidate) =>
-            candidate.canonicalEntity === canonicalEntity &&
-            isSafeAdoptCandidate(candidate),
-        )
-          ? [canonicalEntity]
-          : [],
-      );
+      // Viewing is never selecting: the ledger preselects nothing, not even
+      // the conflicted Skill (spec §2.1 invariant 9).
     } catch (reason) {
       if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
@@ -1116,7 +1109,7 @@ export function App({ client }: AppProps) {
     adoptRunId.current += 1;
     setIsAdoptOpen(true);
     setAdoptReport(null);
-    setAdoptSelected([]);
+    setAdoptSelections({});
     setAdoptPlan(null);
     setAdoptResult(null);
     setAdoptUndo(null);
@@ -1128,11 +1121,6 @@ export function App({ client }: AppProps) {
       const report = await client.scanAdopt();
       if (runId !== adoptRunId.current) return;
       setAdoptReport(report);
-      setAdoptSelected(
-        report.candidates
-          .filter(isSafeAdoptCandidate)
-          .map((candidate) => candidate.canonicalEntity),
-      );
     } catch (reason) {
       if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
@@ -1141,25 +1129,67 @@ export function App({ client }: AppProps) {
   }
 
   function toggleAdoptCandidate(canonicalEntity: string, checked: boolean) {
-    setAdoptSelected((selected) =>
-      checked
-        ? [...selected, canonicalEntity]
-        : selected.filter((entity) => entity !== canonicalEntity),
-    );
+    setAdoptSelections((selections) => {
+      const next = { ...selections };
+      if (checked) {
+        const existing = next[canonicalEntity];
+        next[canonicalEntity] = {
+          canonicalEntity,
+          agentIds: existing?.agentIds ?? [],
+          // The recommendation is to keep the current bytes; the branch
+          // choice never replaces the user's Include action (spec §8.2).
+          modifiedBranch: existing?.modifiedBranch ?? "keep_current",
+        };
+      } else {
+        delete next[canonicalEntity];
+      }
+      return next;
+    });
+  }
+
+  function setAdoptModifiedBranch(
+    canonicalEntity: string,
+    modifiedBranch: ModifiedBranch,
+  ) {
+    setAdoptSelections((selections) => {
+      const existing = selections[canonicalEntity];
+      if (!existing) return selections;
+      return {
+        ...selections,
+        [canonicalEntity]: { ...existing, modifiedBranch },
+      };
+    });
+  }
+
+  async function rescanAdopt() {
+    const runId = ++adoptRunId.current;
+    setAdoptPlan(null);
+    setAdoptError(null);
+    setAdoptErrorHeading("app.notice.scan_failed");
+    setAdoptActivity("scanning");
+    try {
+      const report = await client.scanAdopt();
+      if (runId !== adoptRunId.current) return;
+      setAdoptReport(report);
+      setAdoptSelections({});
+    } catch (reason) {
+      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
+    } finally {
+      if (runId === adoptRunId.current) setAdoptActivity("idle");
+    }
   }
 
   async function planAdopt() {
-    if (adoptSelected.length === 0) return;
+    const selections = Object.values(adoptSelections);
+    if (selections.length === 0) return;
     const runId = ++adoptRunId.current;
     setAdoptActivity("planning");
     setAdoptError(null);
     setAdoptErrorHeading("app.notice.preview_failed");
     try {
       const plan = await client.planAdopt(
-        adoptSelected.map((canonicalEntity) => ({
-          canonicalEntity,
-          agentIds: [],
-        })),
+        adoptReport?.generation ?? 0,
+        selections,
       );
       if (runId !== adoptRunId.current) {
         await client.cancelAdopt(plan.planToken).catch(() => undefined);
@@ -1239,7 +1269,7 @@ export function App({ client }: AppProps) {
         : null;
     setIsAdoptOpen(false);
     setAdoptReport(null);
-    setAdoptSelected([]);
+    setAdoptSelections({});
     setAdoptPlan(null);
     setAdoptResult(null);
     setAdoptUndo(null);
@@ -1459,13 +1489,10 @@ export function App({ client }: AppProps) {
     }
     setIsOnboardingOpen(false);
     setOnboardingStep(0);
-    // Guide into Adopt with the scan results already loaded (spec §8.7).
+    // Guide into Adopt with the scan results already loaded (spec §8.7);
+    // viewing is never selecting, so nothing is pre-included.
     setAdoptReport(report);
-    setAdoptSelected(
-      report.candidates
-        .filter((candidate) => candidate.adoptable && candidate.risk === "none")
-        .map((candidate) => candidate.canonicalEntity),
-    );
+    setAdoptSelections({});
     setAdoptPlan(null);
     setAdoptResult(null);
     setAdoptUndo(null);
@@ -1561,7 +1588,7 @@ export function App({ client }: AppProps) {
       onRetryRecovery={retryRecovery}
       isAdoptOpen={isAdoptOpen}
       adoptReport={adoptReport}
-      adoptSelected={adoptSelected}
+      adoptSelections={adoptSelections}
       adoptPlan={adoptPlan}
       adoptResult={adoptResult}
       adoptUndo={adoptUndo}
@@ -1569,7 +1596,9 @@ export function App({ client }: AppProps) {
       adoptErrorHeading={adoptErrorHeading}
       adoptActivity={adoptActivity}
       onOpenAdopt={openAdopt}
+      onRescanAdopt={rescanAdopt}
       onToggleAdoptCandidate={toggleAdoptCandidate}
+      onSetAdoptBranch={setAdoptModifiedBranch}
       onPlanAdopt={planAdopt}
       onApplyAdopt={applyAdopt}
       onUndoAdopt={undoAdopt}

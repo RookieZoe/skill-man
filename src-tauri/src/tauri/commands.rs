@@ -8,8 +8,7 @@ use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
     AbandonPreviewDto, ActivationConflictDetailsDto, ActivationConflictRequestDto,
     ActivationHealthReportDto, ActivationPreviewDto, ActivationReplacePreviewDto,
-    ActivationReplaceUndoResultDto, ActivationResultDto, AdoptPlanDto, AdoptResultDto,
-    AdoptScanReportDto, AdoptUndoResultDto, AgentActivationDto, AppPreferencesDto,
+    ActivationReplaceUndoResultDto, ActivationResultDto, AdoptEvidenceReportDto, AdoptPlanDto, AdoptResultDto, AdoptUndoResultDto, AgentActivationDto, AppPreferencesDto,
     AppUpdateCheckDto, ApplyAbandonRequestDto, ApplyActivationReplaceRequestDto,
     ApplyActivationRequestDto, ApplyAdoptRequestDto, ApplyFileImportRequestDto,
     ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto,
@@ -502,7 +501,7 @@ pub fn pin_skill_updates(
 }
 
 #[tauri::command]
-pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptScanReportDto, CommandFailureDto> {
+pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptEvidenceReportDto, CommandFailureDto> {
     state.scan_adopt()
 }
 

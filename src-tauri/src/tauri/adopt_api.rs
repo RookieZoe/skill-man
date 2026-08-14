@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use crate::core::adopt::{AdoptError, AdoptSelection, AdoptService};
+use crate::core::adopt::{AdoptError, AdoptPlanRequest, AdoptSelection, AdoptService};
 use crate::core::domain::AgentId;
 use crate::tauri_adapter::dto::{
-    AdoptPlanDto, AdoptResultDto, AdoptScanReportDto, AdoptUndoResultDto, ApplyAdoptRequestDto,
-    CancelAdoptRequestDto, CommandFailureDto, DiagnosticDto, FinalizeAdoptRequestDto,
-    PlanAdoptRequestDto, PublicErrorDto, UndoAdoptRequestDto,
+    AdoptEvidenceReportDto, AdoptPlanDto, AdoptResultDto, AdoptUndoResultDto,
+    ApplyAdoptRequestDto, CancelAdoptRequestDto, CommandFailureDto, DiagnosticDto,
+    FinalizeAdoptRequestDto, PlanAdoptRequestDto, PublicErrorDto, UndoAdoptRequestDto,
 };
 
 pub struct AdoptApi {
@@ -17,14 +17,8 @@ impl AdoptApi {
         Self { service }
     }
 
-    pub fn scan_adopt(&self) -> Result<AdoptScanReportDto, CommandFailureDto> {
-        self.service
-            .scan()
-            .map(|report| AdoptScanReportDto {
-                candidates: report.candidates.into_iter().map(Into::into).collect(),
-                truncated: report.truncated,
-            })
-            .map_err(command_error)
+    pub fn scan_adopt(&self) -> Result<AdoptEvidenceReportDto, CommandFailureDto> {
+        self.service.scan().map(Into::into).map_err(command_error)
     }
 
     pub fn plan_adopt(
@@ -37,35 +31,20 @@ impl AdoptApi {
             .map(|selection| AdoptSelection {
                 canonical_entity: PathBuf::from(selection.canonical_entity),
                 agent_ids: selection.agent_ids.into_iter().map(AgentId).collect(),
+                modified_branch: selection.modified_branch.map(Into::into),
             })
             .collect::<Vec<_>>();
-        let plan = self.service.plan(&selections).map_err(command_error)?;
+        let plan = self
+            .service
+            .plan(&AdoptPlanRequest {
+                evidence_generation: request.evidence_generation,
+                selections,
+            })
+            .map_err(command_error)?;
         Ok(AdoptPlanDto {
             plan_token: plan.plan_token,
-            items: plan
-                .items
-                .into_iter()
-                .map(|item| crate::tauri_adapter::dto::AdoptPlanItemDto {
-                    directory_name: item.directory_name,
-                    canonical_entity: item.canonical_entity.to_string_lossy().into_owned(),
-                    kind: match item.kind {
-                        crate::core::adopt::AdoptPlanKind::Migrate => "migrate".into(),
-                        crate::core::adopt::AdoptPlanKind::Link => "link".into(),
-                    },
-                    final_entity_path: item.final_entity_path.to_string_lossy().into_owned(),
-                    appearances: item.appearances.into_iter().map(Into::into).collect(),
-                    target_agents: item
-                        .target_agents
-                        .into_iter()
-                        .map(|agent| crate::tauri_adapter::dto::AdoptTargetAgentDto {
-                            agent_id: agent.agent_id.0,
-                            name: agent.name,
-                        })
-                        .collect(),
-                    adoptable: item.adoptable,
-                    error: item.error,
-                })
-                .collect(),
+            evidence_generation: plan.evidence_generation,
+            items: plan.items.into_iter().map(Into::into).collect(),
             can_apply: plan.can_apply,
         })
     }
@@ -156,6 +135,7 @@ fn command_error(error: AdoptError) -> CommandFailureDto {
         }) if source.kind() == std::io::ErrorKind::PermissionDenied => {
             PublicErrorDto::PermissionDenied
         }
+        AdoptError::Lock(_) => PublicErrorDto::StateUnavailable,
         AdoptError::FileSystem(_) | AdoptError::Internal(_) => PublicErrorDto::Internal,
     };
     CommandFailureDto {

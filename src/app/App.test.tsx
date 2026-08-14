@@ -3,13 +3,68 @@ import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
+import type { AdoptEvidenceCandidate } from "./catalog-client";
 import { App } from "./App";
+
+function evidenceCandidate(
+  canonicalEntity: string,
+  overrides: Partial<AdoptEvidenceCandidate> = {},
+): AdoptEvidenceCandidate {
+  const directoryName =
+    canonicalEntity.split("/").pop() ?? canonicalEntity;
+  return {
+    canonicalEntity,
+    directoryName,
+    directoryNames: [directoryName],
+    appearances: [
+      {
+        entryPath: canonicalEntity,
+        kind: "real_directory",
+        agentId: "claude-code",
+        shared: false,
+        originalTarget: null,
+        chain: {
+          entryPath: canonicalEntity,
+          entryDevice: 1,
+          entryInode: 1,
+          hops: [],
+          finalEntity: canonicalEntity,
+          fault: null,
+        },
+      },
+    ],
+    verdict: "local",
+    reason: { kind: "no_lock" },
+    lock: null,
+    remote: null,
+    localTreeHash: "tree-sha256-v1:abc",
+    requiresRelocation: false,
+    selectable: true,
+    adoptable: true,
+    conflict: null,
+    suggestedAgentIds: [],
+    ...overrides,
+  };
+}
+
+function evidenceReport(
+  candidates: AdoptEvidenceCandidate[],
+): {
+  generation: number;
+  truncated: boolean;
+  lockFiles: never[];
+  candidates: AdoptEvidenceCandidate[];
+} {
+  return { generation: 1, truncated: false, lockFiles: [], candidates };
+}
 
 function createAdoptableFixtureCatalogClient() {
   const client = createFixtureCatalogClient();
   const canonicalEntity = "~/.claude/skills/prompt-linter";
   client.scanAdopt = async () => ({
+    generation: 1,
     truncated: false,
+    lockFiles: [],
     candidates: [
       {
         canonicalEntity,
@@ -21,34 +76,42 @@ function createAdoptableFixtureCatalogClient() {
             kind: "real_directory",
             agentId: "claude-code",
             shared: false,
+            originalTarget: null,
+            chain: {
+              entryPath: canonicalEntity,
+              entryDevice: 1,
+              entryInode: 1,
+              hops: [],
+              finalEntity: canonicalEntity,
+              fault: null,
+            },
           },
         ],
-        risk: "none",
-        riskReason: null,
-        conflict: null,
+        verdict: "local",
+        reason: { kind: "no_lock" },
+        lock: null,
+        remote: null,
+        localTreeHash: "tree-sha256-v1:abc",
+        requiresRelocation: false,
+        selectable: true,
         adoptable: true,
+        conflict: null,
         suggestedAgentIds: [],
       },
     ],
   });
   client.planAdopt = async () => ({
     planToken: "fixture-adopt-plan",
+    evidenceGeneration: 1,
     items: [
       {
         directoryName: "prompt-linter",
         canonicalEntity,
-        kind: "migrate",
-        finalEntityPath: "/Library/skills/prompt-linter",
-        appearances: [
-          {
-            entryPath: canonicalEntity,
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
-          },
-        ],
+        intent: "local_link",
+        finalEntityPath: canonicalEntity,
+        appearances: [],
         targetAgents: [],
-        adoptable: true,
+        applyable: true,
         error: null,
       },
     ],
@@ -513,7 +576,7 @@ test("disables Adopt existing item when the occupier is not a Skill", async () =
   ).toBeEnabled();
 });
 
-test("Adopt existing item hands off to the Adopt flow with the candidate selected", async () => {
+test("Adopt existing item hands off to the Adopt flow with nothing selected", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   const scanAdopt = client.scanAdopt;
@@ -525,29 +588,8 @@ test("Adopt existing item hands off to the Adopt flow with the candidate selecte
     };
   };
   const canonicalEntity = "~/.claude/skills/skill-authoring";
-  client.scanAdopt = async () => ({
-    truncated: false,
-    candidates: [
-      {
-        canonicalEntity,
-        directoryName: "skill-authoring",
-        directoryNames: ["skill-authoring"],
-        appearances: [
-          {
-            entryPath: canonicalEntity,
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
-          },
-        ],
-        risk: "none",
-        riskReason: null,
-        conflict: null,
-        adoptable: true,
-        suggestedAgentIds: [],
-      },
-    ],
-  });
+  client.scanAdopt = async () =>
+    evidenceReport([evidenceCandidate(canonicalEntity)]);
   void scanAdopt;
   render(<App client={client} />);
   const claudeActivation = await screen.findByRole("switch", {
@@ -565,9 +607,12 @@ test("Adopt existing item hands off to the Adopt flow with the candidate selecte
     screen.queryByRole("dialog", { name: "Activation conflict" }),
   ).not.toBeInTheDocument();
   const checkbox = screen.getByRole("checkbox", {
-    name: /skill-authoring/,
+    name: /Include/,
   });
-  expect(checkbox).toBeChecked();
+  expect(checkbox).not.toBeChecked();
+  expect(
+    screen.getByRole("button", { name: "Preview Adopt" }),
+  ).toBeDisabled();
 });
 
 test("Adopt conflict handoff leaves an unsafe candidate unselected", async () => {
@@ -581,33 +626,22 @@ test("Adopt conflict handoff leaves an unsafe candidate unselected", async () =>
     };
   };
   const canonicalEntity = "~/.claude/skills/skill-authoring";
-  client.scanAdopt = async () => ({
-    truncated: false,
-    candidates: [
-      {
-        canonicalEntity,
-        directoryName: "skill-authoring",
-        directoryNames: ["skill-authoring"],
-        appearances: [
-          {
-            entryPath: canonicalEntity,
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
+  client.scanAdopt = async () =>
+    evidenceReport([
+      evidenceCandidate(canonicalEntity, {
+        verdict: "blocked",
+        reason: {
+          kind: "chain_fault",
+          fault: {
+            kind: "read_failed",
+            at: canonicalEntity,
+            detail: "read error",
           },
-        ],
-        risk: "broken",
-        riskReason: {
-          kind: "unsafe_tree",
-          detail:
-            "Skill symlink target must be a valid UTF-8 relative path: skill-authoring",
         },
-        conflict: null,
+        selectable: false,
         adoptable: false,
-        suggestedAgentIds: [],
-      },
-    ],
-  });
+      }),
+    ]);
   render(<App client={client} />);
 
   await user.click(
@@ -621,11 +655,10 @@ test("Adopt conflict handoff leaves an unsafe candidate unselected", async () =>
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
-  const checkbox = within(dialog).getByRole("checkbox", {
-    name: /skill-authoring/,
-  });
-  expect(checkbox).toBeDisabled();
-  expect(checkbox).not.toBeChecked();
+  expect(
+    within(dialog).queryByRole("checkbox"),
+  ).not.toBeInTheDocument();
+  expect(dialog).toHaveTextContent("No selection control");
   expect(
     within(dialog).getByRole("button", { name: "Preview Adopt" }),
   ).toBeDisabled();
@@ -944,29 +977,10 @@ test("opens the Adopt sheet and reports a fixture rejection", async () => {
 test("labels an Adopt preview failure separately from a scan failure", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
-  client.scanAdopt = async () => ({
-    truncated: false,
-    candidates: [
-      {
-        canonicalEntity: "~/.claude/skills/prompt-linter",
-        directoryName: "prompt-linter",
-        directoryNames: ["prompt-linter"],
-        appearances: [
-          {
-            entryPath: "~/.claude/skills/prompt-linter",
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
-          },
-        ],
-        risk: "none",
-        riskReason: null,
-        conflict: null,
-        adoptable: true,
-        suggestedAgentIds: [],
-      },
-    ],
-  });
+  client.scanAdopt = async () =>
+    evidenceReport([
+      evidenceCandidate("~/.claude/skills/prompt-linter"),
+    ]);
   client.planAdopt = async () => {
     throw {
       code: "validation",
@@ -980,6 +994,7 @@ test("labels an Adopt preview failure separately from a scan failure", async () 
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
+  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
   const preview = within(dialog).getByRole("button", {
     name: "Preview Adopt",
   });
@@ -995,33 +1010,24 @@ test("labels an Adopt preview failure separately from a scan failure", async () 
 test("leaves an unsafe Adopt candidate unselected and shows its scan reason", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
-  client.scanAdopt = async () => ({
-    truncated: false,
-    candidates: [
-      {
-        canonicalEntity: "~/.agents/skills/ask-matt",
-        directoryName: "ask-matt",
-        directoryNames: ["ask-matt"],
-        appearances: [
-          {
-            entryPath: "~/.agents/skills/ask-matt",
-            kind: "real_directory",
-            agentId: null,
-            shared: true,
+  client.scanAdopt = async () =>
+    evidenceReport([
+      evidenceCandidate("~/.agents/skills/ask-matt", {
+        verdict: "blocked",
+        reason: {
+          kind: "chain_fault",
+          fault: {
+            kind: "read_failed",
+            at: "~/.agents/skills/ask-matt",
+            detail:
+              "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
           },
-        ],
-        risk: "broken",
-        riskReason: {
-          kind: "unsafe_tree",
-          detail:
-            "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
         },
-        conflict: null,
+        selectable: false,
         adoptable: false,
         suggestedAgentIds: ["claude-code", "codex"],
-      },
-    ],
-  });
+      }),
+    ]);
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
 
@@ -1030,11 +1036,11 @@ test("leaves an unsafe Adopt candidate unselected and shows its scan reason", as
     name: "Adopt untracked Skills",
   });
 
-  const candidate = within(dialog).getByRole("checkbox", { name: /ask-matt/ });
-  expect(candidate).toBeDisabled();
-  expect(candidate).not.toBeChecked();
+  expect(
+    within(dialog).queryByRole("checkbox"),
+  ).not.toBeInTheDocument();
   expect(dialog).toHaveTextContent(
-    "Broken · Skill symlink target must be a valid UTF-8 relative path: ask-matt",
+    "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
   );
   expect(
     within(dialog).getByRole("button", { name: "Preview Adopt" }),
@@ -1069,6 +1075,7 @@ test("keeps a completed Adopt undoable and finalizable when Library refresh fail
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
+  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
   const previewButton = within(dialog).getByRole("button", {
     name: "Preview Adopt",
   });
@@ -1120,6 +1127,7 @@ test("keeps a completed Undo when Library refresh fails", async () => {
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
+  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
   const previewButton = within(dialog).getByRole("button", {
     name: "Preview Adopt",
   });
@@ -1158,6 +1166,7 @@ test("reports an Adopt command failure before showing a result", async () => {
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
+  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
   const previewButton = within(dialog).getByRole("button", {
     name: "Preview Adopt",
   });
@@ -1188,6 +1197,7 @@ test("reports an Undo command failure and keeps Undo available", async () => {
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
+  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
   const previewButton = within(dialog).getByRole("button", {
     name: "Preview Adopt",
   });
@@ -1252,58 +1262,32 @@ test("shows the three-step onboarding on first run and Skip records completion",
   ).toBeInTheDocument();
 });
 
-test("onboarding full scan hands off to Adopt with candidates selected", async () => {
+test("onboarding full scan hands off to Adopt with nothing selected", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   client.startupInfo = async () => ({
     firstRun: true,
     agents: [],
   });
-  client.scanAdopt = async () => ({
-    truncated: false,
-    candidates: [
-      {
-        canonicalEntity: "~/.claude/skills/prompt-linter",
-        directoryName: "prompt-linter",
-        directoryNames: ["prompt-linter"],
-        appearances: [
-          {
-            entryPath: "~/.claude/skills/prompt-linter",
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
+  client.scanAdopt = async () =>
+    evidenceReport([
+      evidenceCandidate("~/.claude/skills/prompt-linter"),
+      evidenceCandidate("~/.agents/skills/ask-matt", {
+        verdict: "blocked",
+        reason: {
+          kind: "chain_fault",
+          fault: {
+            kind: "read_failed",
+            at: "~/.agents/skills/ask-matt",
+            detail:
+              "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
           },
-        ],
-        risk: "none",
-        riskReason: null,
-        conflict: null,
-        adoptable: true,
-        suggestedAgentIds: [],
-      },
-      {
-        canonicalEntity: "~/.agents/skills/ask-matt",
-        directoryName: "ask-matt",
-        directoryNames: ["ask-matt"],
-        appearances: [
-          {
-            entryPath: "~/.agents/skills/ask-matt",
-            kind: "real_directory",
-            agentId: null,
-            shared: true,
-          },
-        ],
-        risk: "broken",
-        riskReason: {
-          kind: "unsafe_tree",
-          detail:
-            "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
         },
-        conflict: null,
+        selectable: false,
         adoptable: false,
         suggestedAgentIds: ["claude-code", "codex"],
-      },
-    ],
-  });
+      }),
+    ]);
   render(<App client={client} />);
 
   await screen.findByRole("dialog", { name: "Welcome to Skill Man" });
@@ -1313,9 +1297,7 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
   expect(
     await screen.findByText(/2 Untracked Skills found/),
   ).toBeInTheDocument();
-  expect(screen.getByText(/Broken · Skill symlink target/)).toHaveTextContent(
-    "Broken · Skill symlink target must be a valid UTF-8 relative path: ask-matt",
-  );
+  expect(screen.getByText("Blocked")).toBeInTheDocument();
   await user.click(
     screen.getByRole("button", { name: "Review Adopt candidates" }),
   );
@@ -1326,10 +1308,14 @@ test("onboarding full scan hands off to Adopt with candidates selected", async (
   expect(
     screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("checkbox", { name: /prompt-linter/ })).toBeChecked();
-  const unsafeCandidate = screen.getByRole("checkbox", { name: /ask-matt/ });
-  expect(unsafeCandidate).toBeDisabled();
-  expect(unsafeCandidate).not.toBeChecked();
+  // Viewing is never selecting: the handoff opens the ledger with every
+  // Include control unchecked (spec §2.1 invariant 9).
+  const includeControls = screen.getAllByRole("checkbox", { name: /Include/ });
+  expect(includeControls).toHaveLength(1);
+  expect(includeControls[0]).not.toBeChecked();
+  expect(
+    screen.queryByRole("checkbox", { name: /ask-matt/ }),
+  ).not.toBeInTheDocument();
 });
 
 test("Preferences sheet shows exactly four switches with defaults", async () => {

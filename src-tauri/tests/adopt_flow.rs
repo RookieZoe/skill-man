@@ -11,10 +11,11 @@ use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::adopt::{
-    AdoptError, AdoptPlanKind, AdoptRisk, AdoptRiskReason, AdoptSelection, AdoptService,
+    AdoptError, AdoptEvidenceCandidate, AdoptEvidenceReport, AdoptPlanIntent, AdoptPlanRequest,
+    AdoptSelection, AdoptService, AdoptVerdict,
 };
 use skill_man_lib::core::catalog::CatalogService;
-use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SkillId, SourceKind};
+use skill_man_lib::core::domain::{AgentId, CatalogFilter, SkillId, SourceKind};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
 use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
@@ -299,6 +300,40 @@ impl FileSystem for FailDoneJournalFileSystem {
         self.delegate.scan_skills_directory(path)
     }
 
+    fn inspect_evidence_chain(
+        &self,
+        path: &Path,
+    ) -> Result<
+        skill_man_lib::seams::filesystem::EvidenceChain,
+        skill_man_lib::seams::filesystem::FileSystemError,
+    > {
+        self.delegate.inspect_evidence_chain(path)
+    }
+
+    fn scan_skills_evidence(
+        &self,
+        path: &Path,
+    ) -> Result<
+        Vec<skill_man_lib::seams::filesystem::ScannedSkillEvidence>,
+        skill_man_lib::seams::filesystem::FileSystemError,
+    > {
+        self.delegate.scan_skills_evidence(path)
+    }
+
+    fn create_temp_workspace(
+        &self,
+        purpose: &str,
+    ) -> Result<PathBuf, skill_man_lib::seams::filesystem::FileSystemError> {
+        self.delegate.create_temp_workspace(purpose)
+    }
+
+    fn discard_temp_workspace(
+        &self,
+        path: &Path,
+    ) -> Result<(), skill_man_lib::seams::filesystem::FileSystemError> {
+        self.delegate.discard_temp_workspace(path)
+    }
+
     fn stage_external_directory(
         &self,
         source: &Path,
@@ -559,7 +594,7 @@ impl Harness {
     }
 }
 
-fn select(candidates: &[skill_man_lib::core::adopt::AdoptCandidate], name: &str) -> AdoptSelection {
+fn select(candidates: &[AdoptEvidenceCandidate], name: &str) -> AdoptSelection {
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.directory_name == name)
@@ -567,6 +602,14 @@ fn select(candidates: &[skill_man_lib::core::adopt::AdoptCandidate], name: &str)
     AdoptSelection {
         canonical_entity: candidate.canonical_entity.clone(),
         agent_ids: Vec::new(),
+        modified_branch: None,
+    }
+}
+
+fn plan_request(report: &AdoptEvidenceReport, selections: Vec<AdoptSelection>) -> AdoptPlanRequest {
+    AdoptPlanRequest {
+        evidence_generation: report.generation,
+        selections,
     }
 }
 
@@ -595,8 +638,13 @@ fn adopt_scan_groups_appearances_by_canonical_entity_and_marks_risks() {
         real.canonicalize().expect("canonical")
     );
     assert_eq!(foo.appearances.len(), 2);
-    assert!(foo.adoptable);
-    assert_eq!(foo.risk, AdoptRisk::None);
+    assert_eq!(foo.verdict, AdoptVerdict::Local);
+    assert!(foo.selectable);
+    assert!(
+        foo.requires_relocation,
+        "a real directory inside an Agent skills root needs a stable location"
+    );
+    assert!(!foo.adoptable);
     assert_eq!(foo.directory_names, vec!["foo"]);
 
     let bar = candidates
@@ -604,7 +652,9 @@ fn adopt_scan_groups_appearances_by_canonical_entity_and_marks_risks() {
         .find(|candidate| candidate.directory_name == "bar")
         .expect("bar candidate");
     assert!(
-        bar.appearances.iter().all(|appearance| appearance.shared),
+        bar.appearances
+            .iter()
+            .all(|appearance| appearance.appearance.shared),
         "shared entries are flagged"
     );
     assert_eq!(
@@ -617,8 +667,13 @@ fn adopt_scan_groups_appearances_by_canonical_entity_and_marks_risks() {
         .iter()
         .find(|candidate| candidate.directory_name == "dangling-link")
         .expect("dangling candidate");
-    assert_eq!(dangling.risk, AdoptRisk::Broken);
+    assert_eq!(dangling.verdict, AdoptVerdict::Blocked);
+    assert!(!dangling.selectable);
     assert!(!dangling.adoptable);
+    assert!(matches!(
+        dangling.reason,
+        Some(skill_man_lib::core::adopt::AdoptVerdictReason::ChainFault { .. })
+    ));
 
     assert!(
         !candidates
@@ -649,22 +704,19 @@ fn adopt_preview_rejects_an_unsafe_skill_without_moving_the_source() {
         .expect("create the installer-style absolute self-link");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let ask_matt = candidates
         .iter()
         .find(|candidate| candidate.directory_name == "ask-matt")
         .expect("ask-matt candidate");
+    assert_eq!(ask_matt.verdict, AdoptVerdict::Local);
+    assert!(ask_matt.requires_relocation);
     assert!(!ask_matt.adoptable);
-    assert_eq!(ask_matt.risk, AdoptRisk::Broken);
-    assert_eq!(
-        ask_matt.risk_reason,
-        Some(AdoptRiskReason::UnsafeTree(
-            "Skill symlink target must be a valid UTF-8 relative path: ask-matt".into()
-        ))
-    );
     let plan = adopt
-        .plan(&[select(&candidates, "ask-matt")])
-        .expect("the unsafe Skill is represented as a blocked Preview item");
+        .plan(&plan_request(&report, vec![select(candidates, "ask-matt")]))
+        .expect("the installer-root Skill previews as a relocation intent");
+    assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLinkWithMove);
     assert!(!plan.can_apply);
     assert!(
         source.join("SKILL.md").is_file(),
@@ -695,12 +747,13 @@ fn adopt_preview_and_cancel_leave_a_migrating_skill_unchanged() {
     let source = write_skill(&claude, "preview-only", "# Preview only\n");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
     let plan = adopt
-        .plan(&[select(&candidates, "preview-only")])
+        .plan(&plan_request(&report, vec![select(&report.candidates, "preview-only")]))
         .expect("Preview Adopt");
 
-    assert!(plan.can_apply);
+    assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLinkWithMove);
+    assert!(!plan.can_apply, "the Agent-root entity needs a stable location first");
     assert!(
         source.join("SKILL.md").is_file(),
         "Preview must not move a valid Untracked Skill"
@@ -724,24 +777,27 @@ fn adopt_preview_and_cancel_leave_a_migrating_skill_unchanged() {
 }
 
 #[test]
-fn adopt_migrates_a_real_directory_and_replaces_the_appearance() {
+fn adopt_links_a_stable_external_entity_and_replaces_the_appearance() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
+    let projects = harness.home.path().join("Projects");
     let source = write_skill(
-        &claude,
+        &projects,
         "foo",
         "---\nname: foo\ndescription: Adopted.\n---\n# Foo\n",
     );
     let canonical = source.canonicalize().expect("canonical source");
+    std::os::unix::fs::symlink(&canonical, claude.join("foo")).expect("symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "foo")])
+        .plan(&plan_request(&report, vec![select(candidates, "foo")]))
         .expect("plan Adopt");
     assert_eq!(plan.items.len(), 1);
-    assert_eq!(plan.items[0].kind, AdoptPlanKind::Migrate);
-    assert_eq!(plan.items[0].final_entity_path, harness.entity("foo"));
+    assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLink);
+    assert_eq!(plan.items[0].final_entity_path, canonical);
     assert!(plan.can_apply);
 
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
@@ -750,39 +806,31 @@ fn adopt_migrates_a_real_directory_and_replaces_the_appearance() {
 
     let entry = claude.join("foo");
     let target = std::fs::read_link(&entry).expect("appearance became an Activation");
-    assert_eq!(target, harness.entity("foo"));
+    assert_eq!(target, canonical);
+    assert!(
+        source.join("SKILL.md").is_file(),
+        "the source tree is never copied or rewritten for a Local Link"
+    );
     assert_eq!(
-        std::fs::read_to_string(harness.entity("foo").join("SKILL.md")).expect("entity content"),
+        std::fs::read_to_string(source.join("SKILL.md")).expect("source content"),
         "---\nname: foo\ndescription: Adopted.\n---\n# Foo\n"
     );
 
-    let installs = harness
+    let links = harness
         .catalog()
-        .list(CatalogFilter::Install)
-        .expect("list Installs")
+        .list(CatalogFilter::Link)
+        .expect("list Links")
         .items;
-    let adopted = installs
+    let adopted = links
         .iter()
         .find(|skill| skill.directory_name == "foo")
-        .expect("adopted Skill is visible");
-    assert_eq!(adopted.source_kind, SourceKind::FileInstall);
+        .expect("adopted Link is visible");
+    assert_eq!(adopted.source_kind, SourceKind::Link);
     let detail = harness
         .catalog()
         .inspect(adopted.id.clone())
-        .expect("inspect adopted Skill");
-    assert!(
-        detail.file_source_original_path.is_some(),
-        "the raw file source path must survive the split DTO"
-    );
-    assert_eq!(detail.summary.health, Health::Healthy);
-
-    let record = harness
-        .runtime
-        .load_file_install("foo")
-        .expect("load file source")
-        .expect("file source row");
-    assert_eq!(record.original_path, canonical);
-    assert_eq!(record.library_entry_path, harness.entity("foo"));
+        .expect("inspect adopted Link");
+    assert_eq!(detail.final_entity_path, canonical.to_string_lossy());
 
     let journal = harness
         .library_root
@@ -805,12 +853,19 @@ fn adopt_migrates_a_real_directory_and_replaces_the_appearance() {
 fn adopt_apply_rejects_a_source_changed_after_preview_without_writing() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    let source = write_skill(&claude, "changed-after-preview", "# Original\n");
+    let projects = harness.home.path().join("Projects");
+    let source = write_skill(&projects, "changed-after-preview", "# Original\n");
+    std::os::unix::fs::symlink(
+        source.canonicalize().expect("canonical source"),
+        claude.join("changed-after-preview"),
+    )
+    .expect("symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "changed-after-preview")])
+        .plan(&plan_request(&report, vec![select(&candidates, "changed-after-preview")]))
         .expect("Preview Adopt");
     std::fs::write(source.join("SKILL.md"), "# Changed\n").expect("change source after Preview");
 
@@ -832,7 +887,13 @@ fn adopt_apply_rejects_a_source_changed_after_preview_without_writing() {
 fn adopt_apply_never_follows_a_symlinked_staging_root() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    let source = write_skill(&claude, "symlinked-staging", "# Symlinked staging\n");
+    let projects = harness.home.path().join("Projects");
+    let source = write_skill(&projects, "symlinked-staging", "# Symlinked staging\n");
+    std::os::unix::fs::symlink(
+        source.canonicalize().expect("canonical source"),
+        claude.join("symlinked-staging"),
+    )
+    .expect("symlink appearance");
     let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
@@ -842,9 +903,10 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
         harness.home.path().to_path_buf(),
     )
     .with_write_gate(write_gate.clone());
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "symlinked-staging")])
+        .plan(&plan_request(&report, vec![select(&candidates, "symlinked-staging")]))
         .expect("Preview Adopt");
 
     let outside = harness.home.path().join("must-not-stage-here");
@@ -914,7 +976,13 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
 fn gate_transition_makes_an_adopt_plan_stale() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    write_skill(&claude, "gate-stale-skill", "# Gate stale\n");
+    let projects = harness.home.path().join("Projects");
+    let source = write_skill(&projects, "gate-stale-skill", "# Gate stale\n");
+    std::os::unix::fs::symlink(
+        source.canonicalize().expect("canonical source"),
+        claude.join("gate-stale-skill"),
+    )
+    .expect("symlink appearance");
     let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
@@ -925,9 +993,10 @@ fn gate_transition_makes_an_adopt_plan_stale() {
     )
     .with_write_gate(write_gate.clone());
 
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "gate-stale-skill")])
+        .plan(&plan_request(&report, vec![select(&candidates, "gate-stale-skill")]))
         .expect("Preview Adopt");
     assert!(plan.can_apply);
 
@@ -964,8 +1033,19 @@ fn gate_transition_makes_an_adopt_plan_stale() {
 fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    write_skill(&claude, "stable-adopt", "# Stable Adopt\n");
-    write_skill(&claude, "blocked-apply", "# Blocked apply\n");
+    let projects = harness.home.path().join("Projects");
+    let stable_source = write_skill(&projects, "stable-adopt", "# Stable Adopt\n");
+    let blocked_source = write_skill(&projects, "blocked-apply", "# Blocked apply\n");
+    std::os::unix::fs::symlink(
+        stable_source.canonicalize().expect("canonical stable"),
+        claude.join("stable-adopt"),
+    )
+    .expect("stable symlink appearance");
+    std::os::unix::fs::symlink(
+        blocked_source.canonicalize().expect("canonical blocked"),
+        claude.join("blocked-apply"),
+    )
+    .expect("blocked symlink appearance");
     let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         harness.runtime.clone(),
@@ -975,18 +1055,19 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
         harness.home.path().to_path_buf(),
     )
     .with_write_gate(write_gate.clone());
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let stable_plan = adopt
-        .plan(&[select(&candidates, "stable-adopt")])
+        .plan(&plan_request(&report, vec![select(&candidates, "stable-adopt")]))
         .expect("Preview stable Adopt");
     let stable_result = adopt
         .apply(&stable_plan.plan_token)
         .expect("apply stable Adopt");
     let plan = adopt
-        .plan(&[select(&candidates, "blocked-apply")])
+        .plan(&plan_request(&report, vec![select(&candidates, "blocked-apply")]))
         .expect("Preview Adopt");
 
-    let occupied_staging_root = harness.library_root.join("staging/adopt-42-3");
+    let occupied_staging_root = harness.library_root.join("staging/adopt-42-2");
     std::fs::create_dir_all(occupied_staging_root.parent().expect("staging parent"))
         .expect("create staging parent");
     std::fs::write(&occupied_staging_root, "occupied")
@@ -999,9 +1080,13 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     assert!(matches!(error, AdoptError::RecoveryRequired(_)), "{error}");
     assert!(!write_gate.is_product_write_open());
     let second = adopt
-        .plan(&[select(&candidates, "blocked-apply")])
-        .expect_err("the session stays write-locked");
-    assert!(matches!(second, AdoptError::RecoveryRequired(_)));
+        .plan(&plan_request(&report, vec![select(candidates, "blocked-apply")]))
+        .expect("read-only evidence planning stays available during recovery");
+    assert!(second.can_apply, "planning freezes evidence even during recovery");
+    let apply_after_lock = adopt
+        .apply(&second.plan_token)
+        .expect_err("apply stays write-locked");
+    assert!(matches!(apply_after_lock, AdoptError::RecoveryRequired(_)));
     let undo = adopt
         .undo(&stable_result.operation_id)
         .expect_err("Undo is also write-locked");
@@ -1010,16 +1095,16 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
         .finalize(&stable_result.operation_id)
         .expect_err("Finalize is also write-locked");
     assert!(matches!(finalize, AdoptError::RecoveryRequired(_)));
-    assert!(harness.entity("stable-adopt/SKILL.md").is_file());
+    assert!(stable_source.join("SKILL.md").is_file());
     assert_eq!(
         std::fs::read_link(claude.join("stable-adopt")).expect("stable Activation remains"),
-        harness.entity("stable-adopt")
+        stable_source.canonicalize().expect("canonical stable")
     );
-    assert!(claude.join("blocked-apply/SKILL.md").is_file());
+    assert!(blocked_source.join("SKILL.md").is_file());
     assert!(
         harness
             .library_root
-            .join("operations/adopt-42-3/adopt-journal.json")
+            .join("operations/adopt-42-2/adopt-journal.json")
             .is_file(),
         "the durable intent remains for startup recovery"
     );
@@ -1029,7 +1114,11 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
 fn adopt_done_journal_failure_compensates_the_committed_item() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    let source = write_skill(&claude, "done-write-failure", "# Done write failure\n");
+    let projects = harness.home.path().join("Projects");
+    let source = write_skill(&projects, "done-write-failure", "# Done write failure\n");
+    let canonical = source.canonicalize().expect("canonical source");
+    std::os::unix::fs::symlink(&canonical, claude.join("done-write-failure"))
+        .expect("symlink appearance");
     let filesystem = Arc::new(FailDoneJournalFileSystem::new(
         harness.home.path().to_path_buf(),
     ));
@@ -1042,9 +1131,10 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
         harness.home.path().to_path_buf(),
     )
     .with_write_gate(write_gate.clone());
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "done-write-failure")])
+        .plan(&plan_request(&report, vec![select(&candidates, "done-write-failure")]))
         .expect("Preview Adopt");
 
     let result = adopt
@@ -1064,18 +1154,16 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
     assert!(!result.undo_available);
     assert!(write_gate.is_product_write_open());
     assert!(source.join("SKILL.md").is_file());
-    assert!(
-        std::fs::symlink_metadata(&source)
-            .expect("restored source")
-            .is_dir(),
-        "the original appearance is restored as a real directory"
+    assert_eq!(
+        std::fs::read_link(claude.join("done-write-failure")).expect("restored appearance"),
+        canonical,
+        "the original symlink appearance is restored during compensation"
     );
-    assert!(!harness.entity("done-write-failure").exists());
     assert!(
         !harness
             .catalog()
-            .list(CatalogFilter::Install)
-            .expect("list Installs")
+            .list(CatalogFilter::Link)
+            .expect("list Links")
             .items
             .iter()
             .any(|skill| skill.directory_name == "done-write-failure"),
@@ -1092,11 +1180,12 @@ fn adopt_registers_external_symlinks_as_links() {
     std::os::unix::fs::symlink(&external, claude.join("ext-foo")).expect("symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "ext-foo")])
+        .plan(&plan_request(&report, vec![select(&candidates, "ext-foo")]))
         .expect("plan Adopt");
-    assert_eq!(plan.items[0].kind, AdoptPlanKind::Link);
+    assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLink);
     assert_eq!(
         plan.items[0].final_entity_path,
         external.canonicalize().expect("canonical external")
@@ -1127,12 +1216,17 @@ fn adopt_splits_shared_entries_into_per_agent_activations() {
     let claude = harness.claude_skills();
     let codex = harness.codex_skills();
     let shared = harness.shared_skills();
-    write_skill(&shared, "shared-tool", "# Shared\n");
+    let projects = harness.home.path().join("Projects");
+    let entity = write_skill(&projects, "shared-tool", "# Shared\n");
+    let canonical = entity.canonicalize().expect("canonical entity");
+    std::os::unix::fs::symlink(&canonical, shared.join("shared-tool"))
+        .expect("shared symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "shared-tool")])
+        .plan(&plan_request(&report, vec![select(candidates, "shared-tool")]))
         .expect("plan Adopt");
     assert_eq!(
         plan.items[0].target_agents.len(),
@@ -1147,9 +1241,13 @@ fn adopt_splits_shared_entries_into_per_agent_activations() {
         "the shared entry is removed"
     );
     let claude_target = std::fs::read_link(claude.join("shared-tool")).expect("Claude Activation");
-    assert_eq!(claude_target, harness.entity("shared-tool"));
+    assert_eq!(claude_target, canonical);
     let codex_target = std::fs::read_link(codex.join("shared-tool")).expect("Codex Activation");
-    assert_eq!(codex_target, harness.entity("shared-tool"));
+    assert_eq!(codex_target, canonical);
+    assert!(
+        entity.join("SKILL.md").is_file(),
+        "the stable entity is never copied or moved"
+    );
 }
 
 #[test]
@@ -1157,15 +1255,37 @@ fn adopt_partial_failure_rolls_back_only_the_failed_skill() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
     let shared = harness.shared_skills();
-    write_skill(&claude, "alpha", "# Alpha\n");
-    write_skill(&shared, "beta", "# Beta\n");
+    let projects = harness.home.path().join("Projects");
+    let alpha_entity = write_skill(&projects, "alpha", "# Alpha\n");
+    let beta_entity = write_skill(&projects, "beta", "# Beta\n");
+    let alpha_canonical = alpha_entity.canonicalize().expect("canonical alpha");
+    let beta_canonical = beta_entity.canonicalize().expect("canonical beta");
+    std::os::unix::fs::symlink(&alpha_canonical, claude.join("alpha"))
+        .expect("alpha symlink appearance");
+    std::os::unix::fs::symlink(&beta_canonical, shared.join("beta"))
+        .expect("beta shared symlink appearance");
     // Occupy the Claude-side Activation entry for the shared beta item.
     write_skill(&claude, "beta", "# Occupied\n");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
+    let beta_shared = candidates
+        .iter()
+        .find(|candidate| candidate.canonical_entity == beta_canonical)
+        .expect("shared beta candidate");
     let plan = adopt
-        .plan(&[select(&candidates, "alpha"), select(&candidates, "beta")])
+        .plan(&plan_request(
+            &report,
+            vec![
+                select(candidates, "alpha"),
+                AdoptSelection {
+                    canonical_entity: beta_shared.canonical_entity.clone(),
+                    agent_ids: Vec::new(),
+                    modified_branch: None,
+                },
+            ],
+        ))
         .expect("plan Adopt");
     assert_eq!(plan.items.len(), 2);
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
@@ -1185,29 +1305,30 @@ fn adopt_partial_failure_rolls_back_only_the_failed_skill() {
     let beta_error = beta.error.as_deref().expect("beta failure reason");
     assert!(beta_error.contains("occupied"), "{beta_error}");
 
-    assert!(
-        shared.join("beta").join("SKILL.md").is_file(),
-        "the failed Skill was restored to its original shared entry"
+    assert_eq!(
+        std::fs::read_link(shared.join("beta")).expect("restored shared appearance"),
+        beta_canonical,
+        "the failed Skill restored its original shared symlink"
     );
     assert!(
-        !harness.entity("beta").exists(),
-        "no Library entity remains for the failed Skill"
+        beta_entity.join("SKILL.md").is_file(),
+        "the stable entity is untouched"
     );
     assert_eq!(
         std::fs::read_to_string(claude.join("beta/SKILL.md")).expect("occupying entry"),
         "# Occupied\n"
     );
-    let installs = harness
+    let links = harness
         .catalog()
-        .list(CatalogFilter::Install)
-        .expect("list Installs")
+        .list(CatalogFilter::Link)
+        .expect("list Links")
         .items;
     assert!(
-        !installs.iter().any(|skill| skill.directory_name == "beta"),
+        !links.iter().any(|skill| skill.directory_name == "beta"),
         "the failed Skill has no catalog row"
     );
     assert!(
-        installs.iter().any(|skill| skill.directory_name == "alpha"),
+        links.iter().any(|skill| skill.directory_name == "alpha"),
         "the successful Skill stays"
     );
 
@@ -1227,37 +1348,37 @@ fn adopt_partial_failure_rolls_back_only_the_failed_skill() {
 fn adopt_undo_restores_original_locations_and_rows() {
     let harness = Harness::new();
     let claude = harness.claude_skills();
-    let source = write_skill(&claude, "foo", "# Foo\n");
+    let projects = harness.home.path().join("Projects");
+    let source = write_skill(&projects, "foo", "# Foo\n");
     let canonical = source.canonicalize().expect("canonical source");
+    std::os::unix::fs::symlink(&canonical, claude.join("foo")).expect("symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "foo")])
+        .plan(&plan_request(&report, vec![select(candidates, "foo")]))
         .expect("plan Adopt");
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
 
     let undo = adopt.undo(&result.operation_id).expect("undo Adopt");
     assert!(undo.items[0].undone, "{:?}", undo.items[0].error);
-    assert!(
-        claude.join("foo").canonicalize().expect("restored") == canonical,
-        "the entity moved back to its original location"
+    assert_eq!(
+        std::fs::read_link(claude.join("foo")).expect("restored entry"),
+        canonical,
+        "the original symlink appearance is restored"
     );
     assert!(
-        std::fs::symlink_metadata(claude.join("foo"))
-            .expect("restored entry")
-            .file_type()
-            .is_dir(),
-        "the restored entry is a real directory again"
+        source.join("SKILL.md").is_file(),
+        "the stable entity stays in place"
     );
-    assert!(!harness.entity("foo").exists());
-    let installs = harness
+    let links = harness
         .catalog()
-        .list(CatalogFilter::Install)
-        .expect("list Installs")
+        .list(CatalogFilter::Link)
+        .expect("list Links")
         .items;
     assert!(
-        !installs.iter().any(|skill| skill.directory_name == "foo"),
+        !links.iter().any(|skill| skill.directory_name == "foo"),
         "the catalog row is gone"
     );
     let again = adopt
@@ -1272,22 +1393,26 @@ fn adopt_undo_skips_entries_occupied_since_apply() {
     let claude = harness.claude_skills();
     let codex = harness.codex_skills();
     let shared = harness.shared_skills();
-    write_skill(&shared, "foo", "# Foo\n");
+    let projects = harness.home.path().join("Projects");
+    let entity = write_skill(&projects, "foo", "# Foo\n");
+    let canonical = entity.canonicalize().expect("canonical entity");
+    std::os::unix::fs::symlink(&canonical, shared.join("foo"))
+        .expect("shared symlink appearance");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "foo")])
+        .plan(&plan_request(&report, vec![select(candidates, "foo")]))
         .expect("plan Adopt");
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
-    let library_entity = harness.entity("foo");
     assert_eq!(
         std::fs::read_link(claude.join("foo")).expect("Claude Activation"),
-        library_entity
+        canonical
     );
     assert_eq!(
         std::fs::read_link(codex.join("foo")).expect("Codex Activation"),
-        library_entity
+        canonical
     );
 
     write_skill(&shared, "foo", "# New occupant\n");
@@ -1302,8 +1427,8 @@ fn adopt_undo_skips_entries_occupied_since_apply() {
         "{error}"
     );
     assert!(
-        library_entity.join("SKILL.md").is_file(),
-        "the Library entity is untouched"
+        entity.join("SKILL.md").is_file(),
+        "the stable entity is untouched"
     );
     assert_eq!(
         std::fs::read_to_string(shared.join("foo/SKILL.md")).expect("external occupant"),
@@ -1312,20 +1437,22 @@ fn adopt_undo_skips_entries_occupied_since_apply() {
     );
     assert_eq!(
         std::fs::read_link(claude.join("foo")).expect("Claude Activation remains"),
-        library_entity,
+        canonical,
         "an occupied original path must be detected before removing any Activation"
     );
     assert_eq!(
         std::fs::read_link(codex.join("foo")).expect("Codex Activation remains"),
-        library_entity,
+        canonical,
         "the whole skipped item must remain unchanged"
     );
     assert!(
         harness
-            .runtime
-            .load_file_install("foo")
-            .expect("load adopted source")
-            .is_some(),
+            .catalog()
+            .list(CatalogFilter::Link)
+            .expect("list Links")
+            .items
+            .iter()
+            .any(|skill| skill.directory_name == "foo"),
         "the catalog row remains for a skipped Undo item"
     );
 }
@@ -1336,7 +1463,11 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     let claude = harness.claude_skills();
     let codex = harness.codex_skills();
     let shared = harness.shared_skills();
-    write_skill(&shared, "undo-fault", "# Undo fault\n");
+    let projects = harness.home.path().join("Projects");
+    let entity = write_skill(&projects, "undo-fault", "# Undo fault\n");
+    let canonical = entity.canonicalize().expect("canonical entity");
+    std::os::unix::fs::symlink(&canonical, shared.join("undo-fault"))
+        .expect("shared symlink appearance");
     let write_gate = Arc::new(WriteGate::open_for_tests());
     let adopt = AdoptService::new(
         Arc::new(FailFirstAdoptRemovalStore::new(harness.runtime.clone())),
@@ -1346,12 +1477,12 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
         harness.home.path().to_path_buf(),
     )
     .with_write_gate(write_gate.clone());
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let plan = adopt
-        .plan(&[select(&candidates, "undo-fault")])
+        .plan(&plan_request(&report, vec![select(&candidates, "undo-fault")]))
         .expect("plan Adopt");
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
-    let library_entity = harness.entity("undo-fault");
 
     let error = adopt
         .undo(&result.operation_id)
@@ -1368,10 +1499,10 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
             .is_file(),
         "the journal must remain until startup reconciles the catalog and filesystem"
     );
-    assert!(library_entity.join("SKILL.md").is_file());
+    assert!(entity.join("SKILL.md").is_file());
     assert!(
         !shared.join("undo-fault").exists(),
-        "catalog deletion happens before restoring the shared source"
+        "the shared appearance stays removed while recovery is pending"
     );
     assert!(
         std::fs::symlink_metadata(claude.join("undo-fault")).is_err(),
@@ -1383,10 +1514,12 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     );
     assert!(
         harness
-            .runtime
-            .load_file_install("undo-fault")
-            .expect("load adopted source")
-            .is_some(),
+            .catalog()
+            .list(CatalogFilter::Link)
+            .expect("list Links")
+            .items
+            .iter()
+            .any(|skill| skill.directory_name == "undo-fault"),
         "the injected catalog failure leaves the durable row present"
     );
 
@@ -1404,11 +1537,11 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     assert!(restart_gate.is_product_write_open());
     assert_eq!(
         std::fs::read_link(claude.join("undo-fault")).expect("restored Claude Activation"),
-        library_entity
+        canonical
     );
     assert_eq!(
         std::fs::read_link(codex.join("undo-fault")).expect("restored Codex Activation"),
-        library_entity
+        canonical
     );
     assert!(
         !harness
@@ -1447,26 +1580,19 @@ fn adopt_conflicts_with_managed_identity_are_not_adoptable() {
         .expect("apply Link");
 
     let adopt = harness.adopt();
-    let candidates = adopt.scan().expect("scan").candidates;
+    let report = adopt.scan().expect("scan");
+    let candidates = &report.candidates;
     let conflicted = candidates
         .iter()
         .find(|candidate| candidate.directory_name == "conflicted")
         .expect("conflicted candidate");
-    assert!(!conflicted.adoptable);
+    assert_eq!(conflicted.verdict, AdoptVerdict::Conflict);
+    assert!(!conflicted.selectable);
     assert!(conflicted.conflict.is_some());
-    let plan = adopt
-        .plan(&[select(&candidates, "conflicted")])
-        .expect("plan conflicted");
-    assert!(!plan.can_apply);
-    assert!(
-        plan.items[0]
-            .error
-            .as_deref()
-            .expect("conflict error")
-            .contains("already uses"),
-        "{:?}",
-        plan.items[0].error
-    );
+    let error = adopt
+        .plan(&plan_request(&report, vec![select(candidates, "conflicted")]))
+        .expect_err("a conflicted candidate can never be planned");
+    assert!(matches!(error, AdoptError::Validation(_)), "{error}");
 }
 
 #[test]
