@@ -180,6 +180,31 @@ export function createFixtureCatalogClient(): CatalogClient {
         "Home Binding is not available in the preview fixture",
       );
     },
+    async reconnectSameHome() {
+      return fixtureUnsupported(
+        "Reconnect is not available in the preview fixture",
+      );
+    },
+    async planAbandon() {
+      return fixtureUnsupported(
+        "Abandon is not available in the preview fixture",
+      );
+    },
+    async applyAbandon() {
+      return fixtureUnsupported(
+        "Abandon is not available in the preview fixture",
+      );
+    },
+    async getRestoreEligibility() {
+      return fixtureUnsupported(
+        "Restore is not available in the preview fixture",
+      );
+    },
+    async planRestore() {
+      return fixtureUnsupported(
+        "Restore is not available in the preview fixture",
+      );
+    },
     async getBootstrapSnapshot() {
       return {
         state: "bound",

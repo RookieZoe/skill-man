@@ -14,10 +14,7 @@ export type CatalogReadOnlyReason =
   "unsupported_schema" | "integrity_failed" | "open_failed";
 
 /** Raw technical facts from the native authority, never App Copy (spec §4.7). */
-export type HomeCandidateMode =
-  | "fresh"
-  | "legacy_in_place"
-  | "legacy_copy";
+export type HomeCandidateMode = "fresh" | "legacy_in_place" | "legacy_copy";
 
 /** A validated, not-yet-confirmed Home candidate (spec §4.2). */
 export interface HomeCandidate {
@@ -42,6 +39,11 @@ export interface BootstrapDiagnostic {
 export type BootstrapSnapshot =
   | { state: "app_state_unavailable"; diagnostic: BootstrapDiagnostic | null }
   | { state: "unconfigured" }
+  | {
+      state: "abandoned";
+      homeId: string;
+      path: string;
+    }
   | { state: "legacy_detected"; path: string }
   | {
       state: "fixture_recovery_locked";
@@ -68,6 +70,39 @@ export type BootstrapSnapshot =
       path: string;
       diagnostic: BootstrapDiagnostic | null;
     };
+
+/** The high-friction Abandon preview (ADR-0012 §6). */
+export interface AbandonPreview {
+  homeId: string;
+  path: string;
+  boundAt: string;
+  planToken: string;
+}
+
+/** Why Restore applies (closed reasons; presentation maps to message keys). */
+export type RestoreReason =
+  "catalog_integrity_failed" | "fixture_contamination";
+
+export type RestoreNotApplicableReason =
+  | "no_binding"
+  | "legacy_unbound"
+  | "app_state_unavailable"
+  | "identity_mismatch"
+  | "home_unavailable"
+  | "unsupported_schema"
+  | "open_failed"
+  | "active_operation";
+
+/** Restore eligibility probe result (spec §5.5). */
+export type RestoreEligibility =
+  | {
+      kind: "restore_required";
+      homeId: string;
+      path: string;
+      reason: RestoreReason;
+    }
+  | { kind: "not_required" }
+  | { kind: "not_applicable"; reason: RestoreNotApplicableReason };
 
 /** `bootstrap://changed` payload: snapshot plus the write-gate generation. */
 export interface BootstrapChangedPayload {
@@ -201,6 +236,11 @@ export type PublicError =
   | { code: "recovery_state_store" }
   | { code: "recovery_filesystem" }
   | { code: "recovery_probe" }
+  | { code: "restore_not_applicable" }
+  | { code: "reconnect_not_available" }
+  | { code: "abandon_not_applicable" }
+  | { code: "abandon_confirmation_mismatch" }
+  | { code: "abandon_cas_conflict" }
   | { code: "candidate_invalid"; reason: string }
   | { code: "binding_step_failed"; cursor: string }
   | { code: "binding_state_ambiguous" }
@@ -656,6 +696,13 @@ export interface CatalogClient {
   confirmHome(candidateToken: string): Promise<BootstrapSnapshot>;
   continueCandidate(operationId: string): Promise<BootstrapSnapshot>;
   cancelCandidate(operationId: string): Promise<BootstrapSnapshot>;
+  /** Reconnect Same Home: re-verifies the existing binding (spec §5.5). */
+  reconnectSameHome(): Promise<BootstrapSnapshot>;
+  planAbandon(): Promise<AbandonPreview>;
+  applyAbandon(planToken: string, homeId: string): Promise<BootstrapSnapshot>;
+  /** Restore eligibility probe (spec §5.5). */
+  getRestoreEligibility(): Promise<RestoreEligibility>;
+  planRestore(): Promise<{ planToken: string }>;
   listenBootstrapChanged(
     callback: (payload: BootstrapChangedPayload) => void,
   ): Promise<() => void>;
@@ -775,6 +822,23 @@ const tauriCatalogClient: CatalogClient = {
     return invoke<BootstrapSnapshot>("cancel_candidate", {
       request: { operationId },
     });
+  },
+  reconnectSameHome() {
+    return invoke<BootstrapSnapshot>("reconnect_same_home");
+  },
+  planAbandon() {
+    return invoke<AbandonPreview>("plan_abandon");
+  },
+  applyAbandon(planToken, homeId) {
+    return invoke<BootstrapSnapshot>("apply_abandon", {
+      request: { planToken, homeId },
+    });
+  },
+  getRestoreEligibility() {
+    return invoke<RestoreEligibility>("restore_eligibility");
+  },
+  planRestore() {
+    return invoke<{ planToken: string }>("plan_restore");
   },
   listenBootstrapChanged(callback) {
     return listen<BootstrapChangedPayload>("bootstrap://changed", (event) => {

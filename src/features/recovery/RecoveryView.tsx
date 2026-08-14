@@ -8,6 +8,7 @@ import type {
 } from "../../app/catalog-client";
 import { LanguageControl } from "../locale/LanguageControl";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
+import { SafetySnapshots } from "./SafetySnapshots";
 
 export interface RecoveryViewProps {
   client: CatalogClient;
@@ -172,11 +173,11 @@ export function RecoveryView({ client }: RecoveryViewProps) {
         ) : null}
       </div>
 
-      <SnapshotSection
+      <SafetySnapshots
         client={client}
         snapshots={snapshots}
-        busy={busy}
-        run={run}
+        busy={busy !== null}
+        run={(operation) => run("delete", operation)}
       />
     </section>
   );
@@ -296,84 +297,6 @@ function Notice({ message }: { message: string }) {
   return (
     <div className="recovery-notice" role="status">
       <p>{message}</p>
-    </div>
-  );
-}
-
-function SnapshotSection({
-  client,
-  snapshots,
-  busy,
-  run,
-}: {
-  client: CatalogClient;
-  snapshots: SafetySnapshot[];
-  busy: BusyAction;
-  run: (action: BusyAction, operation: () => Promise<unknown>) => Promise<void>;
-}) {
-  const { t } = useLocale();
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  return (
-    <div className="recovery-snapshots">
-      <h2>{t("recovery.snapshots")}</h2>
-      <p>{t("recovery.snapshots_body")}</p>
-      {snapshots.length === 0 ? (
-        <p>{t("recovery.no_snapshots")}</p>
-      ) : (
-        <ul>
-          {snapshots.map((snapshot) => (
-            <li key={snapshot.snapshotId}>
-              <span className="recovery-snapshot-name">
-                {snapshot.snapshotId}
-              </span>
-              <span className="recovery-snapshot-stats">
-                {t("recovery.files_count", {
-                  count: snapshot.fileCount,
-                  bytes: snapshot.totalBytes,
-                })}
-              </span>
-              {confirmDelete === snapshot.snapshotId ? (
-                <span className="recovery-delete-confirm">
-                  <button
-                    type="button"
-                    disabled={busy !== null}
-                    onClick={() =>
-                      void run("delete", async () => {
-                        const preview = await client.planDeleteSafetySnapshot(
-                          snapshot.snapshotId,
-                        );
-                        await client.applyDeleteSafetySnapshot(
-                          preview.snapshotId,
-                        );
-                        setConfirmDelete(null);
-                      })
-                    }
-                  >
-                    {busy === "delete"
-                      ? t("recovery.deleting")
-                      : t("recovery.delete_permanent")}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy !== null}
-                    onClick={() => setConfirmDelete(null)}
-                  >
-                    {t("recovery.cancel")}
-                  </button>
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  disabled={busy !== null}
-                  onClick={() => setConfirmDelete(snapshot.snapshotId)}
-                >
-                  {t("recovery.delete")}
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }

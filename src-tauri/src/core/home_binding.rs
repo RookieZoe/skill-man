@@ -25,11 +25,11 @@ use crate::core::fixture_recovery::{
 };
 use crate::core::home::{HomeId, HomeMarker, VolumeIdentity};
 use crate::seams::app_state_store::{
-    AppStateStore, AppStateStoreError, HomeBindingFile, HomeBindingRecord, RecoveryOperationRecord,
-    HOME_BINDING_SCHEMA_VERSION,
+    AppStateStore, AppStateStoreError, HOME_BINDING_SCHEMA_VERSION, HomeBindingFile,
+    HomeBindingRecord, RecoveryOperationRecord,
 };
 use crate::seams::catalog_probe::{
-    CatalogHomeIdentity, CatalogProbe, CatalogProbeReport, CURRENT_CATALOG_SCHEMA_VERSION,
+    CURRENT_CATALOG_SCHEMA_VERSION, CatalogHomeIdentity, CatalogProbe, CatalogProbeReport,
 };
 use crate::seams::filesystem::{FileSystem, FileSystemError};
 use crate::seams::legacy_migration::LegacyCatalogMigrator;
@@ -131,7 +131,10 @@ pub enum HomeBindingError {
     #[error("catalog migration failed: {0}")]
     Migration(String),
     #[error("not enough free space: need {required_bytes} bytes, {available_bytes} available")]
-    DiskFull { required_bytes: u64, available_bytes: u64 },
+    DiskFull {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
     #[error("the operation cannot be cancelled: {0}")]
     NotCancellable(String),
     #[error("the candidate plan is stale; prepare the Home again")]
@@ -219,7 +222,10 @@ impl HomeBindingService {
     pub fn prepare_home(&self, path: &Path) -> Result<HomeCandidate, HomeBindingError> {
         let snapshot = self.bootstrap.inspect();
         let legacy_path: Option<PathBuf> = match &snapshot {
-            BootstrapSnapshot::Unconfigured => None,
+            // A previously abandoned Home is a brand-new start: the wizard
+            // may prepare any fresh candidate except the abandoned site
+            // itself (which fails the non-empty validation) (ADR-0012 §6).
+            BootstrapSnapshot::Unconfigured | BootstrapSnapshot::Abandoned { .. } => None,
             BootstrapSnapshot::LegacyDetected { path } => Some(path.clone()),
             BootstrapSnapshot::HomeCandidatePending { .. } => {
                 return Err(HomeBindingError::InvalidState(
@@ -400,17 +406,11 @@ impl HomeBindingService {
             return Err(self.invalid(CandidateInvalidReason::NotUtf8, &normalized));
         }
         if paths_overlap(&normalized, &self.config.state_dir) {
-            return Err(self.invalid(
-                CandidateInvalidReason::StateDirOverlap,
-                &normalized,
-            ));
+            return Err(self.invalid(CandidateInvalidReason::StateDirOverlap, &normalized));
         }
         for agent_dir in &self.config.agent_skill_dirs {
             if paths_overlap(&normalized, agent_dir) {
-                return Err(self.invalid(
-                    CandidateInvalidReason::AgentDirOverlap,
-                    &normalized,
-                ));
+                return Err(self.invalid(CandidateInvalidReason::AgentDirOverlap, &normalized));
             }
         }
 
@@ -423,10 +423,7 @@ impl HomeBindingService {
             }
             Err(error) if is_not_found(&error) => {}
             Err(_) => {
-                return Err(self.invalid(
-                    CandidateInvalidReason::NotDirectory,
-                    &normalized,
-                ));
+                return Err(self.invalid(CandidateInvalidReason::NotDirectory, &normalized));
             }
         }
         if exists {
@@ -451,28 +448,20 @@ impl HomeBindingService {
                 .path_is_writable(&parent)
                 .map_err(|error| HomeBindingError::Filesystem(error.to_string()))?
             {
-                return Err(self.invalid(
-                    CandidateInvalidReason::ParentNotWritable,
-                    &normalized,
-                ));
+                return Err(self.invalid(CandidateInvalidReason::ParentNotWritable, &normalized));
             }
         }
 
-        let volume = match self
-            .volume
-            .volume_identity(&normalized)
-            .map_err(|error| HomeBindingError::CandidateInvalid {
+        let volume = match self.volume.volume_identity(&normalized).map_err(|error| {
+            HomeBindingError::CandidateInvalid {
                 reason: CandidateInvalidReason::NoVolumeIdentity,
                 path: normalized.clone(),
                 detail: error.to_string(),
-            })?
-        {
+            }
+        })? {
             Some(volume) => volume,
             None => {
-                return Err(self.invalid(
-                    CandidateInvalidReason::NoVolumeIdentity,
-                    &normalized,
-                ));
+                return Err(self.invalid(CandidateInvalidReason::NoVolumeIdentity, &normalized));
             }
         };
         let available = self
@@ -584,10 +573,10 @@ impl HomeBindingService {
     ) -> Result<BootstrapSnapshot, HomeBindingError> {
         let snapshot = self.bootstrap.inspect();
         match &snapshot {
-            BootstrapSnapshot::Unconfigured => {
+            BootstrapSnapshot::Unconfigured | BootstrapSnapshot::Abandoned { .. } => {
                 if plan.mode != CandidateMode::Fresh {
                     return Err(HomeBindingError::InvalidState(
-                        "a Legacy Home is present; a fresh candidate cannot be confirmed".into(),
+                        "only a fresh candidate can be confirmed in this state".into(),
                     ));
                 }
             }
@@ -638,7 +627,7 @@ impl HomeBindingService {
         &self,
         candidate: ValidatedCandidate,
     ) -> Result<BootstrapSnapshot, HomeBindingError> {
-        let home_id = new_home_id();
+        let home_id = self.new_home_id();
         let bound_at = rfc3339_now();
         let operation_id = new_operation_id();
         self.start_operation(
@@ -672,7 +661,7 @@ impl HomeBindingService {
         &self,
         candidate: ValidatedCandidate,
     ) -> Result<BootstrapSnapshot, HomeBindingError> {
-        let home_id = new_home_id();
+        let home_id = self.new_home_id();
         let bound_at = rfc3339_now();
         let operation_id = new_operation_id();
         self.start_operation(
@@ -684,7 +673,12 @@ impl HomeBindingService {
             &bound_at,
         )?;
         self.quiesce(&candidate.path)?;
-        self.migrate_catalog_with_identity(&candidate.path, &home_id, &candidate.volume, &bound_at)?;
+        self.migrate_catalog_with_identity(
+            &candidate.path,
+            &home_id,
+            &candidate.volume,
+            &bound_at,
+        )?;
         self.write_marker(&candidate.path, &home_id, &candidate.volume, &bound_at)?;
         self.ensure_layout(&candidate.path)?;
         self.step_verify_candidate(
@@ -706,7 +700,7 @@ impl HomeBindingService {
         let source = candidate.legacy_source.clone().ok_or_else(|| {
             HomeBindingError::InvalidState("the copy transition has no source path".into())
         })?;
-        let home_id = new_home_id();
+        let home_id = self.new_home_id();
         let bound_at = rfc3339_now();
         let operation_id = new_operation_id();
         self.start_operation(
@@ -750,7 +744,13 @@ impl HomeBindingService {
         let volume = self.require_volume(&path)?;
         match op.cursor.as_deref() {
             None | Some(cursors::PREPARING) | Some(cursors::CREATED) | Some(cursors::VERIFIED) => {
-                self.ensure_candidate_complete(&op.operation_id, &home_id, &path, &volume, &bound_at)?;
+                self.ensure_candidate_complete(
+                    &op.operation_id,
+                    &home_id,
+                    &path,
+                    &volume,
+                    &bound_at,
+                )?;
             }
             Some(cursors::COMMITTED) => {
                 self.finish_operation(&op.operation_id, cursors::COMMITTED)?;
@@ -842,12 +842,13 @@ impl HomeBindingService {
         bound_at: &str,
     ) -> Result<(), HomeBindingError> {
         let catalog_path = path.join(&self.config.catalog_file_name);
-        let report = self.probe.probe(&catalog_path).map_err(|error| {
-            HomeBindingError::StepFailed {
-                cursor: cursors::PREPARING.into(),
-                message: format!("could not probe the candidate Catalog: {error}"),
-            }
-        })?;
+        let report =
+            self.probe
+                .probe(&catalog_path)
+                .map_err(|error| HomeBindingError::StepFailed {
+                    cursor: cursors::PREPARING.into(),
+                    message: format!("could not probe the candidate Catalog: {error}"),
+                })?;
         if report.exists {
             // An in-place transition may have migrated the Catalog already.
             self.ensure_catalog_identity(&catalog_path, report, home_id, volume, bound_at)?;
@@ -960,12 +961,13 @@ impl HomeBindingService {
         bound_at: &str,
     ) -> Result<(), HomeBindingError> {
         let catalog_path = destination.join(&self.config.catalog_file_name);
-        let report = self.probe.probe(&catalog_path).map_err(|error| {
-            HomeBindingError::StepFailed {
-                cursor: cursors::VERIFIED.into(),
-                message: format!("could not probe the copied Catalog: {error}"),
-            }
-        })?;
+        let report =
+            self.probe
+                .probe(&catalog_path)
+                .map_err(|error| HomeBindingError::StepFailed {
+                    cursor: cursors::VERIFIED.into(),
+                    message: format!("could not probe the copied Catalog: {error}"),
+                })?;
         if !report.exists {
             return Err(HomeBindingError::StepFailed {
                 cursor: cursors::VERIFIED.into(),
@@ -1013,7 +1015,11 @@ impl HomeBindingService {
     /// Per-file size plus tree hash equality between the source and the
     /// copied destination (SQLite WAL/SHM sidecars excluded: they are
     /// derived artifacts of a consistent set, never compared).
-    fn legacy_copy_matches(&self, source: &Path, destination: &Path) -> Result<bool, HomeBindingError> {
+    fn legacy_copy_matches(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<bool, HomeBindingError> {
         let exists = match self.filesystem.path_is_directory(destination) {
             Ok(exists) => exists,
             Err(_) => return Ok(false),
@@ -1126,12 +1132,13 @@ impl HomeBindingService {
         bound_at: &str,
     ) -> Result<(), HomeBindingError> {
         let catalog_path = path.join(&self.config.catalog_file_name);
-        let report = self.probe.probe(&catalog_path).map_err(|error| {
-            HomeBindingError::StepFailed {
-                cursor: cursors::VERIFIED.into(),
-                message: format!("could not probe the candidate Catalog: {error}"),
-            }
-        })?;
+        let report =
+            self.probe
+                .probe(&catalog_path)
+                .map_err(|error| HomeBindingError::StepFailed {
+                    cursor: cursors::VERIFIED.into(),
+                    message: format!("could not probe the candidate Catalog: {error}"),
+                })?;
         if !report.exists {
             return Err(HomeBindingError::StepFailed {
                 cursor: cursors::VERIFIED.into(),
@@ -1323,6 +1330,33 @@ impl HomeBindingService {
         }
     }
 
+    /// UUID v4 from the OS entropy source via the FileSystem seam. Falls
+    /// back to a time-seeded value on exotic failures; the shape is always
+    /// a valid v4 identifier.
+    fn new_home_id(&self) -> HomeId {
+        let mut bytes = [0u8; 16];
+        let mut seeded = false;
+        if self.filesystem.read_entropy(&mut bytes).is_ok() {
+            seeded = true;
+        }
+        if !seeded {
+            let nanos = token_nanos() as u64;
+            bytes[..8].copy_from_slice(&nanos.to_be_bytes());
+            bytes[8..].copy_from_slice(&(nanos ^ 0x9e37_79b9_7f4a_7c15).to_be_bytes());
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        HomeId(format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        ))
+    }
+
     fn remove_tree_if_present(&self, path: &Path) -> Result<(), HomeBindingError> {
         match self.filesystem.path_is_directory(path) {
             Ok(true) => {
@@ -1396,12 +1430,10 @@ impl HomeBindingService {
                     // No valid marker: the Catalog must carry the identity
                     // (or not exist yet) for the directory to be ours.
                     match catalog_report.as_ref() {
-                        Some(report) if report.exists => {
-                            match &report.home_identity {
-                                Some(identity) if &identity.home_id == expected => {}
-                                _ => return Ok(false),
-                            }
-                        }
+                        Some(report) if report.exists => match &report.home_identity {
+                            Some(identity) if &identity.home_id == expected => {}
+                            _ => return Ok(false),
+                        },
                         _ => {}
                     }
                 }
@@ -1412,9 +1444,7 @@ impl HomeBindingService {
         // always empty (schema + preferences only).
         if catalog_exists {
             let evidence = self.probe.probe_fixture(&catalog_path).map_err(|error| {
-                HomeBindingError::Probe(format!(
-                    "could not probe the candidate Catalog: {error}"
-                ))
+                HomeBindingError::Probe(format!("could not probe the candidate Catalog: {error}"))
             })?;
             if !evidence.skills.is_empty() || !evidence.agents.is_empty() {
                 return Ok(false);
@@ -1462,33 +1492,4 @@ fn rfc3339_now() -> String {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
     epoch_seconds_to_rfc3339(seconds)
-}
-
-/// UUID v4 from the OS entropy source. Falls back to a time-seeded value on
-/// exotic failures; the shape is always a valid v4 identifier.
-fn new_home_id() -> HomeId {
-    let mut bytes = [0u8; 16];
-    let mut seeded = false;
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        if file.read_exact(&mut bytes).is_ok() {
-            seeded = true;
-        }
-    }
-    if !seeded {
-        let nanos = token_nanos() as u64;
-        bytes[..8].copy_from_slice(&nanos.to_be_bytes());
-        bytes[8..].copy_from_slice(&(nanos ^ 0x9e37_79b9_7f4a_7c15).to_be_bytes());
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    HomeId(format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    ))
 }

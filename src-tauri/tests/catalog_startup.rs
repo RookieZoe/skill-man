@@ -237,7 +237,7 @@ fn corrupt_catalog_reports_the_real_diagnostic_and_never_serves_fixture_skills()
     match &snapshot {
         BootstrapSnapshot::HomeIdentityMismatch { diagnostic, .. } => {
             let diagnostic = diagnostic.as_ref().expect("real diagnostic");
-            assert_eq!(diagnostic.code, "catalog_unreadable");
+            assert_eq!(diagnostic.code, "catalog_invalid");
             assert!(
                 !diagnostic.message.is_empty(),
                 "the raw diagnostic must carry the open failure detail"

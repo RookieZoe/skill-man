@@ -403,6 +403,22 @@ impl MacOsFileSystem {
 }
 
 impl FileSystem for MacOsFileSystem {
+    fn read_entropy(&self, buffer: &mut [u8]) -> Result<(), FileSystemError> {
+        use std::io::Read;
+        let mut file =
+            std::fs::File::open("/dev/urandom").map_err(|source| FileSystemError::Io {
+                operation: "open the OS entropy source",
+                path: "/dev/urandom".into(),
+                source,
+            })?;
+        file.read_exact(buffer)
+            .map_err(|source| FileSystemError::Io {
+                operation: "read OS entropy",
+                path: "/dev/urandom".into(),
+                source,
+            })
+    }
+
     fn inspect_link_source(&self, path: &Path) -> Result<LinkSourceSnapshot, FileSystemError> {
         let entry_path = normalize_absolute_path(&self.expand_home(path))?;
         let directory_name = entry_path
@@ -832,13 +848,12 @@ impl FileSystem for MacOsFileSystem {
                 }
                 Ok(())
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(path).map_err(|source| FileSystemError::Io {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(path)
+                .map_err(|source| FileSystemError::Io {
                     operation: "ensure directory",
                     path: path.to_path_buf(),
                     source,
-                })
-            }
+                }),
             Err(source) => Err(FileSystemError::Io {
                 operation: "ensure directory",
                 path: path.to_path_buf(),
@@ -896,23 +911,18 @@ impl FileSystem for MacOsFileSystem {
     }
 
     fn path_is_writable(&self, path: &Path) -> Result<bool, FileSystemError> {
-        let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|source| {
-            FileSystemError::Io {
+        let encoded =
+            CString::new(path.as_os_str().as_bytes()).map_err(|source| FileSystemError::Io {
                 operation: "encode path for writability probe",
                 path: path.to_path_buf(),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
-            }
-        })?;
+            })?;
         // SAFETY: `encoded` is NUL-terminated; access() never retains it.
         let result = unsafe { libc::access(encoded.as_ptr(), libc::W_OK) };
         Ok(result == 0)
     }
 
-    fn copy_tree_verified(
-        &self,
-        source: &Path,
-        destination: &Path,
-    ) -> Result<(), FileSystemError> {
+    fn copy_tree_verified(&self, source: &Path, destination: &Path) -> Result<(), FileSystemError> {
         match fs::symlink_metadata(destination) {
             Ok(metadata) => {
                 if !metadata.is_dir() {
@@ -920,13 +930,12 @@ impl FileSystem for MacOsFileSystem {
                         path: destination.to_path_buf(),
                     });
                 }
-                let mut entries = fs::read_dir(destination).map_err(|source_error| {
-                    FileSystemError::Io {
+                let mut entries =
+                    fs::read_dir(destination).map_err(|source_error| FileSystemError::Io {
                         operation: "inspect copy destination",
                         path: destination.to_path_buf(),
                         source: source_error,
-                    }
-                })?;
+                    })?;
                 if entries.next().is_some() {
                     return Err(FileSystemError::Io {
                         operation: "copy tree",

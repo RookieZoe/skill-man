@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use crate::core::fixture_recovery::{FixtureClassifier, FixtureShapeMode};
 use crate::core::home::{BoundHome, HomeId, HomeMarker};
 use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGateState};
-use crate::seams::app_state_store::AppStateStore;
+use crate::seams::app_state_store::{AbandonedHomeRecord, AppStateStore};
 use crate::seams::catalog_probe::CatalogProbe;
 use crate::seams::filesystem::FileSystem;
 use crate::seams::volume_identity::VolumeIdentitySource;
@@ -53,6 +53,11 @@ pub enum BootstrapSnapshot {
     /// No binding, no Legacy Home: the binding wizard entry point. Zero Home
     /// or SQLite artifacts exist.
     Unconfigured,
+    /// No current binding and the site at the default path is a previously
+    /// abandoned Home (its identity is in the locator history): the wizard
+    /// is available for a brand-new binding, but the abandoned site is never
+    /// offered as a candidate (ADR-0012 §6).
+    Abandoned { home_id: HomeId, path: PathBuf },
     /// No binding but the default Legacy path exists: read-only
     /// classification precedes the one-time transition (ticket #45).
     LegacyDetected { path: PathBuf },
@@ -113,6 +118,9 @@ impl BootstrapSnapshot {
             },
             BootstrapSnapshot::Unconfigured => WriteGateState::Closed {
                 reason: ClosedReason::Unconfigured,
+            },
+            BootstrapSnapshot::Abandoned { .. } => WriteGateState::Closed {
+                reason: ClosedReason::Abandoned,
             },
             BootstrapSnapshot::LegacyDetected { .. } => WriteGateState::Closed {
                 reason: ClosedReason::LegacyDetected,
@@ -187,6 +195,16 @@ impl BootstrapService {
     pub fn note_catalog_open_failure(&self, message: String) {
         if let Ok(mut slot) = self.open_failure.write() {
             *slot = Some(BootstrapDiagnostic::new("catalog_open_failed", message));
+        }
+    }
+
+    /// Clear a previously recorded writable-open failure: a successful
+    /// Reconnect / Restore re-verification retries the writable open
+    /// (ADR-0012 §6: 成功则重新打开 SQLite、放行写). The next `inspect`
+    /// recomputes the true catalog access from the current facts.
+    pub fn clear_catalog_open_failure(&self) {
+        if let Ok(mut slot) = self.open_failure.write() {
+            *slot = None;
         }
     }
 
@@ -280,7 +298,7 @@ impl BootstrapService {
                 .path_is_directory(&self.config.default_home_path)
                 .unwrap_or(false);
             if legacy_exists {
-                return self.classify_default_home();
+                return self.classify_default_home(&files.binding.abandoned);
             }
             return BootstrapSnapshot::Unconfigured;
         };
@@ -324,17 +342,51 @@ impl BootstrapService {
             };
         }
 
+        // §5.5: a gone or replaced Home directory is Unavailable (the site
+        // is unreachable), never a content inconsistency.
+        match self.filesystem.path_is_directory(&path) {
+            Ok(true) => {}
+            Ok(false) => {
+                let message = format!("{} is not a directory", path.display());
+                return BootstrapSnapshot::HomeUnavailable {
+                    home_id,
+                    path,
+                    diagnostic: Some(BootstrapDiagnostic::new("home_path_missing", message)),
+                };
+            }
+            Err(error) => {
+                let message = error.to_string();
+                return BootstrapSnapshot::HomeUnavailable {
+                    home_id,
+                    path,
+                    diagnostic: Some(BootstrapDiagnostic::new("home_path_unreadable", message)),
+                };
+            }
+        }
+
         // §3.3: marker must agree with the locator and the current volume.
         let marker_path = path.join(HomeMarker::FILE_NAME);
         let marker = match self.read_marker(&marker_path) {
-            Some(marker) => marker,
-            None => {
+            Ok(Some(marker)) => marker,
+            Ok(None) => {
                 return BootstrapSnapshot::HomeIdentityMismatch {
                     home_id,
                     path,
                     diagnostic: Some(BootstrapDiagnostic::new(
                         "home_marker_invalid",
                         format!("{} is missing or invalid", marker_path.display()),
+                    )),
+                };
+            }
+            Err(error) => {
+                // A permission-denied or unreadable marker makes the site
+                // unreachable, not inconsistent (§5.5).
+                return BootstrapSnapshot::HomeUnavailable {
+                    home_id,
+                    path,
+                    diagnostic: Some(BootstrapDiagnostic::new(
+                        "home_marker_unreadable",
+                        error.to_string(),
                     )),
                 };
             }
@@ -356,13 +408,27 @@ impl BootstrapService {
         let report = match self.probe.probe(&catalog_path) {
             Ok(report) => report,
             Err(error) => {
-                return BootstrapSnapshot::HomeIdentityMismatch {
-                    home_id,
-                    path,
-                    diagnostic: Some(BootstrapDiagnostic::new(
-                        "catalog_unreadable",
-                        error.to_string(),
-                    )),
+                // A reachability failure (permission, lock, transient I/O)
+                // is an unavailable site; a file that opened but is not a
+                // valid Catalog is a content inconsistency (§5.5).
+                return match error {
+                    crate::seams::catalog_probe::CatalogProbeError::Invalid(message) => {
+                        BootstrapSnapshot::HomeIdentityMismatch {
+                            home_id,
+                            path,
+                            diagnostic: Some(BootstrapDiagnostic::new("catalog_invalid", message)),
+                        }
+                    }
+                    crate::seams::catalog_probe::CatalogProbeError::Unreadable(message) => {
+                        BootstrapSnapshot::HomeUnavailable {
+                            home_id,
+                            path,
+                            diagnostic: Some(BootstrapDiagnostic::new(
+                                "catalog_unreadable",
+                                message,
+                            )),
+                        }
+                    }
                 };
             }
         };
@@ -460,9 +526,14 @@ impl BootstrapService {
         }
     }
 
-    fn read_marker(&self, path: &std::path::Path) -> Option<HomeMarker> {
-        let content = self.filesystem.read_utf8_file(path).ok()??;
-        HomeMarker::parse(&content)
+    fn read_marker(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<HomeMarker>, crate::seams::filesystem::FileSystemError> {
+        let Some(content) = self.filesystem.read_utf8_file(path)? else {
+            return Ok(None);
+        };
+        Ok(HomeMarker::parse(&content))
     }
 
     /// §5.4 read-only shape classification of the default path when no
@@ -472,11 +543,34 @@ impl BootstrapService {
     /// one-time binding) or nothing. Candidate artifacts without an active
     /// ledger operation are a contradiction and fail closed — never guessed
     /// or rebuilt (spec §3.3).
-    fn classify_default_home(&self) -> BootstrapSnapshot {
+    fn classify_default_home(&self, abandoned: &[AbandonedHomeRecord]) -> BootstrapSnapshot {
         let default = &self.config.default_home_path;
         let catalog_path = default.join(&self.config.catalog_file_name);
         let report = self.probe.probe(&catalog_path).ok();
-        let marker = self.read_marker(&default.join(HomeMarker::FILE_NAME));
+        let marker = self
+            .read_marker(&default.join(HomeMarker::FILE_NAME))
+            .ok()
+            .flatten();
+        // A site whose marker or Catalog identity is in the locator's
+        // abandoned history is shown as Abandoned — never as a Legacy Home,
+        // never as an orphaned candidate, never auto-rebound (ADR-0012 §6).
+        let site_identity = marker
+            .as_ref()
+            .map(|marker| marker.home_id.clone())
+            .or_else(|| {
+                report
+                    .as_ref()
+                    .and_then(|report| report.home_identity.clone())
+                    .map(|identity| identity.home_id)
+            });
+        if let Some(home_id) = site_identity {
+            if abandoned.iter().any(|record| record.home_id == home_id) {
+                return BootstrapSnapshot::Abandoned {
+                    home_id,
+                    path: default.clone(),
+                };
+            }
+        }
         match report.as_ref().and_then(|report| report.schema_version) {
             Some(version) if version >= CATALOG_SCHEMA_WITH_HOME_IDENTITY => {
                 if marker.is_some() {
@@ -508,8 +602,7 @@ impl BootstrapService {
                     BootstrapSnapshot::AppStateUnavailable {
                         diagnostic: BootstrapDiagnostic::new(
                             "orphaned_candidate",
-                            "a Home marker exists without a Catalog or binding operation"
-                                .into(),
+                            "a Home marker exists without a Catalog or binding operation".into(),
                         ),
                     }
                 } else {
@@ -563,8 +656,8 @@ mod tests {
     };
     use crate::core::home::VolumeIdentity;
     use crate::seams::app_state_store::{
-        AppStateFiles, AppStateStoreError, HomeBindingFile, HomeBindingRecord, RecoveryLedgerFile,
-        RecoveryOperationRecord,
+        AbandonedHomeRecord, AppStateFiles, AppStateStoreError, HomeBindingFile, HomeBindingRecord,
+        RecoveryLedgerFile, RecoveryOperationRecord,
     };
     use crate::seams::catalog_probe::{
         CatalogHomeIdentity, CatalogProbe, CatalogProbeError, CatalogProbeReport,
@@ -863,6 +956,65 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_home_at_the_default_path_is_abandoned_not_orphaned() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
+        let default_home = dir.path().join("default-home");
+        filesystem
+            .create_directory(&default_home)
+            .expect("home dir");
+        filesystem
+            .write_utf8_file(&default_home.join(HomeMarker::FILE_NAME), &valid_marker())
+            .expect("marker file");
+        // The identity was abandoned: the site must be shown as Abandoned —
+        // never as an orphaned candidate or a Legacy Home (ADR-0012 §6).
+        let mut binding = HomeBindingFile::empty();
+        binding.abandoned = vec![AbandonedHomeRecord {
+            home_id: HomeId(HOME_ID.into()),
+            path: default_home.clone(),
+            volume_fsid: "fsid-1".into(),
+            volume_uuid: "uuid-1".into(),
+            abandoned_at: "2026-08-13T00:00:00Z".into(),
+        }];
+        let files = AppStateFiles {
+            binding,
+            recovery_ledger: RecoveryLedgerFile::empty(),
+        };
+        let service = BootstrapService::new(
+            Arc::new(MemoryAppStateStore::new(files)),
+            Arc::new(FixedVolumeIdentitySource {
+                volume: None,
+                fail: false,
+            }),
+            Arc::new(MemoryCatalogProbe::new(probe_report(
+                5,
+                Some(matching_identity()),
+            ))),
+            Arc::new(filesystem),
+            Arc::new(FixedClassifier(FixtureClassification::Clean)),
+            BootstrapConfig {
+                state_dir: dir.path().join("state"),
+                default_home_path: default_home.clone(),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        match service.inspect() {
+            BootstrapSnapshot::Abandoned { home_id, path } => {
+                assert_eq!(home_id.0, HOME_ID);
+                assert_eq!(path, default_home);
+            }
+            other => panic!("expected Abandoned, got {other:?}"),
+        }
+        assert_eq!(
+            service.inspect().write_gate_state(None),
+            WriteGateState::Closed {
+                reason: ClosedReason::Abandoned
+            }
+        );
+        assert!(!service.inspect().is_bound());
+    }
+
+    #[test]
     fn contaminated_legacy_path_is_fixture_recovery_locked() {
         let files = AppStateFiles {
             binding: HomeBindingFile::empty(),
@@ -977,6 +1129,66 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_open_failure_restores_reported_read_write_access() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
+        filesystem.create_directory(&home).expect("home dir");
+        filesystem
+            .write_utf8_file(&home.join(HomeMarker::FILE_NAME), &valid_marker())
+            .expect("marker file");
+        let service = BootstrapService::new(
+            Arc::new(MemoryAppStateStore::new(bound_files(&home))),
+            Arc::new(FixedVolumeIdentitySource {
+                volume: Some(VolumeIdentity {
+                    fsid: "fsid-1".into(),
+                    uuid: "uuid-1".into(),
+                }),
+                fail: false,
+            }),
+            Arc::new(MemoryCatalogProbe::new(probe_report(
+                5,
+                Some(matching_identity()),
+            ))),
+            Arc::new(filesystem),
+            Arc::new(FixedClassifier(FixtureClassification::Clean)),
+            BootstrapConfig {
+                state_dir: dir.path().join("state"),
+                default_home_path: dir.path().join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        assert!(matches!(
+            service.inspect(),
+            BootstrapSnapshot::Bound {
+                catalog_access: CatalogAccess::ReadWrite,
+                ..
+            }
+        ));
+        // A failed writable open degrades the session to read-only and
+        // stays sticky until a successful Reconnect/Restore clears it.
+        service.note_catalog_open_failure("permission denied".into());
+        match service.inspect() {
+            BootstrapSnapshot::Bound {
+                catalog_access:
+                    CatalogAccess::ReadOnly {
+                        reason: ReadOnlyReason::OpenFailed,
+                    },
+                ..
+            } => {}
+            other => panic!("expected Bound read-only OpenFailed, got {other:?}"),
+        }
+        service.clear_catalog_open_failure();
+        assert!(matches!(
+            service.inspect(),
+            BootstrapSnapshot::Bound {
+                catalog_access: CatalogAccess::ReadWrite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn volume_identity_failure_is_home_unavailable() {
         let dir = tempfile::tempdir().expect("temp dir");
         let home = dir.path().join("home");
@@ -1036,6 +1248,8 @@ mod tests {
     fn missing_marker_is_home_identity_mismatch() {
         let dir = tempfile::tempdir().expect("temp dir");
         let home = dir.path().join("home");
+        // The site exists (empty marker file) but carries no valid marker:
+        // a content inconsistency, not an unreachable site.
         let service = service(
             MemoryAppStateStore::new(bound_files(&home)),
             FixedVolumeIdentitySource {
@@ -1046,7 +1260,7 @@ mod tests {
                 fail: false,
             },
             MemoryCatalogProbe::new(CatalogProbeReport::absent()),
-            None,
+            Some(""),
             &home,
         );
         match service.inspect() {
@@ -1057,6 +1271,40 @@ mod tests {
                 );
             }
             other => panic!("expected HomeIdentityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_home_directory_is_home_unavailable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        // The bound directory disappeared: unreachable, never a mismatch.
+        let service = BootstrapService::new(
+            Arc::new(MemoryAppStateStore::new(bound_files(&home))),
+            Arc::new(FixedVolumeIdentitySource {
+                volume: Some(VolumeIdentity {
+                    fsid: "fsid-1".into(),
+                    uuid: "uuid-1".into(),
+                }),
+                fail: false,
+            }),
+            Arc::new(MemoryCatalogProbe::new(CatalogProbeReport::absent())),
+            Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())),
+            Arc::new(FixedClassifier(FixtureClassification::Clean)),
+            BootstrapConfig {
+                state_dir: dir.path().join("state"),
+                default_home_path: dir.path().join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        match service.inspect() {
+            BootstrapSnapshot::HomeUnavailable { diagnostic, .. } => {
+                assert_eq!(
+                    diagnostic.as_ref().map(|d| d.code.as_str()),
+                    Some("home_path_missing")
+                );
+            }
+            other => panic!("expected HomeUnavailable, got {other:?}"),
         }
     }
 

@@ -29,6 +29,9 @@ pub enum ReadOnlyReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClosedReason {
     Unconfigured,
+    /// The previous Home was explicitly abandoned; only a brand-new binding
+    /// (never the abandoned site) may proceed.
+    Abandoned,
     AppStateUnavailable,
     LegacyDetected,
     FixtureRecoveryLocked,

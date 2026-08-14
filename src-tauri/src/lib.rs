@@ -13,12 +13,12 @@ pub fn run() {
     use crate::adapters::agent_adapters::BuiltInAgentAdapters;
     use crate::adapters::app_state_store::AppStateStoreFileSystem;
     use crate::adapters::catalog_probe::SqliteCatalogProbe;
-    use crate::adapters::closed_catalog::ClosedCatalogStore;
     use crate::adapters::git_source::SystemGitSource;
     use crate::adapters::local_file_source::LocalFileSource;
     use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
+    use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
     };
@@ -35,6 +35,7 @@ pub fn run() {
     use crate::core::catalog::CatalogService;
     use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
     use crate::core::home_binding::{HomeBindingConfig, HomeBindingService};
+    use crate::core::home_lifecycle::HomeLifecycleService;
     use crate::core::import::ImportService;
     use crate::core::locale::LocaleService;
     use crate::core::maintenance::MaintenanceService;
@@ -44,6 +45,7 @@ pub fn run() {
     use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
     use crate::seams::activation_store::ActivationStore;
     use crate::seams::adopt_store::AdoptStore;
+    use crate::seams::app_state_store::AppStateStore;
     use crate::seams::catalog_store::CatalogStore;
     use crate::seams::import_store::ImportStore;
     use crate::seams::maintenance_store::MaintenanceStore;
@@ -54,30 +56,31 @@ pub fn run() {
     use crate::tauri_adapter::bootstrap_api::{BootstrapApi, TauriBootstrapChangedEmitter};
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
-        activation_conflict_details, apply_activation, apply_activation_replace, apply_adopt,
-        apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
+        activation_conflict_details, apply_abandon, apply_activation, apply_activation_replace,
+        apply_adopt, apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
         apply_fixture_recovery, apply_git_import_selection, apply_link_import, apply_relocate_link,
         apply_remove_skill, apply_skill_updates, cancel_activation, cancel_activation_replace,
-        cancel_adopt, cancel_app_update, cancel_file_import, cancel_git_import_selection,
-        cancel_candidate, cancel_link_import, cancel_relocate_link, cancel_remove_skill,
-        check_app_update,
-        check_skill_updates, complete_onboarding, confirm_fixture_recovery_result,
-        confirm_home, continue_candidate, create_agent_directory, discover_file_import,
-        discover_file_import_collection,
-        discover_git_import, discover_link_import, download_app_update,
-        finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot,
-        get_fixture_recovery_preview, get_locale_snapshot, inspect_skill, install_app_update,
-        list_agents, list_safety_snapshots, list_skills, load_preferences, pin_skill_updates,
-        plan_activation, plan_activation_repair, plan_activation_replace, plan_adopt,
-        plan_delete_safety_snapshot, plan_file_import, plan_file_import_selection,
-        plan_file_reinstall, plan_fixture_recovery, plan_git_import_selection, plan_link_import,
-        plan_remove_skill, plan_skill_updates, prepare_home, refresh_system_languages, relocate_link,
-        run_activation_health_check, scan_adopt, set_locale_selection, startup_info,
-        undo_activation_replace, undo_adopt, update_preferences,
+        cancel_adopt, cancel_app_update, cancel_candidate, cancel_file_import,
+        cancel_git_import_selection, cancel_link_import, cancel_relocate_link, cancel_remove_skill,
+        check_app_update, check_skill_updates, complete_onboarding,
+        confirm_fixture_recovery_result, confirm_home, continue_candidate, create_agent_directory,
+        discover_file_import, discover_file_import_collection, discover_git_import,
+        discover_link_import, download_app_update, finalize_activation_replace, finalize_adopt,
+        get_bootstrap_snapshot, get_fixture_recovery_preview, get_locale_snapshot, inspect_skill,
+        install_app_update, list_agents, list_safety_snapshots, list_skills, load_preferences,
+        pin_skill_updates, plan_abandon, plan_activation, plan_activation_repair,
+        plan_activation_replace, plan_adopt, plan_delete_safety_snapshot, plan_file_import,
+        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
+        plan_git_import_selection, plan_link_import, plan_remove_skill, plan_restore,
+        plan_skill_updates, prepare_home, reconnect_same_home, refresh_system_languages,
+        relocate_link, restore_eligibility, run_activation_health_check, scan_adopt,
+        set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
+        update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
-    use crate::tauri_adapter::home_binding_api::HomeBindingApi;
     use crate::tauri_adapter::health_api::HealthApi;
+    use crate::tauri_adapter::home_binding_api::HomeBindingApi;
+    use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
     use crate::tauri_adapter::import_api::ImportApi;
     use crate::tauri_adapter::lifecycle::{hide_main_window, show_main_window};
     use crate::tauri_adapter::locale_api::{
@@ -185,86 +188,87 @@ pub fn run() {
                 None => default_home_path.clone(),
             };
             let mut gate_state = snapshot.write_gate_state(bound_home.as_ref());
-            let runtime_store: Option<Arc<RuntimeCatalogStore>> =
-                match (&snapshot, bound_home.as_ref()) {
-                    (
-                        BootstrapSnapshot::Bound {
-                            catalog_access: CatalogAccess::ReadWrite,
-                            ..
-                        },
-                        Some(home),
-                    ) => {
-                        let path = home.path.join(&catalog_file_name);
-                        match SqliteCatalogStore::open_bound(home, &path) {
-                            Ok(sqlite) => Some(Arc::new(RuntimeCatalogStore::new(
-                                Arc::new(sqlite),
-                                filesystem.clone(),
-                            ))),
-                            Err(error) => {
-                                eprintln!(
-                                    "[skill-man] bound catalog open failed; continuing read-only: {error}"
-                                );
-                                bootstrap.note_catalog_open_failure(error.to_string());
-                                gate_state = WriteGateState::CatalogReadOnly {
-                                    reason: ReadOnlyReason::OpenFailed,
-                                };
-                                SqliteCatalogStore::open_read_only(&path)
-                                    .ok()
-                                    .map(|sqlite| {
-                                        Arc::new(RuntimeCatalogStore::new(
-                                            Arc::new(sqlite),
-                                            filesystem.clone(),
-                                        ))
-                                    })
+            // The one facade every service holds: the concrete SQLite store
+            // when Bound, the fail-closed closed store otherwise. Reconnect,
+            // Restore and Abandon swap the inner store through the same
+            // facade, so product writes reopen or close without rebuilding
+            // the service graph.
+            let runtime_store = Arc::new(match (&snapshot, bound_home.as_ref()) {
+                (
+                    BootstrapSnapshot::Bound {
+                        catalog_access: CatalogAccess::ReadWrite,
+                        ..
+                    },
+                    Some(home),
+                ) => {
+                    let path = home.path.join(&catalog_file_name);
+                    match SqliteCatalogStore::open_bound(home, &path) {
+                        Ok(sqlite) => RuntimeCatalogStore::new(Arc::new(sqlite), filesystem.clone()),
+                        Err(error) => {
+                            eprintln!(
+                                "[skill-man] bound catalog open failed; continuing read-only: {error}"
+                            );
+                            bootstrap.note_catalog_open_failure(error.to_string());
+                            gate_state = WriteGateState::CatalogReadOnly {
+                                reason: ReadOnlyReason::OpenFailed,
+                            };
+                            match SqliteCatalogStore::open_read_only(&path) {
+                                Ok(sqlite) => {
+                                    RuntimeCatalogStore::new(Arc::new(sqlite), filesystem.clone())
+                                }
+                                Err(_) => RuntimeCatalogStore::closed(filesystem.clone()),
                             }
                         }
                     }
-                    (
-                        BootstrapSnapshot::Bound {
-                            catalog_access: CatalogAccess::ReadOnly { .. },
-                            ..
-                        },
-                        Some(home),
-                    ) => SqliteCatalogStore::open_read_only(&home.path.join(&catalog_file_name))
+                }
+                (
+                    BootstrapSnapshot::Bound {
+                        catalog_access: CatalogAccess::ReadOnly { .. },
+                        ..
+                    },
+                    Some(home),
+                ) => match SqliteCatalogStore::open_read_only(&home.path.join(&catalog_file_name)) {
+                    Ok(sqlite) => {
+                        RuntimeCatalogStore::new(Arc::new(sqlite), filesystem.clone())
+                    }
+                    Err(_) => RuntimeCatalogStore::closed(filesystem.clone()),
+                },
+                (
+                    BootstrapSnapshot::HomeUnavailable { .. },
+                    _,
+                ) => {
+                    // Spec §5.5: when the Catalog is actually readable, a
+                    // HomeUnavailable site still serves it read-only (the
+                    // gate keeps every write closed); only a truly
+                    // unreachable volume has no Catalog.
+                    let path = app_state
+                        .load()
                         .ok()
-                        .map(|sqlite| {
-                            Arc::new(RuntimeCatalogStore::new(Arc::new(sqlite), filesystem.clone()))
-                        }),
-                    _ => None,
-                };
+                        .and_then(|files| files.binding.current)
+                        .map(|current| current.path.join(&catalog_file_name));
+                    match path.and_then(|path| SqliteCatalogStore::open_read_only(&path).ok()) {
+                        Some(sqlite) => {
+                            RuntimeCatalogStore::new(Arc::new(sqlite), filesystem.clone())
+                        }
+                        None => RuntimeCatalogStore::closed(filesystem.clone()),
+                    }
+                }
+                _ => RuntimeCatalogStore::closed(filesystem.clone()),
+            });
             let _ = write_gate.transition_to(gate_state);
 
-            // Every service consumes the real store when Bound, otherwise the
-            // closed store: all catalog commands fail closed outside Bound.
-            let catalog_store: Arc<dyn CatalogStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
-            let import_store: Arc<dyn ImportStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
-            let adopt_store: Arc<dyn AdoptStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
-            let activation_store: Arc<dyn ActivationStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
-            let maintenance_store: Arc<dyn MaintenanceStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
-            let preferences_store: Arc<dyn PreferencesStore> = match runtime_store.clone() {
-                Some(store) => store.clone(),
-                None => Arc::new(ClosedCatalogStore),
-            };
+            // Every service consumes the same facade: the real store when
+            // Bound, otherwise the closed store — all catalog commands fail
+            // closed outside Bound, and a later Reconnect/Restore swap
+            // reaches every service.
+            let catalog_store: Arc<dyn CatalogStore> = runtime_store.clone();
+            let import_store: Arc<dyn ImportStore> = runtime_store.clone();
+            let adopt_store: Arc<dyn AdoptStore> = runtime_store.clone();
+            let activation_store: Arc<dyn ActivationStore> = runtime_store.clone();
+            let maintenance_store: Arc<dyn MaintenanceStore> = runtime_store.clone();
+            let preferences_store: Arc<dyn PreferencesStore> = runtime_store.clone();
             let conflict_checker: Arc<dyn crate::core::activation::ActivationConflictChecker> =
-                match runtime_store.clone() {
-                    Some(store) => store.clone(),
-                    None => Arc::new(ClosedCatalogStore),
-                };
+                runtime_store.clone();
 
             app.manage(BootstrapApi::new(
                 bootstrap.clone(),
@@ -273,6 +277,11 @@ pub fn run() {
             ));
             app.manage(FixtureRecoveryApi::new(
                 recovery_service,
+                bootstrap.clone(),
+                Arc::new(RuntimeStoreSwitch::new(
+                    runtime_store.clone(),
+                    catalog_file_name.clone(),
+                )),
                 // A second BootstrapApi instance over the same service and
                 // gate; used only to publish `bootstrap://changed` after a
                 // recovery commit transitions the top-level route.
@@ -284,6 +293,22 @@ pub fn run() {
             ));
             app.manage(HomeBindingApi::new(
                 home_binding_service,
+                Arc::new(BootstrapApi::new(
+                    bootstrap.clone(),
+                    write_gate.clone(),
+                    Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
+                )),
+            ));
+            app.manage(HomeLifecycleApi::new(
+                Arc::new(HomeLifecycleService::new(
+                    app_state.clone(),
+                    bootstrap.clone(),
+                )),
+                bootstrap.clone(),
+                Arc::new(RuntimeStoreSwitch::new(
+                    runtime_store.clone(),
+                    catalog_file_name.clone(),
+                )),
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
                     write_gate.clone(),
@@ -424,6 +449,9 @@ pub fn run() {
             confirm_home,
             continue_candidate,
             cancel_candidate,
+            reconnect_same_home,
+            plan_abandon,
+            apply_abandon,
             get_bootstrap_snapshot,
             get_locale_snapshot,
             set_locale_selection,
@@ -484,6 +512,8 @@ pub fn run() {
             complete_onboarding,
             create_agent_directory,
             get_fixture_recovery_preview,
+            restore_eligibility,
+            plan_restore,
             plan_fixture_recovery,
             apply_fixture_recovery,
             confirm_fixture_recovery_result,

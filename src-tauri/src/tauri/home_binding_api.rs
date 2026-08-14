@@ -5,14 +5,11 @@
 
 use std::sync::Arc;
 
-use crate::core::home_binding::{
-    CandidateMode, HomeBindingError, HomeBindingService,
-};
+use crate::core::home_binding::{CandidateMode, HomeBindingError, HomeBindingService};
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::dto::{
     BootstrapSnapshotDto, CandidateModeDto, CandidateOperationRequestDto, CommandFailureDto,
-    ConfirmHomeRequestDto, DiagnosticDto, HomeCandidateDto, PrepareHomeRequestDto,
-    PublicErrorDto,
+    ConfirmHomeRequestDto, DiagnosticDto, HomeCandidateDto, PrepareHomeRequestDto, PublicErrorDto,
 };
 
 pub struct HomeBindingApi {
@@ -96,7 +93,11 @@ fn failure(error: &HomeBindingError) -> CommandFailureDto {
                 message: operation_id.clone(),
             }),
         ),
-        HomeBindingError::CandidateInvalid { reason, path, detail } => (
+        HomeBindingError::CandidateInvalid {
+            reason,
+            path,
+            detail,
+        } => (
             PublicErrorDto::CandidateInvalid {
                 reason: reason_code(reason).into(),
             },

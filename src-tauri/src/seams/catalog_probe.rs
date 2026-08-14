@@ -144,6 +144,11 @@ impl FixtureCatalogEvidence {
 pub enum CatalogProbeError {
     #[error("the catalog could not be opened read-only: {0}")]
     Unreadable(String),
+    /// The file opened as SQLite but is not a readable Catalog (e.g.
+    /// SQLITE_NOTADB or a missing catalog schema): a content inconsistency
+    /// of the site, not a reachability failure.
+    #[error("the catalog file is not a valid Catalog: {0}")]
+    Invalid(String),
 }
 
 /// Seam: read-only identification of a Catalog SQLite file. The system

@@ -1059,6 +1059,13 @@ struct FailingCompensationFileSystem {
 }
 
 impl FileSystem for FailingCompensationFileSystem {
+    fn read_entropy(
+        &self,
+        buffer: &mut [u8],
+    ) -> Result<(), skill_man_lib::seams::filesystem::FileSystemError> {
+        self.delegate.read_entropy(buffer)
+    }
+
     fn inspect_link_source(
         &self,
         path: &std::path::Path,

@@ -37,7 +37,7 @@ impl CatalogProbe for SqliteCatalogProbe {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|error| CatalogProbeError::Unreadable(format!("{}: {error}", path.display())))?;
+        .map_err(|error| map_open_error(error, path))?;
 
         // A file that exists but is not a readable Catalog identifies as
         // exists-without-schema; bootstrap treats that as a closed mismatch.
@@ -48,7 +48,7 @@ impl CatalogProbe for SqliteCatalogProbe {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
+            .map_err(|error| map_query_error(error))?;
         let Some(schema_version) = schema_version else {
             return Ok(CatalogProbeReport {
                 exists: true,
@@ -233,6 +233,30 @@ impl CatalogProbe for SqliteCatalogProbe {
             remote_source_count: count("remote_sources")?,
         })
     }
+}
+
+/// The open step fails for two distinct reasons: a file that is not a
+/// database (SQLITE_NOTADB — a content fact) and everything else
+/// (permission, lock, transient I/O — a reachability fact). The bootstrap
+/// authority routes them to HomeIdentityMismatch and HomeUnavailable
+/// respectively (spec §5.5).
+fn map_open_error(error: rusqlite::Error, path: &Path) -> CatalogProbeError {
+    use rusqlite::Error as SqliteError;
+    match &error {
+        SqliteError::SqliteFailure(ffi, _)
+            if ffi.code == rusqlite::ffi::ErrorCode::NotADatabase =>
+        {
+            CatalogProbeError::Invalid(format!("{}: {error}", path.display()))
+        }
+        _ => CatalogProbeError::Unreadable(format!("{}: {error}", path.display())),
+    }
+}
+
+/// After a successful open, every query failure is a content fact: the
+/// file is a readable SQLite database that is not (or no longer) a valid
+/// Catalog.
+fn map_query_error(error: rusqlite::Error) -> CatalogProbeError {
+    CatalogProbeError::Invalid(error.to_string())
 }
 
 fn read_home_identity(connection: &Connection) -> Option<CatalogHomeIdentity> {

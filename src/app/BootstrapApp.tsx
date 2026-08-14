@@ -7,7 +7,12 @@ import type {
 } from "./catalog-client";
 import { App } from "./App";
 import { RecoveryView } from "../features/recovery/RecoveryView";
-import { HomeBindingView, type HomePicker } from "../features/home/HomeBindingView";
+import { RestoreView } from "../features/recovery/RestoreView";
+import {
+  HomeBindingView,
+  type HomePicker,
+} from "../features/home/HomeBindingView";
+import { LifecycleRoute } from "../features/home/LifecycleRoute";
 import { LocaleProvider } from "../features/locale/LocaleProvider";
 import { LanguageControl } from "../features/locale/LanguageControl";
 import { useLocale } from "../features/locale/LocaleProvider";
@@ -106,8 +111,16 @@ function BootstrapRoutes({
   }
   switch (snapshot.state) {
     case "bound":
-      return <App client={client} />;
+      // A same-identity content failure (integrity/foreign-key) is the
+      // Restore route: browsing a corrupt Catalog is never offered, the
+      // whole Home restores with the same home_id (ADR-0012 §6).
+      return snapshot.catalogReadonlyReason === "integrity_failed" ? (
+        <RestoreView client={client} onSnapshot={onSnapshot} />
+      ) : (
+        <App client={client} />
+      );
     case "unconfigured":
+    case "abandoned":
       return (
         <HomeBindingView
           client={client}
@@ -138,22 +151,20 @@ function BootstrapRoutes({
       );
     case "home_unavailable":
       return (
-        <BootstrapRoute
-          title={t("bootstrap.route.unavailable_title")}
-          summary={t("bootstrap.route.unavailable_summary", {
-            path: snapshot.path,
-          })}
-          diagnostic={snapshot.diagnostic ?? undefined}
+        <LifecycleRoute
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+          onRetry={onRetry}
         />
       );
     case "home_identity_mismatch":
       return (
-        <BootstrapRoute
-          title={t("bootstrap.route.mismatch_title")}
-          summary={t("bootstrap.route.mismatch_summary", {
-            path: snapshot.path,
-          })}
-          diagnostic={snapshot.diagnostic ?? undefined}
+        <LifecycleRoute
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+          onRetry={onRetry}
         />
       );
     case "app_state_unavailable":

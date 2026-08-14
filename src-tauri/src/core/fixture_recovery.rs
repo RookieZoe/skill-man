@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::core::bootstrap::{BootstrapConfig, BootstrapService, BootstrapSnapshot};
+use crate::core::bootstrap::{BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess};
 use crate::core::home::{HomeId, HomeMarker};
+use crate::core::write_gate::ReadOnlyReason;
 use crate::seams::catalog_probe::{
     CatalogHomeIdentity, CatalogProbe, CatalogProbeError, FixtureAgentRowEvidence,
     FixtureCatalogEvidence, FixturePreferencesEvidence, FixtureSkillRowEvidence,
@@ -52,6 +53,10 @@ pub const FIXTURE_AGENT_IDS: [&str; 3] = ["claude-code", "codex", "workbench"];
 
 /// Recovery operation kind recorded in the external ledger.
 pub const RECOVERY_KIND_FIXTURE: &str = "fixture_recovery";
+/// Restore operation kind recorded in the external ledger: the same
+/// crash-convergent state machine, entered from a Bound Home whose content
+/// failed validation without a fixture footprint (ADR-0012 §6).
+pub const RECOVERY_KIND_RESTORE: &str = "restore";
 
 /// Durable cursors of the recovery state machine (spec §5.2). Each cursor is
 /// persisted to the external ledger with the tmp → fsync → rename → parent
@@ -532,6 +537,46 @@ pub enum RecoveryMode {
     BoundRestore { home_id: HomeId },
 }
 
+/// Why a Bound Home needs Restore (ADR-0012 §6): content validation failed
+/// under a provable same identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreReason {
+    /// SQLite integrity or foreign-key verification failed.
+    CatalogIntegrityFailed,
+    /// The Bound Home carries a fixture footprint (the recovery lock).
+    FixtureContamination,
+}
+
+/// Why Restore does not apply right now (closed reasons for the UI; no
+/// free-form text crosses the boundary).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreNotApplicableReason {
+    NoBinding,
+    LegacyUnbound,
+    AppStateUnavailable,
+    IdentityMismatch,
+    HomeUnavailable,
+    UnsupportedSchema,
+    OpenFailed,
+    ActiveOperation,
+}
+
+/// Restore eligibility probe (spec §5.5, ADR-0012 §6): only a provable
+/// same-identity content failure is `RestoreRequired`. A healthy Bound Home
+/// is `NotRequired`; every other state carries a closed reason.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RestoreEligibility {
+    RestoreRequired {
+        home_id: HomeId,
+        path: PathBuf,
+        reason: RestoreReason,
+    },
+    NotRequired,
+    NotApplicable {
+        reason: RestoreNotApplicableReason,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogEvidenceSummary {
     pub tables: Vec<String>,
@@ -612,6 +657,8 @@ pub struct DeleteSnapshotPreview {
 pub enum FixtureRecoveryError {
     #[error("Fixture Recovery does not apply to the current bootstrap state")]
     NotLocked,
+    #[error("Restore does not apply to the current bootstrap state: {0}")]
+    NotRestorable(String),
     #[error("the Home is not a pure fixture; only the exact fingerprint can be recovered")]
     NotPure,
     #[error("no active recovery operation matches the plan token")]
@@ -766,6 +813,137 @@ impl FixtureRecoveryService {
         })
     }
 
+    /// Restore eligibility probe (spec §5.5): Restore applies only when the
+    /// binding's identity is provable and the content failed validation —
+    /// SQLite integrity/foreign-key failure (`Bound` read-only) or a Bound
+    /// Home fixture footprint (the recovery lock). Read-only; never touches
+    /// the locator, the Home or the ledger.
+    pub fn restore_eligibility(&self) -> Result<RestoreEligibility, FixtureRecoveryError> {
+        let ledger = self.app_state.load()?.recovery_ledger;
+        if ledger.active.is_some() {
+            return Ok(RestoreEligibility::NotApplicable {
+                reason: RestoreNotApplicableReason::ActiveOperation,
+            });
+        }
+        match self.bootstrap.inspect() {
+            BootstrapSnapshot::Bound {
+                home_id,
+                catalog_access:
+                    CatalogAccess::ReadOnly {
+                        reason: ReadOnlyReason::IntegrityFailed,
+                    },
+                ..
+            } => {
+                let path = self.resolve_live_path()?;
+                Ok(RestoreEligibility::RestoreRequired {
+                    home_id,
+                    path,
+                    reason: RestoreReason::CatalogIntegrityFailed,
+                })
+            }
+            BootstrapSnapshot::FixtureRecoveryLocked {
+                home_id: Some(home_id),
+                path: Some(path),
+            } => Ok(RestoreEligibility::RestoreRequired {
+                home_id,
+                path,
+                reason: RestoreReason::FixtureContamination,
+            }),
+            BootstrapSnapshot::Bound {
+                catalog_access:
+                    CatalogAccess::ReadOnly {
+                        reason: ReadOnlyReason::UnsupportedSchema,
+                    },
+                ..
+            } => Ok(RestoreEligibility::NotApplicable {
+                reason: RestoreNotApplicableReason::UnsupportedSchema,
+            }),
+            BootstrapSnapshot::Bound {
+                catalog_access:
+                    CatalogAccess::ReadOnly {
+                        reason: ReadOnlyReason::OpenFailed,
+                    },
+                ..
+            } => Ok(RestoreEligibility::NotApplicable {
+                reason: RestoreNotApplicableReason::OpenFailed,
+            }),
+            BootstrapSnapshot::Bound { .. } => Ok(RestoreEligibility::NotRequired),
+            BootstrapSnapshot::HomeUnavailable { .. } => Ok(RestoreEligibility::NotApplicable {
+                reason: RestoreNotApplicableReason::HomeUnavailable,
+            }),
+            BootstrapSnapshot::HomeIdentityMismatch { .. } => {
+                Ok(RestoreEligibility::NotApplicable {
+                    reason: RestoreNotApplicableReason::IdentityMismatch,
+                })
+            }
+            BootstrapSnapshot::FixtureRecoveryLocked { .. } => {
+                Ok(RestoreEligibility::NotApplicable {
+                    reason: RestoreNotApplicableReason::LegacyUnbound,
+                })
+            }
+            BootstrapSnapshot::LegacyDetected { .. } => Ok(RestoreEligibility::NotApplicable {
+                reason: RestoreNotApplicableReason::LegacyUnbound,
+            }),
+            BootstrapSnapshot::AppStateUnavailable { .. } => {
+                Ok(RestoreEligibility::NotApplicable {
+                    reason: RestoreNotApplicableReason::AppStateUnavailable,
+                })
+            }
+            BootstrapSnapshot::Unconfigured
+            | BootstrapSnapshot::Abandoned { .. }
+            | BootstrapSnapshot::HomeCandidatePending { .. } => {
+                Ok(RestoreEligibility::NotApplicable {
+                    reason: RestoreNotApplicableReason::NoBinding,
+                })
+            }
+        }
+    }
+
+    /// User-initiated Restore of a Bound Home whose same-identity content
+    /// failed validation: opens the SAME crash-convergent operation at
+    /// cursor `confirmed` without the pure-fixture gate. The locator
+    /// identity is never modified; the Safety Snapshot is never
+    /// auto-deleted (ADR-0012 §6).
+    pub fn plan_restore(&self) -> Result<FixtureRecoveryPlan, FixtureRecoveryError> {
+        let (home_id, live) = match self.restore_eligibility()? {
+            RestoreEligibility::RestoreRequired { home_id, path, .. } => (home_id, path),
+            RestoreEligibility::NotRequired => {
+                return Err(FixtureRecoveryError::NotRestorable(
+                    "the Bound Home content is healthy; nothing to restore".into(),
+                ));
+            }
+            RestoreEligibility::NotApplicable { reason } => {
+                return Err(FixtureRecoveryError::NotRestorable(format!(
+                    "restore is not applicable: {reason:?}"
+                )));
+            }
+        };
+        let mut ledger = self.app_state.load()?.recovery_ledger;
+        if let Some(active) = &ledger.active {
+            return Err(FixtureRecoveryError::OperationAlreadyActive {
+                operation_id: active.operation_id.clone(),
+            });
+        }
+        let op = RecoveryOperationRecord {
+            operation_id: new_operation_id(),
+            kind: RECOVERY_KIND_RESTORE.into(),
+            home_id: Some(home_id),
+            live_path: Some(live),
+            snapshot_path: None,
+            prepared_path: None,
+            manifest_hash: None,
+            external_probe: None,
+            cursor: Some(cursors::CONFIRMED.into()),
+            commit_point: None,
+            created_at: rfc3339_now(),
+        };
+        ledger.active = Some(op.clone());
+        self.app_state.write_recovery_ledger(&ledger)?;
+        Ok(FixtureRecoveryPlan {
+            plan_token: op.operation_id,
+        })
+    }
+
     /// Run the recovery state machine from the operation's current cursor.
     /// Every durable cursor is persisted before the next mutation, so a
     /// crash at any point resumes deterministically — rollback or
@@ -775,7 +953,12 @@ impl FixtureRecoveryService {
         let Some(op) = ledger.active.clone() else {
             return Err(FixtureRecoveryError::NoActiveOperation);
         };
-        if op.operation_id != plan_token || op.kind != RECOVERY_KIND_FIXTURE {
+        if op.operation_id != plan_token
+            || !matches!(
+                op.kind.as_str(),
+                RECOVERY_KIND_FIXTURE | RECOVERY_KIND_RESTORE
+            )
+        {
             return Err(FixtureRecoveryError::NoActiveOperation);
         }
         let (_, live) = self.recovery_context()?;
@@ -1809,10 +1992,24 @@ pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    use crate::core::home::VolumeIdentity;
+    use crate::seams::catalog_probe::{CatalogProbeError, CatalogProbeReport};
+    use crate::seams::filesystem::FileSystem;
 
     fn home_root() -> &'static Path {
         Path::new("/Users/demo/Library/Application Support/skill-man")
+    }
+
+    struct FixedClassifier(FixtureClassification);
+
+    impl FixtureClassifier for FixedClassifier {
+        fn classify(&self, _home_root: &Path, _mode: FixtureShapeMode) -> FixtureClassification {
+            self.0.clone()
+        }
     }
 
     /// The exact fixture Catalog evidence, as the real production fixture
@@ -2183,5 +2380,319 @@ mod tests {
             }
             other => panic!("expected Mixed, got {other:?}"),
         }
+    }
+
+    // -- Restore eligibility & plan (spec §5.5, ADR-0012 §6) ----------------
+
+    const RESTORE_HOME_ID: &str = "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab";
+
+    use crate::seams::app_state_store::{AppStateFiles, HomeBindingFile, HomeBindingRecord};
+    use crate::seams::volume_identity::{VolumeIdentityError, VolumeIdentitySource};
+
+    struct MemoryStateStore(Mutex<AppStateFiles>);
+
+    impl AppStateStore for MemoryStateStore {
+        fn load(&self) -> Result<AppStateFiles, AppStateStoreError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError> {
+            self.0.lock().unwrap().binding = binding.clone();
+            Ok(())
+        }
+
+        fn write_recovery_ledger(
+            &self,
+            ledger: &RecoveryLedgerFile,
+        ) -> Result<(), AppStateStoreError> {
+            self.0.lock().unwrap().recovery_ledger = ledger.clone();
+            Ok(())
+        }
+    }
+
+    struct FixedVolume(Option<VolumeIdentity>);
+
+    impl VolumeIdentitySource for FixedVolume {
+        fn volume_identity(
+            &self,
+            _path: &Path,
+        ) -> Result<Option<VolumeIdentity>, VolumeIdentityError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct MemoryProbe(Mutex<CatalogProbeReport>);
+
+    impl CatalogProbe for MemoryProbe {
+        fn probe(&self, _path: &Path) -> Result<CatalogProbeReport, CatalogProbeError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+
+    fn restore_files(home_path: &Path) -> AppStateFiles {
+        AppStateFiles {
+            binding: HomeBindingFile {
+                schema_version: 1,
+                current: Some(HomeBindingRecord {
+                    home_id: HomeId(RESTORE_HOME_ID.into()),
+                    path: home_path.to_path_buf(),
+                    volume_fsid: "fsid-1".into(),
+                    volume_uuid: "uuid-1".into(),
+                    bound_at: "2026-08-01T00:00:00Z".into(),
+                }),
+                abandoned: vec![],
+            },
+            recovery_ledger: RecoveryLedgerFile::empty(),
+        }
+    }
+
+    fn restore_probe_report(integrity_ok: bool) -> CatalogProbeReport {
+        CatalogProbeReport {
+            exists: true,
+            schema_version: Some(crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION),
+            integrity_ok,
+            foreign_keys_ok: integrity_ok,
+            home_identity: Some(CatalogHomeIdentity {
+                home_id: HomeId(RESTORE_HOME_ID.into()),
+                volume_fsid: "fsid-1".into(),
+                volume_uuid: "uuid-1".into(),
+                home_bound_at: "2026-08-01T00:00:00Z".into(),
+            }),
+            snapshot_version: Some(3),
+        }
+    }
+
+    fn restore_service(
+        dir: &std::path::Path,
+        app_state: Arc<MemoryStateStore>,
+        probe: CatalogProbeReport,
+        volume: Option<VolumeIdentity>,
+        classifier: FixtureClassification,
+    ) -> FixtureRecoveryService {
+        let home = dir.join("home");
+        let filesystem = crate::adapters::macos_fs::MacOsFileSystem::new(dir.to_path_buf());
+        filesystem.ensure_directory(&home).expect("home dir");
+        filesystem
+            .write_utf8_file(
+                &home.join(HomeMarker::FILE_NAME),
+                &serde_json::to_string_pretty(&HomeMarker {
+                    schema_version: HomeMarker::SCHEMA_VERSION,
+                    home_id: HomeId(RESTORE_HOME_ID.into()),
+                    volume_fsid: "fsid-1".into(),
+                    volume_uuid: "uuid-1".into(),
+                    created_at: "2026-08-01T00:00:00Z".into(),
+                })
+                .expect("marker JSON"),
+            )
+            .expect("marker");
+        let filesystem = crate::adapters::macos_fs::MacOsFileSystem::new(dir.to_path_buf());
+        let bootstrap = BootstrapService::new(
+            app_state.clone(),
+            Arc::new(FixedVolume(volume)),
+            Arc::new(MemoryProbe(Mutex::new(probe))),
+            Arc::new(filesystem),
+            Arc::new(FixedClassifier(classifier)),
+            BootstrapConfig {
+                state_dir: dir.join("state"),
+                default_home_path: dir.join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        );
+        FixtureRecoveryService::new(
+            app_state,
+            Arc::new(MemoryProbe(Mutex::new(CatalogProbeReport::absent()))),
+            Arc::new(crate::adapters::macos_fs::MacOsFileSystem::new(
+                dir.to_path_buf(),
+            )),
+            Arc::new(crate::adapters::sqlite::SqlitePreparedCatalogFactory),
+            Arc::new(bootstrap),
+            BootstrapConfig {
+                state_dir: dir.join("state"),
+                default_home_path: dir.join("default-home"),
+                catalog_file_name: "skill-man.sqlite3".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn restore_eligibility_requires_same_identity_content_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let volume = Some(VolumeIdentity {
+            fsid: "fsid-1".into(),
+            uuid: "uuid-1".into(),
+        });
+
+        // Healthy Bound Home: nothing to restore.
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(restore_files(&home)))),
+            restore_probe_report(true),
+            volume.clone(),
+            FixtureClassification::Clean,
+        );
+        assert_eq!(
+            service.restore_eligibility().expect("probe"),
+            RestoreEligibility::NotRequired
+        );
+
+        // Integrity failure under a provable identity: Restore required.
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(restore_files(&home)))),
+            restore_probe_report(false),
+            volume.clone(),
+            FixtureClassification::Clean,
+        );
+        match service.restore_eligibility().expect("probe") {
+            RestoreEligibility::RestoreRequired {
+                home_id,
+                path,
+                reason,
+            } => {
+                assert_eq!(home_id.0, RESTORE_HOME_ID);
+                assert_eq!(path, home);
+                assert_eq!(reason, RestoreReason::CatalogIntegrityFailed);
+            }
+            other => panic!("expected RestoreRequired, got {other:?}"),
+        }
+
+        // Bound Home with a fixture footprint (recovery lock): Restore required.
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(restore_files(&home)))),
+            restore_probe_report(true),
+            volume,
+            FixtureClassification::Pure,
+        );
+        match service.restore_eligibility().expect("probe") {
+            RestoreEligibility::RestoreRequired { reason, .. } => {
+                assert_eq!(reason, RestoreReason::FixtureContamination);
+            }
+            other => panic!("expected RestoreRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_eligibility_is_closed_outside_a_provable_bound_home() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let mut files = restore_files(&home);
+        files.binding.current = None;
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(files))),
+            CatalogProbeReport::absent(),
+            None,
+            FixtureClassification::Clean,
+        );
+        match service.restore_eligibility().expect("probe") {
+            RestoreEligibility::NotApplicable { reason } => {
+                assert_eq!(reason, RestoreNotApplicableReason::NoBinding);
+            }
+            other => panic!("expected NotApplicable, got {other:?}"),
+        }
+
+        // Identity mismatch (volume changed): Restore never applies.
+        let mut files = restore_files(&home);
+        files.binding.current.as_mut().unwrap().volume_fsid = "other-fsid".into();
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(files))),
+            restore_probe_report(true),
+            Some(VolumeIdentity {
+                fsid: "fsid-1".into(),
+                uuid: "uuid-1".into(),
+            }),
+            FixtureClassification::Clean,
+        );
+        match service.restore_eligibility().expect("probe") {
+            RestoreEligibility::NotApplicable { reason } => {
+                assert_eq!(reason, RestoreNotApplicableReason::IdentityMismatch);
+            }
+            other => panic!("expected NotApplicable, got {other:?}"),
+        }
+
+        // An active operation owns the lock: the probe stays closed.
+        let mut files = restore_files(&home);
+        files.recovery_ledger.active = Some(RecoveryOperationRecord {
+            operation_id: "op-1".into(),
+            kind: RECOVERY_KIND_FIXTURE.into(),
+            home_id: Some(HomeId(RESTORE_HOME_ID.into())),
+            live_path: Some(home.clone()),
+            snapshot_path: None,
+            prepared_path: None,
+            manifest_hash: None,
+            external_probe: None,
+            cursor: Some(cursors::CONFIRMED.into()),
+            commit_point: None,
+            created_at: "2026-08-01T00:00:00Z".into(),
+        });
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(files))),
+            restore_probe_report(false),
+            Some(VolumeIdentity {
+                fsid: "fsid-1".into(),
+                uuid: "uuid-1".into(),
+            }),
+            FixtureClassification::Clean,
+        );
+        match service.restore_eligibility().expect("probe") {
+            RestoreEligibility::NotApplicable { reason } => {
+                assert_eq!(reason, RestoreNotApplicableReason::ActiveOperation);
+            }
+            other => panic!("expected NotApplicable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_restore_opens_a_restore_operation_only_when_eligible() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let volume = Some(VolumeIdentity {
+            fsid: "fsid-1".into(),
+            uuid: "uuid-1".into(),
+        });
+
+        // Healthy: refused with the closed NotRestorable error.
+        let service = restore_service(
+            dir.path(),
+            Arc::new(MemoryStateStore(Mutex::new(restore_files(&home)))),
+            restore_probe_report(true),
+            volume.clone(),
+            FixtureClassification::Clean,
+        );
+        assert!(matches!(
+            service.plan_restore(),
+            Err(FixtureRecoveryError::NotRestorable(_))
+        ));
+
+        // Integrity failed: the operation opens with the same identity and
+        // cursor, kind `restore`, no Home bytes touched.
+        let store = Arc::new(MemoryStateStore(Mutex::new(restore_files(&home))));
+        let service = restore_service(
+            dir.path(),
+            store.clone(),
+            restore_probe_report(false),
+            volume,
+            FixtureClassification::Clean,
+        );
+        let plan = service.plan_restore().expect("plan restore");
+        let files = store.load().expect("app state");
+        let active = files.recovery_ledger.active.expect("active operation");
+        assert_eq!(active.kind, RECOVERY_KIND_RESTORE);
+        assert_eq!(
+            active.home_id.as_ref().map(|id| id.0.as_str()),
+            Some(RESTORE_HOME_ID)
+        );
+        assert_eq!(active.live_path.as_deref(), Some(home.as_path()));
+        assert_eq!(active.cursor.as_deref(), Some(cursors::CONFIRMED));
+        assert_eq!(plan.plan_token, active.operation_id);
+        // The ledger write is the only mutation.
+        assert!(
+            home.join(HomeMarker::FILE_NAME).is_file(),
+            "the Home marker is untouched"
+        );
     }
 }

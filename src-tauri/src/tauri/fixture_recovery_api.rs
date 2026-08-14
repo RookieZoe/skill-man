@@ -5,9 +5,12 @@
 
 use std::sync::Arc;
 
+use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
+use crate::core::bootstrap::BootstrapService;
 use crate::core::fixture_recovery::{
     FixtureClassification, FixtureRecoveryError, FixtureRecoveryPreview, FixtureRecoverySelection,
-    FixtureRecoveryService, RecoveryMode,
+    FixtureRecoveryService, RecoveryMode, RestoreEligibility, RestoreNotApplicableReason,
+    RestoreReason,
 };
 use crate::seams::app_state_store::RecoveryOperationRecord;
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
@@ -17,17 +20,30 @@ use crate::tauri_adapter::dto::{
     DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto, DiagnosticDto,
     FixtureClassificationDto, FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto,
     PlanFixtureRecoveryRequestDto, PublicErrorDto, RecoveryModeDto, RecoveryResultDto,
-    SafetySnapshotDto, TreeEvidenceDto,
+    RestoreEligibilityDto, RestoreNotApplicableReasonDto, RestoreReasonDto, SafetySnapshotDto,
+    TreeEvidenceDto,
 };
 
 pub struct FixtureRecoveryApi {
     service: Arc<FixtureRecoveryService>,
+    bootstrap_service: Arc<BootstrapService>,
+    store_switch: Arc<RuntimeStoreSwitch>,
     bootstrap: Arc<BootstrapApi>,
 }
 
 impl FixtureRecoveryApi {
-    pub fn new(service: Arc<FixtureRecoveryService>, bootstrap: Arc<BootstrapApi>) -> Self {
-        Self { service, bootstrap }
+    pub fn new(
+        service: Arc<FixtureRecoveryService>,
+        bootstrap_service: Arc<BootstrapService>,
+        store_switch: Arc<RuntimeStoreSwitch>,
+        bootstrap: Arc<BootstrapApi>,
+    ) -> Self {
+        Self {
+            service,
+            bootstrap_service,
+            store_switch,
+            bootstrap,
+        }
     }
 
     pub fn get_fixture_recovery_preview(
@@ -45,6 +61,74 @@ impl FixtureRecoveryApi {
     ) -> Result<FixtureRecoveryPlanDto, CommandFailureDto> {
         self.service
             .plan(&FixtureRecoverySelection {})
+            .map(|plan| FixtureRecoveryPlanDto {
+                plan_token: plan.plan_token,
+            })
+            .map_err(|error| failure(&error))
+    }
+
+    /// Restore eligibility probe (spec §5.5): closed reasons, never App
+    /// Copy.
+    pub fn restore_eligibility(&self) -> Result<RestoreEligibilityDto, CommandFailureDto> {
+        self.service
+            .restore_eligibility()
+            .map(|eligibility| match eligibility {
+                RestoreEligibility::RestoreRequired {
+                    home_id,
+                    path,
+                    reason,
+                } => RestoreEligibilityDto::RestoreRequired {
+                    home_id: home_id.0,
+                    path: path.to_string_lossy().into_owned(),
+                    reason: match reason {
+                        RestoreReason::CatalogIntegrityFailed => {
+                            RestoreReasonDto::CatalogIntegrityFailed
+                        }
+                        RestoreReason::FixtureContamination => {
+                            RestoreReasonDto::FixtureContamination
+                        }
+                    },
+                },
+                RestoreEligibility::NotRequired => RestoreEligibilityDto::NotRequired,
+                RestoreEligibility::NotApplicable { reason } => {
+                    RestoreEligibilityDto::NotApplicable {
+                        reason: match reason {
+                            RestoreNotApplicableReason::NoBinding => {
+                                RestoreNotApplicableReasonDto::NoBinding
+                            }
+                            RestoreNotApplicableReason::LegacyUnbound => {
+                                RestoreNotApplicableReasonDto::LegacyUnbound
+                            }
+                            RestoreNotApplicableReason::AppStateUnavailable => {
+                                RestoreNotApplicableReasonDto::AppStateUnavailable
+                            }
+                            RestoreNotApplicableReason::IdentityMismatch => {
+                                RestoreNotApplicableReasonDto::IdentityMismatch
+                            }
+                            RestoreNotApplicableReason::HomeUnavailable => {
+                                RestoreNotApplicableReasonDto::HomeUnavailable
+                            }
+                            RestoreNotApplicableReason::UnsupportedSchema => {
+                                RestoreNotApplicableReasonDto::UnsupportedSchema
+                            }
+                            RestoreNotApplicableReason::OpenFailed => {
+                                RestoreNotApplicableReasonDto::OpenFailed
+                            }
+                            RestoreNotApplicableReason::ActiveOperation => {
+                                RestoreNotApplicableReasonDto::ActiveOperation
+                            }
+                        },
+                    }
+                }
+            })
+            .map_err(|error| failure(&error))
+    }
+
+    /// User-initiated Restore of a same-identity content-failed Bound Home:
+    /// opens the same crash-convergent operation (no pure-fixture gate).
+    pub fn plan_restore(&self) -> Result<FixtureRecoveryPlanDto, CommandFailureDto> {
+        self.service
+            .plan_restore()
             .map(|plan| FixtureRecoveryPlanDto {
                 plan_token: plan.plan_token,
             })
@@ -75,6 +159,19 @@ impl FixtureRecoveryApi {
             .service
             .confirm_result(&request.operation_id)
             .map_err(|error| failure(&error))?;
+        // A Bound commit (fixture recovery or Restore) promoted a fresh
+        // Home with the same identity: clear any stale open failure and
+        // reopen the store facade so product writes work without rebuilding
+        // the service graph.
+        self.store_switch
+            .reconcile_after_transition(&self.bootstrap_service, &snapshot)
+            .map_err(|error| CommandFailureDto {
+                error: PublicErrorDto::CatalogUnavailable,
+                diagnostic: Some(DiagnosticDto {
+                    code: "catalog_reopen_failed".into(),
+                    message: error,
+                }),
+            })?;
         self.bootstrap.publish_changed();
         Ok(BootstrapSnapshotDto::from(&snapshot))
     }
@@ -126,6 +223,13 @@ impl FixtureRecoveryApi {
 fn failure(error: &FixtureRecoveryError) -> CommandFailureDto {
     let (error, diagnostic) = match error {
         FixtureRecoveryError::NotLocked => (PublicErrorDto::RecoveryNotLocked, None),
+        FixtureRecoveryError::NotRestorable(message) => (
+            PublicErrorDto::RestoreNotApplicable,
+            Some(DiagnosticDto {
+                code: "restore_not_applicable".into(),
+                message: message.clone(),
+            }),
+        ),
         FixtureRecoveryError::NotPure => (PublicErrorDto::RecoveryNotPure, None),
         FixtureRecoveryError::NoActiveOperation => {
             (PublicErrorDto::RecoveryNoActiveOperation, None)
@@ -306,5 +410,29 @@ mod tests {
                 .map(|diagnostic| diagnostic.code.as_str()),
             Some("wal_lock")
         );
+    }
+
+    #[test]
+    fn restore_eligibility_serializes_typed_closed_reasons() {
+        let required = RestoreEligibilityDto::RestoreRequired {
+            home_id: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into(),
+            path: "/tmp/skill-man".into(),
+            reason: RestoreReasonDto::CatalogIntegrityFailed,
+        };
+        let json = serde_json::to_value(&required).expect("serialize");
+        assert_eq!(json["kind"], "restore_required");
+        assert_eq!(json["homeId"], "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab");
+        assert_eq!(json["reason"], "catalog_integrity_failed");
+
+        let not_applicable = RestoreEligibilityDto::NotApplicable {
+            reason: RestoreNotApplicableReasonDto::IdentityMismatch,
+        };
+        let json = serde_json::to_value(&not_applicable).expect("serialize");
+        assert_eq!(json["kind"], "not_applicable");
+        assert_eq!(json["reason"], "identity_mismatch");
+
+        let not_required = RestoreEligibilityDto::NotRequired;
+        let json = serde_json::to_value(&not_required).expect("serialize");
+        assert_eq!(json["kind"], "not_required");
     }
 }

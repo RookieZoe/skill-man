@@ -214,6 +214,7 @@ apply_abandon(plan_token, typed_confirmation) -> BootstrapSnapshot
 ```text
 AppStateUnavailable
 Unconfigured
+Abandoned { home_id, path }   # 旧主目录已显式放弃：向导可用，现场绝不作为候选（§5.5）
 LegacyDetected
 FixtureRecoveryLocked
 HomeCandidatePending

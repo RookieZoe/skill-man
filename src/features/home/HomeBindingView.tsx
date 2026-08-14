@@ -31,6 +31,7 @@ interface HomeBindingViewProps {
   client: CatalogClient;
   snapshot:
     | Extract<BootstrapSnapshot, { state: "unconfigured" }>
+    | Extract<BootstrapSnapshot, { state: "abandoned" }>
     | Extract<BootstrapSnapshot, { state: "legacy_detected" }>
     | Extract<BootstrapSnapshot, { state: "home_candidate_pending" }>;
   onSnapshot: (snapshot: BootstrapSnapshot) => void;
@@ -61,6 +62,7 @@ export function HomeBindingView({
 
   const isLegacy = snapshot.state === "legacy_detected";
   const isPending = snapshot.state === "home_candidate_pending";
+  const isAbandoned = snapshot.state === "abandoned";
 
   const fail = useCallback((error: CommandFailure, action: string) => {
     setStep({ kind: "error", error, action });
@@ -88,7 +90,7 @@ export function HomeBindingView({
       setStep({ kind: "busy", action: "confirm" });
       try {
         onSnapshot(await client.confirmHome(token));
-      setStep({ kind: "idle" });
+        setStep({ kind: "idle" });
       } catch (error) {
         fail(error as CommandFailure, "confirm");
       } finally {
@@ -132,7 +134,12 @@ export function HomeBindingView({
 
   if (step.kind === "busy") {
     return (
-      <main role="status" aria-live="polite" className="bootstrap-route" data-bootstrap-route>
+      <main
+        role="status"
+        aria-live="polite"
+        className="bootstrap-route"
+        data-bootstrap-route
+      >
         <h1>{t("bootstrap.home.binding_in_progress_title")}</h1>
         <p>{t("bootstrap.home.binding_in_progress_summary")}</p>
         <LanguageControl />
@@ -142,10 +149,18 @@ export function HomeBindingView({
 
   if (step.kind === "error") {
     return (
-      <main role="status" aria-live="polite" className="bootstrap-route" data-bootstrap-route>
+      <main
+        role="status"
+        aria-live="polite"
+        className="bootstrap-route"
+        data-bootstrap-route
+      >
         <h1>{t("bootstrap.home.failed_title")}</h1>
         <p>
-          {t(errorMessageKey(step.error.error.code), errorMessageParams(step.error.error))}
+          {t(
+            errorMessageKey(step.error.error.code),
+            errorMessageParams(step.error.error),
+          )}
         </p>
         {step.error.diagnostic ? (
           <details className="bootstrap-diagnostic">
@@ -169,7 +184,12 @@ export function HomeBindingView({
   if (step.kind === "confirm") {
     const candidate = step.candidate;
     return (
-      <main role="status" aria-live="polite" className="bootstrap-route" data-bootstrap-route>
+      <main
+        role="status"
+        aria-live="polite"
+        className="bootstrap-route"
+        data-bootstrap-route
+      >
         <h1>{t("bootstrap.home.confirm_title")}</h1>
         <p>{t("bootstrap.home.confirm_summary", { path: candidate.path })}</p>
         <p>
@@ -203,15 +223,28 @@ export function HomeBindingView({
 
   if (isPending) {
     return (
-      <main role="status" aria-live="polite" className="bootstrap-route" data-bootstrap-route>
+      <main
+        role="status"
+        aria-live="polite"
+        className="bootstrap-route"
+        data-bootstrap-route
+      >
         <h1>{t("bootstrap.route.candidate_title")}</h1>
         <p>{t("bootstrap.route.candidate_summary", { path: snapshot.path })}</p>
         <p>{t("bootstrap.home.pending_explanation")}</p>
         <div className="bootstrap-actions">
-          <button type="button" disabled={busy} onClick={() => resume(snapshot.operationId, false)}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => resume(snapshot.operationId, false)}
+          >
             {t("bootstrap.home.continue")}
           </button>
-          <button type="button" disabled={busy} onClick={() => resume(snapshot.operationId, true)}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => resume(snapshot.operationId, true)}
+          >
             {t("bootstrap.home.cancel")}
           </button>
         </div>
@@ -221,29 +254,39 @@ export function HomeBindingView({
   }
 
   return (
-    <main role="status" aria-live="polite" className="bootstrap-route" data-bootstrap-route>
+    <main
+      role="status"
+      aria-live="polite"
+      className="bootstrap-route"
+      data-bootstrap-route
+    >
       <h1>
-        {isLegacy
-          ? t("bootstrap.route.legacy_title")
-          : t("bootstrap.route.unconfigured_title")}
+        {isAbandoned
+          ? t("bootstrap.route.abandoned_title")
+          : isLegacy
+            ? t("bootstrap.route.legacy_title")
+            : t("bootstrap.route.unconfigured_title")}
       </h1>
       <p>
-        {isLegacy
-          ? t("bootstrap.route.legacy_summary", { path: snapshot.path })
-          : t("bootstrap.route.unconfigured_summary")}
+        {isAbandoned
+          ? t("bootstrap.route.abandoned_summary", { path: snapshot.path })
+          : isLegacy
+            ? t("bootstrap.route.legacy_summary", { path: snapshot.path })
+            : t("bootstrap.route.unconfigured_summary")}
       </p>
+      {isAbandoned ? <p>{t("bootstrap.home.abandoned_notice")}</p> : null}
       {isLegacy ? <p>{t("bootstrap.home.legacy_explanation")}</p> : null}
       <div className="bootstrap-actions">
         <button
           type="button"
-          disabled={busy}
-          onClick={() =>
-            prepare(isLegacy ? snapshot.path : "", "default")
-          }
+          disabled={busy || isAbandoned}
+          onClick={() => prepare(isLegacy ? snapshot.path : "", "default")}
         >
-          {isLegacy
-            ? t("bootstrap.home.use_default_legacy", { path: snapshot.path })
-            : t("bootstrap.home.use_default")}
+          {isAbandoned
+            ? t("bootstrap.home.use_default")
+            : isLegacy
+              ? t("bootstrap.home.use_default_legacy", { path: snapshot.path })
+              : t("bootstrap.home.use_default")}
         </button>
         <button type="button" disabled={busy} onClick={choose}>
           {t("bootstrap.home.choose")}
@@ -253,4 +296,3 @@ export function HomeBindingView({
     </main>
   );
 }
-

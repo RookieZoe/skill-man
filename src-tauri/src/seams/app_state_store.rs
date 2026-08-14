@@ -195,6 +195,13 @@ pub enum AppStateStoreError {
     LedgerInvalid(String),
     #[error("could not write the bootstrap locator: {0}")]
     WriteFailed(String),
+    #[error(
+        "the bootstrap locator changed since it was read; expected current {expected:?}, found {found:?}"
+    )]
+    LocatorCasConflict {
+        expected: Option<String>,
+        found: Option<String>,
+    },
 }
 
 /// Seam: atomic read/CAS write of the locator and the recovery ledger. The
@@ -209,6 +216,34 @@ pub trait AppStateStore: Send + Sync {
     /// Atomically persists the locator. Used by the Home Binding flow to
     /// commit a binding and by Abandon to move `current` into history.
     fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError>;
+
+    /// Atomic compare-and-swap of the locator's `current` binding
+    /// (ADR-0012 §6): the Abandon commit point. Succeeds only when the
+    /// stored `current` still matches `expected_current` (`None` = no
+    /// current binding); a concurrent binding commit or a second Abandon
+    /// surfaces `LocatorCasConflict` and the caller's `next` is never
+    /// written. The system adapter's read-verify-write is serialized by the
+    /// single-writer app; the fault-injecting test adapter proves both
+    /// failure directions.
+    fn cas_locator(
+        &self,
+        expected_current: Option<&HomeId>,
+        next: &HomeBindingFile,
+    ) -> Result<(), AppStateStoreError> {
+        let files = self.load()?;
+        let matches = match (expected_current, &files.binding.current) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => &current.home_id == expected,
+            _ => false,
+        };
+        if !matches {
+            return Err(AppStateStoreError::LocatorCasConflict {
+                expected: expected_current.map(|id| id.0.clone()),
+                found: files.binding.current.map(|current| current.home_id.0),
+            });
+        }
+        self.write_locator(next)
+    }
 
     /// Atomically persists the recovery ledger (same protocol as the
     /// locator). Every durable cursor of a recovery operation goes through
@@ -282,6 +317,68 @@ mod tests {
             }]
         }"#;
         assert!(HomeBindingFile::parse(json).is_none());
+    }
+
+    #[test]
+    fn cas_locator_only_succeeds_on_the_expected_current_binding() {
+        use crate::core::home::HomeId;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::adapters::app_state_store::AppStateStoreFileSystem::new(
+            dir.path().join("state"),
+        );
+        let current_id = HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into());
+        let binding = HomeBindingFile {
+            schema_version: 1,
+            current: Some(HomeBindingRecord {
+                home_id: current_id.clone(),
+                path: std::path::PathBuf::from("/tmp/skill-man-home"),
+                volume_fsid: "fsid-1".into(),
+                volume_uuid: "uuid-1".into(),
+                bound_at: "2026-08-01T00:00:00Z".into(),
+            }),
+            abandoned: vec![],
+        };
+        store.write_locator(&binding).expect("seed locator");
+
+        // Abandon: move the expected current into history.
+        let abandoned = HomeBindingFile {
+            schema_version: 1,
+            current: None,
+            abandoned: vec![AbandonedHomeRecord {
+                home_id: current_id.clone(),
+                path: std::path::PathBuf::from("/tmp/skill-man-home"),
+                volume_fsid: "fsid-1".into(),
+                volume_uuid: "uuid-1".into(),
+                abandoned_at: "2026-08-13T10:00:00Z".into(),
+            }],
+        };
+        store
+            .cas_locator(Some(&current_id), &abandoned)
+            .expect("CAS with the expected current succeeds");
+
+        // A second Abandon (or a binding commit) races: the current is gone,
+        // so the same CAS is refused and nothing is overwritten.
+        match store.cas_locator(Some(&current_id), &abandoned) {
+            Err(AppStateStoreError::LocatorCasConflict { found, .. }) => {
+                assert_eq!(found, None, "no current binding remains");
+            }
+            other => panic!("expected LocatorCasConflict, got {other:?}"),
+        }
+        let files = store.load().expect("reload");
+        assert_eq!(files.binding, abandoned, "the CAS result is untouched");
+
+        // A None expectation is refused while a binding exists.
+        store
+            .write_locator(&binding)
+            .expect("re-seed a current binding");
+        match store.cas_locator(None, &abandoned) {
+            Err(AppStateStoreError::LocatorCasConflict { expected, found }) => {
+                assert_eq!(expected, None);
+                assert_eq!(found.as_deref(), Some(current_id.as_str()));
+            }
+            other => panic!("expected LocatorCasConflict, got {other:?}"),
+        }
     }
 
     #[test]

@@ -150,6 +150,16 @@ export function errorMessageKey(code: string): MessageKey {
     case "recovery_filesystem":
     case "recovery_probe":
       return "error.recovery";
+    case "restore_not_applicable":
+      return "error.restore_not_applicable";
+    case "reconnect_not_available":
+      return "error.reconnect_not_available";
+    case "abandon_not_applicable":
+      return "error.abandon_not_applicable";
+    case "abandon_confirmation_mismatch":
+      return "error.abandon_confirmation_mismatch";
+    case "abandon_cas_conflict":
+      return "error.abandon_cas_conflict";
     case "candidate_invalid":
       return "error.candidate_invalid";
     case "binding_step_failed":

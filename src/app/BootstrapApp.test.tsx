@@ -80,7 +80,7 @@ test("fixture_recovery_locked renders the Fixture Recovery route", async () => {
     await screen.findByRole("heading", { name: "Fixture Recovery" }),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Recover this Home" }),
+    await screen.findByRole("button", { name: "Recover this Home" }),
   ).toBeInTheDocument();
   expect(
     screen.queryByRole("navigation", { name: "Library" }),
@@ -181,4 +181,90 @@ test("the production factory fails closed outside the Tauri runtime", async () =
   await expect(client.listSkills("all")).rejects.toMatchObject({
     code: "bootstrap_unavailable",
   });
+});
+
+test("abandoned snapshot renders the wizard with the abandoned notice", async () => {
+  render(
+    <BootstrapApp
+      client={clientWithSnapshot({
+        state: "abandoned",
+        homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+        path: "~/Library/Application Support/skill-man",
+      })}
+    />,
+  );
+
+  const route = await screen.findByRole("status");
+  expect(route).toHaveTextContent("Previous Home Abandoned");
+  expect(route).toHaveTextContent("never rebound");
+  // The abandoned site is never offered as a candidate: Default is
+  // disabled, Choose… starts a brand-new binding.
+  expect(screen.getByRole("button", { name: /Use Default/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Choose/ })).toBeEnabled();
+  expect(
+    screen.queryByRole("navigation", { name: "Library" }),
+  ).not.toBeInTheDocument();
+});
+
+test("bound with integrity_failed renders the Restore route, not the Library Desk", async () => {
+  const client = clientWithSnapshot({
+    state: "bound",
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    catalogAccess: "read_only",
+    catalogReadonlyReason: "integrity_failed",
+    snapshotVersion: 1,
+  });
+  client.getRestoreEligibility = vi.fn(async () => ({
+    kind: "restore_required" as const,
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    path: "/tmp/skill-man",
+    reason: "catalog_integrity_failed" as const,
+  }));
+  client.listSafetySnapshots = vi.fn(async () => []);
+  render(<BootstrapApp client={client} />);
+
+  expect(
+    await screen.findByRole("heading", { name: "Restore Bound Home" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("navigation", { name: "Library" }),
+  ).not.toBeInTheDocument();
+});
+
+test("bound with a read-only but readable catalog keeps the Library Desk", async () => {
+  const client = createFixtureCatalogClient();
+  client.getBootstrapSnapshot = vi.fn(async () => ({
+    state: "bound" as const,
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    catalogAccess: "read_only" as const,
+    catalogReadonlyReason: "unsupported_schema" as const,
+    snapshotVersion: 1,
+  }));
+  render(<BootstrapApp client={client} />);
+
+  expect(
+    await screen.findByRole("navigation", { name: "Library" }),
+  ).toBeInTheDocument();
+});
+
+test("home_unavailable route exposes the lifecycle actions", async () => {
+  const client = clientWithSnapshot({
+    state: "home_unavailable",
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    path: "/Volumes/Offline/skill-man",
+    diagnostic: { code: "volume_unreachable", message: "volume offline" },
+  });
+  render(<BootstrapApp client={client} />);
+
+  const route = await screen.findByRole("status");
+  expect(route).toHaveTextContent("Home Unavailable");
+  expect(
+    screen.getByRole("button", { name: "Reconnect Same Home" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Restore Bound Home" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Abandon Home and Start New" }),
+  ).toBeInTheDocument();
 });

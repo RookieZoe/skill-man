@@ -8,6 +8,7 @@ pub mod dto;
 pub mod fixture_recovery_api;
 pub mod health_api;
 pub mod home_binding_api;
+pub mod home_lifecycle_api;
 pub mod import_api;
 pub mod lifecycle;
 pub mod locale_api;

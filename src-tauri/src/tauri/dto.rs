@@ -1863,6 +1863,10 @@ pub enum BootstrapSnapshotDto {
         diagnostic: Option<DiagnosticDto>,
     },
     Unconfigured,
+    Abandoned {
+        home_id: String,
+        path: String,
+    },
     LegacyDetected {
         path: String,
     },
@@ -1899,6 +1903,67 @@ pub enum BootstrapSnapshotDto {
 pub struct BootstrapChangedPayloadDto {
     pub snapshot: BootstrapSnapshotDto,
     pub generation: u64,
+}
+
+// -- Home Lifecycle (spec §5.5, ADR-0012 §6) --
+
+/// The high-friction Abandon preview: typed facts the confirmation dialog
+/// shows; the user must retype the `home_id` to apply.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbandonPreviewDto {
+    pub home_id: String,
+    pub path: String,
+    pub bound_at: String,
+    pub plan_token: String,
+}
+
+/// The typed Abandon confirmation (ADR-0012 §6): `home_id` must exactly
+/// match the current binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAbandonRequestDto {
+    pub plan_token: String,
+    pub home_id: String,
+}
+
+/// Why Restore applies to a Bound Home (closed reason for presentation).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreReasonDto {
+    CatalogIntegrityFailed,
+    FixtureContamination,
+}
+
+/// Why Restore does not apply right now (closed reason for presentation).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreNotApplicableReasonDto {
+    NoBinding,
+    LegacyUnbound,
+    AppStateUnavailable,
+    IdentityMismatch,
+    HomeUnavailable,
+    UnsupportedSchema,
+    OpenFailed,
+    ActiveOperation,
+}
+
+/// Restore eligibility probe result (spec §5.5): only a provable
+/// same-identity content failure is `restore_required`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RestoreEligibilityDto {
+    RestoreRequired {
+        #[serde(rename = "homeId")]
+        home_id: String,
+        path: String,
+        reason: RestoreReasonDto,
+    },
+    NotRequired,
+    NotApplicable {
+        reason: RestoreNotApplicableReasonDto,
+    },
 }
 
 /// The closed public error union (spec §4.7): every command failure carries
@@ -1939,6 +2004,7 @@ pub enum PublicErrorDto {
     BootstrapUnavailable,
     RecoveryNotLocked,
     RecoveryNotPure,
+    RestoreNotApplicable,
     RecoveryNoActiveOperation,
     RecoveryOperationAlreadyActive,
     RecoveryWriterActive,
@@ -1948,6 +2014,10 @@ pub enum PublicErrorDto {
     RecoveryStateStore,
     RecoveryFilesystem,
     RecoveryProbe,
+    ReconnectNotAvailable,
+    AbandonNotApplicable,
+    AbandonConfirmationMismatch,
+    AbandonCasConflict,
     CandidateInvalid {
         /// Closed `snake_case` candidate-validation reason (spec §5.3);
         /// presentation maps it to a message key, never to free text.

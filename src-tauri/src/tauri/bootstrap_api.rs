@@ -101,6 +101,10 @@ impl From<&BootstrapSnapshot> for BootstrapSnapshotDto {
                 }
             }
             BootstrapSnapshot::Unconfigured => BootstrapSnapshotDto::Unconfigured,
+            BootstrapSnapshot::Abandoned { home_id, path } => BootstrapSnapshotDto::Abandoned {
+                home_id: home_id.0.clone(),
+                path: path.to_string_lossy().into_owned(),
+            },
             BootstrapSnapshot::LegacyDetected { path } => BootstrapSnapshotDto::LegacyDetected {
                 path: path.to_string_lossy().into_owned(),
             },
@@ -293,6 +297,39 @@ mod tests {
         let unconfigured = BootstrapSnapshot::Unconfigured;
         let json = serde_json::to_string(&BootstrapSnapshotDto::from(&unconfigured)).expect("json");
         assert!(json.contains("\"state\":\"unconfigured\""));
+
+        let abandoned = BootstrapSnapshot::Abandoned {
+            home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+            path: std::path::PathBuf::from("/tmp/skill-man"),
+        };
+        let json = serde_json::to_string(&BootstrapSnapshotDto::from(&abandoned)).expect("json");
+        assert!(json.contains("\"state\":\"abandoned\""));
+        assert!(json.contains("\"homeId\":\"b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab\""));
+        assert!(json.contains("\"path\":\"/tmp/skill-man\""));
+
+        let unavailable = BootstrapSnapshot::HomeUnavailable {
+            home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+            path: std::path::PathBuf::from("/Volumes/Offline/skill-man"),
+            diagnostic: Some(BootstrapDiagnostic {
+                code: "volume_unreachable".into(),
+                message: "volume offline".into(),
+            }),
+        };
+        let json = serde_json::to_string(&BootstrapSnapshotDto::from(&unavailable)).expect("json");
+        assert!(json.contains("\"state\":\"home_unavailable\""));
+        assert!(json.contains("\"code\":\"volume_unreachable\""));
+
+        let mismatch = BootstrapSnapshot::HomeIdentityMismatch {
+            home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+            path: std::path::PathBuf::from("/Volumes/Other/skill-man"),
+            diagnostic: Some(BootstrapDiagnostic {
+                code: "volume_identity_mismatch".into(),
+                message: "different volume".into(),
+            }),
+        };
+        let json = serde_json::to_string(&BootstrapSnapshotDto::from(&mismatch)).expect("json");
+        assert!(json.contains("\"state\":\"home_identity_mismatch\""));
+        assert!(json.contains("\"code\":\"volume_identity_mismatch\""));
     }
 
     #[test]

@@ -38,10 +38,7 @@ const TEST_UUID: &str = "test-uuid";
 struct FixedVolumeIdentity(Option<VolumeIdentity>);
 
 impl VolumeIdentitySource for FixedVolumeIdentity {
-    fn volume_identity(
-        &self,
-        _path: &Path,
-    ) -> Result<Option<VolumeIdentity>, VolumeIdentityError> {
+    fn volume_identity(&self, _path: &Path) -> Result<Option<VolumeIdentity>, VolumeIdentityError> {
         Ok(self.0.clone())
     }
 }
@@ -155,7 +152,10 @@ fn seed_legacy_home(home_root: &Path) {
     let connection = Connection::open(&path).expect("open Catalog");
     for column in ["home_id", "volume_fsid", "volume_uuid", "home_bound_at"] {
         connection
-            .execute(&format!("ALTER TABLE catalog_meta DROP COLUMN {column}"), [])
+            .execute(
+                &format!("ALTER TABLE catalog_meta DROP COLUMN {column}"),
+                [],
+            )
             .expect("drop identity column");
     }
     connection
@@ -212,8 +212,8 @@ fn assert_bound_home(composition: &Composition, expected_path: &Path) {
     let current = files.binding.current.expect("current binding");
     assert_eq!(current.path, expected_path);
     // The binding identity must match the marker and the Catalog.
-    let marker = std::fs::read_to_string(expected_path.join(HomeMarker::FILE_NAME))
-        .expect("marker file");
+    let marker =
+        std::fs::read_to_string(expected_path.join(HomeMarker::FILE_NAME)).expect("marker file");
     let marker = HomeMarker::parse(&marker).expect("valid marker");
     assert_eq!(marker.home_id, current.home_id);
     let report = SqliteCatalogProbe::new()
@@ -279,7 +279,10 @@ fn fresh_default_confirm_binds_and_verifies() {
     assert_eq!(candidate.mode, CandidateMode::Fresh);
     assert_eq!(candidate.path, composition.default_home);
 
-    let snapshot = composition.binding.confirm_home(&candidate.token).expect("confirm");
+    let snapshot = composition
+        .binding
+        .confirm_home(&candidate.token)
+        .expect("confirm");
     assert!(is_bound(&snapshot), "expected Bound, got {snapshot:?}");
     assert_bound_home(&composition, &composition.default_home);
 
@@ -312,11 +315,7 @@ fn fresh_candidate_validation_matrix_rejects_unsafe_paths() {
     let composition = compose(Some(volume()));
     // Symlink component.
     let link_dir = composition.home_root().join("linked");
-    std::os::unix::fs::symlink(
-        composition.home_root().join("target"),
-        &link_dir,
-    )
-    .expect("symlink");
+    std::os::unix::fs::symlink(composition.home_root().join("target"), &link_dir).expect("symlink");
     std::fs::create_dir_all(composition.home_root().join("target")).expect("target");
     let error = composition
         .binding
@@ -490,8 +489,9 @@ fn cancel_of_interrupted_fresh_candidate_leaves_zero_artifacts() {
     for directory in ["skills", "remotes", "operations", "cache", "staging"] {
         std::fs::create_dir_all(composition.default_home.join(directory)).expect("layout");
     }
-    let _ = SqliteCatalogStore::create_bound(&bound, &composition.default_home.join(CATALOG_FILE_NAME))
-        .expect("Catalog");
+    let _ =
+        SqliteCatalogStore::create_bound(&bound, &composition.default_home.join(CATALOG_FILE_NAME))
+            .expect("Catalog");
     std::fs::write(
         composition.default_home.join(HomeMarker::FILE_NAME),
         serde_json::to_string_pretty(&HomeMarker {
@@ -536,11 +536,8 @@ fn cancel_refuses_foreign_content_and_never_guesses() {
     );
     write_ledger(&composition, &ledger_file);
     std::fs::create_dir_all(&composition.default_home).expect("Home dir");
-    std::fs::write(
-        composition.default_home.join("user-notes.txt"),
-        "not ours",
-    )
-    .expect("foreign file");
+    std::fs::write(composition.default_home.join("user-notes.txt"), "not ours")
+        .expect("foreign file");
 
     let error = composition
         .binding
@@ -601,7 +598,10 @@ fn continue_after_precommit_crash_completes_the_same_binding() {
         .binding
         .current
         .expect("binding");
-    assert_eq!(current.home_id.0, home_id, "the same identity is rolled forward");
+    assert_eq!(
+        current.home_id.0, home_id,
+        "the same identity is rolled forward"
+    );
     assert!(ledger(&composition).active.is_none());
 }
 
@@ -646,8 +646,9 @@ fn continue_after_postcommit_crash_only_rolls_forward() {
     for directory in ["skills", "remotes", "operations", "cache", "staging"] {
         std::fs::create_dir_all(composition.default_home.join(directory)).expect("layout");
     }
-    let _ = SqliteCatalogStore::create_bound(&bound, &composition.default_home.join(CATALOG_FILE_NAME))
-        .expect("Catalog");
+    let _ =
+        SqliteCatalogStore::create_bound(&bound, &composition.default_home.join(CATALOG_FILE_NAME))
+            .expect("Catalog");
     std::fs::write(
         composition.default_home.join(HomeMarker::FILE_NAME),
         serde_json::to_string_pretty(&HomeMarker {
@@ -700,7 +701,10 @@ fn legacy_default_binds_in_place_with_zero_moves() {
         .prepare_home(&composition.default_home)
         .expect("prepare in place");
     assert_eq!(candidate.mode, CandidateMode::LegacyInPlace);
-    let snapshot = composition.binding.confirm_home(&candidate.token).expect("confirm");
+    let snapshot = composition
+        .binding
+        .confirm_home(&candidate.token)
+        .expect("confirm");
     assert!(is_bound(&snapshot), "expected Bound, got {snapshot:?}");
 
     // Zero moves: the same directory, the same user rows and bytes.
@@ -718,8 +722,8 @@ fn legacy_default_binds_in_place_with_zero_moves() {
         .collect();
     assert_eq!(backups.len(), 1, "the v4 Catalog must be backed up");
     // The user rows survived the migration.
-    let connection = Connection::open(composition.default_home.join(CATALOG_FILE_NAME))
-        .expect("Catalog");
+    let connection =
+        Connection::open(composition.default_home.join(CATALOG_FILE_NAME)).expect("Catalog");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
         .expect("count");
@@ -754,8 +758,8 @@ fn legacy_in_place_continue_after_crash_converges() {
         .expect("binding");
     assert_eq!(current.home_id.0, home_id);
     // User rows are intact after the converged migration.
-    let connection = Connection::open(composition.default_home.join(CATALOG_FILE_NAME))
-        .expect("Catalog");
+    let connection =
+        Connection::open(composition.default_home.join(CATALOG_FILE_NAME)).expect("Catalog");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
         .expect("count");
@@ -779,7 +783,10 @@ fn legacy_choose_copies_then_binds_and_keeps_the_source_inert() {
         candidate.legacy_source.as_deref(),
         Some(composition.default_home.as_path())
     );
-    let snapshot = composition.binding.confirm_home(&candidate.token).expect("confirm");
+    let snapshot = composition
+        .binding
+        .confirm_home(&candidate.token)
+        .expect("confirm");
     assert!(is_bound(&snapshot), "expected Bound, got {snapshot:?}");
 
     // The destination is a complete, verified Home.
@@ -868,7 +875,10 @@ fn legacy_copy_cancel_deletes_destination_but_never_the_source() {
         matches!(snapshot, BootstrapSnapshot::LegacyDetected { .. }),
         "expected LegacyDetected, got {snapshot:?}"
     );
-    assert!(!destination.exists(), "the copy destination must be removed");
+    assert!(
+        !destination.exists(),
+        "the copy destination must be removed"
+    );
     assert!(
         composition.default_home.join(CATALOG_FILE_NAME).exists(),
         "the Legacy source must never be touched"
@@ -888,8 +898,8 @@ fn prepared_recovery_home_binds_in_place() {
     }
     let _ = SqliteCatalogStore::open(&composition.default_home.join(CATALOG_FILE_NAME))
         .expect("prepared Catalog");
-    let connection = Connection::open(composition.default_home.join(CATALOG_FILE_NAME))
-        .expect("Catalog");
+    let connection =
+        Connection::open(composition.default_home.join(CATALOG_FILE_NAME)).expect("Catalog");
     connection
         .execute(
             "INSERT INTO skills (
@@ -916,7 +926,10 @@ fn prepared_recovery_home_binds_in_place() {
         .prepare_home(&composition.default_home)
         .expect("prepare");
     assert_eq!(candidate.mode, CandidateMode::LegacyInPlace);
-    let snapshot = composition.binding.confirm_home(&candidate.token).expect("confirm");
+    let snapshot = composition
+        .binding
+        .confirm_home(&candidate.token)
+        .expect("confirm");
     assert!(is_bound(&snapshot), "expected Bound, got {snapshot:?}");
     assert_bound_home(&composition, &composition.default_home);
 }

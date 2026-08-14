@@ -1,7 +1,6 @@
 pub mod agent_adapters;
 pub mod app_state_store;
 pub mod catalog_probe;
-pub mod closed_catalog;
 pub mod fixture_catalog;
 pub mod git_source;
 pub mod local_file_source;

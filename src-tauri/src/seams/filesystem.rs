@@ -434,6 +434,11 @@ pub enum FileSystemError {
 }
 
 pub trait FileSystem: Send + Sync {
+    /// Fill `buffer` with OS entropy (e.g. `/dev/urandom`): the randomness
+    /// source for generated identities. Behind the seam so Core never
+    /// touches the filesystem directly (core-boundary contract).
+    fn read_entropy(&self, buffer: &mut [u8]) -> Result<(), FileSystemError>;
+
     fn inspect_link_source(&self, path: &Path) -> Result<LinkSourceSnapshot, FileSystemError>;
 
     fn canonical_directory(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
@@ -1249,11 +1254,7 @@ pub trait FileSystem: Send + Sync {
     /// directory (the empty directory is removed first). Home Binding's
     /// Legacy copy transition relies on this for the SQLite+WAL+SHM
     /// consistent set plus every other Home entry.
-    fn copy_tree_verified(
-        &self,
-        source: &Path,
-        destination: &Path,
-    ) -> Result<(), FileSystemError> {
+    fn copy_tree_verified(&self, source: &Path, destination: &Path) -> Result<(), FileSystemError> {
         let _ = (source, destination);
         Err(FileSystemError::Io {
             operation: "copy tree",

@@ -406,8 +406,8 @@ impl SqliteCatalogStore {
         } else {
             None
         };
-        let mut connection =
-            Connection::open(path).map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
+        let mut connection = Connection::open(path)
+            .map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
         configure_connection(&connection)
             .map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
         // Quiesce the WAL into the main database so the copied consistent
