@@ -263,7 +263,7 @@ test("shows the three Modified branches simultaneously and requires a branch", (
   ).toBeChecked();
 });
 
-test("plan view shows the frozen intent and keeps Apply disabled for handoff", () => {
+test("plan view shows the frozen intent and enables Apply for the handoff", () => {
   const plan: AdoptPlan = {
     planToken: "adopt-plan-1",
     evidenceGeneration: 3,
@@ -275,19 +275,36 @@ test("plan view shows the frozen intent and keeps Apply disabled for handoff", (
         finalEntityPath: "",
         appearances: [],
         targetAgents: [],
-        applyable: false,
+        applyable: true,
         error: null,
       },
     ],
-    canApply: false,
+    canApply: true,
   };
   renderLedger(report([candidate()]), {}, plan);
   const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
   expect(dialog).toHaveTextContent("Remote Install — keep current bytes");
-  expect(dialog).toHaveTextContent("Frozen handoff intent");
-  expect(
-    within(dialog).getByRole("button", { name: "Adopt" }),
-  ).toBeDisabled();
+  expect(dialog).toHaveTextContent("Ready");
+  expect(within(dialog).getByRole("button", { name: "Adopt" })).toBeEnabled();
+});
+
+test("ownership conflict reason renders as a closed conflict verdict", () => {
+  renderLedger(
+    report([
+      candidate({
+        verdict: "conflict",
+        reason: { kind: "ownership_conflict", managedDirectoryName: "networking" },
+        selectable: false,
+        adoptable: false,
+      }),
+    ]),
+  );
+  const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
+  expect(dialog).toHaveTextContent(
+    "The external installer reappeared for this Managed Skill",
+  );
+  expect(dialog).toHaveTextContent("Conflict");
+  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
 });
 
 test("source content stays byte-identical in both locales", async () => {

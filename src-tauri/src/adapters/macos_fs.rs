@@ -15,9 +15,10 @@ use crate::seams::filesystem::{
     AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
     ChainFault, DirectoryEntry, DirectoryFingerprint, EvidenceChain, EvidenceChainHop,
     EvidenceChainHopKind, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
-    FileReplacement, FileSystem, FileSystemError, LinkSourceEntryKind, LinkSourceHop,
-    LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry, RelocateJournal,
-    RelocateJournalPhase, RelocateRecoveryBaseline, RemoveInitialEntry, RemoveJournal,
+    FileReplacement, FileSystem, FileSystemError, HandoffItemPhase, HandoffJournal,
+    HandoffJournalItem, LinkSourceEntryKind, LinkSourceHop, LinkSourceSnapshot, OccupantKind,
+    OccupantSnapshot, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
+    RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
     RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
     SkillFingerprint, StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
 };
@@ -2653,10 +2654,7 @@ impl FileSystem for MacOsFileSystem {
         Ok(entries)
     }
 
-    fn inspect_evidence_chain(
-        &self,
-        path: &Path,
-    ) -> Result<EvidenceChain, FileSystemError> {
+    fn inspect_evidence_chain(&self, path: &Path) -> Result<EvidenceChain, FileSystemError> {
         resolve_evidence_chain(path)
     }
 
@@ -2741,22 +2739,41 @@ impl FileSystem for MacOsFileSystem {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "skill-man-{safe_purpose}-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).map_err(|source| FileSystemError::Io {
+        let base = std::env::temp_dir();
+        // The pid + nanos name can collide when two operations create
+        // workspaces in the same instant (concurrent scans); retry with an
+        // incrementing suffix until a fresh directory is actually created
+        // (`create_dir`, not `create_dir_all`: the latter is idempotent and
+        // would silently reuse a colliding path).
+        for attempt in 0..64_u64 {
+            let path = base.join(format!(
+                "skill-man-{safe_purpose}-{}-{nanos}-{attempt}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(FileSystemError::Io {
+                        operation: "create Adopt evidence temp workspace",
+                        path,
+                        source,
+                    });
+                }
+            }
+        }
+        Err(FileSystemError::Io {
             operation: "create Adopt evidence temp workspace",
-            path: path.clone(),
-            source,
-        })?;
-        Ok(path)
+            path: base,
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not allocate a unique temp workspace",
+            ),
+        })
     }
 
     fn discard_temp_workspace(&self, path: &Path) -> Result<(), FileSystemError> {
-        let normalized = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let canonical_temp = std::env::temp_dir()
             .canonicalize()
             .unwrap_or_else(|_| std::env::temp_dir());
@@ -2822,7 +2839,9 @@ impl FileSystem for MacOsFileSystem {
         library_root: &Path,
         operation_id: &str,
     ) -> Result<DirectoryFingerprint, FileSystemError> {
-        validate_adopt_operation_id(operation_id)?;
+        // Shared staging facility: Adopt and Ownership Handoff operations
+        // both stage inside the owned Library staging root.
+        validate_staging_operation_id(operation_id)?;
         let library_root = self.normalize_configured_path(library_root)?;
         let (library, library_metadata) = open_directory_nofollow(
             &library_root,
@@ -3556,6 +3575,628 @@ impl FileSystem for MacOsFileSystem {
         }
         Ok(())
     }
+
+    fn write_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        manifest: &RemoteParentManifest,
+    ) -> Result<(), FileSystemError> {
+        let remotes_root = self.normalize_configured_path(remotes_root)?;
+        validate_operation_id(&manifest.remote_id)?;
+        let directory = remotes_root.join(&manifest.remote_id);
+        fs::create_dir_all(&directory).map_err(|source| FileSystemError::Io {
+            operation: "create remote parent directory",
+            path: directory.clone(),
+            source,
+        })?;
+        sync_directory(&remotes_root, "sync remotes root")?;
+        let journal_path = directory.join("source.json");
+        let temporary_path = directory.join("source.json.tmp");
+        let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| FileSystemError::Io {
+            operation: "serialize remote parent manifest",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary remote parent manifest",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write remote parent manifest",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync remote parent manifest",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish remote parent manifest",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(&directory, "sync remote parent directory")
+    }
+
+    fn read_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        remote_id: &str,
+    ) -> Result<Option<RemoteParentManifest>, FileSystemError> {
+        let remotes_root = self.normalize_configured_path(remotes_root)?;
+        validate_operation_id(remote_id)?;
+        let path = remotes_root.join(remote_id).join("source.json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "read remote parent manifest",
+                    path: path.clone(),
+                    source,
+                });
+            }
+        };
+        let manifest: RemoteParentManifest =
+            serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                operation: "parse remote parent manifest",
+                path: path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            })?;
+        if manifest.schema_version != REMOTE_PARENT_MANIFEST_SCHEMA_VERSION {
+            return Err(FileSystemError::Io {
+                operation: "parse remote parent manifest",
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported manifest schema {}", manifest.schema_version),
+                ),
+            });
+        }
+        Ok(Some(manifest))
+    }
+
+    fn remove_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        remote_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let remotes_root = self.normalize_configured_path(remotes_root)?;
+        validate_operation_id(remote_id)?;
+        let directory = remotes_root.join(remote_id);
+        let expected = directory.join("source.json");
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|source| FileSystemError::Io {
+                        operation: "enumerate remote parent directory",
+                        path: directory.clone(),
+                        source,
+                    })?;
+                    if entry.path() != expected {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "remove remote parent manifest",
+                            path: entry.path(),
+                            message: "the parent directory is not empty".into(),
+                        });
+                    }
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate remote parent directory",
+                    path: directory.clone(),
+                    source,
+                });
+            }
+        }
+        if fs::symlink_metadata(&expected).is_ok() {
+            fs::remove_file(&expected).map_err(|source| FileSystemError::Io {
+                operation: "remove remote parent manifest file",
+                path: expected,
+                source,
+            })?;
+        }
+        fs::remove_dir(&directory).map_err(|source| FileSystemError::Io {
+            operation: "remove remote parent directory",
+            path: directory,
+            source,
+        })?;
+        sync_directory(&remotes_root, "sync remotes root")
+    }
+
+    fn isolate_external_source(
+        &self,
+        source: &Path,
+        operation_id: &str,
+    ) -> Result<PathBuf, FileSystemError> {
+        validate_handoff_operation_id(operation_id)?;
+        let source = self.normalize_configured_path(source)?;
+        let source_parent =
+            source
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: source.clone(),
+                })?;
+        let source_name =
+            source
+                .file_name()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: source.clone(),
+                })?;
+        let isolated = source_parent.join(format!(
+            ".skill-man-handoff-{operation_id}-{}",
+            source_name.to_string_lossy()
+        ));
+        if fs::symlink_metadata(&isolated).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "isolate external source",
+                path: isolated,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the hidden operation path is occupied",
+                ),
+            });
+        }
+        move_directory_verified(&source, &isolated)?;
+        sync_directory(source_parent, "sync external source parent")?;
+        Ok(isolated)
+    }
+
+    fn restore_isolated_source(
+        &self,
+        isolated: &Path,
+        source: &Path,
+        expected_tree_hash: &str,
+    ) -> Result<(), FileSystemError> {
+        let isolated = self.normalize_configured_path(isolated)?;
+        let source = self.normalize_configured_path(source)?;
+        let snapshot = staged_tree_snapshot_at(&isolated)?;
+        if snapshot.content_hash != expected_tree_hash {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore isolated external source",
+                path: isolated,
+                message: "the isolated source no longer matches the frozen tree".into(),
+            });
+        }
+        if fs::symlink_metadata(&source).is_ok() {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore isolated external source",
+                path: source,
+                message: "the original location is occupied".into(),
+            });
+        }
+        move_directory_verified(&isolated, &source)?;
+        if let Some(parent) = source.parent() {
+            sync_directory(parent, "sync restored external source parent")?;
+        }
+        Ok(())
+    }
+
+    fn discard_isolated_source(&self, isolated: &Path) -> Result<(), FileSystemError> {
+        let isolated = self.normalize_configured_path(isolated)?;
+        let name = isolated
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: isolated.clone(),
+            })?;
+        if !name.starts_with(".skill-man-handoff-") {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "discard isolated external source",
+                path: isolated,
+                message: "the path is not a hidden handoff isolation copy".into(),
+            });
+        }
+        remove_owned_directory_if_present(&isolated, None, "discard isolated external source")?;
+        Ok(())
+    }
+
+    fn write_handoff_journal(
+        &self,
+        library_root: &Path,
+        journal: &HandoffJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_handoff_operation_id(&journal.operation_id)?;
+        let operations_root = library_root.join("operations");
+        let operation_root = operations_root.join(&journal.operation_id);
+        fs::create_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "create handoff operation directory",
+            path: operation_root.clone(),
+            source,
+        })?;
+        sync_directory(&operations_root, "sync handoff operations directory")?;
+        let journal_path = operation_root.join("handoff-journal.json");
+        let temporary_path = operation_root.join("handoff-journal.tmp");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize handoff journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary handoff journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write handoff journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync handoff journal",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish handoff journal",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(&operation_root, "sync handoff operation directory")
+    }
+
+    fn finish_handoff_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_handoff_operation_id(operation_id)?;
+        let operation_root = library_root.join("operations").join(operation_id);
+        let journal_path = operation_root.join("handoff-journal.json");
+        if journal_path.is_file() {
+            let journal_bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read completed handoff journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let history_root = library_root.join("operation-history");
+            fs::create_dir_all(&history_root).map_err(|source| FileSystemError::Io {
+                operation: "create handoff operation history",
+                path: history_root.clone(),
+                source,
+            })?;
+            let archive_path = history_root.join(format!("{operation_id}.handoff.json"));
+            let archive_temporary = history_root.join(format!(".{operation_id}.handoff.tmp"));
+            let mut archive = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&archive_temporary)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "open temporary handoff history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive
+                .write_all(&journal_bytes)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "write handoff history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive.sync_all().map_err(|source| FileSystemError::Io {
+                operation: "sync handoff history",
+                path: archive_temporary.clone(),
+                source,
+            })?;
+            fs::rename(&archive_temporary, &archive_path).map_err(|source| {
+                FileSystemError::Io {
+                    operation: "publish handoff history",
+                    path: archive_path,
+                    source,
+                }
+            })?;
+            sync_directory(&history_root, "sync handoff operation history")?;
+        }
+        match fs::remove_file(&journal_path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove completed handoff journal",
+                    path: journal_path,
+                    source,
+                });
+            }
+        }
+        match fs::remove_dir(&operation_root) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "remove completed handoff operation directory",
+                path: operation_root,
+                source,
+            }),
+        }
+    }
+
+    fn list_handoff_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<HandoffJournal>, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        let entries = match fs::read_dir(&operations_root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate handoff recovery journals",
+                    path: operations_root,
+                    source,
+                });
+            }
+        };
+        let mut journals = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate handoff recovery journals",
+                path: operations_root.clone(),
+                source,
+            })?;
+            let operation_root = entry.path();
+            let journal_path = operation_root.join("handoff-journal.json");
+            if !journal_path.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read handoff recovery journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let journal: HandoffJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse handoff recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            if journal.version != HANDOFF_JOURNAL_VERSION {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover handoff journal",
+                    path: journal_path,
+                    message: format!(
+                        "unsupported handoff journal version {}; staged content is retained",
+                        journal.version
+                    ),
+                });
+            }
+            validate_handoff_operation_id(&journal.operation_id)?;
+            if operation_root.file_name().and_then(|name| name.to_str())
+                != Some(journal.operation_id.as_str())
+            {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_root,
+                });
+            }
+            journals.push(journal);
+        }
+        Ok(journals)
+    }
+
+    fn roll_forward_handoff_item(
+        &self,
+        library_root: &Path,
+        journal: &HandoffJournal,
+        item: &mut HandoffJournalItem,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        if item.remote.is_some() {
+            // Home install: publish the staged tree when the final entity
+            // is missing; verify it when present.
+            let final_entity_path = self.normalize_configured_path(&item.final_entity_path)?;
+            match fs::symlink_metadata(&final_entity_path) {
+                Ok(_) => {
+                    let snapshot = staged_tree_snapshot_at(&final_entity_path)?;
+                    if snapshot.content_hash != item.current_baseline_hash {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff entity",
+                            path: final_entity_path,
+                            message: "the Home entity does not match the handoff baseline".into(),
+                        });
+                    }
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    let staged = self.normalize_configured_path(&item.staged_root)?;
+                    let expected_hash = item.staged_tree_hash.clone().ok_or_else(|| {
+                        FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff entity",
+                            path: staged.clone(),
+                            message: "the journal does not record the staged tree hash".into(),
+                        }
+                    })?;
+                    let snapshot = staged_tree_snapshot_at(&staged)?;
+                    if snapshot.content_hash != expected_hash {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff entity",
+                            path: staged,
+                            message: "the staged tree does not match the journal".into(),
+                        });
+                    }
+                    self.install_staged_skill(
+                        &staged,
+                        &final_entity_path,
+                        &library_root,
+                        &journal.operation_id,
+                        &snapshot,
+                    )?;
+                }
+                Err(source) => {
+                    return Err(FileSystemError::Io {
+                        operation: "inspect handoff final entity",
+                        path: final_entity_path,
+                        source,
+                    });
+                }
+            }
+        } else {
+            // Convert-to-Link: the tree must live at the chosen stable
+            // directory; the isolation copy is the only remaining copy.
+            let target = item.target_directory.as_ref().ok_or_else(|| {
+                FileSystemError::RecoveryRequired {
+                    operation: "roll forward handoff Link",
+                    path: item.canonical_entity.clone(),
+                    message: "the journal does not record the chosen stable directory".into(),
+                }
+            })?;
+            let target = self.normalize_configured_path(target)?;
+            match fs::symlink_metadata(&target) {
+                Ok(_) => {
+                    let snapshot = staged_tree_snapshot_at(&target)?;
+                    if snapshot.content_hash != item.source_tree_hash {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff Link",
+                            path: target,
+                            message: "the stable directory does not match the frozen tree".into(),
+                        });
+                    }
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    let isolated = item.isolated_path.as_ref().ok_or_else(|| {
+                        FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff Link",
+                            path: item.canonical_entity.clone(),
+                            message: "neither the stable directory nor the isolation copy exists"
+                                .into(),
+                        }
+                    })?;
+                    let isolated = self.normalize_configured_path(isolated)?;
+                    let snapshot = staged_tree_snapshot_at(&isolated)?;
+                    if snapshot.content_hash != item.source_tree_hash {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "roll forward handoff Link",
+                            path: isolated,
+                            message: "the isolation copy does not match the frozen tree".into(),
+                        });
+                    }
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent).map_err(|source| FileSystemError::Io {
+                            operation: "create stable Link directory",
+                            path: parent.to_path_buf(),
+                            source,
+                        })?;
+                    }
+                    move_directory_verified(&isolated, &target)?;
+                    if let Some(parent) = target.parent() {
+                        sync_directory(parent, "sync stable Link directory")?;
+                    }
+                }
+                Err(source) => {
+                    return Err(FileSystemError::Io {
+                        operation: "inspect handoff Link target",
+                        path: target,
+                        source,
+                    });
+                }
+            }
+        }
+        self.apply_adopt_appearances(&item.appearances, &item.activations)?;
+        // The restart closed the Undo window: discard the staged copy and
+        // the isolation copy.
+        if fs::symlink_metadata(&item.staged_root).is_ok() {
+            remove_owned_directory_if_present(
+                &item.staged_root,
+                None,
+                "discard handoff staged copy",
+            )?;
+        }
+        if let Some(isolated) = &item.isolated_path {
+            if fs::symlink_metadata(isolated).is_ok() {
+                self.discard_isolated_source(isolated)?;
+            }
+        }
+        item.phase = HandoffItemPhase::Finalized;
+        Ok(())
+    }
+
+    fn rollback_handoff_item(
+        &self,
+        library_root: &Path,
+        item: &mut HandoffJournalItem,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        if let Some(isolated) = &item.isolated_path {
+            if fs::symlink_metadata(isolated).is_ok() {
+                self.restore_isolated_source(
+                    isolated,
+                    &item.canonical_entity,
+                    &item.source_tree_hash,
+                )?;
+            }
+            item.isolated_path = None;
+        }
+        if fs::symlink_metadata(&item.staged_root).is_ok() {
+            remove_owned_directory_if_present(
+                &item.staged_root,
+                None,
+                "discard handoff staged copy",
+            )?;
+        }
+        item.staged_fingerprint = None;
+        item.staged_tree_hash = None;
+        item.phase = HandoffItemPhase::Planned;
+        Ok(())
+    }
+
+    fn lock_entry_present(
+        &self,
+        lock_path: &Path,
+        entry_name: &str,
+    ) -> Result<bool, FileSystemError> {
+        let lock_path = self.normalize_configured_path(lock_path)?;
+        let bytes = match fs::read(&lock_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "read installer lock for recovery",
+                    path: lock_path,
+                    source,
+                });
+            }
+        };
+        let report = crate::seams::installer_lock_store::parse_lock_bytes(&lock_path, &bytes);
+        if let Some(fault) = report.fault {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "probe installer lock entry",
+                path: lock_path,
+                message: format!("the lock file is faulted and cannot decide recovery: {fault:?}"),
+            });
+        }
+        Ok(report.entries.iter().any(|entry| entry.name == entry_name))
+    }
+}
+
+/// The parent manifest schema this build writes and audits (ADR-0013 §4.1).
+const REMOTE_PARENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// The durable handoff journal schema this build writes (spec §8.4).
+const HANDOFF_JOURNAL_VERSION: u32 = 1;
+
+fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    validate_operation_id(operation_id)?;
+    if !operation_id.starts_with("handoff-") {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: PathBuf::from(operation_id),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -3670,14 +4311,13 @@ fn resolve_link_source_directory(
 /// detection uses the *active* expansion chain (the symlinks whose targets
 /// are still being consumed), so a shared absolute prefix like `/var` is
 /// followed again legally while `a -> b -> a` stops at the repeat.
-pub(crate) fn resolve_evidence_chain(
-    source_path: &Path,
-) -> Result<EvidenceChain, FileSystemError> {
-    let entry_metadata = fs::symlink_metadata(source_path).map_err(|source| FileSystemError::Io {
-        operation: "inspect Adopt evidence entry",
-        path: source_path.to_path_buf(),
-        source,
-    })?;
+pub(crate) fn resolve_evidence_chain(source_path: &Path) -> Result<EvidenceChain, FileSystemError> {
+    let entry_metadata =
+        fs::symlink_metadata(source_path).map_err(|source| FileSystemError::Io {
+            operation: "inspect Adopt evidence entry",
+            path: source_path.to_path_buf(),
+            source,
+        })?;
     let Some(entry_name) = source_path.file_name() else {
         return Err(FileSystemError::InvalidConfiguredPath {
             path: source_path.to_path_buf(),
@@ -3695,13 +4335,7 @@ pub(crate) fn resolve_evidence_chain(
     // `/var -> private/var` never become hops) and only the entry name's
     // own components are resolved from there.
     let mut resolved = canonical_start;
-    let fault = walk_evidence_components(
-        &mut pending,
-        &mut resolved,
-        &mut hops,
-        &mut active,
-        0,
-    );
+    let fault = walk_evidence_components(&mut pending, &mut resolved, &mut hops, &mut active, 0);
     Ok(EvidenceChain {
         entry_path: source_path.to_path_buf(),
         entry_device: entry_metadata.dev(),
@@ -3771,7 +4405,9 @@ fn walk_evidence_components(
                     }
                     let identity = (metadata.dev(), metadata.ino());
                     if !active.insert(identity) {
-                        return Some(ChainFault::Cycle { at: candidate.clone() });
+                        return Some(ChainFault::Cycle {
+                            at: candidate.clone(),
+                        });
                     }
                     // TOCTOU guard: the entry must not have been replaced
                     // while its target was being read.
@@ -3807,13 +4443,8 @@ fn walk_evidence_components(
                     // prefix (e.g. an absolute target re-entering macOS
                     // `/var`) is never mistaken for `a -> b -> a` cycle.
                     let mut expanded: VecDeque<_> = owned_components(&target).into();
-                    let inner = walk_evidence_components(
-                        &mut expanded,
-                        resolved,
-                        hops,
-                        active,
-                        depth + 1,
-                    );
+                    let inner =
+                        walk_evidence_components(&mut expanded, resolved, hops, active, depth + 1);
                     active.remove(&identity);
                     if inner.is_some() {
                         return inner;
@@ -6091,6 +6722,18 @@ fn validate_adopt_operation_id(operation_id: &str) -> Result<(), FileSystemError
     Ok(())
 }
 
+/// Staging operation ids: `adopt-*` (Adopt) and `handoff-*` (Ownership
+/// Handoff) both live under the owned Library staging root.
+fn validate_staging_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    validate_operation_id(operation_id)?;
+    if !(operation_id.starts_with("adopt-") || operation_id.starts_with("handoff-")) {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: PathBuf::from(operation_id),
+        });
+    }
+    Ok(())
+}
+
 fn sync_directory(path: &Path, operation: &'static str) -> Result<(), FileSystemError> {
     let directory = fs::File::open(path).map_err(|source| FileSystemError::Io {
         operation,
@@ -6224,8 +6867,7 @@ mod tests {
         fs::write(final_entity.join("SKILL.md"), "# Networking\n").expect("write Skill");
         let first_link = root.path().join("first-link");
         let second_link = root.path().join("second-link");
-        std::os::unix::fs::symlink("shared/networking", &first_link)
-            .expect("create first symlink");
+        std::os::unix::fs::symlink("shared/networking", &first_link).expect("create first symlink");
         std::os::unix::fs::symlink("first-link", &second_link).expect("create second symlink");
         let entry = root.path().join("agents").join("networking");
         fs::create_dir_all(entry.parent().expect("agents parent")).expect("create agents root");
@@ -6274,13 +6916,10 @@ mod tests {
         let chain = resolve_evidence_chain(&entry).expect("resolve evidence chain");
         assert!(matches!(chain.fault, Some(ChainFault::Dangling { .. })));
         assert_eq!(
-            chain
-                .fault
-                .as_ref()
-                .and_then(|fault| match fault {
-                    ChainFault::Dangling { at } => at.file_name(),
-                    _ => None,
-                }),
+            chain.fault.as_ref().and_then(|fault| match fault {
+                ChainFault::Dangling { at } => at.file_name(),
+                _ => None,
+            }),
             Some(std::ffi::OsStr::new("missing"))
         );
         assert_eq!(chain.final_entity, None);
@@ -6406,10 +7045,12 @@ mod tests {
             .create_temp_workspace("adopt-evidence-test")
             .expect("create temp workspace");
         assert!(workspace.is_dir());
-        assert!(workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("skill-man-")));
+        assert!(
+            workspace
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("skill-man-"))
+        );
         filesystem
             .discard_temp_workspace(&workspace)
             .expect("discard temp workspace");
@@ -6420,9 +7061,11 @@ mod tests {
     fn temp_workspace_discard_refuses_paths_outside_the_namespace() {
         let filesystem = MacOsFileSystem::new(PathBuf::from("/tmp"));
         let root = tempfile::tempdir().expect("temporary discard root");
-        assert!(filesystem
-            .discard_temp_workspace(root.path())
-            .is_err_and(|error| matches!(error, FileSystemError::InvalidConfiguredPath { .. })));
+        assert!(
+            filesystem
+                .discard_temp_workspace(root.path())
+                .is_err_and(|error| matches!(error, FileSystemError::InvalidConfiguredPath { .. }))
+        );
         assert!(root.path().exists());
     }
 }

@@ -13,8 +13,8 @@ use skill_man_lib::seams::locale_store::{
     EffectiveLocale, LocaleSelection, LocaleStore, SystemLocaleSource,
 };
 use skill_man_lib::tauri_adapter::dto::{
-    ChainFaultDto, CommandFailureDto, CompatibilityWarningDto, DiagnosticDto,
-    LocaleSnapshotDto, OccupierNotAdoptableReasonDto, PreferencesWarningDto, PublicErrorDto,
+    ChainFaultDto, CommandFailureDto, CompatibilityWarningDto, DiagnosticDto, LocaleSnapshotDto,
+    OccupierNotAdoptableReasonDto, PreferencesWarningDto, PublicErrorDto,
     SetLocaleSelectionRequestDto, SkillDetailDto,
 };
 

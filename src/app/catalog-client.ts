@@ -566,6 +566,11 @@ export interface UpdateCheckGroup {
 export interface UpdateCheckReport {
   groups: UpdateCheckGroup[];
   errors: string[];
+  /** Closed Remote Source Identity Conflicts (parent manifest vs row). */
+  parentConflicts: {
+    remoteId: string;
+    canonicalUrl: string;
+  }[];
 }
 
 export interface UpdateSelection {
@@ -638,6 +643,7 @@ export type AdoptVerdictReason =
   | { kind: "remote_conflict"; detail: string }
   | { kind: "identity_conflict"; names: string[] }
   | { kind: "library_conflict"; directoryName: string }
+  | { kind: "ownership_conflict"; managedDirectoryName: string }
   | { kind: "remote_unavailable"; detail: string }
   | { kind: "chain_fault"; fault: ChainFault }
   | { kind: "unreadable_entity"; detail: string }

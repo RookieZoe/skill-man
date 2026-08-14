@@ -4,10 +4,12 @@
 //! simply produce no report.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::seams::installer_lock_store::{
-    InstallerLockError, InstallerLockStore, LockFileReport, parse_lock_bytes,
+    InstallerLockError, InstallerLockStore, LockEntry, LockFileReport, LockReleaseError,
+    parse_lock_bytes, release_lock_entry_bytes, restore_lock_entry_bytes,
 };
 
 /// Default lock location: `~/.agents/.skill-lock.json`.
@@ -69,6 +71,78 @@ impl InstallerLockStore for SystemInstallerLockStore {
         }
         Ok(reports)
     }
+
+    fn release_entry(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        entry: &LockEntry,
+    ) -> Result<(), LockReleaseError> {
+        let bytes = fs::read(lock_path).map_err(|source| {
+            LockReleaseError::Io(format!("read {}: {source}", lock_path.display()))
+        })?;
+        let rewritten = release_lock_entry_bytes(&bytes, frozen_fingerprint, entry)?;
+        write_lock_atomically(lock_path, &rewritten)
+    }
+
+    fn restore_entry(&self, lock_path: &Path, entry: &LockEntry) -> Result<(), LockReleaseError> {
+        let bytes = match fs::read(lock_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                // No lock file: restoring an entry means creating a minimal
+                // valid v3 lock with exactly this entry.
+                let value = serde_json::json!({
+                    "version": 3,
+                    "skills": { entry.name.clone(): serde_json::to_value(entry).map_err(|error| {
+                        LockReleaseError::Invalid(error.to_string())
+                    })? },
+                });
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| LockReleaseError::Invalid(error.to_string()))?;
+                return write_lock_atomically(lock_path, &bytes);
+            }
+            Err(source) => {
+                return Err(LockReleaseError::Io(format!(
+                    "read {}: {source}",
+                    lock_path.display()
+                )));
+            }
+        };
+        let rewritten = restore_lock_entry_bytes(&bytes, entry)?;
+        write_lock_atomically(lock_path, &rewritten)
+    }
+}
+
+/// The lock rewrite write protocol: temp file → full write → fsync →
+/// atomic rename → parent fsync (spec §3.2 protocol, applied to the lock).
+fn write_lock_atomically(lock_path: &Path, bytes: &[u8]) -> Result<(), LockReleaseError> {
+    let parent = lock_path
+        .parent()
+        .ok_or_else(|| LockReleaseError::Io("the lock path has no parent".into()))?;
+    let temporary = parent.join(".skill-lock.json.tmp");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|source| {
+            LockReleaseError::Io(format!("open {}: {source}", temporary.display()))
+        })?;
+    file.write_all(bytes).map_err(|source| {
+        LockReleaseError::Io(format!("write {}: {source}", temporary.display()))
+    })?;
+    file.sync_all().map_err(|source| {
+        LockReleaseError::Io(format!("sync {}: {source}", temporary.display()))
+    })?;
+    fs::rename(&temporary, lock_path).map_err(|source| {
+        LockReleaseError::Io(format!("rename {}: {source}", lock_path.display()))
+    })?;
+    let directory = fs::File::open(parent)
+        .map_err(|source| LockReleaseError::Io(format!("open {}: {source}", parent.display())))?;
+    directory
+        .sync_all()
+        .map_err(|source| LockReleaseError::Io(format!("sync {}: {source}", parent.display())))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -87,11 +161,7 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary home");
         let lock_path = root.path().join(DEFAULT_LOCK_RELATIVE_PATH);
         fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
-        fs::write(
-            &lock_path,
-            r#"{"version": 3, "skills": {}}"#,
-        )
-        .expect("write lock");
+        fs::write(&lock_path, r#"{"version": 3, "skills": {}}"#).expect("write lock");
         let store = SystemInstallerLockStore::new(root.path().to_path_buf());
         let reports = store.discover().expect("discover");
         assert_eq!(reports.len(), 1);
@@ -106,8 +176,7 @@ mod tests {
         let lock_path = xdg.join(XDG_LOCK_RELATIVE_PATH);
         fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
         fs::write(&lock_path, "not json").expect("write corrupt lock");
-        let store =
-            SystemInstallerLockStore::with_xdg(root.path().to_path_buf(), Some(xdg));
+        let store = SystemInstallerLockStore::with_xdg(root.path().to_path_buf(), Some(xdg));
         let reports = store.discover().expect("discover");
         assert_eq!(reports.len(), 1);
         assert!(reports[0].fault.is_some());
@@ -118,7 +187,8 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary home");
         let default = root.path().join(DEFAULT_LOCK_RELATIVE_PATH);
         let xdg = root.path().join("xdg-state");
-        fs::create_dir_all(default.parent().expect("default parent")).expect("create default parent");
+        fs::create_dir_all(default.parent().expect("default parent"))
+            .expect("create default parent");
         fs::create_dir_all(xdg.join("skills")).expect("create xdg skills");
         let valid_entry = r#""dupe": {
             "sourceType": "github",

@@ -214,7 +214,15 @@ impl CatalogProbe for SqliteCatalogProbe {
             .optional()
             .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
 
+        let known_tables = tables.clone();
         let count = |table: &str| -> Result<u64, CatalogProbeError> {
+            // Current-schema Catalogs (v6+) no longer carry the legacy
+            // `remote_sources` table; a missing table counts as zero rows
+            // instead of failing the whole probe (the fixture footprint
+            // only exists in the v4 shape).
+            if !known_tables.iter().any(|known| known == table) {
+                return Ok(0);
+            }
             let statement = format!("SELECT COUNT(*) FROM {table}");
             connection
                 .query_row(&statement, [], |row| row.get::<_, i64>(0))

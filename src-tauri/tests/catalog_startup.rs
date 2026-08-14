@@ -405,12 +405,13 @@ fn unbound_catalog_identity_is_home_identity_mismatch() {
         }
         other => panic!("expected HomeIdentityMismatch, got {other:?}"),
     }
-    // The unbound Catalog stays untouched: still v5, still no identity.
+    // The unbound Catalog stays untouched: still the fresh current schema,
+    // still no identity.
     let probe = SqliteCatalogProbe::new();
     let report = probe
         .probe(&home_path.join("skill-man.sqlite3"))
         .expect("probe unchanged Catalog");
-    assert_eq!(report.schema_version, Some(5));
+    assert_eq!(report.schema_version, Some(6));
     assert!(report.home_identity.is_none());
 }
 

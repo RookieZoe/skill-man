@@ -12,7 +12,7 @@ use crate::core::home::HomeId;
 /// The newest Catalog schema this build supports. Bumps only via the schema
 /// migration tickets (v5: Home identity — ticket #41; v6: Remote Source
 /// Parent — ticket #48).
-pub const CURRENT_CATALOG_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_CATALOG_SCHEMA_VERSION: u32 = 6;
 
 /// The Home identity recorded in `catalog_meta` (schema v5+).
 #[derive(Clone, Debug, Eq, PartialEq)]

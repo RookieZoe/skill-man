@@ -1150,6 +1150,21 @@ function UpdateSection({
             </p>
           ) : null}
         </div>
+      ) : updatePanel.report &&
+        (updatePanel.report.errors.length > 0 ||
+          updatePanel.report.parentConflicts.length > 0) ? (
+        <div className="activation-error" role="alert">
+          <strong>{t("library.update.failed")}</strong>
+          {updatePanel.report.parentConflicts.map((conflict) => (
+            <span key={conflict.remoteId}>
+              {t("library.update.parent_conflict")}{" "}
+              <code>{conflict.canonicalUrl}</code>
+            </span>
+          ))}
+          {updatePanel.report.errors.map((message) => (
+            <span key={message}>{message}</span>
+          ))}
+        </div>
       ) : (
         <p role="status">{t("library.update.not_tracked")}</p>
       )}

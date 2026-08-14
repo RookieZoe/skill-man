@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use crate::core::adopt::{AdoptError, AdoptPlanRequest, AdoptSelection, AdoptService};
 use crate::core::domain::AgentId;
 use crate::tauri_adapter::dto::{
-    AdoptEvidenceReportDto, AdoptPlanDto, AdoptResultDto, AdoptUndoResultDto,
-    ApplyAdoptRequestDto, CancelAdoptRequestDto, CommandFailureDto, DiagnosticDto,
-    FinalizeAdoptRequestDto, PlanAdoptRequestDto, PublicErrorDto, UndoAdoptRequestDto,
+    AdoptEvidenceReportDto, AdoptPlanDto, AdoptResultDto, AdoptUndoResultDto, ApplyAdoptRequestDto,
+    CancelAdoptRequestDto, CommandFailureDto, DiagnosticDto, FinalizeAdoptRequestDto,
+    PlanAdoptRequestDto, PublicErrorDto, UndoAdoptRequestDto,
 };
 
 pub struct AdoptApi {
@@ -32,6 +32,7 @@ impl AdoptApi {
                 canonical_entity: PathBuf::from(selection.canonical_entity),
                 agent_ids: selection.agent_ids.into_iter().map(AgentId).collect(),
                 modified_branch: selection.modified_branch.map(Into::into),
+                target_directory: selection.target_directory.map(PathBuf::from),
             })
             .collect::<Vec<_>>();
         let plan = self
@@ -124,6 +125,9 @@ fn command_error(error: AdoptError) -> CommandFailureDto {
             }
         }
         AdoptError::Store(_) => PublicErrorDto::StateUnavailable,
+        AdoptError::LockConcurrentChange(_) => PublicErrorDto::PlanStale,
+        AdoptError::LockRelease(_) => PublicErrorDto::StateUnavailable,
+        AdoptError::RemoteProvider(_) => PublicErrorDto::SourceUnavailable,
         AdoptError::FileSystem(crate::seams::filesystem::FileSystemError::RecoveryRequired {
             ..
         }) => PublicErrorDto::RecoveryRequired,
@@ -144,5 +148,64 @@ fn command_error(error: AdoptError) -> CommandFailureDto {
             code: "command_error".into(),
             message: error.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::adopt::{AdoptSelection as CoreSelection, ModifiedBranch};
+    use crate::tauri_adapter::dto::{AdoptSelectionDto, AdoptVerdictReasonDto, ModifiedBranchDto};
+
+    #[test]
+    fn adopt_selection_round_trips_target_directory_and_branch() {
+        let dto = AdoptSelectionDto {
+            canonical_entity: "/tmp/entity/networking".into(),
+            agent_ids: vec!["claude-code".into()],
+            modified_branch: Some(ModifiedBranchDto::DiscardToAnchor),
+            target_directory: Some("/tmp/stable/networking".into()),
+        };
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(
+            json.contains(r#""targetDirectory":"/tmp/stable/networking""#),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""modifiedBranch":"discard_to_anchor""#),
+            "{json}"
+        );
+        let parsed: AdoptSelectionDto = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, dto);
+
+        // The API mapping carries the target directory into the Core plan.
+        let core: CoreSelection = CoreSelection {
+            canonical_entity: "/tmp/entity/networking".into(),
+            agent_ids: vec![AgentId("claude-code".into())],
+            modified_branch: Some(ModifiedBranch::DiscardToAnchor),
+            target_directory: Some("/tmp/stable/networking".into()),
+        };
+        assert_eq!(
+            core.target_directory.as_deref(),
+            Some(std::path::Path::new("/tmp/stable/networking"))
+        );
+    }
+
+    #[test]
+    fn ownership_conflict_reason_serializes_as_a_closed_kind() {
+        let reason = crate::core::adopt::AdoptVerdictReason::OwnershipConflict {
+            managed_directory_name: "networking".into(),
+        };
+        let dto: AdoptVerdictReasonDto = reason.into();
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"ownership_conflict","managedDirectoryName":"networking"}"#
+        );
+    }
+
+    #[test]
+    fn lock_concurrent_change_maps_to_plan_stale() {
+        let failure = command_error(AdoptError::LockConcurrentChange("changed".into()));
+        assert_eq!(failure.error, PublicErrorDto::PlanStale);
     }
 }

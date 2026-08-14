@@ -20,6 +20,7 @@ use crate::core::import::{ImportError, ImportService};
 use crate::core::write_gate::WriteGate;
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::FileSystem;
+use crate::seams::filesystem::RemoteParentManifest;
 use crate::seams::import_store::{ImportStore, ImportStoreError, RemoteInstallRecord};
 use crate::seams::source::{GitSource, GitTreeEntry, SourceError};
 
@@ -51,6 +52,16 @@ pub struct UpdateCheckReport {
     /// Repo-scoped failures (offline, resolution, listing); the UI presents
     /// them as inline notices without blocking successful groups.
     pub errors: Vec<String>,
+    /// Closed Remote Source Identity Conflicts (ADR-0013 §4.3): one entry
+    /// per parent whose manifest disagrees with its Catalog row. Update,
+    /// new Bindings and alias changes are closed for that parent only.
+    pub parent_conflicts: Vec<RemoteSourceParentConflict>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteSourceParentConflict {
+    pub remote_id: String,
+    pub canonical_url: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,6 +117,8 @@ pub enum UpdateError {
     #[error(transparent)]
     Source(#[from] SourceError),
     #[error(transparent)]
+    FileSystem(#[from] crate::seams::filesystem::FileSystemError),
+    #[error(transparent)]
     Import(#[from] ImportError),
     #[error("internal Update error: {0}")]
     Internal(String),
@@ -117,6 +130,7 @@ pub struct UpdateService {
     clock: Arc<dyn Clock>,
     git: Arc<dyn GitSource>,
     git_cache_root: PathBuf,
+    remotes_root: PathBuf,
     import: ImportService,
 }
 
@@ -135,7 +149,7 @@ impl UpdateService {
             filesystem.clone(),
             clock.clone(),
             Arc::new(crate::adapters::local_file_source::LocalFileSource::new()),
-            library_root,
+            library_root.clone(),
         )
         .with_write_gate(write_gate)
         .with_git_source(git.clone())
@@ -146,6 +160,7 @@ impl UpdateService {
             clock,
             git,
             git_cache_root,
+            remotes_root: library_root.join("remotes"),
             import,
         }
     }
@@ -171,7 +186,20 @@ impl UpdateService {
             i64::try_from(self.clock.unix_epoch_nanos() / 1_000_000_000).unwrap_or(i64::MAX);
         let mut groups = Vec::new();
         let mut errors = Vec::new();
+        let mut parent_conflicts = Vec::new();
         for (repo_url, items) in by_repo {
+            // Parent integrity gate (ADR-0013 §4.3): a manifest/row
+            // mismatch closes only this parent's Update; other parents and
+            // sources continue. A missing manifest is the migrated-legacy
+            // state and is backfilled on the first successful write.
+            let parent_ok = items.iter().all(|item| self.parent_integrity_ok(item));
+            if !parent_ok {
+                parent_conflicts.push(RemoteSourceParentConflict {
+                    remote_id: items[0].remote_id.clone(),
+                    canonical_url: repo_url.to_owned(),
+                });
+                continue;
+            }
             if !force
                 && items.iter().all(|item| {
                     item.last_checked_at.is_some_and(|checked| {
@@ -210,7 +238,7 @@ impl UpdateService {
                         continue;
                     }
                 };
-                let has_update = resolved != item.resolved_commit;
+                let has_update = resolved != item.verification_anchor_commit;
                 let mut upstream_path_gone = false;
                 if has_update {
                     let entries = match &listed {
@@ -236,7 +264,7 @@ impl UpdateService {
                     directory_name: item.directory_name.clone(),
                     source_url: item.source_url.clone(),
                     requested_ref: item.requested_ref.clone(),
-                    current_commit: item.resolved_commit.clone(),
+                    current_commit: item.verification_anchor_commit.clone(),
                     resolved_commit: resolved,
                     has_update,
                     modified: item.health == Health::Modified,
@@ -249,7 +277,11 @@ impl UpdateService {
                 items: group_items,
             });
         }
-        Ok(UpdateCheckReport { groups, errors })
+        Ok(UpdateCheckReport {
+            groups,
+            errors,
+            parent_conflicts,
+        })
     }
 
     /// Plan Updates for the selected remote Installs. Fetches each involved
@@ -286,6 +318,21 @@ impl UpdateService {
                 .push((selection, record));
         }
         for (repo_url, selections) in by_repo {
+            if selections
+                .iter()
+                .any(|(_, record)| !self.parent_integrity_ok(record))
+            {
+                for (selection, record) in &selections {
+                    items.push(update_item_error(
+                        selection,
+                        record,
+                        "Remote Source Identity Conflict — the parent manifest does not match \
+                         the Catalog row; Update is closed for this parent"
+                            .into(),
+                    ));
+                }
+                continue;
+            }
             let mirror = self.git_mirror_for(&repo_url);
             let fetch = self.git.fetch_mirror(&repo_url, &mirror);
             let default_resolved = match fetch {
@@ -348,7 +395,7 @@ impl UpdateService {
                     ));
                     continue;
                 }
-                if !path_changed && resolved == record.resolved_commit {
+                if !path_changed && resolved == record.verification_anchor_commit {
                     items.push(update_item_error(
                         selection,
                         record,
@@ -367,7 +414,7 @@ impl UpdateService {
                         skill_id: selection.skill_id.clone(),
                         directory_name: record.directory_name.clone(),
                         plan_token: preview.plan_token,
-                        current_commit: record.resolved_commit.clone(),
+                        current_commit: record.verification_anchor_commit.clone(),
                         new_commit: resolved.clone(),
                         modified: self.entity_is_modified(record),
                         path_changed,
@@ -397,12 +444,43 @@ impl UpdateService {
                 .import
                 .apply_git_reinstall(&request.plan_token, abandon_changes)
             {
-                Ok(_) => results.push(UpdateItemResult {
-                    skill_id: request.skill_id.clone(),
-                    directory_name: request.directory_name.clone(),
-                    updated: true,
-                    error: None,
-                }),
+                Ok(_) => {
+                    // The migrated-legacy parents have no manifest yet;
+                    // backfill it from the authoritative Catalog row on the
+                    // first successful write (ADR-0013 §4.3: a missing
+                    // manifest is derived, never chosen over a live one).
+                    if let Ok(records) = self.store.load_remote_installs() {
+                        if let Some(record) = records
+                            .iter()
+                            .find(|record| record.skill_id == request.skill_id)
+                        {
+                            let aliases = self
+                                .store
+                                .load_remote_parents()
+                                .ok()
+                                .and_then(|parents| {
+                                    parents
+                                        .into_iter()
+                                        .find(|parent| parent.remote_id == record.remote_id)
+                                        .map(|parent| parent.aliases)
+                                })
+                                .unwrap_or_default();
+                            let _ = ensure_parent_manifest(
+                                self.filesystem.as_ref(),
+                                &self.remotes_root,
+                                record,
+                                self.clock.unix_epoch_nanos(),
+                                aliases,
+                            );
+                        }
+                    }
+                    results.push(UpdateItemResult {
+                        skill_id: request.skill_id.clone(),
+                        directory_name: request.directory_name.clone(),
+                        updated: true,
+                        error: None,
+                    });
+                }
                 Err(error) => results.push(UpdateItemResult {
                     skill_id: request.skill_id.clone(),
                     directory_name: request.directory_name.clone(),
@@ -426,7 +504,7 @@ impl UpdateService {
                     UpdateError::Validation("the Skill is not a remote Install".into())
                 })?;
             self.store
-                .set_remote_requested_ref(skill_id, &record.resolved_commit)?;
+                .set_remote_requested_ref(skill_id, &record.verification_anchor_commit)?;
         }
         Ok(())
     }
@@ -463,6 +541,90 @@ impl UpdateService {
             .tree_hash(&record.final_entity_path)
             .is_ok_and(|hash| hash != record.recorded_content_hash)
     }
+
+    /// Parent integrity gate (ADR-0013 §4.3): the manifest must agree with
+    /// the Catalog row on remote_id, canonical URL and confirmed aliases.
+    /// A missing manifest is the migrated-legacy backfill state and passes
+    /// (the migration derived the row from the same legacy data, so the row
+    /// is the only authority until the first verified write materializes
+    /// the manifest); any present mismatch fails closed for this parent.
+    fn parent_integrity_ok(&self, record: &RemoteInstallRecord) -> bool {
+        match self
+            .filesystem
+            .read_remote_parent_manifest(&self.remotes_root, &record.remote_id)
+        {
+            Ok(Some(manifest)) => self.parent_matches_manifest(record, &manifest),
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn parent_matches_manifest(
+        &self,
+        record: &RemoteInstallRecord,
+        manifest: &RemoteParentManifest,
+    ) -> bool {
+        if manifest.remote_id != record.remote_id || manifest.canonical_url != record.source_url {
+            return false;
+        }
+        let row_aliases = self
+            .store
+            .load_remote_parents()
+            .ok()
+            .and_then(|parents| {
+                parents
+                    .into_iter()
+                    .find(|parent| parent.remote_id == record.remote_id)
+                    .map(|parent| parent.aliases)
+            })
+            .unwrap_or_default();
+        let mut manifest_aliases = manifest.aliases.clone();
+        let mut row_aliases = row_aliases;
+        manifest_aliases.sort();
+        row_aliases.sort();
+        manifest_aliases == row_aliases
+    }
+}
+
+/// Backfill the parent manifest from the authoritative Catalog row when a
+/// migrated-legacy parent has none (ADR-0013 §4.3).
+fn ensure_parent_manifest(
+    filesystem: &dyn FileSystem,
+    remotes_root: &Path,
+    record: &RemoteInstallRecord,
+    now_nanos: u128,
+    aliases: Vec<String>,
+) -> Result<(), UpdateError> {
+    // The row is the authority for confirmed aliases: a missing manifest
+    // is materialized and a stale alias list is refreshed (the integrity
+    // gate already proved the manifest agrees on remote_id and canonical
+    // URL before this apply ran).
+    let existing_created_at = if let Some(existing) =
+        filesystem.read_remote_parent_manifest(remotes_root, &record.remote_id)?
+    {
+        let mut existing_aliases = existing.aliases;
+        let mut aliases = aliases.clone();
+        existing_aliases.sort();
+        aliases.sort();
+        if existing_aliases == aliases {
+            return Ok(());
+        }
+        Some(existing.created_at)
+    } else {
+        None
+    };
+    filesystem.write_remote_parent_manifest(
+        remotes_root,
+        &RemoteParentManifest {
+            schema_version: 1,
+            remote_id: record.remote_id.clone(),
+            canonical_url: record.source_url.clone(),
+            aliases,
+            created_at: existing_created_at
+                .unwrap_or_else(|| crate::seams::clock::iso_timestamp(now_nanos)),
+        },
+    )?;
+    Ok(())
 }
 
 fn update_item_error(
@@ -474,7 +636,7 @@ fn update_item_error(
         skill_id: selection.skill_id.clone(),
         directory_name: record.directory_name.clone(),
         plan_token: String::new(),
-        current_commit: record.resolved_commit.clone(),
+        current_commit: record.verification_anchor_commit.clone(),
         new_commit: String::new(),
         modified: record.health == Health::Modified,
         path_changed: false,

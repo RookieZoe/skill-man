@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::core::domain::{AgentId, Health, SkillId, SourceKind};
 use crate::seams::activation_store::ActivationStore;
 use crate::seams::filesystem::ActivationRecoveryBaseline;
+use crate::seams::import_store::RemoteImportRecord;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSkillBaseline {
@@ -64,6 +65,15 @@ pub struct AdoptedSkillEntity {
 pub struct SkillHealthObservation {
     pub skill_id: SkillId,
     pub health: Health,
+}
+
+/// The complete Catalog write a crash roll-forward needs after the lock
+/// CAS: one Skill row, its parent/Binding and every desired Activation
+/// (spec §8.4 step 5). The insert is idempotent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HandoffRecoveredRecord {
+    pub skill: RemoteImportRecord,
+    pub activations: Vec<ActivationRecoveryBaseline>,
 }
 
 #[derive(Debug, Error)]
@@ -144,6 +154,34 @@ pub trait MaintenanceStore: ActivationStore {
     /// Delete the Skill row in one transaction; activations and source
     /// tables cascade with the row. Returns the new snapshot version.
     fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError>;
+
+    /// The Binding's parent id of a managed remote Install, captured before
+    /// Remove deletes the Skill row (last-child parent cleanup).
+    fn binding_remote_id(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, MaintenanceStoreError>;
+
+    /// Delete the parent row when it has no remaining child bindings;
+    /// returns whether the parent was deleted (last-child Remove).
+    fn delete_remote_parent_if_last_child(
+        &self,
+        remote_id: &str,
+    ) -> Result<bool, MaintenanceStoreError>;
+
+    /// Crash roll-forward of a committed Handoff: parent upsert, Skill
+    /// row, Binding and Activations in one idempotent transaction.
+    fn insert_handoff_recovered(
+        &self,
+        record: HandoffRecoveredRecord,
+    ) -> Result<u64, MaintenanceStoreError>;
+
+    /// Find one parent by its canonical URL (or a confirmed alias), for
+    /// Handoff roll-forward manifest backfill.
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<crate::seams::import_store::RemoteParentRecord>, MaintenanceStoreError>;
 
     fn record_skill_health(
         &self,

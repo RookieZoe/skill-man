@@ -294,15 +294,31 @@ pub fn classify_fixture(
 
     // -- Catalog facts (spec §3.5: exact tuples, no relations) --
 
-    let mut expected_tables: Vec<&str> = vec![
-        "activations",
-        "agents",
-        "catalog_meta",
-        "file_sources",
-        "preferences",
-        "remote_sources",
-        "skills",
-    ];
+    // The Legacy shape is the untouched v4 fixture Catalog; the Bound
+    // shape is the fixture after the one-time migration (schema v6, Remote
+    // Source Parent tables replace the legacy remote_sources table).
+    let mut expected_tables: Vec<&str> = match mode {
+        FixtureShapeMode::Legacy => vec![
+            "activations",
+            "agents",
+            "catalog_meta",
+            "file_sources",
+            "preferences",
+            "remote_sources",
+            "skills",
+        ],
+        FixtureShapeMode::Bound => vec![
+            "activations",
+            "agents",
+            "catalog_meta",
+            "file_sources",
+            "preferences",
+            "remote_bindings",
+            "remote_source_aliases",
+            "remote_source_parents",
+            "skills",
+        ],
+    };
     expected_tables.sort_unstable();
     for table in &expected_tables {
         if !db.tables.iter().any(|t| t == table) {
@@ -319,7 +335,9 @@ pub fn classify_fixture(
         Some(meta) => {
             let expected_schema = match mode {
                 FixtureShapeMode::Legacy => FIXTURE_CATALOG_SCHEMA_VERSION,
-                FixtureShapeMode::Bound => 5,
+                FixtureShapeMode::Bound => {
+                    crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION
+                }
             };
             if meta.schema_version != expected_schema {
                 reasons.push(format!("unknown_schema:{}", meta.schema_version));
@@ -2156,12 +2174,23 @@ mod tests {
     }
 
     #[test]
-    fn bound_mode_accepts_the_v5_fixture_shape() {
+    fn bound_mode_accepts_the_current_schema_fixture_shape() {
         let mut db = fixture_db();
         db.meta = Some(crate::seams::catalog_probe::FixtureCatalogMetaEvidence {
-            schema_version: 5,
+            schema_version: crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION,
             first_run_completed_at: None,
         });
+        db.tables = vec![
+            "activations".into(),
+            "agents".into(),
+            "catalog_meta".into(),
+            "file_sources".into(),
+            "preferences".into(),
+            "remote_bindings".into(),
+            "remote_source_aliases".into(),
+            "remote_source_parents".into(),
+            "skills".into(),
+        ];
         assert_eq!(
             classify_fixture(&db, &fixture_tree(), home_root(), FixtureShapeMode::Bound),
             FixtureClassification::Pure
@@ -2169,9 +2198,12 @@ mod tests {
         // The same Catalog is a modified fact for an unbound Legacy shape.
         match classify_fixture(&db, &fixture_tree(), home_root(), FixtureShapeMode::Legacy) {
             FixtureClassification::Mixed { reasons } => {
-                assert!(reasons.contains(&"unknown_schema:5".into()));
+                assert!(reasons.contains(&format!(
+                    "unknown_schema:{}",
+                    crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION
+                )));
             }
-            other => panic!("expected Mixed for v5 in Legacy mode, got {other:?}"),
+            other => panic!("expected Mixed for the current schema in Legacy mode, got {other:?}"),
         }
     }
 

@@ -432,7 +432,7 @@ fn restore_of_an_integrity_failed_home_promotes_the_same_identity() {
     let report = SqliteCatalogProbe::new()
         .probe(&composition.catalog_path())
         .expect("probe restored Catalog");
-    assert_eq!(report.schema_version, Some(5));
+    assert_eq!(report.schema_version, Some(6));
     assert!(report.integrity_ok && report.foreign_keys_ok);
     assert_eq!(
         report

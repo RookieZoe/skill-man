@@ -661,7 +661,7 @@ export function createFixtureCatalogClient(): CatalogClient {
       return false;
     },
     async checkSkillUpdates() {
-      return { groups: [], errors: [] };
+      return { groups: [], errors: [], parentConflicts: [] };
     },
     async planSkillUpdates() {
       return fixtureUnsupported(

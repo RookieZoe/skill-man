@@ -158,6 +158,33 @@ fn seed_legacy_home(home_root: &Path) {
             )
             .expect("drop identity column");
     }
+    // The current schema also carries the Remote Source Parent tables; a
+    // real pre-identity v4 file has none of them.
+    for table in [
+        "remote_source_parents",
+        "remote_source_aliases",
+        "remote_bindings",
+    ] {
+        connection
+            .execute(&format!("DROP TABLE {table}"), [])
+            .expect("drop v6 parent table");
+    }
+    // A real v4 file still carries the legacy remote_sources table the v6
+    // migration consumes.
+    connection
+        .execute(
+            "CREATE TABLE remote_sources (
+                skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                source_url TEXT NOT NULL,
+                requested_ref TEXT NOT NULL,
+                resolved_commit TEXT NOT NULL,
+                skill_path TEXT NOT NULL,
+                last_checked_at INTEGER,
+                last_updated_at INTEGER
+             )",
+            [],
+        )
+        .expect("create legacy remote_sources table");
     connection
         .execute(
             "UPDATE catalog_meta SET schema_version = 4, first_run_completed_at = \
@@ -219,7 +246,7 @@ fn assert_bound_home(composition: &Composition, expected_path: &Path) {
     let report = SqliteCatalogProbe::new()
         .probe(&expected_path.join(CATALOG_FILE_NAME))
         .expect("probe Catalog");
-    assert_eq!(report.schema_version, Some(5));
+    assert_eq!(report.schema_version, Some(6));
     let identity = report.home_identity.expect("Catalog identity");
     assert_eq!(identity.home_id, current.home_id);
     assert_eq!(identity.volume_fsid, current.volume_fsid);

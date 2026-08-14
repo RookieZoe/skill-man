@@ -211,7 +211,7 @@ fn git_import_installs_multi_skill_repo_and_records_remote_source() {
         .expect("alpha record");
     assert_eq!(alpha.source_url, source);
     assert_eq!(alpha.requested_ref, "HEAD");
-    assert_eq!(alpha.resolved_commit, head_commit(&repo));
+    assert_eq!(alpha.verification_anchor_commit, head_commit(&repo));
     assert_eq!(alpha.skill_path, "skills/alpha");
     assert!(alpha.last_updated_at.is_some());
     assert!(
@@ -371,7 +371,7 @@ fn update_check_plan_apply_replaces_entity_at_the_new_commit() {
         .iter()
         .find(|record| record.skill_id == skill_id)
         .expect("alpha record");
-    assert_eq!(alpha.resolved_commit, second_commit);
+    assert_eq!(alpha.verification_anchor_commit, second_commit);
     assert_eq!(
         harness
             .catalog()
@@ -468,7 +468,7 @@ fn update_keeps_activations_pointing_at_the_stable_path() {
             .iter()
             .find(|record| record.skill_id == skill_id)
             .expect("record")
-            .resolved_commit,
+            .verification_anchor_commit,
         second_commit
     );
 }
@@ -631,7 +631,7 @@ fn upstream_path_gone_is_reported_and_reselectable() {
         .find(|record| record.skill_id == skill_id)
         .expect("foo record");
     assert_eq!(foo.skill_path, "packages/bar");
-    assert_eq!(foo.resolved_commit, new_commit);
+    assert_eq!(foo.verification_anchor_commit, new_commit);
 }
 
 #[test]

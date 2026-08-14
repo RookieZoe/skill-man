@@ -13,9 +13,11 @@ use skill_man_lib::seams::activation_store::{
     ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
 };
 use skill_man_lib::seams::filesystem::FileSystem;
+use skill_man_lib::seams::import_store::RemoteParentRecord;
 use skill_man_lib::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
-    MaintenanceStoreError, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
+    AdoptedSkillEntity, HandoffRecoveredRecord, InstalledSkillBaseline, LinkSkillRecord,
+    MaintenanceStore, MaintenanceStoreError, RelocateActivationBaseline, RemoveTarget,
+    SkillHealthObservation,
 };
 
 #[test]
@@ -249,5 +251,35 @@ impl MaintenanceStore for HealthStore {
         Err(MaintenanceStoreError::Unavailable(
             "Remove is not supported by this test store".into(),
         ))
+    }
+
+    fn binding_remote_id(
+        &self,
+        _skill_id: &SkillId,
+    ) -> Result<Option<String>, MaintenanceStoreError> {
+        Ok(None)
+    }
+
+    fn delete_remote_parent_if_last_child(
+        &self,
+        _remote_id: &str,
+    ) -> Result<bool, MaintenanceStoreError> {
+        Ok(false)
+    }
+
+    fn insert_handoff_recovered(
+        &self,
+        _record: HandoffRecoveredRecord,
+    ) -> Result<u64, MaintenanceStoreError> {
+        Err(MaintenanceStoreError::Unavailable(
+            "Handoff recovery is not supported by this test store".into(),
+        ))
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        _canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, MaintenanceStoreError> {
+        Ok(None)
     }
 }

@@ -14,7 +14,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::de::Error as SerdeError;
-use serde::Deserializer as SerdeDeserializer;
+use serde::{Deserialize, Deserializer as SerdeDeserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -26,7 +26,8 @@ pub const LOCK_SCHEMA_VERSION: u64 = 3;
 /// the installer did not record a ref (track `HEAD`); time fields and
 /// `plugin_name` are display-only and never participate in trust (spec
 /// §8.2).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LockEntry {
     /// The object key; a safe directory name (ADR-0013 §2.2.1).
     pub name: String,
@@ -92,6 +93,23 @@ pub enum InstallerLockError {
     },
 }
 
+/// Why an exact-entry CAS lock rewrite refused to write (spec §8.4 step 4,
+/// ADR-0013 §5.1): the file or entry changed since the plan was frozen, or
+/// the file cannot be strictly parsed. A refusal never writes.
+#[derive(Debug, Error)]
+pub enum LockReleaseError {
+    #[error("the lock file changed since the plan was frozen")]
+    FingerprintChanged,
+    #[error("the lock entry '{0}' is no longer present")]
+    EntryMissing(String),
+    #[error("the lock key '{0}' is already occupied")]
+    EntryOccupied(String),
+    #[error("the lock file cannot be strictly rewritten: {0}")]
+    Invalid(String),
+    #[error("the lock file could not be read or written: {0}")]
+    Io(String),
+}
+
 /// Known installer lock locations, strict v3 parse and full fingerprint
 /// (spec §4.6). Read-only in this slice.
 pub trait InstallerLockStore: Send + Sync {
@@ -99,6 +117,34 @@ pub trait InstallerLockStore: Send + Sync {
     /// Absent files simply produce no report; every present file yields a
     /// report, valid or faulted.
     fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError>;
+
+    /// CAS-release exactly one lock entry (the Ownership Handoff logical
+    /// commit point): the full-file fingerprint and the exact entry must
+    /// still match, then the entry is removed while every other top-level
+    /// value, other entry and unknown JSON field is preserved and the file
+    /// is re-serialized as a valid v3 lock (temp → fsync → rename → parent
+    /// fsync). Any change refuses without writing.
+    fn release_entry(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        entry: &LockEntry,
+    ) -> Result<(), LockReleaseError> {
+        let _ = (lock_path, frozen_fingerprint, entry);
+        Err(LockReleaseError::Invalid(
+            "this lock store cannot rewrite lock files".into(),
+        ))
+    }
+
+    /// CAS-restore one exact entry during conditional Undo (ADR-0013 §5.1):
+    /// the lock must still parse strictly as v3 and the key must be
+    /// unoccupied; every other value is preserved.
+    fn restore_entry(&self, lock_path: &Path, entry: &LockEntry) -> Result<(), LockReleaseError> {
+        let _ = (lock_path, entry);
+        Err(LockReleaseError::Invalid(
+            "this lock store cannot rewrite lock files".into(),
+        ))
+    }
 }
 
 /// Fail-closed default: no lock declarations anywhere. Used until the
@@ -115,11 +161,7 @@ impl InstallerLockStore for EmptyInstallerLockStore {
 /// A safe v3 skill object key: a directory name that cannot escape the
 /// installer root (ADR-0013 §2.2.1).
 pub fn is_safe_lock_key(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 /// Strictly parse lock file bytes into a report. Pure and total: every
@@ -204,9 +246,7 @@ pub fn parse_lock_bytes(path: &Path, bytes: &[u8]) -> LockFileReport {
                 fingerprint,
                 byte_len,
                 version,
-                fault: Some(LockFileFault::InvalidJson(
-                    "skills must be present".into(),
-                )),
+                fault: Some(LockFileFault::InvalidJson("skills must be present".into())),
                 entries: Vec::new(),
                 entry_faults: Vec::new(),
             };
@@ -394,6 +434,108 @@ pub fn parse_lock_bytes(path: &Path, bytes: &[u8]) -> LockFileReport {
     }
 }
 
+/// Pure exact-entry CAS release (spec §8.4 step 4): returns the rewritten
+/// v3 bytes only when the full-file fingerprint and the exact audited entry
+/// still match. Every other top-level value, other entry and unknown JSON
+/// field is preserved; the last entry removal keeps a valid empty `skills`
+/// object. Never writes; the caller owns the atomic write protocol.
+pub fn release_lock_entry_bytes(
+    bytes: &[u8],
+    frozen_fingerprint: &str,
+    entry: &LockEntry,
+) -> Result<Vec<u8>, LockReleaseError> {
+    let current = format!("{:x}", Sha256::digest(bytes));
+    if current != frozen_fingerprint {
+        return Err(LockReleaseError::FingerprintChanged);
+    }
+    let value = parse_json_no_duplicates(bytes).map_err(LockReleaseError::Invalid)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| LockReleaseError::Invalid("the lock file must be a JSON object".into()))?;
+    let version = object
+        .get("version")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| LockReleaseError::Invalid("version must be the audited v3".into()))?;
+    if version != LOCK_SCHEMA_VERSION {
+        return Err(LockReleaseError::Invalid(format!(
+            "version {version} is not the audited v3"
+        )));
+    }
+    let skills = object
+        .get("skills")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| LockReleaseError::Invalid("skills must be an object".into()))?;
+    let live = skills
+        .get(&entry.name)
+        .ok_or_else(|| LockReleaseError::EntryMissing(entry.name.clone()))?;
+    // The entry object never carries its own key as a field; re-inject it
+    // so the strict LockEntry deserialization matches the frozen shape.
+    let mut live_with_name = live.clone();
+    live_with_name
+        .as_object_mut()
+        .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
+        .insert("name".into(), serde_json::Value::String(entry.name.clone()));
+    let live_entry: LockEntry = serde_json::from_value(live_with_name).map_err(|error| {
+        LockReleaseError::Invalid(format!("the entry is not a strict v3 entry: {error}"))
+    })?;
+    if &live_entry != entry {
+        return Err(LockReleaseError::Invalid(
+            "the exact entry changed since the plan was frozen".into(),
+        ));
+    }
+    let mut rewritten = object.clone();
+    let skills = rewritten
+        .get_mut("skills")
+        .and_then(|value| value.as_object_mut())
+        .expect("skills object verified above");
+    skills.remove(&entry.name);
+    serde_json::to_vec_pretty(&rewritten)
+        .map_err(|error| LockReleaseError::Invalid(error.to_string()))
+}
+
+/// Pure exact-entry CAS restore (ADR-0013 §5.1 conditional Undo): returns
+/// the rewritten v3 bytes only when the lock still parses strictly as v3
+/// and the key is unoccupied. Every other value is preserved.
+pub fn restore_lock_entry_bytes(
+    bytes: &[u8],
+    entry: &LockEntry,
+) -> Result<Vec<u8>, LockReleaseError> {
+    let value = parse_json_no_duplicates(bytes).map_err(LockReleaseError::Invalid)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| LockReleaseError::Invalid("the lock file must be a JSON object".into()))?;
+    let version = object
+        .get("version")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| LockReleaseError::Invalid("version must be the audited v3".into()))?;
+    if version != LOCK_SCHEMA_VERSION {
+        return Err(LockReleaseError::Invalid(format!(
+            "version {version} is not the audited v3"
+        )));
+    }
+    let skills = object
+        .get("skills")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| LockReleaseError::Invalid("skills must be an object".into()))?;
+    if skills.contains_key(&entry.name) {
+        return Err(LockReleaseError::EntryOccupied(entry.name.clone()));
+    }
+    let mut entry_value = serde_json::to_value(entry)
+        .map_err(|error| LockReleaseError::Invalid(error.to_string()))?;
+    entry_value
+        .as_object_mut()
+        .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
+        .remove("name");
+    let mut rewritten = object.clone();
+    let skills = rewritten
+        .get_mut("skills")
+        .and_then(|value| value.as_object_mut())
+        .expect("skills object verified above");
+    skills.insert(entry.name.clone(), entry_value);
+    serde_json::to_vec_pretty(&rewritten)
+        .map_err(|error| LockReleaseError::Invalid(error.to_string()))
+}
+
 /// Deserialize a JSON document rejecting duplicate object keys at every
 /// nesting level; `Err` carries a human-readable reason.
 fn parse_json_no_duplicates(bytes: &[u8]) -> Result<serde_json::Value, String> {
@@ -401,9 +543,7 @@ fn parse_json_no_duplicates(bytes: &[u8]) -> Result<serde_json::Value, String> {
     let value = deserializer
         .deserialize_any(StrictValueVisitor)
         .map_err(|error| error.to_string())?;
-    deserializer
-        .end()
-        .map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
     Ok(value)
 }
 
@@ -512,9 +652,7 @@ impl<'de> serde::de::Visitor<'de> for StrictValueVisitor {
         let mut values = serde_json::Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if !keys.insert(key.clone()) {
-                return Err(SerdeError::custom(format!(
-                    "duplicate key: {key}"
-                )));
+                return Err(SerdeError::custom(format!("duplicate key: {key}")));
             }
             let value = map.next_value_seed(StrictValueSeed)?;
             values.insert(key, value);
@@ -590,9 +728,12 @@ mod tests {
         ));
         assert!(lock.entries.is_empty());
 
-        let nested = br#"{"version": 3, "skills": {"a": {"sourceType": "github", "sourceType": "gitlab"}}}"#;
+        let nested =
+            br#"{"version": 3, "skills": {"a": {"sourceType": "github", "sourceType": "gitlab"}}}"#;
         let lock = report(nested);
-        assert!(matches!(lock.fault, Some(LockFileFault::DuplicateKey(key)) if key == "sourceType"));
+        assert!(
+            matches!(lock.fault, Some(LockFileFault::DuplicateKey(key)) if key == "sourceType")
+        );
     }
 
     #[test]
@@ -682,15 +823,13 @@ mod tests {
             .iter()
             .map(|fault| (fault.name.as_str(), fault.reason.as_str()))
             .collect::<Vec<_>>();
-        assert!(reasons
-            .iter()
-            .any(|(name, _)| *name == "missing-hash"));
-        assert!(reasons
-            .iter()
-            .any(|(name, reason)| *name == "wrong-type" && reason.contains("sourceType")));
-        assert!(reasons
-            .iter()
-            .any(|(name, _)| *name == "../escape"));
+        assert!(reasons.iter().any(|(name, _)| *name == "missing-hash"));
+        assert!(
+            reasons
+                .iter()
+                .any(|(name, reason)| *name == "wrong-type" && reason.contains("sourceType"))
+        );
+        assert!(reasons.iter().any(|(name, _)| *name == "../escape"));
     }
 
     #[test]
@@ -724,5 +863,135 @@ mod tests {
         assert!(!is_safe_lock_key(".."));
         assert!(!is_safe_lock_key("a/b"));
         assert!(!is_safe_lock_key("a\\b"));
+    }
+
+    fn entry(name: &str) -> LockEntry {
+        LockEntry {
+            name: name.into(),
+            source_type: "github".into(),
+            source: format!("acme/{name}"),
+            source_url: format!("https://github.com/acme/{name}"),
+            requested_ref: None,
+            skill_path: format!("skills/{name}"),
+            skill_folder_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+            installed_at: None,
+            updated_at: None,
+            plugin_name: None,
+        }
+    }
+
+    fn fingerprint(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn release_entry_keeps_unknown_fields_and_other_entries() {
+        let json = r#"{
+            "version": 3,
+            "installerVersion": "9.9.9",
+            "installed": [{"name": "other"}],
+            "skills": {
+                "networking": {
+                    "sourceType": "github",
+                    "source": "acme/networking",
+                    "sourceUrl": "https://github.com/acme/networking",
+                    "skillPath": "skills/networking",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                },
+                "audio": {
+                    "sourceType": "github",
+                    "source": "acme/audio",
+                    "sourceUrl": "https://github.com/acme/audio",
+                    "skillPath": "skills/audio",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                }
+            }
+        }"#;
+        let bytes = json.as_bytes();
+        let rewritten = release_lock_entry_bytes(bytes, &fingerprint(bytes), &entry("networking"))
+            .expect("CAS release");
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).expect("rewritten JSON");
+        assert_eq!(value["version"], 3);
+        assert_eq!(value["installerVersion"], "9.9.9", "unknown top-level kept");
+        assert_eq!(value["installed"][0]["name"], "other", "unknown array kept");
+        let skills = value["skills"].as_object().expect("skills object");
+        assert!(!skills.contains_key("networking"), "released entry gone");
+        assert!(skills.contains_key("audio"), "other entry kept");
+        // The rewritten file is a strict valid v3 lock.
+        let report = report(&rewritten);
+        assert_eq!(report.fault, None);
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].name, "audio");
+    }
+
+    #[test]
+    fn release_entry_keeps_a_valid_empty_lock_after_the_last_entry() {
+        let bytes = valid_entry_json().into_bytes();
+        let mut frozen = entry("networking");
+        frozen.installed_at = Some("2026-08-01T00:00:00Z".into());
+        frozen.updated_at = Some("2026-08-01T00:00:00Z".into());
+        frozen.plugin_name = Some("networking".into());
+        let rewritten =
+            release_lock_entry_bytes(&bytes, &fingerprint(&bytes), &frozen).expect("CAS release");
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).expect("rewritten JSON");
+        assert_eq!(value["version"], 3);
+        assert!(
+            value["skills"].as_object().expect("skills").is_empty(),
+            "the last entry removal keeps a valid empty skills object"
+        );
+        assert_eq!(report(&rewritten).fault, None);
+    }
+
+    #[test]
+    fn release_entry_refuses_when_the_fingerprint_changed() {
+        let bytes = valid_entry_json().into_bytes();
+        let error = release_lock_entry_bytes(&bytes, "deadbeef", &entry("networking"))
+            .expect_err("changed fingerprint refuses");
+        assert!(matches!(error, LockReleaseError::FingerprintChanged));
+    }
+
+    #[test]
+    fn release_entry_refuses_when_the_entry_differs() {
+        // The full-file fingerprint matches but the frozen entry differs
+        // (a stale plan frozen against a different entry shape).
+        let bytes = valid_entry_json().into_bytes();
+        let mut other = entry("networking");
+        other.skill_folder_hash = "ffffffffffffffffffffffffffffffffffffffff".into();
+        let error = release_lock_entry_bytes(&bytes, &fingerprint(&bytes), &other)
+            .expect_err("changed entry refuses");
+        assert!(matches!(error, LockReleaseError::Invalid(_)));
+    }
+
+    #[test]
+    fn restore_entry_refuses_when_the_key_is_occupied() {
+        let bytes = valid_entry_json().into_bytes();
+        let error = restore_lock_entry_bytes(&bytes, &entry("networking"))
+            .expect_err("occupied key refuses");
+        assert!(matches!(
+            error,
+            LockReleaseError::EntryOccupied(name) if name == "networking"
+        ));
+    }
+
+    #[test]
+    fn restore_entry_readds_the_exact_entry_and_keeps_other_values() {
+        let bytes = valid_entry_json().into_bytes();
+        let mut frozen = entry("networking");
+        frozen.installed_at = Some("2026-08-01T00:00:00Z".into());
+        frozen.updated_at = Some("2026-08-01T00:00:00Z".into());
+        frozen.plugin_name = Some("networking".into());
+        let released =
+            release_lock_entry_bytes(&bytes, &fingerprint(&bytes), &frozen).expect("release");
+        let restored = restore_lock_entry_bytes(&released, &frozen).expect("restore");
+        let value: serde_json::Value = serde_json::from_slice(&restored).expect("restored JSON");
+        assert_eq!(value["version"], 3);
+        assert_eq!(
+            value["skills"]["networking"]["skillFolderHash"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        let report = report(&restored);
+        assert_eq!(report.fault, None);
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].name, "networking");
     }
 }

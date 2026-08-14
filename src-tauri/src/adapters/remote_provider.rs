@@ -35,15 +35,13 @@ impl SystemRemoteProvider {
     }
 
     fn is_ref_kind(&self, mirror_dir: &Path, namespace: &str, reference: &str) -> bool {
-        run_git_local(
-            &[
-                "-C",
-                mirror_dir.to_str().unwrap_or("."),
-                "rev-parse",
-                "--verify",
-                &format!("{namespace}/{reference}"),
-            ],
-        )
+        run_git_local(&[
+            "-C",
+            mirror_dir.to_str().unwrap_or("."),
+            "rev-parse",
+            "--verify",
+            &format!("{namespace}/{reference}"),
+        ])
         .is_ok()
     }
 
@@ -102,7 +100,11 @@ impl SystemRemoteProvider {
             args.push(skill_path);
         }
         let output = run_git_local(&args)?;
-        for commit in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for commit in output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             if let Some(sha) = self.subtree_sha(mirror_dir, commit, skill_path)? {
                 if sha == provider_hash {
                     return Ok(Some(commit.to_owned()));
@@ -120,7 +122,9 @@ impl SystemRemoteProvider {
         self.git
             .resolve_commit(mirror_dir, reference)
             .map_err(|error| {
-                RemoteProviderError::Conflict(format!("ref '{reference}' cannot be resolved: {error}"))
+                RemoteProviderError::Conflict(format!(
+                    "ref '{reference}' cannot be resolved: {error}"
+                ))
             })?
             .ok_or_else(|| {
                 RemoteProviderError::Conflict(format!(
@@ -143,9 +147,7 @@ impl RemoteProvider for SystemRemoteProvider {
             }
         };
         if entry.source_url.trim().is_empty() {
-            return Err(RemoteProviderError::Conflict(
-                "sourceUrl is empty".into(),
-            ));
+            return Err(RemoteProviderError::Conflict("sourceUrl is empty".into()));
         }
         let canonical_url = normalize_url(&entry.source_url, kind)?;
         let source = entry.source.trim();
@@ -187,7 +189,9 @@ impl RemoteProvider for SystemRemoteProvider {
         let skill_path = normalize_skill_path(&entry.skill_path)?;
         let provider_hash = entry.skill_folder_hash.trim().to_lowercase();
         if (provider_hash.len() != 40 && provider_hash.len() != 64)
-            || !provider_hash.chars().all(|character| character.is_ascii_hexdigit())
+            || !provider_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
         {
             return Err(RemoteProviderError::Conflict(
                 "skillFolderHash is not a known hash format".into(),
@@ -265,8 +269,8 @@ impl RemoteProvider for SystemRemoteProvider {
                             ))
                         })?;
                     if tip_sha != request.provider_hash {
-                        anchor_commit =
-                            self.find_ancestry_match(
+                        anchor_commit = self
+                            .find_ancestry_match(
                                 &mirror_dir,
                                 &resolved_commit,
                                 &request.skill_path,
@@ -302,7 +306,21 @@ impl RemoteProvider for SystemRemoteProvider {
             }
         }
 
-        let materialized_root = workspace.join("tree");
+        // The workspace is shared by every candidate of one normalized
+        // remote (ADR-0013 §2.3: 同 remote 共享一次 fetch); the materialized
+        // tree must be per candidate or concurrent verifications collide.
+        let tree_id = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}-{}-{}",
+                    request.skill_path, anchor_commit, request.provider_hash
+                )
+                .as_bytes()
+            )
+        );
+        let tree_id = &tree_id[..12];
+        let materialized_root = workspace.join(format!("tree-{tree_id}"));
         self.git
             .stage_skill(
                 &mirror_dir,
@@ -341,9 +359,7 @@ impl RemoteProvider for SystemRemoteProvider {
         let subtree_tree_sha = self
             .subtree_sha(&mirror_dir, &anchor_commit, &request.skill_path)?
             .ok_or_else(|| {
-                RemoteProviderError::Conflict(
-                    "the anchor subtree vanished while verifying".into(),
-                )
+                RemoteProviderError::Conflict("the anchor subtree vanished while verifying".into())
             })?;
         Ok(RemoteTreeFacts {
             disposition,
@@ -394,9 +410,10 @@ fn normalize_skill_path(raw: &str) -> Result<String, RemoteProviderError> {
                 "skillPath '{raw}' escapes the repository"
             )));
         }
-        if part.chars().any(|character| {
-            character.is_control() || character == '\\' || character == ':'
-        }) {
+        if part
+            .chars()
+            .any(|character| character.is_control() || character == '\\' || character == ':')
+        {
             return Err(RemoteProviderError::Conflict(format!(
                 "skillPath '{raw}' contains an unsafe component"
             )));
@@ -506,6 +523,14 @@ pub fn normalize_url(raw: &str, kind: RemoteKind) -> Result<String, RemoteProvid
     Ok(normalized)
 }
 
+/// Normalize a persisted remote URL for repository identity without a
+/// provider kind (spec §3.4 v6 migration, parent lookups and Update
+/// grouping): the generic Git rules accept https and file URLs and do not
+/// enforce a provider host; embedded credentials are still rejected.
+pub fn normalize_catalog_url(raw: &str) -> Result<String, RemoteProviderError> {
+    normalize_url(raw, RemoteKind::GenericGit)
+}
+
 /// The installer CLI's local skill hash (skills CLI `local-lock.ts`): SHA-256
 /// over the concatenation of (relative path + file content) of every regular
 /// file, sorted by relative path, skipping `.git`/`node_modules` directories.
@@ -543,10 +568,7 @@ fn collect_cli_files(
         })?;
         let path = entry.path();
         let file_type = entry.file_type().map_err(|source| {
-            RemoteProviderError::Conflict(format!(
-                "cannot inspect '{}': {source}",
-                path.display()
-            ))
+            RemoteProviderError::Conflict(format!("cannot inspect '{}': {source}", path.display()))
         })?;
         let name = entry.file_name();
         if file_type.is_dir() {
@@ -561,10 +583,7 @@ fn collect_cli_files(
                 .to_string_lossy()
                 .replace('\\', "/");
             let content = fs::read(&path).map_err(|source| {
-                RemoteProviderError::Conflict(format!(
-                    "cannot read '{}': {source}",
-                    path.display()
-                ))
+                RemoteProviderError::Conflict(format!("cannot read '{}': {source}", path.display()))
             })?;
             files.push((relative, content));
         }
@@ -580,9 +599,7 @@ fn run_git_local(args: &[&str]) -> Result<String, RemoteProviderError> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|source| {
-            RemoteProviderError::Conflict(format!("cannot run git: {source}"))
-        })?;
+        .map_err(|source| RemoteProviderError::Conflict(format!("cannot run git: {source}")))?;
     let deadline = Instant::now() + Duration::from_secs(LOCAL_GIT_TIMEOUT_SECONDS);
     let status = loop {
         match child.try_wait() {
@@ -651,9 +668,9 @@ fn run_git_local(args: &[&str]) -> Result<String, RemoteProviderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::adapters::git_source::SystemGitSource;
     use crate::seams::remote_provider::RemoteProvider;
+    use std::path::PathBuf;
 
     fn entry(
         source_type: &str,
@@ -677,11 +694,7 @@ mod tests {
         }
     }
 
-    fn fixture_repo(
-        root: &Path,
-        files: &[(&str, &str)],
-        branch: &str,
-    ) -> PathBuf {
+    fn fixture_repo(root: &Path, files: &[(&str, &str)], branch: &str) -> PathBuf {
         let repo = root.join("repo");
         fs::create_dir_all(&repo).expect("create fixture repo");
         for (path, contents) in files {
@@ -863,7 +876,8 @@ mod tests {
             "main",
         );
         let url = format!("file://{}", repo.display());
-        let hash = cli_skill_folder_hash(&repo.join("skills/networking")).expect("fixture cli hash");
+        let hash =
+            cli_skill_folder_hash(&repo.join("skills/networking")).expect("fixture cli hash");
         let lock = entry("git", &url, &url, None, "skills/networking", &hash);
         let request = provider().parse_request(&lock).expect("parse");
         let workspace = root.path().join("workspace");
@@ -913,7 +927,8 @@ mod tests {
         );
         tag(&repo, "v1.0.0");
         let url = format!("file://{}", repo.display());
-        let hash = cli_skill_folder_hash(&repo.join("skills/networking")).expect("fixture cli hash");
+        let hash =
+            cli_skill_folder_hash(&repo.join("skills/networking")).expect("fixture cli hash");
         let lock = entry(
             "git",
             &url,

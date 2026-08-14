@@ -14,18 +14,19 @@ use crate::seams::activation_store::{
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict as AdoptConflict,
+    RemoteAdoptedSkillRecord,
 };
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::{ActivationRecoveryBaseline, FileSystem};
 use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
-    RemoteImportRecord, RemoteInstallRecord,
+    RemoteImportRecord, RemoteInstallRecord, RemoteParentRecord,
 };
 use crate::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStore,
-    MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget,
-    SkillHealthObservation,
+    AdoptedSkillEntity, HandoffRecoveredRecord, InstalledSkillBaseline, LinkSkillRecord,
+    MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline,
+    RemoveTarget, SkillHealthObservation,
 };
 
 pub struct RuntimeCatalogStore {
@@ -387,6 +388,58 @@ impl ImportStore for RuntimeCatalogStore {
         self.require()
             .set_remote_requested_ref(skill_id, requested_ref)
     }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::import_store::ImportStore::find_remote_parent_by_url(
+            self.require().as_ref(),
+            canonical_url,
+        )
+    }
+
+    fn load_remote_parents(&self) -> Result<Vec<RemoteParentRecord>, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().load_remote_parents()
+    }
+
+    fn insert_remote_alias(
+        &self,
+        remote_id: &str,
+        alias_url: &str,
+    ) -> Result<(), ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().insert_remote_alias(remote_id, alias_url)
+    }
+
+    fn delete_remote_parent_if_last_child(
+        &self,
+        remote_id: &str,
+    ) -> Result<bool, ImportStoreError> {
+        if !self.is_writable() {
+            return Err(ImportStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::import_store::ImportStore::delete_remote_parent_if_last_child(
+            self.require().as_ref(),
+            remote_id,
+        )
+    }
 }
 
 impl AdoptStore for RuntimeCatalogStore {
@@ -424,6 +477,54 @@ impl AdoptStore for RuntimeCatalogStore {
             ));
         }
         self.require().remove_adopted_skill(skill_id)
+    }
+
+    fn insert_remote_adopted(
+        &self,
+        record: RemoteAdoptedSkillRecord,
+    ) -> Result<u64, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().insert_remote_adopted(record)
+    }
+
+    fn delete_remote_parent_if_last_child(&self, remote_id: &str) -> Result<bool, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::adopt_store::AdoptStore::delete_remote_parent_if_last_child(
+            self.require().as_ref(),
+            remote_id,
+        )
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::adopt_store::AdoptStore::find_remote_parent_by_url(
+            self.require().as_ref(),
+            canonical_url,
+        )
+    }
+
+    fn binding_remote_id(&self, skill_id: &SkillId) -> Result<Option<String>, AdoptStoreError> {
+        if !self.is_writable() {
+            return Err(AdoptStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::adopt_store::AdoptStore::binding_remote_id(self.require().as_ref(), skill_id)
     }
 
     fn find_library_conflict(
@@ -617,6 +718,58 @@ impl MaintenanceStore for RuntimeCatalogStore {
             ));
         }
         self.require().delete_skill(skill_id)
+    }
+
+    fn binding_remote_id(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().binding_remote_id(skill_id)
+    }
+
+    fn delete_remote_parent_if_last_child(
+        &self,
+        remote_id: &str,
+    ) -> Result<bool, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().delete_remote_parent_if_last_child(remote_id)
+    }
+
+    fn insert_handoff_recovered(
+        &self,
+        record: HandoffRecoveredRecord,
+    ) -> Result<u64, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().insert_handoff_recovered(record)
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        crate::seams::import_store::ImportStore::find_remote_parent_by_url(
+            self.require().as_ref(),
+            canonical_url,
+        )
+        .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
     }
 
     fn desired_activation_baselines(

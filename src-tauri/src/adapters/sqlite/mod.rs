@@ -16,7 +16,7 @@ use crate::seams::activation_store::{
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
-    LibraryConflict as AdoptLibraryConflict,
+    LibraryConflict as AdoptLibraryConflict, RemoteAdoptedSkillRecord,
 };
 use crate::seams::catalog_probe::{CURRENT_CATALOG_SCHEMA_VERSION, CatalogHomeIdentity};
 use crate::seams::catalog_store::{
@@ -24,12 +24,13 @@ use crate::seams::catalog_store::{
 };
 use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
-    RemoteImportRecord, RemoteInstallRecord,
+    RemoteImportRecord, RemoteInstallRecord, RemoteParentRecord,
 };
 use crate::seams::legacy_migration::{LegacyCatalogMigrator, LegacyMigrationError};
 use crate::seams::maintenance_store::{
-    AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStoreError,
-    ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
+    AdoptedSkillEntity, HandoffRecoveredRecord, InstalledSkillBaseline, LinkSkillRecord,
+    MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget,
+    SkillHealthObservation,
 };
 use crate::seams::preferences_store::PreferencesStoreError;
 
@@ -122,12 +123,29 @@ CREATE TABLE file_sources (
     installed_at TEXT NOT NULL
 );
 
-CREATE TABLE remote_sources (
+CREATE TABLE remote_source_parents (
+    remote_id TEXT PRIMARY KEY,
+    canonical_url TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE remote_source_aliases (
+    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+    alias_url TEXT NOT NULL UNIQUE,
+    confirmed_at TEXT NOT NULL,
+    PRIMARY KEY (remote_id, alias_url)
+);
+
+CREATE TABLE remote_bindings (
     skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
-    source_url TEXT NOT NULL,
+    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
     requested_ref TEXT NOT NULL,
-    resolved_commit TEXT NOT NULL,
+    verification_anchor_commit TEXT NOT NULL,
+    original_commit_known INTEGER NOT NULL DEFAULT 0 CHECK (original_commit_known IN (0, 1)),
     skill_path TEXT NOT NULL,
+    provider_hash TEXT,
+    remote_baseline_hash TEXT NOT NULL,
+    current_baseline_hash TEXT NOT NULL,
     last_checked_at INTEGER,
     last_updated_at INTEGER
 );
@@ -143,7 +161,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 5, 0);
+VALUES (1, 6, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -188,7 +206,7 @@ pub struct SqliteCatalogStore {
 
 impl SqliteCatalogStore {
     /// Test/binding-internal convenience: opens an existing Catalog, creating
-    /// a fresh v5 file only when the path does not exist. Production
+    /// a fresh v6 file only when the path does not exist. Production
     /// composition never calls this without a verified `BoundHome`; the
     /// bootstrap authority resolves state read-only first (spec §3.4: a
     /// pre-identity Catalog is only probed, never auto-migrated).
@@ -214,7 +232,8 @@ impl SqliteCatalogStore {
 
         // Pre-identity schemas (v1–v4) may only be probed read-only: the
         // one-time Legacy transition owns their migration (spec §3.4).
-        if existing_schema_version != 0 && existing_schema_version < CURRENT_SCHEMA_VERSION {
+        // Identity-bearing v5 Catalogs migrate in place to v6 below.
+        if existing_schema_version != 0 && existing_schema_version < 5 {
             let connection = open_read_only(path)?;
             return Ok(Self {
                 connection: Mutex::new(connection),
@@ -235,9 +254,10 @@ impl SqliteCatalogStore {
         let mut connection = Connection::open(path).map_err(CatalogStoreOpenError::Open)?;
         configure_connection(&connection)?;
 
-        if existing_schema_version == 0 {
-            // Fresh file: create the current schema. This is the only case
-            // ordinary open() writes; it never migrates existing data.
+        if existing_schema_version == 0 || existing_schema_version == 5 {
+            // Fresh file: create the current schema. Identity-bearing v5:
+            // migrate in place to v6 (spec §3.4). Ordinary open() never
+            // migrates pre-identity data.
             if let Err(error) = migrate_to_current(&mut connection, existing_schema_version) {
                 connection
                     .pragma_update(None, "query_only", true)
@@ -290,16 +310,17 @@ impl SqliteCatalogStore {
     /// Open the Catalog of a verified `BoundHome` for writing. Re-verifies
     /// the recorded identity against the bound value object (spec §3.4:
     /// `BoundCatalogStore` construction requires the four identity fields to
-    /// be present and matching). Refuses anything else; never migrates.
+    /// be present and matching). An identity-bearing v5 Catalog migrates in
+    /// place to v6; anything else is refused.
     pub fn open_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
         if !has_content(path) {
             return Err(BoundCatalogOpenError::Missing);
         }
         let schema = detect_schema_version(path);
-        if schema != CURRENT_SCHEMA_VERSION {
+        if schema != CURRENT_SCHEMA_VERSION && schema != 5 {
             return Err(BoundCatalogOpenError::SchemaNotBound { found: schema });
         }
-        let connection = Connection::open(path).map_err(BoundCatalogOpenError::Open)?;
+        let mut connection = Connection::open(path).map_err(BoundCatalogOpenError::Open)?;
         configure_connection(&connection).map_err(BoundCatalogOpenError::Configure)?;
         let stored =
             read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
@@ -308,6 +329,9 @@ impl SqliteCatalogStore {
             || stored.volume_uuid != bound.volume_uuid
         {
             return Err(BoundCatalogOpenError::IdentityMismatch);
+        }
+        if schema == 5 {
+            migrate_to_current(&mut connection, 5).map_err(BoundCatalogOpenError::Migration)?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -319,7 +343,7 @@ impl SqliteCatalogStore {
         })
     }
 
-    /// Create a fresh v5 Catalog carrying `bound`'s identity. The primitive
+    /// Create a fresh v6 Catalog carrying `bound`'s identity. The primitive
     /// behind the Home Binding flow (ticket #45) and the test Home helper;
     /// refuses an existing file so it can never overwrite real data.
     pub fn create_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
@@ -1026,6 +1050,241 @@ impl SqliteCatalogStore {
             MaintenanceStoreError::Unavailable("negative SQLite snapshot version".into())
         })
     }
+
+    /// The Binding's parent id of a managed remote Install; `None` when
+    /// the skill has no binding (captured before Remove deletes the row).
+    pub fn binding_remote_id(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, MaintenanceStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT remote_id FROM remote_bindings WHERE skill_id = ?1",
+                [skill_id.0.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_maintenance_error)
+    }
+
+    /// Delete the parent row when it has no remaining child bindings;
+    /// returns whether the parent was deleted (last-child Remove).
+    pub fn delete_remote_parent_if_last_child(
+        &self,
+        remote_id: &str,
+    ) -> Result<bool, MaintenanceStoreError> {
+        self.remove_parent_if_last_child(remote_id)
+            .map_err(MaintenanceStoreError::Unavailable)
+    }
+
+    /// Crash roll-forward of a committed Handoff (spec §8.4 step 5): the
+    /// parent upsert, Skill row, Binding and Activations commit in one
+    /// idempotent transaction — existing rows are left untouched.
+    pub fn insert_handoff_recovered(
+        &self,
+        record: HandoffRecoveredRecord,
+    ) -> Result<u64, MaintenanceStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_maintenance_error)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT directory_name FROM skills WHERE id = ?1",
+                [&record.skill.skill_id.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_maintenance_error)?;
+        if existing.is_none() {
+            // Crash roll-forward journals may not carry a resolved parent id
+            // (the crash happened before the remote_id was assigned); a
+            // fresh UUID is safe because the canonical-URL conflict clause
+            // reuses any existing parent.
+            let remote_id = if record.skill.remote_id.is_empty() {
+                new_remote_id(&transaction).map_err(sqlite_maintenance_error)?
+            } else {
+                record.skill.remote_id.clone()
+            };
+            transaction
+                .execute(
+                    "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                     VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                     ON CONFLICT(canonical_url) DO NOTHING",
+                    params![remote_id, record.skill.source_url],
+                )
+                .map_err(sqlite_maintenance_error)?;
+            let remote_id: String = transaction
+                .query_row(
+                    "SELECT remote_id FROM remote_source_parents WHERE canonical_url = ?1",
+                    [&record.skill.source_url],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_maintenance_error)?;
+            let health = if record.skill.remote_baseline_hash == record.skill.current_baseline_hash
+            {
+                "healthy"
+            } else {
+                "modified"
+            };
+            transaction
+                .execute(
+                    "INSERT INTO skills (
+                        id, directory_name, identity_key, display_name, description,
+                        source_kind, library_entry_path, final_entity_path,
+                        recorded_content_hash, health, created_at, updated_at
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, 'remote_install', ?6, ?6, ?7, ?8,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     )",
+                    params![
+                        record.skill.skill_id.0,
+                        record.skill.directory_name,
+                        record.skill.identity_key,
+                        record.skill.display_name,
+                        record.skill.description,
+                        record.skill.final_entity_path.to_string_lossy(),
+                        record.skill.current_baseline_hash,
+                        health,
+                    ],
+                )
+                .map_err(sqlite_maintenance_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO remote_bindings (
+                        skill_id, remote_id, requested_ref, verification_anchor_commit,
+                        original_commit_known, skill_path, provider_hash,
+                        remote_baseline_hash, current_baseline_hash,
+                        last_checked_at, last_updated_at
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                        unixepoch('now'), unixepoch('now')
+                     )",
+                    params![
+                        record.skill.skill_id.0,
+                        remote_id,
+                        record.skill.requested_ref,
+                        record.skill.verification_anchor_commit,
+                        record.skill.original_commit_known as i64,
+                        record.skill.skill_path,
+                        record.skill.provider_hash,
+                        record.skill.remote_baseline_hash,
+                        record.skill.current_baseline_hash,
+                    ],
+                )
+                .map_err(sqlite_maintenance_error)?;
+            for activation in &record.activations {
+                transaction
+                    .execute(
+                        "INSERT INTO activations (
+                            skill_id, agent_id, desired_enabled, expected_entry_path,
+                            expected_target_path, observed_state, last_enabled_at, last_checked_at
+                         ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                         ON CONFLICT(skill_id, agent_id) DO NOTHING",
+                        params![
+                            record.skill.skill_id.0,
+                            activation.agent_id,
+                            activation.expected_entry_path.to_string_lossy(),
+                            activation.expected_target_path.to_string_lossy(),
+                        ],
+                    )
+                    .map_err(sqlite_maintenance_error)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                    [],
+                )
+                .map_err(sqlite_maintenance_error)?;
+        }
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_maintenance_error)?;
+        transaction.commit().map_err(sqlite_maintenance_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            MaintenanceStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    /// Shared parent lookup behind every store facade (Import/Adopt/
+    /// Maintenance): one implementation, typed error wrappers per trait.
+    fn remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite lock poisoned".to_string())?;
+        let parent: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT remote_id, canonical_url, created_at
+                   FROM remote_source_parents
+                  WHERE canonical_url = ?1
+                     OR remote_id IN (
+                            SELECT remote_id FROM remote_source_aliases WHERE alias_url = ?1
+                        )",
+                [canonical_url],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((remote_id, parent_url, created_at)) = parent else {
+            return Ok(None);
+        };
+        let aliases = connection
+            .prepare(
+                "SELECT alias_url FROM remote_source_aliases WHERE remote_id = ?1 ORDER BY alias_url",
+            )
+            .map_err(|error| error.to_string())?
+            .query_map([&remote_id], |row| row.get(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(RemoteParentRecord {
+            remote_id,
+            canonical_url: parent_url,
+            created_at,
+            aliases,
+        }))
+    }
+
+    /// Shared last-child parent removal behind every store facade.
+    fn remove_parent_if_last_child(&self, remote_id: &str) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "SQLite lock poisoned".to_string())?;
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM remote_bindings WHERE remote_id = ?1",
+                [remote_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if remaining != 0 {
+            return Ok(false);
+        }
+        let changed = connection
+            .execute(
+                "DELETE FROM remote_source_parents WHERE remote_id = ?1",
+                [remote_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(changed == 1)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1419,22 +1678,45 @@ impl ImportStore for SqliteCatalogStore {
                     ],
                 )
                 .map_err(sqlite_import_error)?;
+            // Parent per canonical URL: reuse the existing parent when one
+            // already exists (ADR-0013 §4.2), otherwise keep the fresh id.
             transaction
                 .execute(
-                    "INSERT INTO remote_sources (
-                        skill_id, source_url, requested_ref, resolved_commit, skill_path,
+                    "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                     VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                     ON CONFLICT(canonical_url) DO NOTHING",
+                    params![record.remote_id, record.source_url],
+                )
+                .map_err(sqlite_import_error)?;
+            let remote_id: String = transaction
+                .query_row(
+                    "SELECT remote_id FROM remote_source_parents WHERE canonical_url = ?1",
+                    [&record.source_url],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_import_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO remote_bindings (
+                        skill_id, remote_id, requested_ref, verification_anchor_commit,
+                        original_commit_known, skill_path, provider_hash,
+                        remote_baseline_hash, current_baseline_hash,
                         last_checked_at, last_updated_at
                      ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5,
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                         unixepoch('now'),
                         unixepoch('now')
                      )",
                     params![
                         record.skill_id.0,
-                        record.source_url,
+                        remote_id,
                         record.requested_ref,
-                        record.resolved_commit,
+                        record.verification_anchor_commit,
+                        record.original_commit_known as i64,
                         record.skill_path,
+                        record.provider_hash,
+                        record.remote_baseline_hash,
+                        record.current_baseline_hash,
                     ],
                 )
                 .map_err(sqlite_import_error)?;
@@ -1467,12 +1749,17 @@ impl ImportStore for SqliteCatalogStore {
                 "SELECT skills.id, skills.directory_name, skills.identity_key,
                         skills.display_name, skills.description,
                         skills.final_entity_path, skills.recorded_content_hash,
-                        skills.health, remote_sources.source_url,
-                        remote_sources.requested_ref, remote_sources.resolved_commit,
-                        remote_sources.skill_path, remote_sources.last_checked_at,
-                        remote_sources.last_updated_at
+                        skills.health, remote_source_parents.canonical_url,
+                        remote_bindings.remote_id, remote_bindings.requested_ref,
+                        remote_bindings.verification_anchor_commit,
+                        remote_bindings.original_commit_known, remote_bindings.skill_path,
+                        remote_bindings.provider_hash, remote_bindings.remote_baseline_hash,
+                        remote_bindings.current_baseline_hash, remote_bindings.last_checked_at,
+                        remote_bindings.last_updated_at
                    FROM skills
-                   JOIN remote_sources ON remote_sources.skill_id = skills.id
+                   JOIN remote_bindings ON remote_bindings.skill_id = skills.id
+                   JOIN remote_source_parents
+                     ON remote_source_parents.remote_id = remote_bindings.remote_id
                   WHERE skills.source_kind = 'remote_install'
                   ORDER BY skills.directory_name",
             )
@@ -1489,11 +1776,16 @@ impl ImportStore for SqliteCatalogStore {
                     recorded_content_hash: row.get(6)?,
                     health: parse_health(&row.get::<_, String>(7)?)?,
                     source_url: row.get(8)?,
-                    requested_ref: row.get(9)?,
-                    resolved_commit: row.get(10)?,
-                    skill_path: row.get(11)?,
-                    last_checked_at: row.get::<_, Option<i64>>(12)?,
-                    last_updated_at: row.get::<_, Option<i64>>(13)?,
+                    remote_id: row.get(9)?,
+                    requested_ref: row.get(10)?,
+                    verification_anchor_commit: row.get(11)?,
+                    original_commit_known: row.get::<_, bool>(12)?,
+                    skill_path: row.get(13)?,
+                    provider_hash: row.get(14)?,
+                    remote_baseline_hash: row.get(15)?,
+                    current_baseline_hash: row.get(16)?,
+                    last_checked_at: row.get::<_, Option<i64>>(17)?,
+                    last_updated_at: row.get::<_, Option<i64>>(18)?,
                 })
             })
             .map_err(sqlite_import_error)?;
@@ -1515,12 +1807,17 @@ impl ImportStore for SqliteCatalogStore {
                 "SELECT skills.id, skills.directory_name, skills.identity_key,
                         skills.display_name, skills.description,
                         skills.final_entity_path, skills.recorded_content_hash,
-                        skills.health, remote_sources.source_url,
-                        remote_sources.requested_ref, remote_sources.resolved_commit,
-                        remote_sources.skill_path, remote_sources.last_checked_at,
-                        remote_sources.last_updated_at
+                        skills.health, remote_source_parents.canonical_url,
+                        remote_bindings.remote_id, remote_bindings.requested_ref,
+                        remote_bindings.verification_anchor_commit,
+                        remote_bindings.original_commit_known, remote_bindings.skill_path,
+                        remote_bindings.provider_hash, remote_bindings.remote_baseline_hash,
+                        remote_bindings.current_baseline_hash, remote_bindings.last_checked_at,
+                        remote_bindings.last_updated_at
                    FROM skills
-                   JOIN remote_sources ON remote_sources.skill_id = skills.id
+                   JOIN remote_bindings ON remote_bindings.skill_id = skills.id
+                   JOIN remote_source_parents
+                     ON remote_source_parents.remote_id = remote_bindings.remote_id
                   WHERE skills.identity_key = ?1 AND skills.source_kind = 'remote_install'",
                 [identity_key],
                 |row| {
@@ -1534,11 +1831,16 @@ impl ImportStore for SqliteCatalogStore {
                         recorded_content_hash: row.get(6)?,
                         health: parse_health(&row.get::<_, String>(7)?)?,
                         source_url: row.get(8)?,
-                        requested_ref: row.get(9)?,
-                        resolved_commit: row.get(10)?,
-                        skill_path: row.get(11)?,
-                        last_checked_at: row.get::<_, Option<i64>>(12)?,
-                        last_updated_at: row.get::<_, Option<i64>>(13)?,
+                        remote_id: row.get(9)?,
+                        requested_ref: row.get(10)?,
+                        verification_anchor_commit: row.get(11)?,
+                        original_commit_known: row.get::<_, bool>(12)?,
+                        skill_path: row.get(13)?,
+                        provider_hash: row.get(14)?,
+                        remote_baseline_hash: row.get(15)?,
+                        current_baseline_hash: row.get(16)?,
+                        last_checked_at: row.get::<_, Option<i64>>(17)?,
+                        last_updated_at: row.get::<_, Option<i64>>(18)?,
                     })
                 },
             )
@@ -1577,12 +1879,22 @@ impl ImportStore for SqliteCatalogStore {
         }
         transaction
             .execute(
-                "UPDATE remote_sources
-                    SET resolved_commit = ?2, skill_path = ?3,
+                "UPDATE remote_bindings
+                    SET verification_anchor_commit = ?2, skill_path = ?3,
+                        original_commit_known = ?4, provider_hash = ?5,
+                        remote_baseline_hash = ?6, current_baseline_hash = ?7,
                         last_updated_at = unixepoch('now'),
                         last_checked_at = unixepoch('now')
                   WHERE skill_id = ?1",
-                params![record.skill_id.0, record.resolved_commit, record.skill_path],
+                params![
+                    record.skill_id.0,
+                    record.verification_anchor_commit,
+                    record.skill_path,
+                    record.original_commit_known as i64,
+                    record.provider_hash,
+                    record.remote_baseline_hash,
+                    record.current_baseline_hash,
+                ],
             )
             .map_err(sqlite_import_error)?;
         transaction
@@ -1608,7 +1920,7 @@ impl ImportStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
             .execute(
-                "UPDATE remote_sources SET last_checked_at = unixepoch('now') WHERE skill_id = ?1",
+                "UPDATE remote_bindings SET last_checked_at = unixepoch('now') WHERE skill_id = ?1",
                 [skill_id.0.as_str()],
             )
             .map_err(sqlite_import_error)?;
@@ -1624,11 +1936,99 @@ impl ImportStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
             .execute(
-                "UPDATE remote_sources SET requested_ref = ?2 WHERE skill_id = ?1",
+                "UPDATE remote_bindings SET requested_ref = ?2 WHERE skill_id = ?1",
                 params![skill_id.0, requested_ref],
             )
             .map_err(sqlite_import_error)?;
         Ok(())
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, ImportStoreError> {
+        self.remote_parent_by_url(canonical_url)
+            .map_err(ImportStoreError::Unavailable)
+    }
+
+    fn load_remote_parents(&self) -> Result<Vec<RemoteParentRecord>, ImportStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT remote_id, canonical_url, created_at
+                   FROM remote_source_parents ORDER BY canonical_url",
+            )
+            .map_err(sqlite_import_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sqlite_import_error)?;
+        let mut parents = Vec::new();
+        for row in rows {
+            let (remote_id, canonical_url, created_at) = row.map_err(sqlite_import_error)?;
+            let aliases = connection
+                .prepare(
+                    "SELECT alias_url FROM remote_source_aliases WHERE remote_id = ?1 ORDER BY alias_url",
+                )
+                .map_err(sqlite_import_error)?
+                .query_map([&remote_id], |row| row.get(0))
+                .map_err(sqlite_import_error)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(sqlite_import_error)?;
+            parents.push(RemoteParentRecord {
+                remote_id,
+                canonical_url,
+                created_at,
+                aliases,
+            });
+        }
+        Ok(parents)
+    }
+
+    fn insert_remote_alias(
+        &self,
+        remote_id: &str,
+        alias_url: &str,
+    ) -> Result<(), ImportStoreError> {
+        let changed = self
+            .connection
+            .lock()
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .execute(
+                // Fail closed on two-parent convergence: an alias must not
+                // collide with any parent's canonical URL (ADR-0013 §4.2:
+                // existing parents only merge via an explicit survivor).
+                "INSERT INTO remote_source_aliases (remote_id, alias_url, confirmed_at)
+                 SELECT ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE NOT EXISTS (
+                            SELECT 1 FROM remote_source_parents WHERE canonical_url = ?2
+                        )",
+                params![remote_id, alias_url],
+            )
+            .map_err(sqlite_import_error)?;
+        if changed != 1 {
+            return Err(ImportStoreError::Unavailable(format!(
+                "the alias '{alias_url}' collides with an existing parent; \
+                 two parents never auto-merge — choose a survivor explicitly"
+            )));
+        }
+        Ok(())
+    }
+
+    fn delete_remote_parent_if_last_child(
+        &self,
+        remote_id: &str,
+    ) -> Result<bool, ImportStoreError> {
+        self.remove_parent_if_last_child(remote_id)
+            .map_err(ImportStoreError::Unavailable)
     }
 }
 
@@ -1814,6 +2214,164 @@ impl AdoptStore for SqliteCatalogStore {
                         final_entity_path: PathBuf::from(row.get::<_, String>(2)?),
                     })
                 },
+            )
+            .optional()
+            .map_err(sqlite_adopt_error)
+    }
+
+    fn insert_remote_adopted(
+        &self,
+        record: RemoteAdoptedSkillRecord,
+    ) -> Result<u64, AdoptStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_adopt_error)?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                [&record.identity_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_adopt_error)?;
+        if let Some(_directory_name) = existing {
+            // Crash roll-forward: the skill row already committed; report
+            // the current snapshot version without touching anything.
+            let snapshot_version: i64 = transaction
+                .query_row(
+                    "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sqlite_adopt_error)?;
+            transaction.commit().map_err(sqlite_adopt_error)?;
+            return u64::try_from(snapshot_version).map_err(|_| {
+                AdoptStoreError::Unavailable("negative SQLite snapshot version".into())
+            });
+        }
+        transaction
+            .execute(
+                "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                 VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 ON CONFLICT(canonical_url) DO NOTHING",
+                params![record.remote_id, record.canonical_url],
+            )
+            .map_err(sqlite_adopt_error)?;
+        let remote_id: String = transaction
+            .query_row(
+                "SELECT remote_id FROM remote_source_parents WHERE canonical_url = ?1",
+                [&record.canonical_url],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_adopt_error)?;
+        transaction
+            .execute(
+                "INSERT INTO skills (
+                    id, directory_name, identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path,
+                    recorded_content_hash, health, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, 'remote_install', ?6, ?6, ?7, ?8,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.skill_id.0,
+                    record.directory_name,
+                    record.identity_key,
+                    record.display_name,
+                    record.description,
+                    record.final_entity_path.to_string_lossy(),
+                    record.recorded_content_hash,
+                    health_value(record.health),
+                ],
+            )
+            .map_err(sqlite_adopt_error)?;
+        transaction
+            .execute(
+                "INSERT INTO remote_bindings (
+                    skill_id, remote_id, requested_ref, verification_anchor_commit,
+                    original_commit_known, skill_path, provider_hash,
+                    remote_baseline_hash, current_baseline_hash,
+                    last_checked_at, last_updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    unixepoch('now'), unixepoch('now')
+                 )",
+                params![
+                    record.skill_id.0,
+                    remote_id,
+                    record.requested_ref,
+                    record.verification_anchor_commit,
+                    record.original_commit_known as i64,
+                    record.skill_path,
+                    record.provider_hash,
+                    record.remote_baseline_hash,
+                    record.current_baseline_hash,
+                ],
+            )
+            .map_err(sqlite_adopt_error)?;
+        for activation in &record.activations {
+            transaction
+                .execute(
+                    "INSERT INTO activations (
+                        skill_id, agent_id, desired_enabled, expected_entry_path,
+                        expected_target_path, observed_state, last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                    params![
+                        record.skill_id.0,
+                        activation.agent_id.0,
+                        activation.expected_entry_path.to_string_lossy(),
+                        activation.expected_target_path.to_string_lossy(),
+                    ],
+                )
+                .map_err(sqlite_adopt_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_adopt_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_adopt_error)?;
+        transaction.commit().map_err(sqlite_adopt_error)?;
+        u64::try_from(snapshot_version)
+            .map_err(|_| AdoptStoreError::Unavailable("negative SQLite snapshot version".into()))
+    }
+
+    fn delete_remote_parent_if_last_child(&self, remote_id: &str) -> Result<bool, AdoptStoreError> {
+        self.remove_parent_if_last_child(remote_id)
+            .map_err(AdoptStoreError::Unavailable)
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, AdoptStoreError> {
+        self.remote_parent_by_url(canonical_url)
+            .map_err(AdoptStoreError::Unavailable)
+    }
+
+    fn binding_remote_id(&self, skill_id: &SkillId) -> Result<Option<String>, AdoptStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT remote_id FROM remote_bindings WHERE skill_id = ?1",
+                [skill_id.0.as_str()],
+                |row| row.get(0),
             )
             .optional()
             .map_err(sqlite_adopt_error)
@@ -2247,7 +2805,184 @@ fn migrate_to_current(
              UPDATE catalog_meta SET schema_version = 5 WHERE singleton = 1;",
         )?;
     }
+    // v4 inputs run the v5 step first in this same transaction; v5 inputs
+    // already carry the identity columns. Pre-v4 chains are the Home
+    // Binding flow's single-step legacy path and are untouched here.
+    if existing_schema_version == 4 || existing_schema_version == 5 {
+        // Schema v6: Remote Source Parent (spec §3.4, ADR-0013 §4).
+        // Legacy Skill Man-owned Remote Installs keep their resolved
+        // commit, ref, path and baselines: each `remote_sources` row
+        // becomes one parent (per normalized URL) plus one per-Skill
+        // Binding. The old table is dropped only after integrity and
+        // foreign-key checks pass inside this transaction. External
+        // `.skill-lock.json` files are never read or modified here.
+        transaction.execute_batch(
+            "CREATE TABLE remote_source_parents (
+                remote_id TEXT PRIMARY KEY,
+                canonical_url TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE remote_source_aliases (
+                remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+                alias_url TEXT NOT NULL UNIQUE,
+                confirmed_at TEXT NOT NULL,
+                PRIMARY KEY (remote_id, alias_url)
+             );
+             CREATE TABLE remote_bindings (
+                skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+                requested_ref TEXT NOT NULL,
+                verification_anchor_commit TEXT NOT NULL,
+                original_commit_known INTEGER NOT NULL DEFAULT 0 CHECK (original_commit_known IN (0, 1)),
+                skill_path TEXT NOT NULL,
+                provider_hash TEXT,
+                remote_baseline_hash TEXT NOT NULL,
+                current_baseline_hash TEXT NOT NULL,
+                last_checked_at INTEGER,
+                last_updated_at INTEGER
+             );",
+        )?;
+        migrate_legacy_remote_rows(&transaction)?;
+        let violations: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if violations != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(format!(
+                    "schema v6 migration left {violations} foreign-key violations"
+                )),
+            ));
+        }
+        let integrity: String =
+            transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                Some("schema v6 migration failed the integrity check".into()),
+            ));
+        }
+        transaction.execute_batch(
+            "DROP TABLE remote_sources;
+             UPDATE catalog_meta SET schema_version = 6 WHERE singleton = 1;",
+        )?;
+    }
     transaction.commit()
+}
+
+/// Copy legacy `remote_sources` rows into parents and bindings (spec
+/// §3.4): the normalized URL keys one parent per repository, the resolved
+/// commit becomes the known install commit and Verification Anchor, and
+/// the recorded content hash becomes both the remote and current baseline.
+/// A row whose Skill has no recorded content hash fails the whole
+/// migration: a baseline can never be guessed.
+fn migrate_legacy_remote_rows(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    let mut statement = transaction.prepare(
+        "SELECT skills.id, skills.recorded_content_hash, remote_sources.source_url,
+                remote_sources.requested_ref, remote_sources.resolved_commit,
+                remote_sources.skill_path, remote_sources.last_checked_at,
+                remote_sources.last_updated_at
+           FROM remote_sources
+           JOIN skills ON skills.id = remote_sources.skill_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    for (
+        skill_id,
+        recorded_hash,
+        source_url,
+        requested_ref,
+        resolved_commit,
+        skill_path,
+        last_checked_at,
+        last_updated_at,
+    ) in rows
+    {
+        let canonical_url = crate::adapters::remote_provider::normalize_catalog_url(&source_url)
+            .map_err(|error| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some(format!(
+                        "legacy remote Install '{skill_id}' has a non-normalizable URL '{source_url}': {error}"
+                    )),
+                )
+            })?;
+        let Some(recorded_hash) = recorded_hash else {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(format!(
+                    "legacy remote Install '{skill_id}' has no recorded content hash; \
+                     its baseline cannot be migrated"
+                )),
+            ));
+        };
+        let remote_id = new_remote_id(transaction)?;
+        transaction.execute(
+            "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT(canonical_url) DO NOTHING",
+            rusqlite::params![remote_id, canonical_url],
+        )?;
+        let parent_id: String = transaction.query_row(
+            "SELECT remote_id FROM remote_source_parents WHERE canonical_url = ?1",
+            [&canonical_url],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO remote_bindings (
+                skill_id, remote_id, requested_ref, verification_anchor_commit,
+                original_commit_known, skill_path, provider_hash,
+                remote_baseline_hash, current_baseline_hash,
+                last_checked_at, last_updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL, ?6, ?6, ?7, ?8)",
+            rusqlite::params![
+                skill_id,
+                parent_id,
+                requested_ref,
+                resolved_commit,
+                skill_path,
+                recorded_hash,
+                last_checked_at,
+                last_updated_at
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// A fresh remote parent id: a UUID v4 built from SQLite's random bytes,
+/// shaped exactly like the Home identity ids.
+fn new_remote_id(transaction: &rusqlite::Transaction) -> rusqlite::Result<String> {
+    let mut bytes = [0u8; 16];
+    transaction.query_row("SELECT randomblob(16)", [], |row| {
+        let blob = row.get::<_, Vec<u8>>(0)?;
+        let len = blob.len().min(16);
+        bytes[..len].copy_from_slice(&blob[..len]);
+        Ok(())
+    })?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
 }
 
 /// Read the Home identity columns; `None` when missing, empty or invalid.
@@ -2462,27 +3197,28 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v4_to_v5_preserves_rows_and_adds_identity_columns() {
+    fn migrate_v4_to_current_preserves_rows_and_adds_identity_columns() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("skill-man.sqlite3");
         {
-            let connection = Connection::open(&path).expect("create v4 catalog");
+            // The exact pre-identity v4 shape: the v5 schema minus the
+            // identity columns.
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("open v4 catalog");
             connection
                 .execute_batch(
-                    "CREATE TABLE catalog_meta (
-                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                        schema_version INTEGER NOT NULL,
-                        snapshot_version INTEGER NOT NULL DEFAULT 0,
-                        first_run_completed_at TEXT,
-                        last_startup_check_at TEXT
-                     );
-                     INSERT INTO catalog_meta (singleton, schema_version, first_run_completed_at)
-                     VALUES (1, 4, '2026-08-01T00:00:00Z');",
+                    "ALTER TABLE catalog_meta DROP COLUMN home_id;
+                     ALTER TABLE catalog_meta DROP COLUMN volume_fsid;
+                     ALTER TABLE catalog_meta DROP COLUMN volume_uuid;
+                     ALTER TABLE catalog_meta DROP COLUMN home_bound_at;
+                     UPDATE catalog_meta SET schema_version = 4,
+                        first_run_completed_at = '2026-08-01T00:00:00Z'
+                      WHERE singleton = 1;",
                 )
-                .expect("seed v4 header");
+                .expect("rewind to the v4 shape");
         }
         let mut connection = Connection::open(&path).expect("reopen");
-        migrate_to_current(&mut connection, 4).expect("v4 → v5 migration");
+        migrate_to_current(&mut connection, 4).expect("v4 → v6 migration");
         let schema: u32 = connection
             .query_row(
                 "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
@@ -2490,7 +3226,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema version");
-        assert_eq!(schema, 5);
+        assert_eq!(schema, 6);
         let first_run: Option<String> = connection
             .query_row(
                 "SELECT first_run_completed_at FROM catalog_meta WHERE singleton = 1",
@@ -2499,6 +3235,469 @@ mod tests {
             )
             .expect("first run flag preserved");
         assert_eq!(first_run.as_deref(), Some("2026-08-01T00:00:00Z"));
+        let home_id: Option<String> = connection
+            .query_row(
+                "SELECT home_id FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("identity column added");
+        assert!(
+            home_id.is_none(),
+            "identity stays unset until the binding writes it"
+        );
+    }
+
+    /// The exact v5 Catalog shape (spec §3.4): the identity-bearing schema
+    /// a pre-#48 build wrote. Used to pin the v5→v6 migration contract.
+    fn seed_v5_catalog(path: &Path) {
+        let connection = Connection::open(path).expect("create v5 catalog");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE catalog_meta (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL,
+                    snapshot_version INTEGER NOT NULL DEFAULT 0,
+                    first_run_completed_at TEXT,
+                    last_startup_check_at TEXT,
+                    home_id TEXT,
+                    volume_fsid TEXT,
+                    volume_uuid TEXT,
+                    home_bound_at TEXT
+                );
+                CREATE TABLE skills (
+                    id TEXT PRIMARY KEY,
+                    directory_name TEXT NOT NULL,
+                    identity_key TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    source_kind TEXT NOT NULL CHECK (source_kind IN ('link', 'remote_install', 'file_install')),
+                    library_entry_path TEXT,
+                    final_entity_path TEXT NOT NULL,
+                    recorded_content_hash TEXT,
+                    health TEXT NOT NULL CHECK (health IN ('healthy', 'broken', 'modified')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE agents (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL CHECK (kind IN ('claude_preset', 'codex_preset', 'custom')),
+                    skills_path TEXT NOT NULL,
+                    path_identity_key TEXT NOT NULL UNIQUE,
+                    detected INTEGER NOT NULL CHECK (detected IN (0, 1)),
+                    compatibility TEXT NOT NULL CHECK (compatibility IN ('verified', 'unknown')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE activations (
+                    skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+                    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                    desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
+                    expected_entry_path TEXT NOT NULL UNIQUE,
+                    expected_target_path TEXT NOT NULL,
+                    observed_state TEXT NOT NULL CHECK (
+                        observed_state IN ('present', 'missing', 'target_mismatch', 'dangling', 'occupied')
+                    ),
+                    last_enabled_at TEXT,
+                    last_checked_at TEXT,
+                    PRIMARY KEY (skill_id, agent_id)
+                );
+                CREATE TABLE file_sources (
+                    skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                    original_path TEXT NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    installed_at TEXT NOT NULL
+                );
+                CREATE TABLE remote_sources (
+                    skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                    source_url TEXT NOT NULL,
+                    requested_ref TEXT NOT NULL,
+                    resolved_commit TEXT NOT NULL,
+                    skill_path TEXT NOT NULL,
+                    last_checked_at INTEGER,
+                    last_updated_at INTEGER
+                );
+                CREATE TABLE preferences (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    launch_at_login INTEGER NOT NULL DEFAULT 0 CHECK (launch_at_login IN (0, 1)),
+                    show_in_dock INTEGER NOT NULL DEFAULT 1 CHECK (show_in_dock IN (0, 1)),
+                    check_app_updates INTEGER NOT NULL DEFAULT 1 CHECK (check_app_updates IN (0, 1)),
+                    check_skill_updates INTEGER NOT NULL DEFAULT 1 CHECK (check_skill_updates IN (0, 1)),
+                    last_app_update_check_at TEXT,
+                    last_skill_update_check_at TEXT
+                );
+                INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
+                VALUES (1, 5, 0);
+                INSERT INTO preferences (singleton) VALUES (1);
+                "#,
+            )
+            .expect("create v5 schema");
+    }
+
+    fn seed_v5_remote_skill(
+        connection: &Connection,
+        skill_id: &str,
+        source_url: &str,
+        requested_ref: &str,
+        resolved_commit: &str,
+        skill_path: &str,
+        content_hash: Option<&str>,
+        last_checked: Option<i64>,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO skills (
+                    id, directory_name, identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path,
+                    recorded_content_hash, health, created_at, updated_at
+                 ) VALUES (?1, ?1, ?1, ?1, '', 'remote_install', '/lib/' || ?1, '/lib/' || ?1, ?2, 'healthy', 'now', 'now')",
+                params![skill_id, content_hash],
+            )
+            .expect("seed v5 remote skill");
+        connection
+            .execute(
+                "INSERT INTO remote_sources (
+                    skill_id, source_url, requested_ref, resolved_commit, skill_path,
+                    last_checked_at, last_updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    skill_id,
+                    source_url,
+                    requested_ref,
+                    resolved_commit,
+                    skill_path,
+                    last_checked
+                ],
+            )
+            .expect("seed v5 remote source row");
+    }
+
+    #[test]
+    fn v5_to_v6_migration_moves_remote_rows_into_parents_and_bindings() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            // Two rows, same repository with different URL spellings: the
+            // normalized identity must produce ONE parent, two bindings.
+            seed_v5_remote_skill(
+                &connection,
+                "alpha",
+                "https://github.com/acme/skills.git",
+                "HEAD",
+                "c0ffee0000000000000000000000000000000000",
+                "skills/alpha",
+                Some("tree-sha256-v1:aaaa"),
+                Some(1700000000),
+            );
+            seed_v5_remote_skill(
+                &connection,
+                "beta",
+                "https://github.com/acme/skills/",
+                "refs/tags/v1.2.3",
+                "deadbeef00000000000000000000000000000000",
+                "",
+                Some("tree-sha256-v1:bbbb"),
+                None,
+            );
+            seed_v5_remote_skill(
+                &connection,
+                "gamma",
+                "file:///Users/tester/work/local-skills",
+                "main",
+                "1111111111111111111111111111111111111111",
+                "tools/gamma",
+                Some("tree-sha256-v1:cccc"),
+                None,
+            );
+        }
+        let mut connection = Connection::open(&path).expect("reopen");
+        migrate_to_current(&mut connection, 5).expect("v5 → v6 migration");
+
+        let schema: u32 = connection
+            .query_row(
+                "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version");
+        assert_eq!(schema, 6);
+
+        // Integrity and foreign keys passed inside the migration transaction
+        // before the old table was dropped; re-verify on the live file.
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("integrity check");
+        assert_eq!(integrity, "ok");
+        let violations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert_eq!(violations, 0);
+
+        // The old table is gone; the new tables exist.
+        let remote_sources_present: bool = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_sources'",
+                [],
+                |row| row.get::<_, i64>(0).map(|count| count != 0),
+            )
+            .expect("old table query");
+        assert!(!remote_sources_present, "remote_sources must be dropped");
+
+        // Two distinct normalized parents (github.com/acme/skills and the
+        // file URL); the two GitHub spellings share one parent.
+        let mut parents = connection
+            .prepare(
+                "SELECT remote_id, canonical_url FROM remote_source_parents ORDER BY canonical_url",
+            )
+            .expect("parents query")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("parents rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parents collect");
+        assert_eq!(parents.len(), 2);
+        parents.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(parents[0].1, "file:///Users/tester/work/local-skills");
+        assert_eq!(parents[1].1, "https://github.com/acme/skills");
+
+        let binding = |skill_id: &str| -> (
+            String,
+            String,
+            bool,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<i64>,
+        ) {
+            connection
+                .query_row(
+                    "SELECT b.requested_ref, b.verification_anchor_commit, b.original_commit_known,
+                            b.skill_path, b.provider_hash, b.remote_baseline_hash,
+                            b.current_baseline_hash, b.last_checked_at
+                       FROM remote_bindings b WHERE b.skill_id = ?1",
+                    [skill_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get::<_, Option<i64>>(7)?,
+                        ))
+                    },
+                )
+                .expect("binding row")
+        };
+
+        let (
+            ref_alpha,
+            anchor_alpha,
+            known_alpha,
+            path_alpha,
+            hash_alpha,
+            remote_base_alpha,
+            current_base_alpha,
+            checked_alpha,
+        ) = binding("alpha");
+        assert_eq!(ref_alpha, "HEAD");
+        assert_eq!(anchor_alpha, "c0ffee0000000000000000000000000000000000");
+        assert!(
+            known_alpha,
+            "legacy resolved commit is the known install commit"
+        );
+        assert_eq!(path_alpha, "skills/alpha");
+        assert_eq!(
+            hash_alpha, None,
+            "provider hash stays NULL until a verified fetch"
+        );
+        assert_eq!(remote_base_alpha, "tree-sha256-v1:aaaa");
+        assert_eq!(current_base_alpha, "tree-sha256-v1:aaaa");
+        assert_eq!(
+            checked_alpha,
+            Some(1700000000),
+            "last_checked_at is preserved"
+        );
+
+        let (
+            ref_beta,
+            anchor_beta,
+            known_beta,
+            path_beta,
+            _,
+            remote_base_beta,
+            current_base_beta,
+            _,
+        ) = binding("beta");
+        assert_eq!(ref_beta, "refs/tags/v1.2.3");
+        assert_eq!(anchor_beta, "deadbeef00000000000000000000000000000000");
+        assert!(known_beta);
+        assert_eq!(path_beta, "");
+        assert_eq!(remote_base_beta, "tree-sha256-v1:bbbb");
+        assert_eq!(current_base_beta, "tree-sha256-v1:bbbb");
+
+        let (_, _, _, _, _, _, _, _) = binding("gamma");
+    }
+
+    #[test]
+    fn v5_to_v6_migration_fails_closed_on_missing_content_hash() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            seed_v5_remote_skill(
+                &connection,
+                "alpha",
+                "https://github.com/acme/skills.git",
+                "HEAD",
+                "c0ffee0000000000000000000000000000000000",
+                "skills/alpha",
+                None,
+                None,
+            );
+        }
+        let mut connection = Connection::open(&path).expect("reopen");
+        let error = migrate_to_current(&mut connection, 5).expect_err("migration must fail");
+        assert!(error.to_string().contains("no recorded content hash"));
+        // The transaction rolled back: the v5 schema and rows are intact.
+        let schema: u32 = connection
+            .query_row(
+                "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version");
+        assert_eq!(schema, 5);
+        let remote_sources_present: bool = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_sources'",
+                [],
+                |row| row.get::<_, i64>(0).map(|count| count != 0),
+            )
+            .expect("old table query");
+        assert!(
+            remote_sources_present,
+            "old table must survive a failed migration"
+        );
+    }
+
+    #[test]
+    fn v5_to_v6_migration_fails_closed_on_non_normalizable_url() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            seed_v5_remote_skill(
+                &connection,
+                "alpha",
+                "git@github.com:acme/skills.git",
+                "HEAD",
+                "c0ffee0000000000000000000000000000000000",
+                "",
+                Some("tree-sha256-v1:aaaa"),
+                None,
+            );
+        }
+        let mut connection = Connection::open(&path).expect("reopen");
+        let error = migrate_to_current(&mut connection, 5).expect_err("migration must fail");
+        assert!(error.to_string().contains("non-normalizable URL"));
+        let schema: u32 = connection
+            .query_row(
+                "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version");
+        assert_eq!(schema, 5);
+    }
+
+    #[test]
+    fn identity_bearing_v5_catalog_migrates_on_ordinary_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            connection
+                .execute(
+                    "UPDATE catalog_meta
+                     SET home_id = ?1, volume_fsid = ?2, volume_uuid = ?3, home_bound_at = ?4
+                     WHERE singleton = 1",
+                    params![
+                        "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+                        "fsid",
+                        "uuid",
+                        "2026-08-01T00:00:00Z",
+                    ],
+                )
+                .expect("record identity");
+            seed_v5_remote_skill(
+                &connection,
+                "alpha",
+                "https://github.com/acme/skills.git",
+                "HEAD",
+                "c0ffee0000000000000000000000000000000000",
+                "",
+                Some("tree-sha256-v1:aaaa"),
+                None,
+            );
+        }
+        let store = SqliteCatalogStore::open(&path).expect("ordinary open migrates v5 in place");
+        assert_eq!(store.startup_status().access, StartupAccess::ReadWrite);
+        assert_eq!(store.startup_status().schema_version, 6);
+        let remote_installs = store
+            .load_remote_installs()
+            .expect("migrated remote installs load");
+        assert_eq!(remote_installs.len(), 1);
+        assert_eq!(
+            remote_installs[0].source_url,
+            "https://github.com/acme/skills"
+        );
+        assert_eq!(
+            remote_installs[0].verification_anchor_commit,
+            "c0ffee0000000000000000000000000000000000"
+        );
+        assert!(remote_installs[0].original_commit_known);
+        assert_eq!(remote_installs[0].provider_hash, None);
+    }
+
+    #[test]
+    fn open_bound_migrates_identity_bearing_v5_in_place() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let bound = bound_home();
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            connection
+                .execute(
+                    "UPDATE catalog_meta
+                     SET home_id = ?1, volume_fsid = ?2, volume_uuid = ?3, home_bound_at = ?4
+                     WHERE singleton = 1",
+                    params![
+                        bound.home_id.0,
+                        bound.volume_fsid,
+                        bound.volume_uuid,
+                        bound.bound_at
+                    ],
+                )
+                .expect("record identity");
+        }
+        let store = SqliteCatalogStore::open_bound(&bound, &path).expect("open_bound migrates v5");
+        assert_eq!(store.startup_status().access, StartupAccess::ReadWrite);
+        assert_eq!(store.startup_status().schema_version, 6);
     }
 
     #[test]
@@ -2510,12 +3709,12 @@ mod tests {
 
         let opened = SqliteCatalogStore::open_bound(&bound, &path).expect("reopen bound Catalog");
         assert_eq!(opened.startup_status().access, StartupAccess::ReadWrite);
-        assert_eq!(opened.startup_status().schema_version, 5);
+        assert_eq!(opened.startup_status().schema_version, 6);
 
         let probe = crate::adapters::catalog_probe::SqliteCatalogProbe::new();
         let report = probe.probe(&path).expect("read-only probe");
         assert!(report.exists);
-        assert_eq!(report.schema_version, Some(5));
+        assert_eq!(report.schema_version, Some(6));
         assert!(report.integrity_ok);
         assert!(report.foreign_keys_ok);
         let identity = report.home_identity.expect("recorded identity");

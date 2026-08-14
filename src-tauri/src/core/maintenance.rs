@@ -12,16 +12,18 @@ use crate::core::domain::{
 };
 use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
+use crate::seams::filesystem::ActivationRecoveryBaseline;
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileImportRecoveryBaseline, FileSystem,
-    FileSystemError, LinkSourceSnapshot, RelocateActivationStep, RelocateInitialEntry,
-    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoveActivationStep,
-    RemoveInitialEntry, RemoveJournal, RemoveJournalPhase, RemoveRecoveryBaseline,
-    RemoveSourceKind, SkillFingerprint,
+    FileSystemError, HandoffItemPhase, HandoffJournal, HandoffJournalItem, LinkSourceSnapshot,
+    RelocateActivationStep, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
+    RelocateRecoveryBaseline, RemoteParentManifest, RemoveActivationStep, RemoveInitialEntry,
+    RemoveJournal, RemoveJournalPhase, RemoveRecoveryBaseline, RemoveSourceKind, SkillFingerprint,
 };
+use crate::seams::import_store::RemoteImportRecord;
 use crate::seams::maintenance_store::{
-    LinkSkillRecord, MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline,
-    RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
+    HandoffRecoveredRecord, LinkSkillRecord, MaintenanceStore, MaintenanceStoreError,
+    ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
@@ -263,8 +265,151 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_remove_journals(library_root, &remove_baselines)?;
+            self.recover_handoff_operations(library_root)?;
         }
         Ok(())
+    }
+
+    /// Ownership Handoff startup recovery (spec §8.4, ADR-0013 §5): every
+    /// pending handoff journal decides per item by its phase. Below the
+    /// lock CAS the item rolls back in place (external directory restored,
+    /// staged copy discarded, nothing committed); at or above it the item
+    /// rolls forward under the recovery gate — idempotent Catalog write,
+    /// parent manifest backfill, entity publish, Activation flattening —
+    /// and the isolation/staged copies are discarded because the restart
+    /// closed the Undo window. No long-term double owner or no-owner.
+    fn recover_handoff_operations(&self, library_root: &Path) -> Result<(), MaintenanceError> {
+        let journals = self.filesystem.list_handoff_journals(library_root)?;
+        let remotes_root = library_root.join("remotes");
+        for mut journal in journals {
+            let journal_view = journal.clone();
+            for item in &mut journal.items {
+                match item.phase {
+                    HandoffItemPhase::Planned
+                    | HandoffItemPhase::Staged
+                    | HandoffItemPhase::SourceIsolated => {
+                        // Pre-CAS: roll back in place — EXCEPT for the
+                        // crash window between the exact-entry CAS and the
+                        // durable journal phase write. The journal still
+                        // says SourceIsolated there, but the released entry
+                        // proves the commit point passed: resolve the
+                        // direction from the lock itself (spec §8.4: the
+                        // CAS is the commit point; CAS 后只 roll-forward).
+                        let releases_lock = !item.lock_path.as_os_str().is_empty();
+                        let cas_happened = if releases_lock {
+                            self.filesystem
+                                .lock_entry_present(&item.lock_path, &item.lock_entry_name)?
+                                == false
+                        } else {
+                            false
+                        };
+                        if cas_happened {
+                            self.roll_forward_handoff_item(library_root, &journal_view, item)?;
+                        } else {
+                            self.filesystem.rollback_handoff_item(library_root, item)?;
+                        }
+                    }
+                    HandoffItemPhase::OwnershipReleased
+                    | HandoffItemPhase::ManagedCommitted
+                    | HandoffItemPhase::Finalized => {
+                        // Post-CAS: roll forward only. The Catalog write is
+                        // idempotent; the manifest is backfilled from the
+                        // authoritative row.
+                        self.roll_forward_handoff_item(library_root, &journal_view, item)?;
+                    }
+                }
+            }
+            self.filesystem
+                .write_handoff_journal(library_root, &journal)?;
+            self.filesystem
+                .finish_handoff_journal(library_root, &journal.operation_id)?;
+        }
+        Ok(())
+    }
+
+    /// Post-CAS roll-forward of one handoff journal item: idempotent
+    /// Catalog write (with parent manifest backfill) followed by the
+    /// filesystem-side publish, Activation flattening and cleanup.
+    fn roll_forward_handoff_item(
+        &self,
+        library_root: &Path,
+        journal_view: &HandoffJournal,
+        item: &mut HandoffJournalItem,
+    ) -> Result<(), MaintenanceError> {
+        let remotes_root = library_root.join("remotes");
+        if let Some(remote) = &item.remote {
+            let record = self.handoff_recovered_record(item)?;
+            self.store.insert_handoff_recovered(record)?;
+            let parent = self
+                .store
+                .find_remote_parent_by_url(&remote.canonical_url)?;
+            if let Some(parent) = parent {
+                if self
+                    .filesystem
+                    .read_remote_parent_manifest(&remotes_root, &parent.remote_id)?
+                    .is_none()
+                {
+                    self.filesystem.write_remote_parent_manifest(
+                        &remotes_root,
+                        &RemoteParentManifest {
+                            schema_version: 1,
+                            remote_id: parent.remote_id.clone(),
+                            canonical_url: parent.canonical_url.clone(),
+                            aliases: parent.aliases.clone(),
+                            created_at: parent.created_at.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
+        self.filesystem
+            .roll_forward_handoff_item(library_root, journal_view, item)?;
+        Ok(())
+    }
+
+    /// Rebuild the durable Catalog write a committed Handoff needs from its
+    /// journal (spec §8.4 step 5): every fact was frozen at plan time, so
+    /// roll-forward never re-fetches or re-verifies the remote.
+    fn handoff_recovered_record(
+        &self,
+        item: &HandoffJournalItem,
+    ) -> Result<HandoffRecoveredRecord, MaintenanceError> {
+        let remote = item.remote.as_ref().ok_or_else(|| {
+            MaintenanceError::Internal("a remote handoff item has no remote journal".into())
+        })?;
+        Ok(HandoffRecoveredRecord {
+            skill: RemoteImportRecord {
+                skill_id: SkillId(item.skill_id.clone()),
+                directory_name: item.directory_name.clone(),
+                identity_key: item.identity_key.clone(),
+                display_name: item.display_name.clone(),
+                description: item.description.clone(),
+                library_entry_path: item.final_entity_path.clone(),
+                final_entity_path: item.final_entity_path.clone(),
+                recorded_content_hash: item.current_baseline_hash.clone(),
+                // The store resolves the existing parent by canonical URL;
+                // a fresh id is only a placeholder.
+                remote_id: item.remote_id.clone().unwrap_or_default(),
+                source_url: remote.canonical_url.clone(),
+                requested_ref: remote.requested_ref.clone(),
+                verification_anchor_commit: remote.verification_anchor_commit.clone(),
+                original_commit_known: remote.original_commit_known,
+                skill_path: remote.skill_path.clone(),
+                provider_hash: remote.provider_hash.clone(),
+                remote_baseline_hash: remote.remote_baseline_hash.clone(),
+                current_baseline_hash: item.current_baseline_hash.clone(),
+            },
+            activations: item
+                .activations
+                .iter()
+                .map(|activation| ActivationRecoveryBaseline {
+                    skill_id: item.skill_id.clone(),
+                    agent_id: activation.agent_id.clone(),
+                    expected_entry_path: activation.entry_path.clone(),
+                    expected_target_path: activation.target_path.clone(),
+                })
+                .collect(),
+        })
     }
 
     fn run_health_check(&self) -> Result<ActivationHealthReport, MaintenanceError> {
@@ -1007,10 +1152,42 @@ impl MaintenanceService {
 
         // Step 3: catalog delete; activations, file_sources and
         // remote_sources cascade with the row (§5.4).
+        // Last-child semantics (ADR-0013 §4.2): the parent row and its
+        // manifest are removed when no other Binding remains; the old
+        // external lock owner is never restored.
+        let binding_remote_id = self.store.binding_remote_id(&plan.target.skill_id)?;
         let snapshot_version = match self.store.delete_skill(&plan.target.skill_id) {
             Ok(version) => version,
             Err(error) => return self.fail_remove(&library_root, &journal, error.into()),
         };
+        if let Some(remote_id) = binding_remote_id {
+            let deleted = match self.store.delete_remote_parent_if_last_child(&remote_id) {
+                Ok(deleted) => deleted,
+                Err(error) => {
+                    self.write_gate.mark_blocked();
+                    return Err(MaintenanceError::RecoveryRequired {
+                        state_error: "the Remove catalog delete committed".into(),
+                        compensation_error: format!(
+                            "the empty parent could not be deleted: {error}"
+                        ),
+                    });
+                }
+            };
+            if deleted {
+                if let Err(error) = self
+                    .filesystem
+                    .remove_remote_parent_manifest(&library_root.join("remotes"), &remote_id)
+                {
+                    self.write_gate.mark_blocked();
+                    return Err(MaintenanceError::RecoveryRequired {
+                        state_error: "the Remove catalog delete committed".into(),
+                        compensation_error: format!(
+                            "the parent manifest could not be removed: {error}"
+                        ),
+                    });
+                }
+            }
+        }
         journal.phase = RemoveJournalPhase::Committed;
         if let Err(error) = self
             .filesystem

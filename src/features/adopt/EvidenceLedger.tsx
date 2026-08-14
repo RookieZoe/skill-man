@@ -42,6 +42,8 @@ function reasonLabelKey(reason: AdoptVerdictReason): MessageKey {
       return "library.adopt.reason.identity_conflict";
     case "library_conflict":
       return "library.adopt.reason.library_conflict";
+    case "ownership_conflict":
+      return "library.adopt.reason.ownership_conflict";
     case "remote_unavailable":
       return "library.adopt.reason.remote_unavailable";
     case "chain_fault":

@@ -1226,17 +1226,11 @@ impl FileSystem for FailingCompensationFileSystem {
         self.delegate.scan_skills_evidence(path)
     }
 
-    fn create_temp_workspace(
-        &self,
-        purpose: &str,
-    ) -> Result<std::path::PathBuf, FileSystemError> {
+    fn create_temp_workspace(&self, purpose: &str) -> Result<std::path::PathBuf, FileSystemError> {
         self.delegate.create_temp_workspace(purpose)
     }
 
-    fn discard_temp_workspace(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<(), FileSystemError> {
+    fn discard_temp_workspace(&self, path: &std::path::Path) -> Result<(), FileSystemError> {
         self.delegate.discard_temp_workspace(path)
     }
 

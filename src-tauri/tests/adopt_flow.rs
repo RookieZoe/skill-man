@@ -21,10 +21,12 @@ use skill_man_lib::core::maintenance::MaintenanceService;
 use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
 use skill_man_lib::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict,
+    RemoteAdoptedSkillRecord,
 };
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::import_store::ImportStore;
+use skill_man_lib::seams::import_store::RemoteParentRecord;
 
 mod common;
 use common::BoundTestHome;
@@ -101,6 +103,28 @@ impl AdoptStore for FailFirstAdoptRemovalStore {
         identity_key: &str,
     ) -> Result<Option<LibraryConflict>, AdoptStoreError> {
         AdoptStore::find_library_conflict(self.delegate.as_ref(), identity_key)
+    }
+
+    fn insert_remote_adopted(
+        &self,
+        record: RemoteAdoptedSkillRecord,
+    ) -> Result<u64, AdoptStoreError> {
+        AdoptStore::insert_remote_adopted(self.delegate.as_ref(), record)
+    }
+
+    fn delete_remote_parent_if_last_child(&self, remote_id: &str) -> Result<bool, AdoptStoreError> {
+        AdoptStore::delete_remote_parent_if_last_child(self.delegate.as_ref(), remote_id)
+    }
+
+    fn find_remote_parent_by_url(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<RemoteParentRecord>, AdoptStoreError> {
+        AdoptStore::find_remote_parent_by_url(self.delegate.as_ref(), canonical_url)
+    }
+
+    fn binding_remote_id(&self, skill_id: &SkillId) -> Result<Option<String>, AdoptStoreError> {
+        AdoptStore::binding_remote_id(self.delegate.as_ref(), skill_id)
     }
 }
 
@@ -603,6 +627,7 @@ fn select(candidates: &[AdoptEvidenceCandidate], name: &str) -> AdoptSelection {
         canonical_entity: candidate.canonical_entity.clone(),
         agent_ids: Vec::new(),
         modified_branch: None,
+        target_directory: None,
     }
 }
 
@@ -749,11 +774,17 @@ fn adopt_preview_and_cancel_leave_a_migrating_skill_unchanged() {
     let adopt = harness.adopt();
     let report = adopt.scan().expect("scan");
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&report.candidates, "preview-only")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&report.candidates, "preview-only")],
+        ))
         .expect("Preview Adopt");
 
     assert_eq!(plan.items[0].intent, AdoptPlanIntent::LocalLinkWithMove);
-    assert!(!plan.can_apply, "the Agent-root entity needs a stable location first");
+    assert!(
+        !plan.can_apply,
+        "the Agent-root entity needs a stable location first"
+    );
     assert!(
         source.join("SKILL.md").is_file(),
         "Preview must not move a valid Untracked Skill"
@@ -865,7 +896,10 @@ fn adopt_apply_rejects_a_source_changed_after_preview_without_writing() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "changed-after-preview")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "changed-after-preview")],
+        ))
         .expect("Preview Adopt");
     std::fs::write(source.join("SKILL.md"), "# Changed\n").expect("change source after Preview");
 
@@ -906,7 +940,10 @@ fn adopt_apply_never_follows_a_symlinked_staging_root() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "symlinked-staging")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "symlinked-staging")],
+        ))
         .expect("Preview Adopt");
 
     let outside = harness.home.path().join("must-not-stage-here");
@@ -996,7 +1033,10 @@ fn gate_transition_makes_an_adopt_plan_stale() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "gate-stale-skill")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "gate-stale-skill")],
+        ))
         .expect("Preview Adopt");
     assert!(plan.can_apply);
 
@@ -1058,13 +1098,19 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let stable_plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "stable-adopt")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "stable-adopt")],
+        ))
         .expect("Preview stable Adopt");
     let stable_result = adopt
         .apply(&stable_plan.plan_token)
         .expect("apply stable Adopt");
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "blocked-apply")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "blocked-apply")],
+        ))
         .expect("Preview Adopt");
 
     let occupied_staging_root = harness.library_root.join("staging/adopt-42-2");
@@ -1080,9 +1126,15 @@ fn adopt_apply_blocks_further_writes_when_a_durable_intent_needs_recovery() {
     assert!(matches!(error, AdoptError::RecoveryRequired(_)), "{error}");
     assert!(!write_gate.is_product_write_open());
     let second = adopt
-        .plan(&plan_request(&report, vec![select(candidates, "blocked-apply")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(candidates, "blocked-apply")],
+        ))
         .expect("read-only evidence planning stays available during recovery");
-    assert!(second.can_apply, "planning freezes evidence even during recovery");
+    assert!(
+        second.can_apply,
+        "planning freezes evidence even during recovery"
+    );
     let apply_after_lock = adopt
         .apply(&second.plan_token)
         .expect_err("apply stays write-locked");
@@ -1134,7 +1186,10 @@ fn adopt_done_journal_failure_compensates_the_committed_item() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "done-write-failure")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "done-write-failure")],
+        ))
         .expect("Preview Adopt");
 
     let result = adopt
@@ -1226,7 +1281,10 @@ fn adopt_splits_shared_entries_into_per_agent_activations() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(candidates, "shared-tool")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(candidates, "shared-tool")],
+        ))
         .expect("plan Adopt");
     assert_eq!(
         plan.items[0].target_agents.len(),
@@ -1283,6 +1341,7 @@ fn adopt_partial_failure_rolls_back_only_the_failed_skill() {
                     canonical_entity: beta_shared.canonical_entity.clone(),
                     agent_ids: Vec::new(),
                     modified_branch: None,
+                    target_directory: None,
                 },
             ],
         ))
@@ -1396,8 +1455,7 @@ fn adopt_undo_skips_entries_occupied_since_apply() {
     let projects = harness.home.path().join("Projects");
     let entity = write_skill(&projects, "foo", "# Foo\n");
     let canonical = entity.canonicalize().expect("canonical entity");
-    std::os::unix::fs::symlink(&canonical, shared.join("foo"))
-        .expect("shared symlink appearance");
+    std::os::unix::fs::symlink(&canonical, shared.join("foo")).expect("shared symlink appearance");
 
     let adopt = harness.adopt();
     let report = adopt.scan().expect("scan");
@@ -1480,7 +1538,10 @@ fn adopt_undo_catalog_failure_stops_writes_and_recovers_forward_on_restart() {
     let report = adopt.scan().expect("scan");
     let candidates = &report.candidates;
     let plan = adopt
-        .plan(&plan_request(&report, vec![select(&candidates, "undo-fault")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(&candidates, "undo-fault")],
+        ))
         .expect("plan Adopt");
     let result = adopt.apply(&plan.plan_token).expect("apply Adopt");
 
@@ -1590,7 +1651,10 @@ fn adopt_conflicts_with_managed_identity_are_not_adoptable() {
     assert!(!conflicted.selectable);
     assert!(conflicted.conflict.is_some());
     let error = adopt
-        .plan(&plan_request(&report, vec![select(candidates, "conflicted")]))
+        .plan(&plan_request(
+            &report,
+            vec![select(candidates, "conflicted")],
+        ))
         .expect_err("a conflicted candidate can never be planned");
     assert!(matches!(error, AdoptError::Validation(_)), "{error}");
 }

@@ -13,19 +13,19 @@ use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::remote_provider::SystemRemoteProvider;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
-use skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
+use skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore;
 use skill_man_lib::core::adopt::{
     AdoptError, AdoptPlanIntent, AdoptPlanRequest, AdoptSelection, AdoptService, AdoptVerdict,
     AdoptVerdictReason, ModifiedBranch,
 };
 use skill_man_lib::seams::filesystem::{ChainFault, FileSystem};
-use skill_man_lib::seams::source::GitSource;
 use skill_man_lib::seams::installer_lock_store::{InstallerLockStore, LockEntry};
 use skill_man_lib::seams::remote_provider::{
     AnchorResolution, RefDisposition, RemoteKind, RemoteProvider, RemoteProviderError,
     RemoteRequest, RemoteTreeFacts,
 };
+use skill_man_lib::seams::source::GitSource;
 
 mod common;
 use common::BoundTestHome;
@@ -85,7 +85,7 @@ impl Harness {
         self.home.path().join(".agents/skills")
     }
 
-        fn lock_path(&self) -> PathBuf {
+    fn lock_path(&self) -> PathBuf {
         self.home.path().join(".agents/.skill-lock.json")
     }
 
@@ -136,17 +136,24 @@ fn lock_json(entries: &[(&str, &str, String, Option<&str>, String, String)]) -> 
                 r#""{name}": {{
                     {}
                 }}"#,
-                fields.join(",
-")
+                fields.join(
+                    ",
+"
+                )
             )
         })
         .collect::<Vec<_>>()
-        .join(",
-");
+        .join(
+            ",
+",
+        );
     format!(r#"{{"version": 3, "skills": {{{rendered}}}}}"#)
 }
 
-fn select(candidates: &[skill_man_lib::core::adopt::AdoptEvidenceCandidate], name: &str) -> AdoptSelection {
+fn select(
+    candidates: &[skill_man_lib::core::adopt::AdoptEvidenceCandidate],
+    name: &str,
+) -> AdoptSelection {
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.directory_name == name)
@@ -155,6 +162,7 @@ fn select(candidates: &[skill_man_lib::core::adopt::AdoptEvidenceCandidate], nam
         canonical_entity: candidate.canonical_entity.clone(),
         agent_ids: Vec::new(),
         modified_branch: None,
+        target_directory: None,
     }
 }
 
@@ -164,7 +172,10 @@ fn select(candidates: &[skill_man_lib::core::adopt::AdoptEvidenceCandidate], nam
 enum ScriptedOutcome {
     Deferred(String),
     Conflict(String),
-    Ok { files: Vec<(String, String)>, anchor: String },
+    Ok {
+        files: Vec<(String, String)>,
+        anchor: String,
+    },
 }
 
 struct ScriptedRemoteProvider {
@@ -198,12 +209,8 @@ impl RemoteProvider for ScriptedRemoteProvider {
             .get(&request.canonical_url)
             .unwrap_or_else(|| panic!("no scripted behavior for {}", request.canonical_url))
         {
-            ScriptedOutcome::Deferred(detail) => {
-                Err(RemoteProviderError::Deferred(detail.clone()))
-            }
-            ScriptedOutcome::Conflict(detail) => {
-                Err(RemoteProviderError::Conflict(detail.clone()))
-            }
+            ScriptedOutcome::Deferred(detail) => Err(RemoteProviderError::Deferred(detail.clone())),
+            ScriptedOutcome::Conflict(detail) => Err(RemoteProviderError::Conflict(detail.clone())),
             ScriptedOutcome::Ok { files, anchor } => {
                 let tree = workspace.join("tree");
                 for (path, contents) in files {
@@ -301,8 +308,7 @@ fn cli_hash_at(repo: &Path, commit: &str, skill_path: &str) -> String {
     SystemGitSource::new()
         .stage_skill(&mirror, commit, skill_path, &destination)
         .expect("stage skill");
-    skill_man_lib::adapters::remote_provider::cli_skill_folder_hash(&destination)
-        .expect("cli hash")
+    skill_man_lib::adapters::remote_provider::cli_skill_folder_hash(&destination).expect("cli hash")
 }
 
 // =====================================================================
@@ -322,10 +328,16 @@ fn evidence_reports_multi_hop_chains_and_aggregates_appearances() {
         .expect("second hop");
     std::os::unix::fs::symlink("second-hop", harness.projects.join("first-hop"))
         .expect("first hop");
-    std::os::unix::fs::symlink("../../Projects/first-hop", harness.claude().join("networking"))
-        .expect("Claude appearance");
-    std::os::unix::fs::symlink("../../Projects/first-hop", harness.codex().join("networking"))
-        .expect("Codex appearance");
+    std::os::unix::fs::symlink(
+        "../../Projects/first-hop",
+        harness.claude().join("networking"),
+    )
+    .expect("Claude appearance");
+    std::os::unix::fs::symlink(
+        "../../Projects/first-hop",
+        harness.codex().join("networking"),
+    )
+    .expect("Codex appearance");
 
     let report = harness.adopt().scan().expect("scan");
     let candidate = report
@@ -340,11 +352,18 @@ fn evidence_reports_multi_hop_chains_and_aggregates_appearances() {
         .appearances
         .iter()
         .find(|appearance| {
-            appearance.appearance.agent_id.as_ref().is_some_and(|id| id.0 == "claude-code")
+            appearance
+                .appearance
+                .agent_id
+                .as_ref()
+                .is_some_and(|id| id.0 == "claude-code")
         })
         .expect("Claude appearance");
     assert_eq!(claude_appearance.chain.hops.len(), 3);
-    assert_eq!(claude_appearance.chain.final_entity.as_deref(), Some(canonical.as_path()));
+    assert_eq!(
+        claude_appearance.chain.final_entity.as_deref(),
+        Some(canonical.as_path())
+    );
     assert_eq!(
         claude_appearance.chain.hops[0]
             .path
@@ -356,7 +375,10 @@ fn evidence_reports_multi_hop_chains_and_aggregates_appearances() {
         .filesystem
         .tree_hash(&canonical)
         .expect("local tree hash");
-    assert_eq!(candidate.local_tree_hash.as_deref(), Some(expected_hash.as_str()));
+    assert_eq!(
+        candidate.local_tree_hash.as_deref(),
+        Some(expected_hash.as_str())
+    );
 }
 
 #[test]
@@ -401,7 +423,9 @@ fn evidence_stops_at_the_exact_hop_for_every_chain_fault() {
     assert_eq!(dangling.verdict, AdoptVerdict::Blocked);
     assert!(matches!(
         dangling.reason,
-        Some(AdoptVerdictReason::ChainFault { fault: ChainFault::Dangling { .. } })
+        Some(AdoptVerdictReason::ChainFault {
+            fault: ChainFault::Dangling { .. }
+        })
     ));
     assert_eq!(dangling.local_tree_hash, None);
 
@@ -409,14 +433,18 @@ fn evidence_stops_at_the_exact_hop_for_every_chain_fault() {
     assert_eq!(cycle.verdict, AdoptVerdict::Blocked);
     assert!(matches!(
         cycle.reason,
-        Some(AdoptVerdictReason::ChainFault { fault: ChainFault::Cycle { .. } })
+        Some(AdoptVerdictReason::ChainFault {
+            fault: ChainFault::Cycle { .. }
+        })
     ));
 
     let deep = find("deep");
     assert_eq!(deep.verdict, AdoptVerdict::Blocked);
     assert!(matches!(
         deep.reason,
-        Some(AdoptVerdictReason::ChainFault { fault: ChainFault::HopLimit { .. } })
+        Some(AdoptVerdictReason::ChainFault {
+            fault: ChainFault::HopLimit { .. }
+        })
     ));
     assert_eq!(deep.appearances[0].chain.hops.len(), 16);
 
@@ -424,7 +452,9 @@ fn evidence_stops_at_the_exact_hop_for_every_chain_fault() {
     assert_eq!(non_utf8_candidate.verdict, AdoptVerdict::Blocked);
     assert!(matches!(
         non_utf8_candidate.reason,
-        Some(AdoptVerdictReason::ChainFault { fault: ChainFault::NonUtf8 { .. } })
+        Some(AdoptVerdictReason::ChainFault {
+            fault: ChainFault::NonUtf8 { .. }
+        })
     ));
     assert!(!non_utf8_candidate.selectable);
 }
@@ -434,8 +464,7 @@ fn evidence_blocks_an_unreadable_entity_without_partial_fingerprints() {
     let harness = Harness::new();
     let entity = write_skill(&harness.projects, "locked", "# Locked\n");
     let canonical = entity.canonicalize().expect("canonical entity");
-    std::os::unix::fs::symlink(&canonical, harness.claude().join("locked"))
-        .expect("appearance");
+    std::os::unix::fs::symlink(&canonical, harness.claude().join("locked")).expect("appearance");
     let mut permissions = std::fs::metadata(&canonical)
         .expect("metadata")
         .permissions();
@@ -463,7 +492,9 @@ fn evidence_blocks_an_unreadable_entity_without_partial_fingerprints() {
     assert_eq!(candidate.verdict, AdoptVerdict::Blocked);
     assert!(matches!(
         candidate.reason,
-        Some(AdoptVerdictReason::ChainFault { fault: ChainFault::ReadFailed { .. } })
+        Some(AdoptVerdictReason::ChainFault {
+            fault: ChainFault::ReadFailed { .. }
+        })
     ));
     assert_eq!(candidate.local_tree_hash, None);
     assert!(!candidate.selectable);
@@ -538,14 +569,25 @@ fn evidence_flags_identity_and_library_conflicts() {
         .discover_link(&managed_entity)
         .expect("discover managed Link");
     import
-        .apply_link(&import.plan_link(&managed_entity).expect("plan Link").plan_token)
+        .apply_link(
+            &import
+                .plan_link(&managed_entity)
+                .expect("plan Link")
+                .plan_token,
+        )
         .expect("apply managed Link");
     // The untracked appearance shares the identity but points at a
     // DIFFERENT entity: a Library conflict, never an alias.
-    let untracked_entity = write_skill(&harness.projects, "untracked-conflict", "# Untracked
-");
+    let untracked_entity = write_skill(
+        &harness.projects,
+        "untracked-conflict",
+        "# Untracked
+",
+    );
     std::os::unix::fs::symlink(
-        untracked_entity.canonicalize().expect("canonical untracked"),
+        untracked_entity
+            .canonicalize()
+            .expect("canonical untracked"),
         harness.claude().join("managed-conflict"),
     )
     .expect("untracked appearance");
@@ -627,10 +669,12 @@ fn corrupt_lock_blocks_every_candidate_its_root_governs() {
             candidate.reason,
             Some(AdoptVerdictReason::LockFileFault { .. })
         ));
-        assert!(candidate
-            .lock
-            .as_ref()
-            .is_some_and(|lock| lock.file_fault.is_some()));
+        assert!(
+            candidate
+                .lock
+                .as_ref()
+                .is_some_and(|lock| lock.file_fault.is_some())
+        );
         assert!(!candidate.selectable);
     }
     let free_candidate = report
@@ -727,7 +771,11 @@ fn duplicate_lock_owners_are_a_conflict() {
         Some(harness.home.path().join("xdg-state")),
     ));
 
-    let report = harness.adopt_with(locks, Arc::new(SystemRemoteProvider::new(Arc::new(SystemGitSource::new()))))
+    let report = harness
+        .adopt_with(
+            locks,
+            Arc::new(SystemRemoteProvider::new(Arc::new(SystemGitSource::new()))),
+        )
         .scan()
         .expect("scan");
     let candidate = report
@@ -749,8 +797,7 @@ fn lock_declaration_with_entity_elsewhere_is_a_conflict() {
     // The lock declares "escaped" but the entity lives in Projects.
     let entity = write_skill(&harness.projects, "escaped", "# Escaped\n");
     let canonical = entity.canonicalize().expect("canonical entity");
-    std::os::unix::fs::symlink(&canonical, harness.claude().join("escaped"))
-        .expect("appearance");
+    std::os::unix::fs::symlink(&canonical, harness.claude().join("escaped")).expect("appearance");
     std::fs::write(
         harness.lock_path(),
         lock_json(&[(
@@ -796,7 +843,14 @@ fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
     write_skill(&harness.shared(), "networking", "# Networking v1\n");
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[("networking", "git", url.clone(), None, "skills/networking".into(), hash.clone())]),
+        lock_json(&[(
+            "networking",
+            "git",
+            url.clone(),
+            None,
+            "skills/networking".into(),
+            hash.clone(),
+        )]),
     )
     .expect("write lock");
 
@@ -830,9 +884,7 @@ fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
         lock.lock_fingerprint,
         format!("{:x}", {
             use sha2::Digest;
-            sha2::Sha256::digest(
-                std::fs::read(&harness.lock_path()).expect("lock bytes"),
-            )
+            sha2::Sha256::digest(std::fs::read(&harness.lock_path()).expect("lock bytes"))
         })
     );
     let plan = adopt
@@ -841,8 +893,15 @@ fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
             selections: vec![select(&report.candidates, "networking")],
         })
         .expect("plan verified candidate");
-    assert_eq!(plan.items[0].intent, AdoptPlanIntent::RemoteInstallKeepCurrent);
-    assert!(!plan.can_apply, "the Ownership Handoff is the handoff ticket's work");
+    assert_eq!(
+        plan.items[0].intent,
+        AdoptPlanIntent::RemoteInstallKeepCurrent
+    );
+    assert!(
+        plan.items[0].applyable,
+        "the Handoff applies the verified tree"
+    );
+    assert!(plan.can_apply);
 }
 
 #[test]
@@ -859,7 +918,14 @@ fn pinned_tag_anchor_is_exact_and_known() {
     write_skill(&harness.shared(), "networking", "# Networking v1\n");
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[("networking", "git", url.clone(), Some("v1.0.0"), "skills/networking".into(), hash.clone())]),
+        lock_json(&[(
+            "networking",
+            "git",
+            url.clone(),
+            Some("v1.0.0"),
+            "skills/networking".into(),
+            hash.clone(),
+        )]),
     )
     .expect("write lock");
 
@@ -887,11 +953,22 @@ fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
     let url = format!("file://{}", repo.display());
     let hash = cli_hash_at(&repo, "HEAD", "skills/networking");
     // The local entity diverged from the remote anchor.
-    let entity = write_skill(&harness.shared(), "networking", "# Networking v1\nlocal change\n");
+    let entity = write_skill(
+        &harness.shared(),
+        "networking",
+        "# Networking v1\nlocal change\n",
+    );
     let canonical = entity.canonicalize().expect("canonical entity");
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[("networking", "git", url.clone(), None, "skills/networking".into(), hash.clone())]),
+        lock_json(&[(
+            "networking",
+            "git",
+            url.clone(),
+            None,
+            "skills/networking".into(),
+            hash.clone(),
+        )]),
     )
     .expect("write lock");
 
@@ -918,33 +995,39 @@ fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
                     canonical_entity: canonical.clone(),
                     agent_ids: Vec::new(),
                     modified_branch: Some(ModifiedBranch::KeepCurrent),
+                    target_directory: None,
                 },
                 AdoptSelection {
                     canonical_entity: canonical.clone(),
                     agent_ids: Vec::new(),
                     modified_branch: Some(ModifiedBranch::DiscardToAnchor),
+                    target_directory: None,
                 },
                 AdoptSelection {
                     canonical_entity: canonical.clone(),
                     agent_ids: Vec::new(),
                     modified_branch: Some(ModifiedBranch::ConvertToLocalLink),
+                    target_directory: None,
                 },
             ],
         })
         .expect("plan all three branches");
     assert_eq!(plan.items.len(), 3);
-    assert!(plan
-        .items
-        .iter()
-        .any(|item| item.intent == AdoptPlanIntent::RemoteInstallKeepCurrent));
-    assert!(plan
-        .items
-        .iter()
-        .any(|item| item.intent == AdoptPlanIntent::RemoteInstallDiscardModified));
-    assert!(plan
-        .items
-        .iter()
-        .any(|item| item.intent == AdoptPlanIntent::RemoteInstallConvertToLink));
+    assert!(
+        plan.items
+            .iter()
+            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallKeepCurrent)
+    );
+    assert!(
+        plan.items
+            .iter()
+            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallDiscardModified)
+    );
+    assert!(
+        plan.items
+            .iter()
+            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallConvertToLink)
+    );
     assert!(!plan.can_apply);
 
     let missing_branch = adopt
@@ -954,6 +1037,7 @@ fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
                 canonical_entity: canonical,
                 agent_ids: Vec::new(),
                 modified_branch: None,
+                target_directory: None,
             }],
         })
         .expect_err("Modified requires an explicit branch");
@@ -974,7 +1058,14 @@ fn moving_ref_contradiction_and_pinned_mismatch_are_conflicts() {
     write_skill(&harness.shared(), "networking", "# Networking v2\n");
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[("networking", "git", url.clone(), None, "skills/networking".into(), old_hash.clone())]),
+        lock_json(&[(
+            "networking",
+            "git",
+            url.clone(),
+            None,
+            "skills/networking".into(),
+            old_hash.clone(),
+        )]),
     )
     .expect("write lock");
 
@@ -1005,17 +1096,50 @@ fn deferred_remote_group_does_not_block_other_groups() {
     write_skill(&harness.shared(), "alpha", "# Alpha\n");
     write_skill(&harness.shared(), "beta", "# Beta\n");
     write_skill(&harness.shared(), "gamma", "# Gamma\n");
-    let alpha_entity = harness.shared().join("alpha").canonicalize().expect("canonical alpha");
-    let beta_entity = harness.shared().join("beta").canonicalize().expect("canonical beta");
-    let gamma_entity = harness.shared().join("gamma").canonicalize().expect("canonical gamma");
+    let alpha_entity = harness
+        .shared()
+        .join("alpha")
+        .canonicalize()
+        .expect("canonical alpha");
+    let beta_entity = harness
+        .shared()
+        .join("beta")
+        .canonicalize()
+        .expect("canonical beta");
+    let gamma_entity = harness
+        .shared()
+        .join("gamma")
+        .canonicalize()
+        .expect("canonical gamma");
     let _ = (alpha_entity, beta_entity, gamma_entity);
     let hash = "0".repeat(64);
     std::fs::write(
         harness.lock_path(),
         lock_json(&[
-            ("alpha", "git", "https://group-a.example/alpha".into(), None, "skills/alpha".into(), hash.clone()),
-            ("beta", "git", "https://group-a.example/beta".into(), None, "skills/beta".into(), hash.clone()),
-            ("gamma", "git", "https://group-b.example/gamma".into(), None, "skills/gamma".into(), hash.clone()),
+            (
+                "alpha",
+                "git",
+                "https://group-a.example/alpha".into(),
+                None,
+                "skills/alpha".into(),
+                hash.clone(),
+            ),
+            (
+                "beta",
+                "git",
+                "https://group-a.example/beta".into(),
+                None,
+                "skills/beta".into(),
+                hash.clone(),
+            ),
+            (
+                "gamma",
+                "git",
+                "https://group-b.example/gamma".into(),
+                None,
+                "skills/gamma".into(),
+                hash.clone(),
+            ),
         ]),
     )
     .expect("write lock");
@@ -1038,9 +1162,12 @@ fn deferred_remote_group_does_not_block_other_groups() {
     );
     let provider = Arc::new(ScriptedRemoteProvider::new(behaviors));
     let report = harness
-        .adopt_with(Arc::new(SystemInstallerLockStore::new(
-            harness.home.path().to_path_buf(),
-        )), provider)
+        .adopt_with(
+            Arc::new(SystemInstallerLockStore::new(
+                harness.home.path().to_path_buf(),
+            )),
+            provider,
+        )
         .scan()
         .expect("scan");
 
@@ -1137,7 +1264,14 @@ fn plan_is_stale_after_rescan_lock_change_tree_change_or_appearance_change() {
     let hash = "0".repeat(64);
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[("locked-skill", "git", "https://example.com/locked".into(), None, "skills/locked".into(), hash.clone())]),
+        lock_json(&[(
+            "locked-skill",
+            "git",
+            "https://example.com/locked".into(),
+            None,
+            "skills/locked".into(),
+            hash.clone(),
+        )]),
     )
     .expect("write lock");
     let locked = adopt.scan().expect("locked scan");
@@ -1154,7 +1288,10 @@ fn plan_is_stale_after_rescan_lock_change_tree_change_or_appearance_change() {
         .expect_err("the fake provider cannot verify; the entry-level evidence still binds");
     // The lock declares the name but verification fails; the plan must not
     // silently accept a Verification Deferred as selectable.
-    assert!(matches!(error, AdoptError::Validation(_) | AdoptError::PlanStale));
+    assert!(matches!(
+        error,
+        AdoptError::Validation(_) | AdoptError::PlanStale
+    ));
     let _ = locked_candidate;
 }
 
@@ -1163,8 +1300,7 @@ fn scan_and_plan_are_proven_read_only() {
     let harness = Harness::new();
     let entity = write_skill(&harness.projects, "readonly", "# Readonly\n");
     let canonical = entity.canonicalize().expect("canonical entity");
-    std::os::unix::fs::symlink(&canonical, harness.claude().join("readonly"))
-        .expect("appearance");
+    std::os::unix::fs::symlink(&canonical, harness.claude().join("readonly")).expect("appearance");
 
     // Snapshot every observable surface.
     let catalog_before = std::fs::read(harness.home.catalog_path()).expect("catalog bytes");
@@ -1193,11 +1329,16 @@ fn scan_and_plan_are_proven_read_only() {
         catalog_before
     );
     assert_eq!(
-        harness.filesystem.tree_hash(&canonical).expect("tree hash after"),
+        harness
+            .filesystem
+            .tree_hash(&canonical)
+            .expect("tree hash after"),
         tree_before
     );
     assert_eq!(
-        std::fs::symlink_metadata(&canonical).expect("metadata after").ino(),
+        std::fs::symlink_metadata(&canonical)
+            .expect("metadata after")
+            .ino(),
         inode_before
     );
     assert_eq!(
@@ -1290,7 +1431,10 @@ fn evidence_dto_serializes_closed_states_and_keeps_source_content_verbatim() {
     };
     let json = serde_json::to_value(&report).expect("serialize report");
     assert_eq!(json["generation"], 7);
-    assert_eq!(json["candidates"][0]["canonicalEntity"], "/Users/zoe/.agents/skills/α-skill");
+    assert_eq!(
+        json["candidates"][0]["canonicalEntity"],
+        "/Users/zoe/.agents/skills/α-skill"
+    );
     assert_eq!(json["candidates"][0]["verdict"], "local");
     assert_eq!(json["candidates"][0]["reason"]["kind"], "no_lock");
     assert_eq!(json["candidates"][0]["requiresRelocation"], false);
@@ -1321,8 +1465,7 @@ fn cancelled_applyable_plan_cannot_be_applied() {
     let harness = Harness::new();
     let entity = write_skill(&harness.projects, "cancel-me", "# Cancel me\n");
     let canonical = entity.canonicalize().expect("canonical entity");
-    std::os::unix::fs::symlink(&canonical, harness.claude().join("cancel-me"))
-        .expect("appearance");
+    std::os::unix::fs::symlink(&canonical, harness.claude().join("cancel-me")).expect("appearance");
     let adopt = harness.adopt();
     let report = adopt.scan().expect("scan");
     let plan = adopt

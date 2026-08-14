@@ -77,10 +77,16 @@ pub enum AdoptVerdictReason {
     IdentityConflict { names: Vec<String> },
     /// Conflict: a Managed Skill already uses this directory identity.
     LibraryConflict { directory_name: String },
+    /// Conflict: the external installer reappeared with a lock declaration
+    /// (or canonical entity) for a name Skill Man already manages; never
+    /// an Update, never auto-taken-over (ADR-0013 §6).
+    OwnershipConflict { managed_directory_name: String },
     /// Deferred: availability facts prevented the closed loop.
     RemoteUnavailable { detail: String },
     /// Blocked: the source chain stopped at an exact hop.
-    ChainFault { fault: crate::seams::filesystem::ChainFault },
+    ChainFault {
+        fault: crate::seams::filesystem::ChainFault,
+    },
     /// Blocked: the final entity tree cannot be read completely.
     UnreadableEntity { detail: String },
     /// Excluded: fixture footprint.
@@ -185,6 +191,10 @@ pub struct AdoptSelection {
     pub agent_ids: Vec<AgentId>,
     /// Required exactly when the candidate verdict is Modified.
     pub modified_branch: Option<ModifiedBranch>,
+    /// The user-chosen stable directory outside Home/Agent/shared roots,
+    /// required for Local Link with Move and Convert-to-Link intents
+    /// (ADR-0013 §3).
+    pub target_directory: Option<PathBuf>,
 }
 
 /// The planned operation for one included candidate. This slice only
@@ -275,6 +285,7 @@ pub(super) struct PlannedEvidenceItem {
     pub intent: AdoptPlanIntent,
     pub frozen: AdoptFrozenEvidence,
     pub target_agent_ids: Vec<AgentId>,
+    pub target_directory: Option<PathBuf>,
 }
 
 impl AdoptService {
@@ -294,14 +305,9 @@ impl AdoptService {
     /// Internal scan that also returns the remote-verification workspaces
     /// (one per normalized remote, shared across the group's candidates,
     /// ADR-0013 §2.3) so callers can discard them after assembly.
-    fn scan_with_workspaces(
-        &self,
-    ) -> Result<(AdoptEvidenceReport, Vec<PathBuf>), AdoptError> {
+    fn scan_with_workspaces(&self) -> Result<(AdoptEvidenceReport, Vec<PathBuf>), AdoptError> {
         let agents = self.store.list_agents()?;
-        let lock_files = self
-            .lock_store
-            .discover()
-            .map_err(AdoptError::Lock)?;
+        let lock_files = self.lock_store.discover().map_err(AdoptError::Lock)?;
         let shared_dir = self.home_directory.join(".agents").join("skills");
         // Canonical spellings for identity comparisons: the evidence walk
         // resolves system symlinks (macOS `/var -> /private/var`), so every
@@ -371,9 +377,7 @@ impl AdoptService {
                 &mut workspaces,
             )?;
             candidate.appearances.sort_by(|left, right| {
-                left.appearance
-                    .entry_path
-                    .cmp(&right.appearance.entry_path)
+                left.appearance.entry_path.cmp(&right.appearance.entry_path)
             });
             candidates.push(candidate);
         }
@@ -417,9 +421,7 @@ impl AdoptService {
                 }) => AdoptAppearanceKind::Symlink {
                     original_target: match entry.chain.hops.first() {
                         Some(crate::seams::filesystem::EvidenceChainHop {
-                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink {
-                                target,
-                            },
+                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink { target },
                             ..
                         }) => target.clone(),
                         _ => PathBuf::new(),
@@ -431,37 +433,32 @@ impl AdoptService {
             shared,
         };
         let Some(final_entity) = entry.chain.final_entity.clone() else {
-            let fault = entry
-                .chain
-                .fault
-                .clone()
-                .unwrap_or(crate::seams::filesystem::ChainFault::ReadFailed {
+            let fault = entry.chain.fault.clone().unwrap_or(
+                crate::seams::filesystem::ChainFault::ReadFailed {
                     at: entry.entry_path.clone(),
                     detail: "the chain stopped without a fault".into(),
-                });
-            grouped
-                .entry(entry.entry_path)
-                .or_default()
-                .blocked = Some(self.blocked_candidate(&entry, &fault));
+                },
+            );
+            grouped.entry(entry.entry_path).or_default().blocked =
+                Some(self.blocked_candidate(&entry, &fault));
             return;
         };
         // Fixture footprints are visible in the ledger as Excluded (spec
         // §8.2): Fixture Recovery owns them, they never enter a selection.
         if is_fixture_entity(&final_entity) {
-            grouped
-                .entry(entry.entry_path)
-                .or_default()
-                .excluded = Some(self.excluded_candidate(&entry, &final_entity));
+            grouped.entry(entry.entry_path).or_default().excluded =
+                Some(self.excluded_candidate(&entry, &final_entity));
             return;
         }
         if final_entity.starts_with(&self.seam_canonical_root(&self.library_root)) {
             return;
         }
-        if !self.filesystem.skill_directory_is_readable(&final_entity).unwrap_or(false) {
-            grouped
-                .entry(entry.entry_path)
-                .or_default()
-                .blocked = Some(self.blocked_candidate(
+        if !self
+            .filesystem
+            .skill_directory_is_readable(&final_entity)
+            .unwrap_or(false)
+        {
+            grouped.entry(entry.entry_path).or_default().blocked = Some(self.blocked_candidate(
                 &entry,
                 &crate::seams::filesystem::ChainFault::ReadFailed {
                     at: final_entity.clone(),
@@ -492,9 +489,7 @@ impl AdoptService {
                     entry_path: entry.entry_path.clone(),
                     kind: match entry.chain.hops.first() {
                         Some(crate::seams::filesystem::EvidenceChainHop {
-                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink {
-                                target,
-                            },
+                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink { target },
                             ..
                         }) => AdoptAppearanceKind::Symlink {
                             original_target: target.clone(),
@@ -535,9 +530,7 @@ impl AdoptService {
                     entry_path: entry.entry_path.clone(),
                     kind: match entry.chain.hops.first() {
                         Some(crate::seams::filesystem::EvidenceChainHop {
-                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink {
-                                target,
-                            },
+                            kind: crate::seams::filesystem::EvidenceChainHopKind::Symlink { target },
                             ..
                         }) => AdoptAppearanceKind::Symlink {
                             original_target: target.clone(),
@@ -666,24 +659,48 @@ impl AdoptService {
 
         let conflict = self
             .store
-            .find_library_conflict(&crate::core::import::normalize_identity(directory_name).unwrap_or_default())?
+            .find_library_conflict(
+                &crate::core::import::normalize_identity(directory_name).unwrap_or_default(),
+            )?
             .filter(|found| found.final_entity_path != entity)
             .map(|found| LibraryConflict {
                 existing_skill_id: found.skill_id,
                 directory_name: found.directory_name,
             });
         if conflict.is_some() {
+            // The external installer reappeared when the managed Skill is a
+            // Remote Install governed by a live lock declaration: keep the
+            // Managed Skill and Home bytes, mark Ownership Conflict, and
+            // never misreport this as an Update (ADR-0013 §6).
+            let lock_declared = lock_files
+                .iter()
+                .filter(|report| report.fault.is_none())
+                .any(|report| {
+                    report
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == directory_name)
+                });
             return Ok(AdoptEvidenceCandidate {
                 canonical_entity: entity.to_path_buf(),
                 directory_name: directory_name.to_owned(),
                 directory_names: directory_names.to_vec(),
                 appearances,
                 verdict: AdoptVerdict::Conflict,
-                reason: Some(AdoptVerdictReason::LibraryConflict {
-                    directory_name: conflict
-                        .as_ref()
-                        .map(|found| found.directory_name.clone())
-                        .unwrap_or_default(),
+                reason: Some(if lock_declared {
+                    AdoptVerdictReason::OwnershipConflict {
+                        managed_directory_name: conflict
+                            .as_ref()
+                            .map(|found| found.directory_name.clone())
+                            .unwrap_or_default(),
+                    }
+                } else {
+                    AdoptVerdictReason::LibraryConflict {
+                        directory_name: conflict
+                            .as_ref()
+                            .map(|found| found.directory_name.clone())
+                            .unwrap_or_default(),
+                    }
                 }),
                 lock: None,
                 remote: None,
@@ -804,7 +821,9 @@ impl AdoptService {
             let other_path = valid_declarations[1].0.path.clone();
             return Ok((
                 AdoptVerdict::Conflict,
-                Some(AdoptVerdictReason::DuplicateLockOwner { other_lock_path: other_path }),
+                Some(AdoptVerdictReason::DuplicateLockOwner {
+                    other_lock_path: other_path,
+                }),
                 Some(AdoptLockEvidence {
                     lock_path: valid_declarations[0].0.path.clone(),
                     lock_fingerprint: valid_declarations[0].0.fingerprint.clone(),
@@ -858,7 +877,12 @@ impl AdoptService {
                     None,
                 ));
             }
-            return Ok((AdoptVerdict::Local, Some(AdoptVerdictReason::NoLock), None, None));
+            return Ok((
+                AdoptVerdict::Local,
+                Some(AdoptVerdictReason::NoLock),
+                None,
+                None,
+            ));
         }
         let (declaration_report, declaration) = valid_declarations[0];
         let canonical_subdirectory = installer_root.join(directory_name);
@@ -912,9 +936,7 @@ impl AdoptService {
                 let workspace = self
                     .filesystem
                     .create_temp_workspace("adopt-evidence")
-                    .map_err(|error| {
-                        AdoptError::Internal(format!("temp workspace: {error}"))
-                    })?;
+                    .map_err(|error| AdoptError::Internal(format!("temp workspace: {error}")))?;
                 workspaces.insert(request.canonical_url.clone(), workspace.clone());
                 workspace
             }
@@ -977,12 +999,7 @@ impl AdoptService {
             trees_match,
             default_branch: facts.default_branch,
         };
-        Ok((
-            verdict,
-            None,
-            Some(lock_evidence),
-            Some(remote),
-        ))
+        Ok((verdict, None, Some(lock_evidence), Some(remote)))
     }
 
     /// Generation-bound plan: freezes the scan evidence plus the explicit
@@ -995,8 +1012,7 @@ impl AdoptService {
                 .last_report
                 .lock()
                 .map_err(|_| AdoptError::Internal("Adopt report lock poisoned".into()))?;
-            last.clone()
-                .ok_or(AdoptError::PlanStale)?
+            last.clone().ok_or(AdoptError::PlanStale)?
         };
         if request.evidence_generation != report.generation {
             return Err(AdoptError::PlanStale);
@@ -1017,9 +1033,7 @@ impl AdoptService {
                     "this candidate cannot be included; its verdict is closed".into(),
                 ));
             }
-            if candidate.verdict == AdoptVerdict::Modified
-                && selection.modified_branch.is_none()
-            {
+            if candidate.verdict == AdoptVerdict::Modified && selection.modified_branch.is_none() {
                 return Err(AdoptError::Validation(
                     "a Modified candidate requires an explicit three-way branch choice".into(),
                 ));
@@ -1037,9 +1051,7 @@ impl AdoptService {
                 }
                 AdoptVerdict::Verified => AdoptPlanIntent::RemoteInstallKeepCurrent,
                 AdoptVerdict::Modified => match selection.modified_branch {
-                    Some(ModifiedBranch::KeepCurrent) => {
-                        AdoptPlanIntent::RemoteInstallKeepCurrent
-                    }
+                    Some(ModifiedBranch::KeepCurrent) => AdoptPlanIntent::RemoteInstallKeepCurrent,
                     Some(ModifiedBranch::DiscardToAnchor) => {
                         AdoptPlanIntent::RemoteInstallDiscardModified
                     }
@@ -1054,7 +1066,7 @@ impl AdoptService {
                     ));
                 }
             };
-            let applyable = matches!(intent, AdoptPlanIntent::LocalLink);
+            let (applyable, _) = intent_applyability(intent, selection.target_directory.as_deref());
             can_apply = can_apply && applyable;
             let target_agent_ids = if candidate
                 .appearances
@@ -1074,30 +1086,35 @@ impl AdoptService {
                 intent,
                 frozen: self.freeze_evidence(candidate, report.generation)?,
                 target_agent_ids,
+                target_directory: selection.target_directory.clone(),
             });
         }
         let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
         let plan_token = format!("adopt-plan-{plan_number}");
         let plan_items = items
             .iter()
-            .map(|item| AdoptPlanItem {
-                directory_name: item.candidate.directory_name.clone(),
-                canonical_entity: item.candidate.canonical_entity.clone(),
-                intent: item.intent,
-                final_entity_path: if matches!(item.intent, AdoptPlanIntent::LocalLink) {
-                    item.candidate.canonical_entity.clone()
-                } else {
-                    PathBuf::new()
-                },
-                appearances: item.candidate.appearances.clone(),
-                target_agents: agents
-                    .iter()
-                    .filter(|agent| item.target_agent_ids.contains(&agent.agent_id))
-                    .cloned()
-                    .collect(),
-                frozen: item.frozen.clone(),
-                applyable: matches!(item.intent, AdoptPlanIntent::LocalLink),
-                error: None,
+            .map(|item| {
+                let (applyable, error) =
+                    intent_applyability(item.intent, item.target_directory.as_deref());
+                AdoptPlanItem {
+                    directory_name: item.candidate.directory_name.clone(),
+                    canonical_entity: item.candidate.canonical_entity.clone(),
+                    intent: item.intent,
+                    final_entity_path: if matches!(item.intent, AdoptPlanIntent::LocalLink) {
+                        item.candidate.canonical_entity.clone()
+                    } else {
+                        PathBuf::new()
+                    },
+                    appearances: item.candidate.appearances.clone(),
+                    target_agents: agents
+                        .iter()
+                        .filter(|agent| item.target_agent_ids.contains(&agent.agent_id))
+                        .cloned()
+                        .collect(),
+                    frozen: item.frozen.clone(),
+                    applyable,
+                    error,
+                }
             })
             .collect::<Vec<_>>();
         let batch = EvidencePlannedBatch { items };
@@ -1112,11 +1129,7 @@ impl AdoptService {
         // intents keep their frozen handoff intent only.
         let mut batch_registered = false;
         if can_apply {
-            let inputs = items_for_durable_batch(
-                &request.selections,
-                &agents,
-                &batch,
-            )?;
+            let inputs = items_for_durable_batch(&request.selections, &agents, &batch)?;
             if let Some(inputs) = inputs {
                 let durable = self.build_planned_batch(&plan_token, inputs, &agents)?;
                 batch_registered = true;
@@ -1132,10 +1145,7 @@ impl AdoptService {
     }
 
     /// Read-only re-verification that the scan-time facts still hold.
-    fn verify_frozen_evidence(
-        &self,
-        candidate: &AdoptEvidenceCandidate,
-    ) -> Result<(), AdoptError> {
+    fn verify_frozen_evidence(&self, candidate: &AdoptEvidenceCandidate) -> Result<(), AdoptError> {
         for appearance in &candidate.appearances {
             let chain = self
                 .filesystem
@@ -1158,13 +1168,10 @@ impl AdoptService {
         }
         if let Some(lock) = &candidate.lock {
             if !lock.lock_fingerprint.is_empty() {
-                let reports = self
-                    .lock_store
-                    .discover()
-                    .map_err(AdoptError::Lock)?;
-                let still_matching = reports
-                    .iter()
-                    .any(|report| report.path == lock.lock_path && report.fingerprint == lock.lock_fingerprint);
+                let reports = self.lock_store.discover().map_err(AdoptError::Lock)?;
+                let still_matching = reports.iter().any(|report| {
+                    report.path == lock.lock_path && report.fingerprint == lock.lock_fingerprint
+                });
                 if !still_matching {
                     return Err(AdoptError::PlanStale);
                 }
@@ -1199,22 +1206,13 @@ impl AdoptService {
             canonical_entity: candidate.canonical_entity.clone(),
             entity_device: fingerprint.device,
             entity_inode: fingerprint.inode,
-            tree_hash: candidate
-                .local_tree_hash
-                .clone()
-                .unwrap_or_default(),
-            lock_path: candidate
-                .lock
-                .as_ref()
-                .map(|lock| lock.lock_path.clone()),
+            tree_hash: candidate.local_tree_hash.clone().unwrap_or_default(),
+            lock_path: candidate.lock.as_ref().map(|lock| lock.lock_path.clone()),
             lock_fingerprint: candidate
                 .lock
                 .as_ref()
                 .map(|lock| lock.lock_fingerprint.clone()),
-            lock_entry_name: candidate
-                .lock
-                .as_ref()
-                .map(|lock| lock.entry_name.clone()),
+            lock_entry_name: candidate.lock.as_ref().map(|lock| lock.entry_name.clone()),
             appearance_identities,
         })
     }
@@ -1222,7 +1220,10 @@ impl AdoptService {
     /// Re-check the frozen evidence of an evidence plan item before any
     /// write: the generation, the entity identity, the tree, the lock bytes
     /// and every appearance identity (spec §8.1 TOCTOU row).
-    pub(super) fn recheck_frozen_evidence(&self, frozen: &AdoptFrozenEvidence) -> Result<(), AdoptError> {
+    pub(super) fn recheck_frozen_evidence(
+        &self,
+        frozen: &AdoptFrozenEvidence,
+    ) -> Result<(), AdoptError> {
         if self.evidence_generation.load(Ordering::Relaxed) != frozen.evidence_generation {
             return Err(AdoptError::PlanStale);
         }
@@ -1253,14 +1254,12 @@ impl AdoptService {
                 return Err(AdoptError::PlanStale);
             }
         }
-        if let (Some(lock_path), Some(expected)) =
-            (&frozen.lock_path, &frozen.lock_fingerprint)
-        {
+        if let (Some(lock_path), Some(expected)) = (&frozen.lock_path, &frozen.lock_fingerprint) {
             if !expected.is_empty() {
                 let reports = self.lock_store.discover().map_err(AdoptError::Lock)?;
-                let still_matching = reports.iter().any(|report| {
-                    report.path == *lock_path && report.fingerprint == *expected
-                });
+                let still_matching = reports
+                    .iter()
+                    .any(|report| report.path == *lock_path && report.fingerprint == *expected);
                 if !still_matching {
                     return Err(AdoptError::PlanStale);
                 }
@@ -1288,7 +1287,6 @@ impl AdoptService {
             .is_some();
         Ok(evidence_removed || durable_removed)
     }
-
 }
 
 fn items_for_durable_batch(
@@ -1298,9 +1296,6 @@ fn items_for_durable_batch(
 ) -> Result<Option<Vec<super::PlanInputItem>>, AdoptError> {
     let mut inputs = Vec::with_capacity(batch.items.len());
     for item in &batch.items {
-        if !matches!(item.intent, AdoptPlanIntent::LocalLink) {
-            return Ok(None);
-        }
         let candidate = &item.candidate;
         let selection = selections
             .iter()
@@ -1324,20 +1319,131 @@ fn items_for_durable_batch(
         } else {
             Vec::new()
         };
+        let handoff = match item.intent {
+            AdoptPlanIntent::LocalLink => None,
+            _ => {
+                let (lock_path, lock_fingerprint, lock_entry, lock_entry_json) = match item.intent {
+                    AdoptPlanIntent::LocalLinkWithMove => {
+                        // No lock governs a Local Link with Move: the
+                        // journaled move is its own commit point and
+                        // nothing is ever CAS-released or restored.
+                        (PathBuf::new(), String::new(), None, String::new())
+                    }
+                    _ => {
+                        let lock = candidate.lock.as_ref().ok_or_else(|| {
+                            AdoptError::Internal(
+                                "a remote handoff intent requires lock evidence".into(),
+                            )
+                        })?;
+                        let lock_entry = lock.entry.clone().ok_or_else(|| {
+                            AdoptError::Internal(
+                                "a remote handoff intent requires the strict lock entry".into(),
+                            )
+                        })?;
+                        let lock_entry_json =
+                            serde_json::to_string(&lock_entry).map_err(|error| {
+                                AdoptError::Internal(format!(
+                                    "the lock entry cannot be frozen: {error}"
+                                ))
+                            })?;
+                        (
+                            lock.lock_path.clone(),
+                            lock.lock_fingerprint.clone(),
+                            Some(lock_entry),
+                            lock_entry_json,
+                        )
+                    }
+                };
+                Some(super::HandoffPlanInput {
+                    intent: item.intent,
+                    lock_path,
+                    lock_fingerprint,
+                    lock_entry: lock_entry.unwrap_or_else(|| {
+                        // Placeholder for Local Link with Move: never
+                        // serialized, never released, never restored.
+                        crate::seams::installer_lock_store::LockEntry {
+                            name: candidate.directory_name.clone(),
+                            source_type: String::new(),
+                            source: String::new(),
+                            source_url: String::new(),
+                            requested_ref: None,
+                            skill_path: String::new(),
+                            skill_folder_hash: String::new(),
+                            installed_at: None,
+                            updated_at: None,
+                            plugin_name: None,
+                        }
+                    }),
+                    lock_entry_json,
+                    // Convert-to-Link never creates a Binding: the journal
+                    // must not carry remote evidence (recovery and Undo
+                    // decide Home-install vs Link from it).
+                    remote: matches!(
+                        item.intent,
+                        AdoptPlanIntent::RemoteInstallKeepCurrent
+                            | AdoptPlanIntent::RemoteInstallDiscardModified
+                    )
+                    .then(|| candidate.remote.clone())
+                    .flatten(),
+                    target_directory: selection.target_directory.clone(),
+                })
+            }
+        };
         inputs.push(super::PlanInputItem {
             directory_name: candidate.directory_name.clone(),
-            kind: super::AdoptPlanKind::Link,
+            kind: match item.intent {
+                AdoptPlanIntent::LocalLink
+                | AdoptPlanIntent::LocalLinkWithMove
+                | AdoptPlanIntent::RemoteInstallConvertToLink => super::AdoptPlanKind::Link,
+                AdoptPlanIntent::RemoteInstallKeepCurrent
+                | AdoptPlanIntent::RemoteInstallDiscardModified => {
+                    super::AdoptPlanKind::RemoteInstall
+                }
+            },
             canonical_entity: candidate.canonical_entity.clone(),
-            final_entity_path: candidate.canonical_entity.clone(),
+            final_entity_path: match item.intent {
+                AdoptPlanIntent::LocalLink => candidate.canonical_entity.clone(),
+                AdoptPlanIntent::LocalLinkWithMove
+                | AdoptPlanIntent::RemoteInstallConvertToLink => {
+                    selection.target_directory.clone().unwrap_or_default()
+                }
+                AdoptPlanIntent::RemoteInstallKeepCurrent
+                | AdoptPlanIntent::RemoteInstallDiscardModified => PathBuf::new(),
+            },
             appearances: candidate
                 .appearances
                 .iter()
                 .map(|appearance| appearance.appearance.clone())
                 .collect(),
             target_agents,
+            handoff,
         });
     }
     Ok(Some(inputs))
+}
+
+/// Whether a plan intent can be applied right now: Home installs and
+/// stable Local Links always can; the two move intents require the
+/// user-chosen stable directory (ADR-0013 §3).
+fn intent_applyability(
+    intent: AdoptPlanIntent,
+    target_directory: Option<&std::path::Path>,
+) -> (bool, Option<String>) {
+    match intent {
+        AdoptPlanIntent::LocalLink
+        | AdoptPlanIntent::RemoteInstallKeepCurrent
+        | AdoptPlanIntent::RemoteInstallDiscardModified => (true, None),
+        AdoptPlanIntent::LocalLinkWithMove | AdoptPlanIntent::RemoteInstallConvertToLink => {
+            if target_directory.is_some() {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some("a stable target directory is required for this intent".into()),
+                )
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1352,9 +1458,9 @@ struct GroupedEvidence {
 /// `fixture-entities` root or its exact tree hash equals an immutable
 /// fixture fingerprint (spec §3.5).
 fn is_fixture_entity(entity: &Path) -> bool {
-    entity.components().any(|component| {
-        component.as_os_str() == "fixture-entities"
-    })
+    entity
+        .components()
+        .any(|component| component.as_os_str() == "fixture-entities")
 }
 
 fn is_fixture_tree_hash(hash: &str) -> bool {

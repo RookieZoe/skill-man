@@ -94,6 +94,10 @@ fn command_error(error: UpdateError) -> CommandFailureDto {
             PublicErrorDto::PermissionDenied
         }
         UpdateError::Source(_) => PublicErrorDto::SourceUnavailable,
+        UpdateError::FileSystem(crate::seams::filesystem::FileSystemError::RecoveryRequired {
+            ..
+        }) => PublicErrorDto::RecoveryRequired,
+        UpdateError::FileSystem(_) => PublicErrorDto::StateUnavailable,
         UpdateError::Internal(_) => PublicErrorDto::Internal,
     };
     CommandFailureDto {

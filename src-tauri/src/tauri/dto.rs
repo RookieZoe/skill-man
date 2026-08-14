@@ -1380,7 +1380,21 @@ impl From<UpdateCheckGroup> for UpdateCheckGroupDto {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheckReportDto {
     pub groups: Vec<UpdateCheckGroupDto>,
+    /// Repo-scoped failures (offline, resolution, listing).
     pub errors: Vec<String>,
+    /// Closed Remote Source Identity Conflict entries (ADR-0013 §4.3): the
+    /// parent manifest disagrees with the Catalog row, so Update for that
+    /// parent is closed. Read/Disable/Remove and other parents continue.
+    pub parent_conflicts: Vec<ParentConflictDto>,
+}
+
+/// One parent whose manifest/row mismatch closes its Update (spec §4.7:
+/// closed code plus typed params; the URL is Source Content).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentConflictDto {
+    pub remote_id: String,
+    pub canonical_url: String,
 }
 
 impl From<UpdateCheckReport> for UpdateCheckReportDto {
@@ -1392,6 +1406,14 @@ impl From<UpdateCheckReport> for UpdateCheckReportDto {
                 .map(UpdateCheckGroupDto::from)
                 .collect(),
             errors: value.errors,
+            parent_conflicts: value
+                .parent_conflicts
+                .into_iter()
+                .map(|conflict| ParentConflictDto {
+                    remote_id: conflict.remote_id,
+                    canonical_url: conflict.canonical_url,
+                })
+                .collect(),
         }
     }
 }
@@ -1546,7 +1568,11 @@ impl From<crate::core::adopt::AdoptVerdict> for AdoptVerdictDto {
 /// Closed lock-file faults (spec §8.1); reasons are raw facts, never App
 /// Copy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum LockFileFaultDto {
     NotUtf8,
     InvalidJson { detail: String },
@@ -1569,7 +1595,11 @@ impl From<crate::seams::installer_lock_store::LockFileFault> for LockFileFaultDt
 /// Closed chain-fault reasons (spec §8.1); a failure stops at the exact hop
 /// and never yields a partial fingerprint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChainFaultDto {
     Dangling { at: String },
     Cycle { at: String },
@@ -1602,19 +1632,48 @@ impl From<crate::seams::filesystem::ChainFault> for ChainFaultDto {
 /// The typed reason behind a verdict (spec §4.7): closed states, never
 /// free-form warning strings.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AdoptVerdictReasonDto {
     NoLock,
-    DuplicateLockOwner { other_lock_path: String },
-    LockFileFault { lock_path: String, fault: LockFileFaultDto },
-    LockEntryFault { lock_path: String, reason: String },
-    EntityNotAtInstallerRoot { expected: String },
-    RemoteConflict { detail: String },
-    IdentityConflict { names: Vec<String> },
-    LibraryConflict { directory_name: String },
-    RemoteUnavailable { detail: String },
-    ChainFault { fault: ChainFaultDto },
-    UnreadableEntity { detail: String },
+    DuplicateLockOwner {
+        other_lock_path: String,
+    },
+    LockFileFault {
+        lock_path: String,
+        fault: LockFileFaultDto,
+    },
+    LockEntryFault {
+        lock_path: String,
+        reason: String,
+    },
+    EntityNotAtInstallerRoot {
+        expected: String,
+    },
+    RemoteConflict {
+        detail: String,
+    },
+    IdentityConflict {
+        names: Vec<String>,
+    },
+    LibraryConflict {
+        directory_name: String,
+    },
+    OwnershipConflict {
+        managed_directory_name: String,
+    },
+    RemoteUnavailable {
+        detail: String,
+    },
+    ChainFault {
+        fault: ChainFaultDto,
+    },
+    UnreadableEntity {
+        detail: String,
+    },
     FixtureEntity,
 }
 
@@ -1640,11 +1699,16 @@ impl From<crate::core::adopt::AdoptVerdictReason> for AdoptVerdictReasonDto {
             },
             Reason::RemoteConflict { detail } => Self::RemoteConflict { detail },
             Reason::IdentityConflict { names } => Self::IdentityConflict { names },
-            Reason::LibraryConflict { directory_name } => Self::LibraryConflict {
-                directory_name,
+            Reason::LibraryConflict { directory_name } => Self::LibraryConflict { directory_name },
+            Reason::OwnershipConflict {
+                managed_directory_name,
+            } => Self::OwnershipConflict {
+                managed_directory_name,
             },
             Reason::RemoteUnavailable { detail } => Self::RemoteUnavailable { detail },
-            Reason::ChainFault { fault } => Self::ChainFault { fault: fault.into() },
+            Reason::ChainFault { fault } => Self::ChainFault {
+                fault: fault.into(),
+            },
             Reason::UnreadableEntity { detail } => Self::UnreadableEntity { detail },
             Reason::FixtureEntity => Self::FixtureEntity,
         }
@@ -1742,19 +1806,12 @@ impl From<crate::core::adopt::AdoptAppearanceEvidence> for AdoptAppearanceEviden
             crate::core::adopt::AdoptAppearanceKind::RealDirectory => None,
         };
         Self {
-            entry_path: value
-                .appearance
-                .entry_path
-                .to_string_lossy()
-                .into_owned(),
+            entry_path: value.appearance.entry_path.to_string_lossy().into_owned(),
             kind: match value.appearance.kind {
                 crate::core::adopt::AdoptAppearanceKind::RealDirectory => "real_directory".into(),
                 crate::core::adopt::AdoptAppearanceKind::Symlink { .. } => "symlink".into(),
             },
-            agent_id: value
-                .appearance
-                .agent_id
-                .map(|agent_id| agent_id.0),
+            agent_id: value.appearance.agent_id.map(|agent_id| agent_id.0),
             shared: value.appearance.shared,
             original_target,
             chain: value.chain.into(),
@@ -1883,11 +1940,7 @@ impl From<crate::core::adopt::AdoptEvidenceCandidate> for AdoptEvidenceCandidate
             canonical_entity: value.canonical_entity.to_string_lossy().into_owned(),
             directory_name: value.directory_name,
             directory_names: value.directory_names,
-            appearances: value
-                .appearances
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            appearances: value.appearances.into_iter().map(Into::into).collect(),
             verdict: value.verdict.into(),
             reason: value.reason.map(Into::into),
             lock: value.lock.map(Into::into),
@@ -1960,11 +2013,7 @@ impl From<crate::core::adopt::AdoptEvidenceReport> for AdoptEvidenceReportDto {
     fn from(value: crate::core::adopt::AdoptEvidenceReport) -> Self {
         Self {
             generation: value.generation,
-            candidates: value
-                .candidates
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            candidates: value.candidates.into_iter().map(Into::into).collect(),
             lock_files: value.lock_files.into_iter().map(Into::into).collect(),
             truncated: value.truncated,
         }
@@ -2007,6 +2056,9 @@ pub struct AdoptSelectionDto {
     pub canonical_entity: String,
     pub agent_ids: Vec<String>,
     pub modified_branch: Option<ModifiedBranchDto>,
+    /// The user-chosen stable directory for move intents (spec §8.2,
+    /// ADR-0013 §3); `None` for Home installs and stable Links.
+    pub target_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

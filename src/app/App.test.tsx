@@ -1806,6 +1806,7 @@ test("Modified Install update offers only abandon-and-update or cancel", async (
       },
     ],
     errors: [],
+    parentConflicts: [],
   });
   client.planSkillUpdates = async () => ({
     items: [

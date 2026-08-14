@@ -376,6 +376,100 @@ pub struct AdoptJournal {
     pub items: Vec<AdoptJournalItem>,
 }
 
+/// The durable parent manifest (`<Home>/remotes/<remote-id>/source.json`,
+/// ADR-0013 §4.1): repository identity only, never checkout, credentials,
+/// the whole lock or per-Skill versions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteParentManifest {
+    pub schema_version: u32,
+    pub remote_id: String,
+    pub canonical_url: String,
+    pub aliases: Vec<String>,
+    pub created_at: String,
+}
+
+/// Ownership Handoff per-Skill phases (spec §8.4, ADR-0013 §5): the exact
+/// lock-entry CAS is the logical commit point. Recovery direction is
+/// decided by this phase: below `OwnershipReleased` rolls back in place,
+/// at or above it rolls forward under the recovery gate.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffItemPhase {
+    Planned,
+    Staged,
+    SourceIsolated,
+    OwnershipReleased,
+    ManagedCommitted,
+    Finalized,
+}
+
+/// The frozen remote facts a handoff journal needs to roll forward without
+/// any network access (spec §8.4 step 5: post-CAS recovery never re-fetches).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffRemoteJournal {
+    pub canonical_url: String,
+    pub requested_ref: String,
+    pub verification_anchor_commit: String,
+    pub original_commit_known: bool,
+    pub skill_path: String,
+    pub provider_hash: Option<String>,
+    pub remote_baseline_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HandoffJournalItem {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    /// The external canonical entity (the installer's directory).
+    pub canonical_entity: PathBuf,
+    /// The same-parent hidden operation path after Source Isolated; the
+    /// short-term Undo isolation copy until the window closes or restarts.
+    pub isolated_path: Option<PathBuf>,
+    /// The staged tree (current bytes or the explicit Verification Anchor
+    /// tree); `None` for Convert-to-Link (the tree moves, never stages).
+    pub staged_root: PathBuf,
+    pub staged_fingerprint: Option<DirectoryFingerprint>,
+    pub final_entity_path: PathBuf,
+    /// The frozen local tree hash (spec §8.1 TOCTOU baseline).
+    pub source_tree_hash: String,
+    /// The staged tree hash once Staged; `None` before staging.
+    pub staged_tree_hash: Option<String>,
+    pub lock_path: PathBuf,
+    pub lock_fingerprint: String,
+    pub lock_entry_name: String,
+    /// The exact frozen lock entry (canonical JSON); the CAS writer
+    /// re-compares it against the live file.
+    pub lock_entry_json: String,
+    /// The resolved parent id once the catalog commit runs; `None` until
+    /// then and for Link intents. Undo uses it for last-child cleanup.
+    #[serde(default)]
+    pub remote_id: Option<String>,
+    pub remote: Option<HandoffRemoteJournal>,
+    pub current_baseline_hash: String,
+    pub appearances: Vec<AdoptAppearanceStep>,
+    pub activations: Vec<AdoptActivationStep>,
+    /// The user-chosen stable directory for Convert-to-Link and
+    /// Local-Link-with-Move; `None` for Home installs.
+    pub target_directory: Option<PathBuf>,
+    pub phase: HandoffItemPhase,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HandoffJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub staging_operation_root: PathBuf,
+    pub staging_fingerprint: DirectoryFingerprint,
+    pub items: Vec<HandoffJournalItem>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkSourceEntryKind {
     Directory,
@@ -1380,6 +1474,237 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "directory removal is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Atomically write the parent manifest `source.json` (temp → fsync →
+    /// rename → parent fsync, spec §3.2 protocol; ADR-0013 §4.1). The
+    /// remotes root is `<Home>/remotes`; the remote-id directory is
+    /// created when absent.
+    fn write_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        manifest: &RemoteParentManifest,
+    ) -> Result<(), FileSystemError> {
+        let _ = (remotes_root, manifest);
+        Err(FileSystemError::Io {
+            operation: "write remote parent manifest",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "remote parent manifests are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Read the parent manifest; `Ok(None)` when the manifest does not
+    /// exist (parent integrity check, ADR-0013 §4.3).
+    fn read_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        remote_id: &str,
+    ) -> Result<Option<RemoteParentManifest>, FileSystemError> {
+        let _ = (remotes_root, remote_id);
+        Err(FileSystemError::Io {
+            operation: "read remote parent manifest",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "remote parent manifests are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Remove an empty parent's manifest directory after its last child
+    /// Binding was removed (ADR-0013 §4.2). Bounded: the directory must be
+    /// `<remotes_root>/<remote-id>` and may only contain `source.json`.
+    fn remove_remote_parent_manifest(
+        &self,
+        remotes_root: &Path,
+        remote_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (remotes_root, remote_id);
+        Err(FileSystemError::Io {
+            operation: "remove remote parent manifest",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "remote parent manifests are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Ownership Handoff step 3: atomically rename the external canonical
+    /// directory to a same-parent hidden operation path, freezing the
+    /// external source. Returns the hidden path. Any pre-CAS failure
+    /// restores it with `restore_isolated_source`.
+    fn isolate_external_source(
+        &self,
+        source: &Path,
+        operation_id: &str,
+    ) -> Result<PathBuf, FileSystemError> {
+        let _ = (source, operation_id);
+        Err(FileSystemError::Io {
+            operation: "isolate external source",
+            path: source.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source isolation is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Reverse of `isolate_external_source`: rename the hidden operation
+    /// path back to the canonical location, which must be absent. The
+    /// isolated tree must still match `expected_tree_hash`.
+    fn restore_isolated_source(
+        &self,
+        isolated: &Path,
+        source: &Path,
+        expected_tree_hash: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (isolated, source, expected_tree_hash);
+        Err(FileSystemError::Io {
+            operation: "restore isolated source",
+            path: isolated.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source isolation is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Delete the hidden isolation copy (post-CAS roll-forward cleanup or
+    /// Undo-after-restore). Bounded to the operation-name pattern.
+    fn discard_isolated_source(&self, isolated: &Path) -> Result<(), FileSystemError> {
+        let _ = isolated;
+        Err(FileSystemError::Io {
+            operation: "discard isolated source",
+            path: isolated.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source isolation is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Persist the handoff journal before the first filesystem step;
+    /// progress is re-written after every item phase transition.
+    fn write_handoff_journal(
+        &self,
+        library_root: &Path,
+        journal: &HandoffJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, journal);
+        Err(FileSystemError::Io {
+            operation: "write handoff journal",
+            path: PathBuf::from(&journal.operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Archive a completed handoff journal and remove its operation
+    /// directory (window close, Undo or startup recovery completion).
+    fn finish_handoff_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, operation_id);
+        Err(FileSystemError::Io {
+            operation: "finish handoff journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Every pending handoff journal (one per operation root), for the
+    /// startup recovery gate (spec §8.4: CAS-before journals roll back,
+    /// CAS-after journals roll forward).
+    fn list_handoff_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<HandoffJournal>, FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "list handoff journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Post-CAS roll-forward, filesystem side: publish the staged Home
+    /// entity (idempotent when the final entity already matches), flatten
+    /// the real Agent appearances into Activations, discard the staging
+    /// tree and the isolation copy (the result window is closed by a
+    /// restart), and mark the item Finalized.
+    fn roll_forward_handoff_item(
+        &self,
+        library_root: &Path,
+        journal: &HandoffJournal,
+        item: &mut HandoffJournalItem,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, journal, item);
+        Err(FileSystemError::Io {
+            operation: "roll forward handoff item",
+            path: journal.staging_operation_root.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Pre-CAS rollback: restore the external canonical directory from the
+    /// isolation copy when it was isolated (the tree must still match the
+    /// frozen source hash), discard the staged tree, and mark the item
+    /// Planned again. Catalog and lock were never touched.
+    fn rollback_handoff_item(
+        &self,
+        library_root: &Path,
+        item: &mut HandoffJournalItem,
+    ) -> Result<(), FileSystemError> {
+        let canonical = item.canonical_entity.clone();
+        let _ = (library_root, item);
+        Err(FileSystemError::Io {
+            operation: "rollback handoff item",
+            path: canonical,
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Whether the lock file still carries `entry_name`, resolved from the
+    /// strict v3 parse. Startup recovery uses this to decide the direction
+    /// of an item interrupted between the exact-entry CAS and the durable
+    /// journal phase write (spec §8.4: the CAS is the commit point, so an
+    /// already-released entry must roll forward, never back). `Ok(false)`
+    /// when the lock file is absent or the entry is gone; a faulted file
+    /// fails closed.
+    fn lock_entry_present(
+        &self,
+        lock_path: &Path,
+        entry_name: &str,
+    ) -> Result<bool, FileSystemError> {
+        let _ = (lock_path, entry_name);
+        Err(FileSystemError::Io {
+            operation: "probe installer lock entry",
+            path: lock_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "lock entry probing is not supported by this filesystem",
             ),
         })
     }

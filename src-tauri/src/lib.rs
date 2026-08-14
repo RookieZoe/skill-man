@@ -19,12 +19,12 @@ pub fn run() {
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::remote_provider::SystemRemoteProvider;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
-    use crate::adapters::system_installer_lock_store::SystemInstallerLockStore;
     use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
     };
     use crate::adapters::system_clock::SystemClock;
+    use crate::adapters::system_installer_lock_store::SystemInstallerLockStore;
     use crate::adapters::system_locale::MacOsSystemLocaleSource;
     use crate::adapters::tauri_app_updater::TauriAppUpdater;
     use crate::adapters::volume_identity::MacOsVolumeIdentitySource;

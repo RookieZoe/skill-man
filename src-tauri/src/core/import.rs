@@ -252,7 +252,7 @@ impl ReinstallBaseline {
                     && left.recorded_content_hash == right.recorded_content_hash
                     && left.source_url == right.source_url
                     && left.requested_ref == right.requested_ref
-                    && left.resolved_commit == right.resolved_commit
+                    && left.verification_anchor_commit == right.verification_anchor_commit
                     && left.skill_path == right.skill_path
             }
             _ => false,
@@ -890,18 +890,18 @@ impl ImportService {
             )));
         }
         let snapshot_version = if batch.commit_remotes {
-            let records = batch
-                .items
-                .iter()
-                .map(|item| {
-                    remote_record_from_plan(
-                        item,
-                        item.remote
-                            .as_ref()
-                            .expect("git Import batch items carry a remote record"),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut records = Vec::with_capacity(batch.items.len());
+            for item in &batch.items {
+                let remote = item
+                    .remote
+                    .as_ref()
+                    .expect("git Import batch items carry a remote record");
+                let canonical =
+                    crate::adapters::remote_provider::normalize_catalog_url(&remote.repo_url)
+                        .unwrap_or_else(|_| remote.repo_url.clone());
+                let remote_id = self.remote_id_for(&canonical)?;
+                records.push(remote_record_from_plan(item, remote, remote_id, true, None));
+            }
             match self.store.insert_remotes(records) {
                 Ok(version) => version,
                 Err(error) => {
@@ -1598,13 +1598,36 @@ impl ImportService {
         }
         let record = file_record_from_plan(&plan);
         let catalog_result = match (&plan.reinstall, &plan.remote) {
-            (Some(_), Some(remote)) => self
-                .store
-                .update_remote_install(remote_record_from_plan(&plan, remote)),
+            (Some(_), Some(remote)) => {
+                let (remote_id, original_commit_known, provider_hash) = match &plan.reinstall {
+                    Some(PlannedFileReinstall {
+                        existing_record: ReinstallBaseline::Remote(existing),
+                        ..
+                    }) => (
+                        existing.remote_id.clone(),
+                        existing.original_commit_known,
+                        existing.provider_hash.clone(),
+                    ),
+                    _ => (String::new(), false, None),
+                };
+                self.store.update_remote_install(remote_record_from_plan(
+                    &plan,
+                    remote,
+                    remote_id,
+                    original_commit_known,
+                    provider_hash,
+                ))
+            }
             (Some(_), None) => self.store.replace_file(record),
-            (None, Some(remote)) => self
-                .store
-                .insert_remotes(vec![remote_record_from_plan(&plan, remote)]),
+            (None, Some(remote)) => {
+                let canonical =
+                    crate::adapters::remote_provider::normalize_catalog_url(&remote.repo_url)
+                        .unwrap_or_else(|_| remote.repo_url.clone());
+                let remote_id = self.remote_id_for(&canonical)?;
+                self.store.insert_remotes(vec![remote_record_from_plan(
+                    &plan, remote, remote_id, true, None,
+                )])
+            }
             (None, None) => self.store.insert_file(record),
         };
         let snapshot_version = match catalog_result {
@@ -2290,6 +2313,22 @@ impl ImportService {
         Ok(git_mirror_path(&cache_root, &spec.url))
     }
 
+    /// Resolve the parent id for a canonical URL: reuse the existing
+    /// parent (ADR-0013 §4.2), otherwise mint a fresh UUID v4 from the OS
+    /// entropy seam, shaped like the Home identity ids.
+    fn remote_id_for(&self, canonical_url: &str) -> Result<String, ImportError> {
+        if let Some(parent) = self.store.find_remote_parent_by_url(canonical_url)? {
+            return Ok(parent.remote_id);
+        }
+        let mut bytes = [0u8; 16];
+        if self.filesystem.read_entropy(&mut bytes).is_err() {
+            let nanos = self.clock.unix_epoch_nanos() as u64;
+            bytes[..8].copy_from_slice(&nanos.to_be_bytes());
+            bytes[8..].copy_from_slice(&(nanos ^ 0x9e37_79b9_7f4a_7c15).to_be_bytes());
+        }
+        Ok(crate::seams::clock::uuid_v4_shape(&mut bytes))
+    }
+
     fn discover_git_candidates(
         &self,
         spec: &GitSourceSpec,
@@ -2543,7 +2582,11 @@ fn file_record_from_plan(plan: &PlannedFileImport) -> FileImportRecord {
 fn remote_record_from_plan(
     plan: &PlannedFileImport,
     remote: &PlannedRemoteImport,
+    remote_id: String,
+    original_commit_known: bool,
+    provider_hash: Option<String>,
 ) -> RemoteImportRecord {
+    let content_hash = plan.tree_snapshot.content_hash.clone();
     RemoteImportRecord {
         skill_id: plan.skill_id.clone(),
         directory_name: plan.candidate.directory_name.clone(),
@@ -2552,11 +2595,22 @@ fn remote_record_from_plan(
         description: plan.candidate.description.clone(),
         library_entry_path: plan.final_entity_path.clone(),
         final_entity_path: plan.final_entity_path.clone(),
-        recorded_content_hash: plan.tree_snapshot.content_hash.clone(),
-        source_url: remote.repo_url.clone(),
+        recorded_content_hash: content_hash.clone(),
+        remote_id,
+        // The recorded URL is the canonical repository identity when it
+        // normalizes; user-authored import URLs that cannot normalize
+        // (http, shorthand) keep their exact spelling so the mirror path
+        // and the fetch stay stable (spec §3.4 normalization applies to
+        // lock-derived and migrated rows).
+        source_url: crate::adapters::remote_provider::normalize_catalog_url(&remote.repo_url)
+            .unwrap_or_else(|_| remote.repo_url.clone()),
         requested_ref: remote.requested_ref.clone(),
-        resolved_commit: remote.resolved_commit.clone(),
+        verification_anchor_commit: remote.resolved_commit.clone(),
+        original_commit_known,
         skill_path: remote.skill_path.clone(),
+        provider_hash,
+        remote_baseline_hash: content_hash.clone(),
+        current_baseline_hash: content_hash,
     }
 }
 
