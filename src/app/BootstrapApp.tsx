@@ -7,12 +7,14 @@ import type {
 } from "./catalog-client";
 import { App } from "./App";
 import { RecoveryView } from "../features/recovery/RecoveryView";
+import { HomeBindingView, type HomePicker } from "../features/home/HomeBindingView";
 import { LocaleProvider } from "../features/locale/LocaleProvider";
 import { LanguageControl } from "../features/locale/LanguageControl";
 import { useLocale } from "../features/locale/LocaleProvider";
 
 export interface BootstrapAppProps {
   client: CatalogClient;
+  pickDirectory?: HomePicker;
 }
 
 /**
@@ -21,7 +23,7 @@ export interface BootstrapAppProps {
  * Desk; every closed variant renders its own accessible route — the app never
  * guesses state or falls back to fixture data.
  */
-export function BootstrapApp({ client }: BootstrapAppProps) {
+export function BootstrapApp({ client, pickDirectory }: BootstrapAppProps) {
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -57,6 +59,8 @@ export function BootstrapApp({ client }: BootstrapAppProps) {
         snapshot={snapshot}
         loadFailed={loadFailed}
         onRetry={refresh}
+        onSnapshot={setSnapshot}
+        pickDirectory={pickDirectory}
       />
     </LocaleProvider>
   );
@@ -67,11 +71,15 @@ function BootstrapRoutes({
   snapshot,
   loadFailed,
   onRetry,
+  onSnapshot,
+  pickDirectory,
 }: {
   client: CatalogClient;
   snapshot: BootstrapSnapshot | null;
   loadFailed: boolean;
   onRetry: () => void;
+  onSnapshot: (snapshot: BootstrapSnapshot) => void;
+  pickDirectory?: HomePicker;
 }) {
   const { t } = useLocale();
 
@@ -101,27 +109,31 @@ function BootstrapRoutes({
       return <App client={client} />;
     case "unconfigured":
       return (
-        <BootstrapRoute
-          title={t("bootstrap.route.unconfigured_title")}
-          summary={t("bootstrap.route.unconfigured_summary")}
+        <HomeBindingView
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+          pickDirectory={pickDirectory}
         />
       );
     case "legacy_detected":
       return (
-        <BootstrapRoute
-          title={t("bootstrap.route.legacy_title")}
-          summary={t("bootstrap.route.legacy_summary", { path: snapshot.path })}
+        <HomeBindingView
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+          pickDirectory={pickDirectory}
         />
       );
     case "fixture_recovery_locked":
       return <RecoveryView client={client} />;
     case "home_candidate_pending":
       return (
-        <BootstrapRoute
-          title={t("bootstrap.route.candidate_title")}
-          summary={t("bootstrap.route.candidate_summary", {
-            path: snapshot.path,
-          })}
+        <HomeBindingView
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+          pickDirectory={pickDirectory}
         />
       );
     case "home_unavailable":

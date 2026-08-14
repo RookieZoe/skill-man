@@ -150,6 +150,16 @@ export function errorMessageKey(code: string): MessageKey {
     case "recovery_filesystem":
     case "recovery_probe":
       return "error.recovery";
+    case "candidate_invalid":
+      return "error.candidate_invalid";
+    case "binding_step_failed":
+      return "error.binding_step_failed";
+    case "binding_state_ambiguous":
+      return "error.binding_state_ambiguous";
+    case "binding_not_cancellable":
+      return "error.binding_not_cancellable";
+    case "binding_migration_failed":
+      return "error.binding_migration_failed";
     default:
       return "error.internal";
   }

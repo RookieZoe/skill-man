@@ -27,6 +27,7 @@ serde_json = "1.0.149"
 sha2 = "0.10.9"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
+tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2.10.1"
 thiserror = "2.0.17"
 unicode-casefold = "0.2"

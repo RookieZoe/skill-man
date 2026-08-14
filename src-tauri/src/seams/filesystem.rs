@@ -1193,4 +1193,106 @@ pub trait FileSystem: Send + Sync {
             ),
         })
     }
+
+    /// Create `path` as a directory when it does not exist (parents
+    /// included); when it already exists it must be a real directory.
+    /// Home Binding uses this to build the standard layout inside a fresh
+    /// candidate and to fill legacy layout gaps without ever treating an
+    /// existing file as a directory.
+    fn ensure_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "ensure directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory creation is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// `Ok(true)` when no component of `path` that currently exists is a
+    /// symlink (the final component included); components that do not exist
+    /// yet cannot be symlinks and are skipped. Home Candidate validation
+    /// refuses any path whose resolved components could change identity.
+    fn path_has_no_symlink_component(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "inspect path components for symlinks",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlink component inspection is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// `Ok(true)` when the directory exists and the current user may create
+    /// entries in it (Home Candidate validation checks the parent before a
+    /// confirmation could create a new Home there).
+    fn path_is_writable(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "inspect directory writability",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "writability inspection is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Copy one whole tree to a new destination: directories, regular files
+    /// and symlinks (symlinks are recreated as symlinks, never followed),
+    /// with per-entry TOCTOU verification and cleanup of the partial copy
+    /// on failure. The destination must not exist or must be an empty
+    /// directory (the empty directory is removed first). Home Binding's
+    /// Legacy copy transition relies on this for the SQLite+WAL+SHM
+    /// consistent set plus every other Home entry.
+    fn copy_tree_verified(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), FileSystemError> {
+        let _ = (source, destination);
+        Err(FileSystemError::Io {
+            operation: "copy tree",
+            path: source.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "tree copy is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Total bytes of every regular file in the tree (symlink targets are
+    /// not followed; their link text counts). Used to preflight the Legacy
+    /// copy destination's free space.
+    fn tree_size(&self, path: &Path) -> Result<u64, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "measure tree size",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "tree size measurement is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Remove a directory tree. Home Binding calls this only after the
+    /// caller has proven the directory is an operation-created candidate
+    /// (ledger identity plus pure-layout contents); the capability is
+    /// deliberately narrow so no other module can delete arbitrary trees.
+    fn remove_directory_verified(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "remove candidate directory",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "directory removal is not supported by this filesystem",
+            ),
+        })
+    }
 }

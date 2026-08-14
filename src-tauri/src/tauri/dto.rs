@@ -1948,6 +1948,17 @@ pub enum PublicErrorDto {
     RecoveryStateStore,
     RecoveryFilesystem,
     RecoveryProbe,
+    CandidateInvalid {
+        /// Closed `snake_case` candidate-validation reason (spec §5.3);
+        /// presentation maps it to a message key, never to free text.
+        reason: String,
+    },
+    BindingStepFailed {
+        cursor: String,
+    },
+    BindingStateAmbiguous,
+    BindingNotCancellable,
+    BindingMigrationFailed,
     LocaleStoreUnavailable,
     Internal,
 }
@@ -2116,6 +2127,49 @@ pub struct DeleteSnapshotPreviewDto {
     pub path: String,
     pub file_count: u64,
     pub total_bytes: u64,
+}
+
+// -- Home Binding (spec §4.2, §5.3–§5.4) --
+
+/// Which one-time transition a prepared candidate carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateModeDto {
+    Fresh,
+    LegacyInPlace,
+    LegacyCopy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareHomeRequestDto {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmHomeRequestDto {
+    pub candidate_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateOperationRequestDto {
+    pub operation_id: String,
+}
+
+/// A validated, not-yet-confirmed Home candidate: the token `confirm_home`
+/// binds to this path and mode, plus the typed facts React renders.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeCandidateDto {
+    pub path: String,
+    pub token: String,
+    pub mode: CandidateModeDto,
+    pub volume_fsid: String,
+    pub volume_uuid: String,
+    pub available_bytes: u64,
+    pub legacy_source: Option<String>,
 }
 
 impl From<StartupInfo> for StartupInfoDto {

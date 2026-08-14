@@ -19,7 +19,9 @@ pub fn run() {
     use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
-    use crate::adapters::sqlite::{SqliteCatalogStore, SqlitePreparedCatalogFactory};
+    use crate::adapters::sqlite::{
+        SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
+    };
     use crate::adapters::system_clock::SystemClock;
     use crate::adapters::system_locale::MacOsSystemLocaleSource;
     use crate::adapters::tauri_app_updater::TauriAppUpdater;
@@ -32,6 +34,7 @@ pub fn run() {
     };
     use crate::core::catalog::CatalogService;
     use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
+    use crate::core::home_binding::{HomeBindingConfig, HomeBindingService};
     use crate::core::import::ImportService;
     use crate::core::locale::LocaleService;
     use crate::core::maintenance::MaintenanceService;
@@ -56,9 +59,11 @@ pub fn run() {
         apply_fixture_recovery, apply_git_import_selection, apply_link_import, apply_relocate_link,
         apply_remove_skill, apply_skill_updates, cancel_activation, cancel_activation_replace,
         cancel_adopt, cancel_app_update, cancel_file_import, cancel_git_import_selection,
-        cancel_link_import, cancel_relocate_link, cancel_remove_skill, check_app_update,
+        cancel_candidate, cancel_link_import, cancel_relocate_link, cancel_remove_skill,
+        check_app_update,
         check_skill_updates, complete_onboarding, confirm_fixture_recovery_result,
-        create_agent_directory, discover_file_import, discover_file_import_collection,
+        confirm_home, continue_candidate, create_agent_directory, discover_file_import,
+        discover_file_import_collection,
         discover_git_import, discover_link_import, download_app_update,
         finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot,
         get_fixture_recovery_preview, get_locale_snapshot, inspect_skill, install_app_update,
@@ -66,11 +71,12 @@ pub fn run() {
         plan_activation, plan_activation_repair, plan_activation_replace, plan_adopt,
         plan_delete_safety_snapshot, plan_file_import, plan_file_import_selection,
         plan_file_reinstall, plan_fixture_recovery, plan_git_import_selection, plan_link_import,
-        plan_remove_skill, plan_skill_updates, refresh_system_languages, relocate_link,
+        plan_remove_skill, plan_skill_updates, prepare_home, refresh_system_languages, relocate_link,
         run_activation_health_check, scan_adopt, set_locale_selection, startup_info,
         undo_activation_replace, undo_adopt, update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
+    use crate::tauri_adapter::home_binding_api::HomeBindingApi;
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::import_api::ImportApi;
     use crate::tauri_adapter::lifecycle::{hide_main_window, show_main_window};
@@ -84,6 +90,7 @@ pub fn run() {
 
     let app = ::tauri::Builder::default()
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
@@ -134,6 +141,32 @@ pub fn run() {
                     state_dir: state_dir.clone(),
                     default_home_path: default_home_path.clone(),
                     catalog_file_name: catalog_file_name.clone(),
+                },
+            ));
+            // The one-time Home Binding flow (spec §5.3–§5.4): candidates
+            // may not overlap the known Agent skills roots (ADR-0012 §3).
+            let home_binding_service = Arc::new(HomeBindingService::new(
+                app_state.clone(),
+                Arc::new(MacOsVolumeIdentitySource::new()),
+                catalog_probe.clone(),
+                filesystem.clone(),
+                Arc::new(SystemFixtureClassifier::new(
+                    catalog_probe.clone(),
+                    filesystem.clone(),
+                    catalog_file_name.clone(),
+                )),
+                Arc::new(SqliteLegacyCatalogMigrator),
+                Arc::new(SqlitePreparedCatalogFactory),
+                bootstrap.clone(),
+                HomeBindingConfig {
+                    state_dir: state_dir.clone(),
+                    default_home_path: default_home_path.clone(),
+                    catalog_file_name: catalog_file_name.clone(),
+                    agent_skill_dirs: vec![
+                        home_directory.join(".claude/skills"),
+                        home_directory.join(".codex/skills"),
+                        home_directory.join("Library/Application Support/workbench/skills"),
+                    ],
                 },
             ));
 
@@ -243,6 +276,14 @@ pub fn run() {
                 // A second BootstrapApi instance over the same service and
                 // gate; used only to publish `bootstrap://changed` after a
                 // recovery commit transitions the top-level route.
+                Arc::new(BootstrapApi::new(
+                    bootstrap.clone(),
+                    write_gate.clone(),
+                    Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
+                )),
+            ));
+            app.manage(HomeBindingApi::new(
+                home_binding_service,
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
                     write_gate.clone(),
@@ -379,6 +420,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
+            prepare_home,
+            confirm_home,
+            continue_candidate,
+            cancel_candidate,
             get_bootstrap_snapshot,
             get_locale_snapshot,
             set_locale_selection,

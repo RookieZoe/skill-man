@@ -15,6 +15,7 @@ use crate::tauri_adapter::dto::{
     ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto,
     ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto, BootstrapSnapshotDto,
     CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
+    CandidateOperationRequestDto, ConfirmHomeRequestDto,
     CancelAppUpdateRequestDto, CancelFileImportRequestDto, CancelGitImportSelectionRequestDto,
     CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
     CancelledAppUpdateDto, CatalogListDto, CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto,
@@ -26,13 +27,14 @@ use crate::tauri_adapter::dto::{
     FileImportResultDto, FileImportSelectionPreviewDto, FileImportSelectionResultDto,
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
     FixtureRecoveryPreviewDto, GitImportDiscoveryDto, GitImportSelectionPreviewDto,
-    GitImportSelectionResultDto, InstallAppUpdateRequestDto, LinkImportCandidateDto,
+    GitImportSelectionResultDto, HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto,
     LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto,
     PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto,
     PlanActivationRequestDto, PlanAdoptRequestDto, PlanFileImportRequestDto,
     PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto,
     PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto, PlanRemoveSkillRequestDto,
-    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, PreferencesWarningDto, RecoveryResultDto,
+    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, PreferencesWarningDto, PrepareHomeRequestDto,
+    RecoveryResultDto,
     RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
     RemoveSkillResultDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
     StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto,
@@ -40,11 +42,44 @@ use crate::tauri_adapter::dto::{
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::health_api::HealthApi;
+use crate::tauri_adapter::home_binding_api::HomeBindingApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::locale_api::LocaleApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
+
+#[tauri::command]
+pub fn prepare_home(
+    state: State<'_, HomeBindingApi>,
+    request: PrepareHomeRequestDto,
+) -> Result<HomeCandidateDto, CommandFailureDto> {
+    state.prepare_home(request)
+}
+
+#[tauri::command]
+pub fn confirm_home(
+    state: State<'_, HomeBindingApi>,
+    request: ConfirmHomeRequestDto,
+) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+    state.confirm_home(request)
+}
+
+#[tauri::command]
+pub fn continue_candidate(
+    state: State<'_, HomeBindingApi>,
+    request: CandidateOperationRequestDto,
+) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+    state.continue_candidate(request)
+}
+
+#[tauri::command]
+pub fn cancel_candidate(
+    state: State<'_, HomeBindingApi>,
+    request: CandidateOperationRequestDto,
+) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+    state.cancel_candidate(request)
+}
 
 #[tauri::command]
 pub fn get_bootstrap_snapshot(

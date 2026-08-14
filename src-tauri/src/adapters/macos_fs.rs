@@ -822,6 +822,190 @@ impl FileSystem for MacOsFileSystem {
         tree_hash_at_excluding(path, excluded)
     }
 
+    fn ensure_directory(&self, path: &Path) -> Result<(), FileSystemError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(FileSystemError::NotDirectory {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(path).map_err(|source| FileSystemError::Io {
+                    operation: "ensure directory",
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+            Err(source) => Err(FileSystemError::Io {
+                operation: "ensure directory",
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn path_has_no_symlink_component(&self, path: &Path) -> Result<bool, FileSystemError> {
+        // Check the raw path (home-expanded but not canonicalized):
+        // normalization resolves existing ancestors and would erase the
+        // symlink facts this probe exists to find.
+        let expanded = self.expand_home(path);
+        let mut current = PathBuf::new();
+        let mut depth = 0_u32;
+        for component in expanded.components() {
+            match component {
+                std::path::Component::RootDir => {
+                    current.push("/");
+                    depth = 0;
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    // A normalized absolute candidate never contains `..`;
+                    // treat it as an unresolvable path, never a valid one.
+                    return Ok(false);
+                }
+                std::path::Component::Prefix(_) => return Ok(false),
+                std::path::Component::Normal(name) => {
+                    current.push(name);
+                    depth += 1;
+                    match fs::symlink_metadata(&current) {
+                        Ok(metadata) => {
+                            // Direct children of the root (`/var`, `/tmp`,
+                            // `/etc`, …) are stable system-level symlinks on
+                            // macOS; user-controlled components start at
+                            // depth 2 and any symlink there is refused.
+                            if depth > 1 && metadata.file_type().is_symlink() {
+                                return Ok(false);
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(source) => {
+                            return Err(FileSystemError::Io {
+                                operation: "inspect path components for symlinks",
+                                path: current,
+                                source,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn path_is_writable(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|source| {
+            FileSystemError::Io {
+                operation: "encode path for writability probe",
+                path: path.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+            }
+        })?;
+        // SAFETY: `encoded` is NUL-terminated; access() never retains it.
+        let result = unsafe { libc::access(encoded.as_ptr(), libc::W_OK) };
+        Ok(result == 0)
+    }
+
+    fn copy_tree_verified(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), FileSystemError> {
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(FileSystemError::NotDirectory {
+                        path: destination.to_path_buf(),
+                    });
+                }
+                let mut entries = fs::read_dir(destination).map_err(|source_error| {
+                    FileSystemError::Io {
+                        operation: "inspect copy destination",
+                        path: destination.to_path_buf(),
+                        source: source_error,
+                    }
+                })?;
+                if entries.next().is_some() {
+                    return Err(FileSystemError::Io {
+                        operation: "copy tree",
+                        path: destination.to_path_buf(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "the copy destination is not empty",
+                        ),
+                    });
+                }
+                fs::remove_dir(destination).map_err(|source_error| FileSystemError::Io {
+                    operation: "clear empty copy destination",
+                    path: destination.to_path_buf(),
+                    source: source_error,
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "inspect copy destination",
+                    path: destination.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        copy_directory_verified(source, destination)
+    }
+
+    fn tree_size(&self, path: &Path) -> Result<u64, FileSystemError> {
+        let mut total = 0_u64;
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let entries = fs::read_dir(&current).map_err(|source| FileSystemError::Io {
+                operation: "measure tree size",
+                path: current.clone(),
+                source,
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|source| FileSystemError::Io {
+                    operation: "measure tree size",
+                    path: current.clone(),
+                    source,
+                })?;
+                let metadata =
+                    fs::symlink_metadata(entry.path()).map_err(|source| FileSystemError::Io {
+                        operation: "measure tree size",
+                        path: entry.path(),
+                        source,
+                    })?;
+                if metadata.file_type().is_symlink() {
+                    total = total.saturating_add(metadata.len());
+                } else if metadata.is_dir() {
+                    stack.push(entry.path());
+                } else if metadata.is_file() {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    fn remove_directory_verified(&self, path: &Path) -> Result<(), FileSystemError> {
+        let metadata = fs::symlink_metadata(path).map_err(|source| FileSystemError::Io {
+            operation: "remove candidate directory",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(FileSystemError::NotDirectory {
+                path: path.to_path_buf(),
+            });
+        }
+        fs::remove_dir_all(path).map_err(|source| FileSystemError::Io {
+            operation: "remove candidate directory",
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
         tree_hash_at(path)
     }

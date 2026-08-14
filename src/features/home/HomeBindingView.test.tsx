@@ -1,0 +1,231 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, test, vi } from "vitest";
+
+import type {
+  BootstrapSnapshot,
+  CatalogClient,
+  CommandFailure,
+} from "../../app/catalog-client";
+import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
+import { LocaleProvider } from "../locale/LocaleProvider";
+import { HomeBindingView } from "./HomeBindingView";
+
+function renderView(
+  snapshot:
+    | Extract<BootstrapSnapshot, { state: "unconfigured" }>
+    | Extract<BootstrapSnapshot, { state: "legacy_detected" }>
+    | Extract<BootstrapSnapshot, { state: "home_candidate_pending" }>,
+  overrides: Partial<CatalogClient> = {},
+  pickDirectory?: () => Promise<string | null>,
+) {
+  const client = createFixtureCatalogClient();
+  Object.assign(client, overrides);
+  const onSnapshot = vi.fn();
+  render(
+    <LocaleProvider client={client}>
+      <HomeBindingView
+        client={client}
+        snapshot={snapshot}
+        onSnapshot={onSnapshot}
+        pickDirectory={pickDirectory}
+      />
+    </LocaleProvider>,
+  );
+  return { client, onSnapshot };
+}
+
+test("unconfigured offers Use Default and Choose…", async () => {
+  renderView({ state: "unconfigured" });
+  expect(
+    await screen.findByRole("button", {
+      name: /Use Default/,
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Choose/ })).toBeInTheDocument();
+});
+
+test("Use Default prepares the default path then requires explicit confirmation", async () => {
+  const prepare = vi.fn(async (path: string) => {
+    expect(path).toBe("");
+    return {
+      path: "~/Library/Application Support/skill-man",
+      token: "hb-1",
+      mode: "fresh" as const,
+      volumeFsid: "fsid",
+      volumeUuid: "uuid",
+      availableBytes: 1024 * 1024 * 1024,
+      legacySource: null,
+    };
+  });
+  const confirm = vi.fn(async () => ({
+    state: "bound" as const,
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    catalogAccess: "read_write" as const,
+    catalogReadonlyReason: null,
+    snapshotVersion: 1,
+  }));
+  const { onSnapshot } = renderView(
+    { state: "unconfigured" },
+    { prepareHome: prepare, confirmHome: confirm },
+  );
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Use Default/ }),
+  );
+  // The candidate needs an explicit confirmation before any binding.
+  expect(
+    await screen.findByRole("heading", { name: "Confirm your Home" }),
+  ).toBeInTheDocument();
+  expect(prepare).toHaveBeenCalledTimes(1);
+  expect(confirm).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: "Bind Home" }));
+  await waitFor(() => expect(confirm).toHaveBeenCalledWith("hb-1"));
+  await waitFor(() =>
+    expect(onSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "bound" }),
+    ),
+  );
+});
+
+test("Choose… uses the injected directory picker", async () => {
+  const prepare = vi.fn(async () => {
+    throw {
+      error: { code: "candidate_invalid", reason: "not_empty" },
+    } as CommandFailure;
+  });
+  const pickDirectory = vi.fn(async () => "/Users/test/My Home");
+  renderView({ state: "unconfigured" }, { prepareHome: prepare }, pickDirectory);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Choose/ }),
+  );
+  await waitFor(() => expect(pickDirectory).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(prepare).toHaveBeenCalledWith("/Users/test/My Home"),
+  );
+});
+
+test("candidate rejection renders the typed reason with diagnostics", async () => {
+  const prepare = vi.fn(async () => {
+    throw {
+      error: { code: "candidate_invalid", reason: "symlink_component" },
+      diagnostic: {
+        code: "candidate_invalid",
+        message: "/tmp/x: path contains a symlink",
+      },
+    } as CommandFailure;
+  });
+  renderView({ state: "unconfigured" }, { prepareHome: prepare });
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Use Default/ }),
+  );
+  expect(
+    await screen.findByRole("heading", { name: "Home setup could not complete" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("This location cannot be used as a Skill Man Home."),
+  ).toBeInTheDocument();
+  // Raw technical detail stays in the explicitly labeled region.
+  expect(
+    screen.getByText("/tmp/x: path contains a symlink"),
+  ).toBeInTheDocument();
+});
+
+test("legacy detected explains the one-time transition and binds in place", async () => {
+  const prepare = vi.fn(async (path: string) => {
+    expect(path).toBe("/var/old/skill-man");
+    return {
+      path: "/var/old/skill-man",
+      token: "hb-legacy",
+      mode: "legacy_in_place" as const,
+      volumeFsid: "fsid",
+      volumeUuid: "uuid",
+      availableBytes: 1024 * 1024 * 1024,
+      legacySource: null,
+    };
+  });
+  renderView(
+    { state: "legacy_detected", path: "/var/old/skill-man" },
+    { prepareHome: prepare },
+  );
+
+  expect(
+    await screen.findByText(/A Legacy Home was found/),
+  ).toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: /Use Default/ }),
+  );
+  expect(
+    await screen.findByText(/bound in place/),
+  ).toBeInTheDocument();
+});
+
+test("pending candidate routes to Continue and Cancel", async () => {
+  const resume = vi.fn(async () => ({
+    state: "bound" as const,
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    catalogAccess: "read_write" as const,
+    catalogReadonlyReason: null,
+    snapshotVersion: 1,
+  }));
+  const cancel = vi.fn(async () => ({ state: "unconfigured" as const }));
+  const { onSnapshot } = renderView(
+    {
+      state: "home_candidate_pending",
+      path: "/tmp/candidate",
+      operationId: "hb-crash",
+    },
+    { continueCandidate: resume, cancelCandidate: cancel },
+  );
+
+  expect(
+    await screen.findByRole("heading", { name: "Home candidate pending" }),
+  ).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await waitFor(() => expect(resume).toHaveBeenCalledWith("hb-crash"));
+
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument(),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(cancel).toHaveBeenCalledWith("hb-crash"));
+  await waitFor(() =>
+    expect(onSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "unconfigured" }),
+    ),
+  );
+});
+
+test("non-cancellable error is shown and back returns to the route", async () => {
+  const cancel = vi.fn(async () => {
+    throw {
+      error: { code: "binding_not_cancellable" },
+      diagnostic: {
+        code: "binding_not_cancellable",
+        message: "the location contains user content",
+      },
+    } as CommandFailure;
+  });
+  renderView(
+    {
+      state: "home_candidate_pending",
+      path: "/tmp/candidate",
+      operationId: "hb-crash",
+    },
+    { cancelCandidate: cancel },
+  );
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Cancel" }),
+  );
+  expect(
+    await screen.findByText("This setup cannot be cancelled: the location contains content that was not created by it."),
+  ).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(
+    await screen.findByRole("button", { name: "Continue" }),
+  ).toBeInTheDocument();
+});

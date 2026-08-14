@@ -8,6 +8,7 @@ pub mod catalog_store;
 pub mod clock;
 pub mod filesystem;
 pub mod import_store;
+pub mod legacy_migration;
 pub mod locale_store;
 pub mod maintenance_store;
 pub mod preferences_store;

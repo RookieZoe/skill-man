@@ -26,6 +26,7 @@ use crate::seams::import_store::{
     FileImportRecord, ImportStore, ImportStoreError, LibraryConflict, LinkImportRecord,
     RemoteImportRecord, RemoteInstallRecord,
 };
+use crate::seams::legacy_migration::{LegacyCatalogMigrator, LegacyMigrationError};
 use crate::seams::maintenance_store::{
     AdoptedSkillEntity, InstalledSkillBaseline, LinkSkillRecord, MaintenanceStoreError,
     ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
@@ -36,6 +37,25 @@ mod prepared;
 pub use prepared::SqlitePreparedCatalogFactory;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = CURRENT_CATALOG_SCHEMA_VERSION;
+
+/// System `LegacyCatalogMigrator`: wraps the one-time Catalog transition
+/// owned by the Home Binding flow. Never called by ordinary `open()`, which
+/// probes pre-identity schemas read-only (spec §3.4).
+pub struct SqliteLegacyCatalogMigrator;
+
+impl LegacyCatalogMigrator for SqliteLegacyCatalogMigrator {
+    fn checkpoint(&self, path: &Path) -> Result<(), LegacyMigrationError> {
+        SqliteCatalogStore::checkpoint_wal(path)
+    }
+
+    fn migrate_with_identity(
+        &self,
+        path: &Path,
+        identity: &CatalogHomeIdentity,
+    ) -> Result<PathBuf, LegacyMigrationError> {
+        SqliteCatalogStore::migrate_with_identity(path, identity).map(|backup| backup)
+    }
+}
 
 const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE catalog_meta (
@@ -344,6 +364,92 @@ impl SqliteCatalogStore {
                 diagnostic: None,
             },
         })
+    }
+
+    /// Checkpoint the Catalog WAL into the main database (TRUNCATE) so a
+    /// later tree copy carries the consistent SQLite+WAL+SHM set. The
+    /// Legacy copy transition calls this after proving no other process
+    /// holds the WAL index.
+    pub fn checkpoint_wal(path: &Path) -> Result<(), LegacyMigrationError> {
+        let connection = Connection::open(path)
+            .map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
+        configure_connection(&connection)
+            .map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
+        connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|error| LegacyMigrationError::Checkpoint(error.to_string()))?;
+        Ok(())
+    }
+
+    /// One-time Home Binding / Legacy transition (spec §3.4, §5.4): migrates
+    /// a pre-identity Catalog (v1–v4) to the current schema, records the
+    /// Home identity and verifies it. The untouched Catalog is backed up to
+    /// a sibling `pre-migration-v<schema>.bak` file first; the caller owns
+    /// the crash-recovery contract around the locator commit. Never called
+    /// by ordinary `open()`, which probes pre-identity schemas read-only.
+    pub fn migrate_with_identity(
+        path: &Path,
+        identity: &CatalogHomeIdentity,
+    ) -> Result<PathBuf, LegacyMigrationError> {
+        let schema = detect_schema_version(path);
+        if schema == 0 || schema > CURRENT_SCHEMA_VERSION {
+            return Err(LegacyMigrationError::NotPreIdentity { found: schema });
+        }
+        // Pre-identity schemas are backed up untouched; a current-schema
+        // Catalog (e.g. a fixture-recovery prepared Home or a retried
+        // transition) is migrated in place idempotently.
+        let backup_path = if schema < CURRENT_SCHEMA_VERSION {
+            Some(
+                backup_catalog(path, schema)
+                    .map_err(|error| LegacyMigrationError::Backup(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let mut connection =
+            Connection::open(path).map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
+        configure_connection(&connection)
+            .map_err(|error| LegacyMigrationError::Open(error.to_string()))?;
+        // Quiesce the WAL into the main database so the copied consistent
+        // set (SQLite + WAL + SHM) carries every committed row.
+        connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|error| LegacyMigrationError::Checkpoint(error.to_string()))?;
+        if schema < CURRENT_SCHEMA_VERSION {
+            migrate_to_current(&mut connection, schema)
+                .map_err(|error| LegacyMigrationError::Migration(error.to_string()))?;
+        }
+        // Never overwrite a different recorded identity: a mismatched
+        // Catalog is a closed error, not a repair.
+        if let Some(existing) = read_catalog_identity(&connection) {
+            if existing != *identity {
+                return Err(LegacyMigrationError::Identity(
+                    "recorded identity differs from the requested binding".into(),
+                ));
+            }
+        } else {
+            connection
+                .execute(
+                    "UPDATE catalog_meta
+                     SET home_id = ?1, volume_fsid = ?2, volume_uuid = ?3, home_bound_at = ?4
+                     WHERE singleton = 1",
+                    params![
+                        identity.home_id.0,
+                        identity.volume_fsid,
+                        identity.volume_uuid,
+                        identity.home_bound_at
+                    ],
+                )
+                .map_err(|error| LegacyMigrationError::Identity(error.to_string()))?;
+        }
+        let stored = read_catalog_identity(&connection)
+            .ok_or_else(|| LegacyMigrationError::Identity("missing".into()))?;
+        if stored != *identity {
+            return Err(LegacyMigrationError::Identity(
+                "recorded identity differs from the requested binding".into(),
+            ));
+        }
+        Ok(backup_path.unwrap_or_else(|| path.to_path_buf()))
     }
 
     pub fn persisted_snapshot_version(&self) -> Result<u64, ActivationStoreError> {
@@ -2177,9 +2283,8 @@ fn read_catalog_identity(connection: &Connection) -> Option<CatalogHomeIdentity>
 }
 
 /// Whole-file SQLite backup taken by the Home Binding/Legacy migration flow
-/// (ticket #45) before any pre-identity schema is migrated; covered by the
-/// unit tests in this module.
-#[allow(dead_code)]
+/// before any pre-identity schema is migrated; covered by the unit tests in
+/// this module.
 fn backup_catalog(path: &Path, schema_version: u32) -> Result<PathBuf, CatalogStoreOpenError> {
     let extension = format!("pre-migration-v{schema_version}.bak");
     let backup_path = path.with_extension(extension);

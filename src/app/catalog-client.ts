@@ -14,6 +14,22 @@ export type CatalogReadOnlyReason =
   "unsupported_schema" | "integrity_failed" | "open_failed";
 
 /** Raw technical facts from the native authority, never App Copy (spec §4.7). */
+export type HomeCandidateMode =
+  | "fresh"
+  | "legacy_in_place"
+  | "legacy_copy";
+
+/** A validated, not-yet-confirmed Home candidate (spec §4.2). */
+export interface HomeCandidate {
+  path: string;
+  token: string;
+  mode: HomeCandidateMode;
+  volumeFsid: string;
+  volumeUuid: string;
+  availableBytes: number;
+  legacySource: string | null;
+}
+
 export interface BootstrapDiagnostic {
   code: string;
   message: string;
@@ -185,6 +201,11 @@ export type PublicError =
   | { code: "recovery_state_store" }
   | { code: "recovery_filesystem" }
   | { code: "recovery_probe" }
+  | { code: "candidate_invalid"; reason: string }
+  | { code: "binding_step_failed"; cursor: string }
+  | { code: "binding_state_ambiguous" }
+  | { code: "binding_not_cancellable" }
+  | { code: "binding_migration_failed" }
   | { code: "locale_store_unavailable" }
   | { code: "internal" };
 
@@ -631,6 +652,10 @@ export interface AdoptUndoResult {
 
 export interface CatalogClient {
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
+  prepareHome(path: string): Promise<HomeCandidate>;
+  confirmHome(candidateToken: string): Promise<BootstrapSnapshot>;
+  continueCandidate(operationId: string): Promise<BootstrapSnapshot>;
+  cancelCandidate(operationId: string): Promise<BootstrapSnapshot>;
   listenBootstrapChanged(
     callback: (payload: BootstrapChangedPayload) => void,
   ): Promise<() => void>;
@@ -732,6 +757,24 @@ let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
 const tauriCatalogClient: CatalogClient = {
   getBootstrapSnapshot() {
     return invoke<BootstrapSnapshot>("get_bootstrap_snapshot");
+  },
+  prepareHome(path) {
+    return invoke<HomeCandidate>("prepare_home", { request: { path } });
+  },
+  confirmHome(candidateToken) {
+    return invoke<BootstrapSnapshot>("confirm_home", {
+      request: { candidateToken },
+    });
+  },
+  continueCandidate(operationId) {
+    return invoke<BootstrapSnapshot>("continue_candidate", {
+      request: { operationId },
+    });
+  },
+  cancelCandidate(operationId) {
+    return invoke<BootstrapSnapshot>("cancel_candidate", {
+      request: { operationId },
+    });
   },
   listenBootstrapChanged(callback) {
     return listen<BootstrapChangedPayload>("bootstrap://changed", (event) => {

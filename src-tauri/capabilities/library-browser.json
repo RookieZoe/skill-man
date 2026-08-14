@@ -4,5 +4,5 @@
   "description": "Library Desk command surface with no frontend filesystem or shell plugin access.",
   "windows": ["main"],
   "platforms": ["macOS"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

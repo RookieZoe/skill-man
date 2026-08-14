@@ -227,13 +227,50 @@ impl BootstrapService {
             }
         };
 
-        // §5.1 step 6: an active recovery operation keeps the recovery lock;
-        // only the Fixture Recovery ticket resumes or completes it.
+        // §5.1 step 6: an active operation keeps its route. Fixture
+        // Recovery keeps the recovery lock; Home Binding operations surface
+        // the candidate route so the user can Continue or Cancel.
         if let Some(active) = &files.recovery_ledger.active {
-            return BootstrapSnapshot::FixtureRecoveryLocked {
-                home_id: active.home_id.clone(),
-                path: active.live_path.clone(),
-            };
+            match active.kind.as_str() {
+                crate::core::home_binding::HOME_CANDIDATE_KIND => {
+                    let Some(path) = &active.live_path else {
+                        return BootstrapSnapshot::AppStateUnavailable {
+                            diagnostic: BootstrapDiagnostic::new(
+                                "candidate_operation_incomplete",
+                                "the candidate operation records no live path".into(),
+                            ),
+                        };
+                    };
+                    return BootstrapSnapshot::HomeCandidatePending {
+                        path: path.clone(),
+                        operation_id: active.operation_id.clone(),
+                    };
+                }
+                crate::core::home_binding::LEGACY_TRANSITION_KIND => {
+                    let path = active
+                        .prepared_path
+                        .clone()
+                        .or_else(|| active.live_path.clone());
+                    let Some(path) = path else {
+                        return BootstrapSnapshot::AppStateUnavailable {
+                            diagnostic: BootstrapDiagnostic::new(
+                                "candidate_operation_incomplete",
+                                "the copy transition records no destination path".into(),
+                            ),
+                        };
+                    };
+                    return BootstrapSnapshot::HomeCandidatePending {
+                        path,
+                        operation_id: active.operation_id.clone(),
+                    };
+                }
+                _ => {
+                    return BootstrapSnapshot::FixtureRecoveryLocked {
+                        home_id: active.home_id.clone(),
+                        path: active.live_path.clone(),
+                    };
+                }
+            }
         }
 
         // §5.1 step 4: no binding.
@@ -243,20 +280,7 @@ impl BootstrapService {
                 .path_is_directory(&self.config.default_home_path)
                 .unwrap_or(false);
             if legacy_exists {
-                // §5.1 step 7: fixture classification precedes the legacy
-                // transition; any footprint keeps the recovery lock.
-                let classification = self
-                    .classifier
-                    .classify(&self.config.default_home_path, FixtureShapeMode::Legacy);
-                if classification.is_contaminated() {
-                    return BootstrapSnapshot::FixtureRecoveryLocked {
-                        home_id: None,
-                        path: Some(self.config.default_home_path.clone()),
-                    };
-                }
-                return BootstrapSnapshot::LegacyDetected {
-                    path: self.config.default_home_path.clone(),
-                };
+                return self.classify_default_home();
             }
             return BootstrapSnapshot::Unconfigured;
         };
@@ -439,6 +463,76 @@ impl BootstrapService {
     fn read_marker(&self, path: &std::path::Path) -> Option<HomeMarker> {
         let content = self.filesystem.read_utf8_file(path).ok()??;
         HomeMarker::parse(&content)
+    }
+
+    /// §5.4 read-only shape classification of the default path when no
+    /// binding exists: an unbound candidate (schema v5 with marker), a
+    /// Legacy Home (pre-identity schema, behind the fixture gate), a
+    /// fixture-recovery prepared Home (v5 without identity, waiting for the
+    /// one-time binding) or nothing. Candidate artifacts without an active
+    /// ledger operation are a contradiction and fail closed — never guessed
+    /// or rebuilt (spec §3.3).
+    fn classify_default_home(&self) -> BootstrapSnapshot {
+        let default = &self.config.default_home_path;
+        let catalog_path = default.join(&self.config.catalog_file_name);
+        let report = self.probe.probe(&catalog_path).ok();
+        let marker = self.read_marker(&default.join(HomeMarker::FILE_NAME));
+        match report.as_ref().and_then(|report| report.schema_version) {
+            Some(version) if version >= CATALOG_SCHEMA_WITH_HOME_IDENTITY => {
+                if marker.is_some() {
+                    BootstrapSnapshot::AppStateUnavailable {
+                        diagnostic: BootstrapDiagnostic::new(
+                            "orphaned_candidate",
+                            "candidate artifacts exist without a binding operation".into(),
+                        ),
+                    }
+                } else if report
+                    .as_ref()
+                    .is_some_and(|report| report.home_identity.is_some())
+                {
+                    BootstrapSnapshot::AppStateUnavailable {
+                        diagnostic: BootstrapDiagnostic::new(
+                            "orphaned_candidate",
+                            "an identified Catalog exists without a binding".into(),
+                        ),
+                    }
+                } else {
+                    // A fixture-recovery prepared Home: current schema
+                    // without identity, waiting for the binding transition.
+                    self.legacy_or_locked(default)
+                }
+            }
+            Some(_) => self.legacy_or_locked(default),
+            None => {
+                if marker.is_some() {
+                    BootstrapSnapshot::AppStateUnavailable {
+                        diagnostic: BootstrapDiagnostic::new(
+                            "orphaned_candidate",
+                            "a Home marker exists without a Catalog or binding operation"
+                                .into(),
+                        ),
+                    }
+                } else {
+                    self.legacy_or_locked(default)
+                }
+            }
+        }
+    }
+
+    /// §5.1 step 7 / §5.4: read-only fixture classification precedes any
+    /// Legacy transition; any footprint keeps the recovery lock and the
+    /// binding wizard never offers path selection around it.
+    fn legacy_or_locked(&self, path: &std::path::Path) -> BootstrapSnapshot {
+        let classification = self.classifier.classify(path, FixtureShapeMode::Legacy);
+        if classification.is_contaminated() {
+            return BootstrapSnapshot::FixtureRecoveryLocked {
+                home_id: None,
+                path: Some(path.to_path_buf()),
+            };
+        }
+        BootstrapSnapshot::LegacyDetected {
+            path: path.to_path_buf(),
+        }
     }
 
     fn build_bound_home(&self, home_id: &HomeId) -> Option<BoundHome> {

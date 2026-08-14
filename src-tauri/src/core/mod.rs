@@ -7,6 +7,7 @@ pub mod domain;
 pub mod fixture_recovery;
 pub mod git_source;
 pub mod home;
+pub mod home_binding;
 pub mod import;
 pub mod locale;
 pub mod maintenance;

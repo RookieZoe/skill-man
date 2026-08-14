@@ -160,6 +160,26 @@ export function createFixtureCatalogClient(): CatalogClient {
   }
 
   return {
+    async prepareHome() {
+      return fixtureUnsupported(
+        "Home Binding is not available in the preview fixture",
+      );
+    },
+    async confirmHome() {
+      return fixtureUnsupported(
+        "Home Binding is not available in the preview fixture",
+      );
+    },
+    async continueCandidate() {
+      return fixtureUnsupported(
+        "Home Binding is not available in the preview fixture",
+      );
+    },
+    async cancelCandidate() {
+      return fixtureUnsupported(
+        "Home Binding is not available in the preview fixture",
+      );
+    },
     async getBootstrapSnapshot() {
       return {
         state: "bound",
