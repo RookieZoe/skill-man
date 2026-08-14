@@ -1546,7 +1546,7 @@ impl From<crate::core::adopt::AdoptVerdict> for AdoptVerdictDto {
 /// Closed lock-file faults (spec §8.1); reasons are raw facts, never App
 /// Copy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum LockFileFaultDto {
     NotUtf8,
     InvalidJson { detail: String },
@@ -1569,7 +1569,7 @@ impl From<crate::seams::installer_lock_store::LockFileFault> for LockFileFaultDt
 /// Closed chain-fault reasons (spec §8.1); a failure stops at the exact hop
 /// and never yields a partial fingerprint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ChainFaultDto {
     Dangling { at: String },
     Cycle { at: String },
@@ -1602,7 +1602,7 @@ impl From<crate::seams::filesystem::ChainFault> for ChainFaultDto {
 /// The typed reason behind a verdict (spec §4.7): closed states, never
 /// free-form warning strings.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum AdoptVerdictReasonDto {
     NoLock,
     DuplicateLockOwner { other_lock_path: String },
@@ -1651,11 +1651,23 @@ impl From<crate::core::adopt::AdoptVerdictReason> for AdoptVerdictReasonDto {
     }
 }
 
+/// The hop entry kind; the raw symlink target is a separate Source Content
+/// field (spec §4.7: closed codes plus typed params, never stringly-typed).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceChainHopKindDto {
+    Directory,
+    Symlink,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceChainHopDto {
     pub path: String,
-    pub kind: String,
+    pub kind: EvidenceChainHopKindDto,
+    /// The raw symlink target text when the hop is a symlink; `None` for
+    /// real directory hops. Source Content, rendered verbatim.
+    pub target: Option<String>,
     pub device: u64,
     pub inode: u64,
 }
@@ -1684,14 +1696,17 @@ impl From<crate::seams::filesystem::EvidenceChain> for EvidenceChainDto {
                     path: hop.path.to_string_lossy().into_owned(),
                     kind: match hop.kind {
                         crate::seams::filesystem::EvidenceChainHopKind::Directory => {
-                            "directory".into()
+                            EvidenceChainHopKindDto::Directory
                         }
+                        crate::seams::filesystem::EvidenceChainHopKind::Symlink { .. } => {
+                            EvidenceChainHopKindDto::Symlink
+                        }
+                    },
+                    target: match hop.kind {
                         crate::seams::filesystem::EvidenceChainHopKind::Symlink { target } => {
-                            format!(
-                                "symlink:{}",
-                                target.to_string_lossy()
-                            )
+                            Some(target.to_string_lossy().into_owned())
                         }
+                        crate::seams::filesystem::EvidenceChainHopKind::Directory => None,
                     },
                     device: hop.device,
                     inode: hop.inode,

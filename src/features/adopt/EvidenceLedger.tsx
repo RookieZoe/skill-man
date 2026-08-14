@@ -377,12 +377,12 @@ function LedgerCandidate({
                     })}
                   </span>{" "}
                   <span className="adopt-source-content">{hop.path}</span>
-                  <span className="adopt-source-content adopt-hop-target">
-                    {" "}
-                    → {hop.kind.startsWith("symlink:")
-                      ? hop.kind.slice("symlink:".length)
-                      : hop.kind}
-                  </span>
+                  {hop.target !== null ? (
+                    <span className="adopt-source-content adopt-hop-target">
+                      {" "}
+                      → {hop.target}
+                    </span>
+                  ) : null}
                   <span className="adopt-hop-identity">
                     {" "}
                     dev={hop.device} ino={hop.inode}
@@ -421,6 +421,14 @@ function LedgerCandidate({
         {candidate.lock ? (
           <div className="adopt-evidence-block">
             <h4>{t("library.adopt.lock.title")}</h4>
+            <p className="adopt-hop">
+              <span className="adopt-hop-index">
+                {t("library.adopt.lock.path")}
+              </span>{" "}
+              <span className="adopt-source-content">
+                {candidate.lock.lockPath}
+              </span>
+            </p>
             {candidate.lock.fileFault ? (
               <p className="candidate-blocked">
                 {t(lockFaultKey(candidate.lock.fileFault))}

@@ -1315,3 +1315,125 @@ fn evidence_dto_serializes_closed_states_and_keeps_source_content_verbatim() {
     assert_eq!(lock_fault["kind"], "duplicate_key");
     assert_eq!(lock_fault["key"], "skills");
 }
+
+#[test]
+fn cancelled_applyable_plan_cannot_be_applied() {
+    let harness = Harness::new();
+    let entity = write_skill(&harness.projects, "cancel-me", "# Cancel me\n");
+    let canonical = entity.canonicalize().expect("canonical entity");
+    std::os::unix::fs::symlink(&canonical, harness.claude().join("cancel-me"))
+        .expect("appearance");
+    let adopt = harness.adopt();
+    let report = adopt.scan().expect("scan");
+    let plan = adopt
+        .plan(&AdoptPlanRequest {
+            evidence_generation: report.generation,
+            selections: vec![select(&report.candidates, "cancel-me")],
+        })
+        .expect("applyable plan");
+    assert!(plan.can_apply);
+    assert!(adopt.cancel(&plan.plan_token).expect("cancel plan"));
+    // Cancelling removes BOTH the evidence batch and the durable per-Skill
+    // batch; the plan must no longer be executable (spec §11: stale plans
+    // never write).
+    let error = adopt
+        .apply(&plan.plan_token)
+        .expect_err("a cancelled plan cannot be applied");
+    assert!(matches!(error, AdoptError::PlanNotFound), "{error}");
+    assert!(
+        !skill_man_lib::core::catalog::CatalogService::new(harness.runtime.clone())
+            .list(skill_man_lib::core::domain::CatalogFilter::Link)
+            .expect("list Links")
+            .items
+            .iter()
+            .any(|skill| skill.directory_name == "cancel-me"),
+        "nothing was adopted"
+    );
+    assert!(
+        std::fs::symlink_metadata(harness.claude().join("cancel-me"))
+            .expect("appearance intact")
+            .file_type()
+            .is_symlink(),
+        "the appearance was never replaced"
+    );
+}
+
+#[test]
+fn faulted_xdg_lock_does_not_block_default_installer_root_candidates() {
+    let harness = Harness::new();
+    write_skill(&harness.shared(), "default-root-skill", "# Default\n");
+    // The default lock is valid; the XDG lock is corrupt and governs a
+    // different root that Adopt never scans.
+    std::fs::write(
+        harness.lock_path(),
+        lock_json(&[(
+            "default-root-skill",
+            "git",
+            "https://example.com/default".into(),
+            None,
+            "skills/default".into(),
+            "0".repeat(64),
+        )]),
+    )
+    .expect("valid default lock");
+    let xdg = harness.home.path().join("xdg-state/skills");
+    std::fs::create_dir_all(&xdg).expect("xdg skills dir");
+    std::fs::write(xdg.join(".skill-lock.json"), "{corrupt").expect("corrupt xdg lock");
+    let locks = Arc::new(SystemInstallerLockStore::with_xdg(
+        harness.home.path().to_path_buf(),
+        Some(harness.home.path().join("xdg-state")),
+    ));
+
+    let report = harness
+        .adopt_with(
+            locks,
+            Arc::new(SystemRemoteProvider::new(Arc::new(SystemGitSource::new()))),
+        )
+        .scan()
+        .expect("scan");
+    let candidate = report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.directory_name == "default-root-skill")
+        .expect("candidate");
+    assert_eq!(
+        candidate.verdict,
+        AdoptVerdict::Deferred,
+        "the XDG lock fault must not block the default root candidate; \
+         only the default lock governs ~/.agents/skills"
+    );
+    assert!(!matches!(
+        candidate.reason,
+        Some(AdoptVerdictReason::LockFileFault { .. })
+    ));
+}
+
+#[test]
+fn verdict_reason_dto_fields_serialize_camel_case() {
+    use skill_man_lib::tauri_adapter::dto::AdoptVerdictReasonDto;
+    let json = serde_json::to_value(AdoptVerdictReasonDto::DuplicateLockOwner {
+        other_lock_path: "~/.agents/.skill-lock.json".into(),
+    })
+    .expect("serialize");
+    assert_eq!(json["kind"], "duplicate_lock_owner");
+    assert_eq!(json["otherLockPath"], "~/.agents/.skill-lock.json");
+
+    let json = serde_json::to_value(AdoptVerdictReasonDto::LibraryConflict {
+        directory_name: "foo".into(),
+    })
+    .expect("serialize");
+    assert_eq!(json["kind"], "library_conflict");
+    assert_eq!(json["directoryName"], "foo");
+
+    let json = serde_json::to_value(AdoptVerdictReasonDto::LockFileFault {
+        lock_path: "~/.agents/.skill-lock.json".into(),
+        fault: skill_man_lib::tauri_adapter::dto::LockFileFaultDto::UnsupportedVersion {
+            version: 9,
+        },
+    })
+    .expect("serialize");
+    assert_eq!(json["kind"], "lock_file_fault");
+    assert_eq!(json["lockPath"], "~/.agents/.skill-lock.json");
+    assert_eq!(json["fault"]["kind"], "unsupported_version");
+    assert_eq!(json["fault"]["version"], 9);
+}

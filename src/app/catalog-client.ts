@@ -645,7 +645,9 @@ export type AdoptVerdictReason =
 
 export interface EvidenceChainHop {
   path: string;
-  kind: string;
+  kind: "directory" | "symlink";
+  /** The raw symlink target text for symlink hops; Source Content. */
+  target: string | null;
   device: number;
   inode: number;
 }

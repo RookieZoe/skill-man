@@ -33,7 +33,8 @@ function candidate(
           hops: [
             {
               path: "~/.claude/skills/networking",
-              kind: "symlink:../../.agents/skills/networking",
+              kind: "symlink",
+              target: "../../.agents/skills/networking",
               device: 1,
               inode: 10,
             },
@@ -121,7 +122,9 @@ test("renders the three columns with the source chain fully expanded by default"
   expect(dialog).toHaveTextContent("~/.claude/skills/networking");
   expect(dialog).toHaveTextContent("../../.agents/skills/networking");
   expect(dialog).toHaveTextContent("final entity");
-  // Lock evidence renders raw Source Content verbatim.
+  // Lock evidence renders raw Source Content verbatim, including the hit
+  // path (spec §8.1).
+  expect(dialog).toHaveTextContent("~/.agents/.skill-lock.json");
   expect(dialog).toHaveTextContent("https://github.com/acme/networking");
   expect(dialog).toHaveTextContent("0123456789abcdef0123456789abcdef01234567");
   expect(dialog).toHaveTextContent("deadbeef");

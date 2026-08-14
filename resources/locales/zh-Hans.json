@@ -639,5 +639,6 @@
   "library.adopt.intent.remote_install_discard_modified": "远程安装——重装验证锚点",
   "library.adopt.intent.remote_install_convert_to_link": "远程安装——转为本地链接",
   "library.adopt.plan.handoff_pending": "已冻结交接意图；所有权转移在下一阶段。",
-  "library.adopt.ready": "就绪"
+  "library.adopt.ready": "就绪",
+  "library.adopt.lock.path": "lock 路径"
 }

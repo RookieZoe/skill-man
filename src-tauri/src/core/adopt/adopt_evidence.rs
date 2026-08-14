@@ -262,13 +262,10 @@ pub struct AdoptPlanRequest {
 }
 
 /// The stored plan: frozen evidence plus the selections, bound to one
-/// evidence generation.
+/// evidence generation (the token itself is the map key; staleness is
+/// enforced by the frozen evidence re-check and the durable batch TTL).
 #[derive(Clone)]
-#[allow(dead_code)] // plan_token/generation/created_at are the plan identity contract
 pub(super) struct EvidencePlannedBatch {
-    pub plan_token: String,
-    pub evidence_generation: u64,
-    pub created_at_millis: u128,
     pub items: Vec<PlannedEvidenceItem>,
 }
 
@@ -287,6 +284,19 @@ impl AdoptService {
     /// generation and invalidates older plans. No Catalog, filesystem or
     /// lock write happens here.
     pub fn scan(&self) -> Result<AdoptEvidenceReport, AdoptError> {
+        let (report, workspaces) = self.scan_with_workspaces()?;
+        for workspace in workspaces {
+            let _ = self.filesystem.discard_temp_workspace(&workspace);
+        }
+        Ok(report)
+    }
+
+    /// Internal scan that also returns the remote-verification workspaces
+    /// (one per normalized remote, shared across the group's candidates,
+    /// ADR-0013 §2.3) so callers can discard them after assembly.
+    fn scan_with_workspaces(
+        &self,
+    ) -> Result<(AdoptEvidenceReport, Vec<PathBuf>), AdoptError> {
         let agents = self.store.list_agents()?;
         let lock_files = self
             .lock_store
@@ -297,15 +307,15 @@ impl AdoptService {
         // resolves system symlinks (macOS `/var -> /private/var`), so every
         // raw root must be canonicalized before `starts_with`/equality
         // checks against canonical entities.
-        let installer_root = canonical_root(&shared_dir);
-        let library_root = canonical_root(&self.library_root);
+        let installer_root = self.seam_canonical_root(&shared_dir);
+        let library_root = self.seam_canonical_root(&self.library_root);
         let agent_roots = agents
             .iter()
             .filter(|agent| agent.detected)
             .map(|agent| {
                 self.filesystem
                     .normalize_configured_path(&agent.skills_path)
-                    .map(|path| canonical_root(&path))
+                    .map(|path| self.seam_canonical_root(&path))
                     .unwrap_or_else(|_| agent.skills_path.clone())
             })
             .collect::<Vec<_>>();
@@ -332,6 +342,10 @@ impl AdoptService {
             .map(|agent| agent.agent_id.clone())
             .collect::<Vec<_>>();
         let mut candidates = Vec::new();
+        // One temp workspace per normalized remote, shared by every
+        // candidate of that remote and discarded after the whole scan
+        // (ADR-0013 §2.3: 按 normalized remote 共享一次 fetch).
+        let mut workspaces: HashMap<String, PathBuf> = HashMap::new();
         for (key, group) in grouped {
             if let Some(blocked) = group.blocked {
                 candidates.push(blocked);
@@ -354,6 +368,7 @@ impl AdoptService {
                 &library_root,
                 &agent_roots,
                 &suggested,
+                &mut workspaces,
             )?;
             candidate.appearances.sort_by(|left, right| {
                 left.appearance
@@ -375,7 +390,7 @@ impl AdoptService {
         if let Ok(mut last) = self.last_report.lock() {
             *last = Some(report.clone());
         }
-        Ok(report)
+        Ok((report, workspaces.into_values().collect()))
     }
 
     fn accumulate_evidence(
@@ -439,7 +454,7 @@ impl AdoptService {
                 .excluded = Some(self.excluded_candidate(&entry, &final_entity));
             return;
         }
-        if final_entity.starts_with(&canonical_root(&self.library_root)) {
+        if final_entity.starts_with(&self.seam_canonical_root(&self.library_root)) {
             return;
         }
         if !self.filesystem.skill_directory_is_readable(&final_entity).unwrap_or(false) {
@@ -559,6 +574,7 @@ impl AdoptService {
         library_root: &Path,
         agent_roots: &[PathBuf],
         suggested: &[AgentId],
+        workspaces: &mut HashMap<String, PathBuf>,
     ) -> Result<AdoptEvidenceCandidate, AdoptError> {
         // 1. Fixture footprint is Excluded before anything else (spec §3.5,
         // §8.2): Fixture Recovery owns it.
@@ -695,6 +711,7 @@ impl AdoptService {
             lock_files,
             installer_root,
             &local_tree_hash,
+            workspaces,
         )?;
         let requires_relocation = entity.starts_with(library_root)
             || entity.starts_with(installer_root)
@@ -731,6 +748,7 @@ impl AdoptService {
         lock_files: &[crate::seams::installer_lock_store::LockFileReport],
         installer_root: &Path,
         local_tree_hash: &str,
+        workspaces: &mut HashMap<String, PathBuf>,
     ) -> Result<
         (
             AdoptVerdict,
@@ -741,9 +759,17 @@ impl AdoptService {
         AdoptError,
     > {
         // File-level faults block every candidate the lock's installer root
-        // governs.
+        // governs (ADR-0013 §2.1). The default lock at
+        // `~/.agents/.skill-lock.json` is the only one governing the
+        // `~/.agents/skills` root Adopt scans; the XDG variant governs a
+        // different root that is not an Adopt scan source, so a fault there
+        // must not block candidates here.
         if entity.starts_with(installer_root) {
-            if let Some(faulted) = lock_files.iter().find(|report| report.fault.is_some()) {
+            let default_lock = self.home_directory.join(".agents/.skill-lock.json");
+            if let Some(faulted) = lock_files
+                .iter()
+                .find(|report| report.fault.is_some() && report.path == default_lock)
+            {
                 let fault = faulted.fault.clone().expect("file fault present");
                 return Ok((
                     AdoptVerdict::Conflict,
@@ -878,15 +904,25 @@ impl AdoptService {
         };
         // Verification Deferred grouping: one failed group marks every
         // candidate of the same canonical remote; other groups continue.
-        let workspace = self
-            .filesystem
-            .create_temp_workspace("adopt-evidence")
-            .map_err(|error| AdoptError::Internal(format!("temp workspace: {error}")))?;
+        // The workspace is shared by the whole remote group and discarded
+        // by the caller after the scan (ADR-0013 §2.3).
+        let workspace = match workspaces.get(&request.canonical_url) {
+            Some(workspace) => workspace.clone(),
+            None => {
+                let workspace = self
+                    .filesystem
+                    .create_temp_workspace("adopt-evidence")
+                    .map_err(|error| {
+                        AdoptError::Internal(format!("temp workspace: {error}"))
+                    })?;
+                workspaces.insert(request.canonical_url.clone(), workspace.clone());
+                workspace
+            }
+        };
         let outcome = self.remote_provider.verify(&request, &workspace);
         let facts = match outcome {
             Ok(facts) => facts,
             Err(RemoteProviderError::Deferred(detail)) => {
-                let _ = self.filesystem.discard_temp_workspace(&workspace);
                 return Ok((
                     AdoptVerdict::Deferred,
                     Some(AdoptVerdictReason::RemoteUnavailable { detail }),
@@ -895,7 +931,6 @@ impl AdoptService {
                 ));
             }
             Err(RemoteProviderError::Conflict(detail)) => {
-                let _ = self.filesystem.discard_temp_workspace(&workspace);
                 return Ok((
                     AdoptVerdict::Conflict,
                     Some(AdoptVerdictReason::RemoteConflict { detail }),
@@ -907,7 +942,6 @@ impl AdoptService {
         let remote_tree_hash = match self.filesystem.tree_hash(&facts.materialized_root) {
             Ok(hash) => hash,
             Err(error) => {
-                let _ = self.filesystem.discard_temp_workspace(&workspace);
                 return Ok((
                     AdoptVerdict::Conflict,
                     Some(AdoptVerdictReason::RemoteConflict {
@@ -918,9 +952,6 @@ impl AdoptService {
                 ));
             }
         };
-        // The materialized tree is hashed above; only now may the workspace
-        // go away.
-        let _ = self.filesystem.discard_temp_workspace(&workspace);
         let trees_match = remote_tree_hash == local_tree_hash;
         let verdict = if trees_match {
             AdoptVerdict::Verified
@@ -1069,12 +1100,7 @@ impl AdoptService {
                 error: None,
             })
             .collect::<Vec<_>>();
-        let batch = EvidencePlannedBatch {
-            plan_token: plan_token.clone(),
-            evidence_generation: report.generation,
-            created_at_millis: self.clock.monotonic_millis(),
-            items,
-        };
+        let batch = EvidencePlannedBatch { items };
         let mut evidence_plans = self
             .evidence_plans
             .lock()
@@ -1087,7 +1113,6 @@ impl AdoptService {
         let mut batch_registered = false;
         if can_apply {
             let inputs = items_for_durable_batch(
-                &report,
                 &request.selections,
                 &agents,
                 &batch,
@@ -1244,31 +1269,29 @@ impl AdoptService {
         Ok(())
     }
 
-    /// Discard a read-only plan.
+    /// Discard a read-only plan. An applyable plan registers BOTH the
+    /// evidence batch and the durable per-Skill batch under the same token;
+    /// cancel must remove both or `apply` could still execute the durable
+    /// batch without its frozen-evidence recheck (spec §11).
     pub fn cancel(&self, plan_token: &str) -> Result<bool, AdoptError> {
-        let removed = self
+        let evidence_removed = self
             .evidence_plans
             .lock()
             .map_err(|_| AdoptError::Internal("Adopt evidence plan lock poisoned".into()))?
             .remove(plan_token)
             .is_some();
-        if removed {
-            return Ok(true);
-        }
-        // Legacy plan store: no longer produced, kept for in-flight plans.
-        let removed = self
+        let durable_removed = self
             .plans
             .lock()
             .map_err(|_| AdoptError::Internal("Adopt plan lock poisoned".into()))?
             .remove(plan_token)
             .is_some();
-        Ok(removed)
+        Ok(evidence_removed || durable_removed)
     }
 
 }
 
 fn items_for_durable_batch(
-    report: &AdoptEvidenceReport,
     selections: &[AdoptSelection],
     agents: &[AdoptAgent],
     batch: &EvidencePlannedBatch,
@@ -1314,7 +1337,6 @@ fn items_for_durable_batch(
             target_agents,
         });
     }
-    let _ = report;
     Ok(Some(inputs))
 }
 
@@ -1339,6 +1361,13 @@ fn is_fixture_tree_hash(hash: &str) -> bool {
     hash == crate::core::fixture_recovery::FIXTURE_TREE_HASH_SKILL_AUTHORING
         || hash == crate::core::fixture_recovery::FIXTURE_TREE_HASH_MEDIA_XRAY
 }
-fn canonical_root(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+impl AdoptService {
+    /// Canonical spelling through the FileSystem seam (spec §4.1: Core
+    /// never touches the filesystem directly); falls back to the raw path
+    /// when the canonical form is unavailable.
+    fn seam_canonical_root(&self, path: &Path) -> PathBuf {
+        self.filesystem
+            .canonical_directory(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
 }

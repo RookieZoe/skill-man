@@ -639,5 +639,6 @@
   "library.adopt.intent.remote_install_discard_modified": "Remote Install — reinstall the Verification Anchor",
   "library.adopt.intent.remote_install_convert_to_link": "Remote Install — convert to Local Link",
   "library.adopt.plan.handoff_pending": "Frozen handoff intent; ownership transfer is the next stage.",
-  "library.adopt.ready": "Ready"
+  "library.adopt.ready": "Ready",
+  "library.adopt.lock.path": "lock path"
 }
