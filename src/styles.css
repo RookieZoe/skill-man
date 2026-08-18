@@ -2097,3 +2097,434 @@ button:active:not(:disabled) {
   flex-wrap: wrap;
   align-items: center;
 }
+
+/* -- Closed bootstrap, recovery, and Home lifecycle routes --
+   These routes render before a Bound Home can mount the Library Desk, so
+   they own the viewport scroll and cannot borrow the desk's pane styles. */
+.bootstrap-route,
+.recovery-route {
+  height: 100vh;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 760px);
+  align-content: start;
+  justify-content: center;
+  gap: var(--space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: clamp(28px, 7vw, 72px) clamp(20px, 6vw, 64px);
+  background:
+    radial-gradient(
+      circle at top right,
+      color-mix(in srgb, var(--accent-soft) 72%, transparent),
+      transparent 42%
+    ),
+    var(--canvas);
+}
+
+.bootstrap-route > h1,
+.recovery-route > h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(25px, 3.4vw, 36px);
+  font-weight: 720;
+  letter-spacing: -0.035em;
+  line-height: 1.12;
+}
+
+.bootstrap-route > p,
+.recovery-route > p {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.bootstrap-route > button,
+.recovery-route > button,
+.bootstrap-actions > button,
+.recovery-actions > button,
+.recovery-snapshots button,
+.abandon-dialog button {
+  min-height: 40px;
+  padding: 0 14px;
+  color: var(--accent-strong);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow:
+    0 1px 2px oklch(20% 0.02 250 / 0.08),
+    inset 0 1px 0 oklch(100% 0 0 / 0.48);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.bootstrap-actions,
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.bootstrap-actions > button:first-child,
+.recovery-actions > button:first-child {
+  color: white;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow:
+    0 1px 2px oklch(30% 0.08 250 / 0.26),
+    inset 0 1px 0 oklch(100% 0 0 / 0.2);
+}
+
+.bootstrap-route button:disabled,
+.recovery-route button:disabled,
+.abandon-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.bootstrap-route > .bootstrap-home-facts,
+.recovery-route > .recovery-path,
+.recovery-route > .restore-reason {
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.language-control {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-raised) 84%, transparent);
+  box-shadow: 0 1px 2px oklch(20% 0.02 250 / 0.04);
+}
+
+.language-control-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.language-control-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.language-control-option {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--text-secondary);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.language-control-option input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.language-control-option input:checked + span {
+  color: var(--accent-strong);
+  font-weight: 720;
+}
+
+.language-control-hint {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.bootstrap-diagnostic,
+.recovery-evidence,
+.recovery-snapshots,
+.bootstrap-error,
+.bootstrap-notice,
+.recovery-notice {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-4);
+  color: var(--text-secondary);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 3px oklch(20% 0.02 250 / 0.06);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.bootstrap-diagnostic summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-weight: 680;
+}
+
+.bootstrap-diagnostic dl {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.38fr) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  margin: var(--space-2) 0 0;
+}
+
+.bootstrap-diagnostic dt,
+.recovery-facts dt {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.bootstrap-diagnostic dd,
+.recovery-facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.bootstrap-error,
+.recovery-notice--error {
+  color: oklch(37% 0.13 27);
+  border-color: oklch(78% 0.08 27);
+  background: oklch(96% 0.026 27);
+}
+
+.bootstrap-notice,
+.recovery-notice {
+  color: oklch(39% 0.11 145);
+  border-color: oklch(80% 0.075 145);
+  background: oklch(96% 0.024 145);
+}
+
+.recovery-notice p {
+  margin: 0;
+}
+
+.recovery-evidence h2,
+.recovery-evidence h3,
+.recovery-snapshots h2 {
+  margin: 0;
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.recovery-evidence h2,
+.recovery-snapshots h2 {
+  font-size: 16px;
+}
+
+.recovery-evidence h3 {
+  padding-top: var(--space-2);
+  font-size: 12px;
+}
+
+.recovery-evidence > p,
+.recovery-snapshots > p {
+  margin: 0;
+}
+
+.recovery-reasons {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.recovery-reasons code,
+.recovery-diagnostic code {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.recovery-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 7px var(--space-4);
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.recovery-facts dd {
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.recovery-diagnostic {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.recovery-snapshots ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recovery-snapshots li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.recovery-snapshot-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.recovery-snapshot-stats {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.recovery-delete-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.overlay-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: oklch(20% 0.018 250 / 0.44);
+  backdrop-filter: blur(3px);
+}
+
+.abandon-dialog {
+  width: min(100%, 560px);
+  max-height: calc(100vh - var(--space-8));
+  display: grid;
+  gap: var(--space-4);
+  overflow-y: auto;
+  padding: clamp(22px, 4vw, 34px);
+  color: var(--text);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: 0 20px 55px oklch(20% 0.025 250 / 0.28);
+}
+
+.abandon-dialog h2,
+.abandon-dialog p {
+  margin: 0;
+}
+
+.abandon-dialog h2 {
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+
+.abandon-dialog p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.abandon-type {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.abandon-type > span:first-child {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.abandon-type input {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.abandon-hint {
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 600px) {
+  .bootstrap-route,
+  .recovery-route {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .bootstrap-actions,
+  .recovery-actions,
+  .recovery-delete-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bootstrap-actions > button,
+  .recovery-actions > button,
+  .recovery-delete-confirm > button {
+    width: 100%;
+  }
+
+  .recovery-facts,
+  .bootstrap-diagnostic dl {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-facts dd {
+    text-align: left;
+  }
+
+  .recovery-snapshots li {
+    grid-template-columns: 1fr;
+  }
+}

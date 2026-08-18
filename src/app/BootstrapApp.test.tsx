@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
+import "../styles.css";
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 import { BootstrapApp } from "./BootstrapApp";
 import {
@@ -40,9 +41,14 @@ test("unconfigured snapshot renders the Unconfigured route", async () => {
   expect(
     screen.queryByRole("navigation", { name: "Library" }),
   ).not.toBeInTheDocument();
+  expect(getComputedStyle(route).display).toBe("grid");
+  expect(getComputedStyle(route).overflowY).toBe("auto");
+  expect(
+    getComputedStyle(document.querySelector(".language-control")!).display,
+  ).toBe("grid");
 });
 
-test("fixture_recovery_locked renders the Fixture Recovery route", async () => {
+test("fixture_recovery_locked renders a styled Fixture Recovery route", async () => {
   const client = clientWithSnapshot({
     state: "fixture_recovery_locked",
     homeId: null,
@@ -85,6 +91,19 @@ test("fixture_recovery_locked renders the Fixture Recovery route", async () => {
   expect(
     screen.queryByRole("navigation", { name: "Library" }),
   ).not.toBeInTheDocument();
+
+  expect(
+    getComputedStyle(document.querySelector(".recovery-route")!).display,
+  ).toBe("grid");
+  expect(
+    getComputedStyle(document.querySelector(".recovery-route")!).overflowY,
+  ).toBe("auto");
+  expect(
+    getComputedStyle(document.querySelector(".language-control")!).display,
+  ).toBe("grid");
+  expect(
+    getComputedStyle(document.querySelector(".recovery-actions")!).display,
+  ).toBe("flex");
 });
 
 test("app_state_unavailable route shows the raw diagnostic and Retry re-resolves", async () => {
