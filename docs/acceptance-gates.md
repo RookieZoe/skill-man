@@ -1,222 +1,289 @@
 # vNext 人工验收 Gate 本地测试清单（issue #49）
 
 > 对应票：[验收:vNext 本机恢复、真实 Adopt、窗口与双语 Gate #49](https://github.com/RookieZoe/skill-man/issues/49)
-> 权威依据：[vnext-implementation-spec.md §10.3–§10.4](vnext-implementation-spec.md)
-> 本清单是逐项可勾选的执行手册；结果按 §10.3 记录到 issue #49 评论，**不得**粘贴 Skill 正文、token 或凭据。
+> 权威依据：[vnext-implementation-spec.md §10.3 至 §10.4](vnext-implementation-spec.md)
+> 这是一份人工 Gate 的执行清单。自动化测试、CI、真实 macOS/Tauri 运行时证据分别成立，任何一项都不能替代另一项。不要在 issue、截图文件名或日志中放入 Skill 正文、token、凭据或 remote response body。
 
 ## 0. 前置条件
 
-- [ ] 候选 build commit 已固定：记录待测 checkout 的 `git rev-parse HEAD` 为 `CANDIDATE_COMMIT`
-- [ ] 同一 `CANDIDATE_COMMIT` 的 CI 全绿（全步骤通过，含 Tauri no-bundle 构建）
-- [ ] 旧 Skill Man 完全退出且无 SQLite writer：
+- [ ] 从 issue #49 最新评论取得已通过 CI 的候选 SHA，记为 `CANDIDATE_COMMIT`。
+- [ ] 同一 `CANDIDATE_COMMIT` 的 CI 已全绿，且包含 Tauri no-bundle 构建。
+- [ ] 在干净 clone 或专用 worktree 构建。当前 checkout 有 WIP 时，不要在其中切换 candidate SHA。
+- [ ] Gate A 开始前完全退出旧 Skill Man，确认没有 SQLite writer。
+- [ ] Gate C 和 Gate D 的截图只截 Skill Man 窗口，避免把聊天、文件列表或其他桌面内容带入验收资产。
+- [ ] 本票只验证未签名或开发构建的产品行为。Developer ID 签名、公证、Gatekeeper、真实 updater 升级和回滚属于发布 Gate，不是本票的通过条件。
 
-```bash
-pgrep -fl skill-man          # 期望空
-lsof "$HOME/Library/Application Support/skill-man/skill-man.sqlite3"   # 期望无输出
-```
+### 0.1 本机 Gate A 已知基线
 
-- [ ] 本次验收只验证未签名/开发构建行为；签名、公证、Gatekeeper、真实 updater 升级由 #31/#17 跟踪，不在本 Gate（§10.4）
+以下是本轮首次只读采集的基线，不是可重复注入的 fixture。每次写操作前仍必须重跑 §3.2，并以当次结果为准。
 
-### 0.1 本机已知起点（2026-08-17 采集，只读）
+| 证据                | 首次采集值                                                                     |
+| ------------------- | ------------------------------------------------------------------------------ |
+| Catalog schema      | v4，`snapshot_version = 9`                                                     |
+| 行数                | skills 3，agents 3，activations 0，file_sources 0，remote_sources 0            |
+| skills              | skill-authoring、media-xray、legacy-audit                                      |
+| agents              | claude-code、codex、workbench                                                  |
+| `fixture-entities/` | 仅 `skill-authoring/SKILL.md` 与 `media-xray/SKILL.md`，没有 legacy-audit 实体 |
+| SQLite              | `integrity_check = ok`，`foreign_key_check` 无输出                             |
 
-真实 Home `~/Library/Application Support/skill-man/` 为**生产 fixture 足迹**，与 `FixtureFingerprintV1` 常量字节级一致：
-
-| 证据 | 值 |
-|---|---|
-| schema_version | `4`（= `FIXTURE_CATALOG_SCHEMA_VERSION`） |
-| 行数 | skills 3 / agents 3 / activations 0 / file_sources 0 / remote_sources 0 |
-| skills | skill-authoring、media-xray、legacy-audit |
-| agents | claude-code、codex、workbench |
-| `fixture-entities/` | 仅 `skill-authoring/SKILL.md` 与 `media-xray/SKILL.md`（legacy-audit 悬空，seed 从未物化） |
-| integrity / FK | `ok` / 无违规 |
-
-预期分类：**Pure fixture → Fixture Recovery Lock**（RecoveryView）。若判定不同，先停，把分类证据贴回 issue 再继续。
+预期 bootstrap 分类是 **Pure fixture -> Fixture Recovery Lock**。若 app 显示 Mixed、Unknown 或任何其他分类，先记录完整 Preview 和原因，在任何写操作前停止本 Gate。不要通过删除 `fixture-entities/`、改数据库、修改 lock 或运行 fixture 测试来让分类“变对”。
 
 ## 1. 构建候选 app
 
+在干净 clone 或专用 worktree 执行。若 `git status --short` 有输出，保留该 WIP，改用另一个 clone 或 worktree。
+
 ```bash
-cd /Users/zoe/Codes/AI/skill-man
-git checkout <CI-green-candidate-SHA>
-git rev-parse HEAD            # 复制为 Gate 记录中的 CANDIDATE_COMMIT
+cd /path/to/clean/skill-man
+export CANDIDATE_COMMIT=<issue-49-latest-comment-sha>
+git fetch origin
+git switch --detach "$CANDIDATE_COMMIT"
+test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+
 npm ci
-npm run tauri build -- --target aarch64-apple-darwin
-# 产物：src-tauri/target/release/bundle/macos/Skill Man.app
+export TARGET=aarch64-apple-darwin
+export VERSION="$(node -p "require('./package.json').version")"
+npm run tauri build -- --target "$TARGET"
+
+export DMG="src-tauri/target/$TARGET/release/bundle/dmg/Skill Man_${VERSION}_aarch64.dmg"
+test -f "$DMG"
+shasum -a 256 "$DMG"
+open "$DMG"
 ```
 
-- [ ] 构建成功，记录产物 sha256：`shasum -a 256 "src-tauri/target/release/bundle/macos/Skill Man.app/Contents/MacOS/skill-man"`
-- [ ] 首次启动被 Gatekeeper 拦时：右键 → 打开（未签名/临时签名构建，§10.4 允许）
-- [ ] 需要 DevTools（查 `document.lang` 等）时改用开发构建：`npm run tauri dev`（右键 → Inspect / ⌘⌥I）
+- [ ] 在 issue 记录 `CANDIDATE_COMMIT`、DMG SHA-256、构建日期和操作者。
+- [ ] 从挂载的 DMG 打开 `Skill Man.app`。需要安装时，在 Finder 中拖到 Applications 并选择替换旧副本。
+- [ ] `tauri build` 创建 DMG 后会清理 `bundle/macos/Skill Man.app`。不要把该临时路径当成构建后必须存在的验收产物。
+- [ ] 需要检查 `document.lang` 时，单独运行 `npm run tauri dev`。先退出 release app，避免两个实例同时访问同一个 Home。
+- [ ] Gatekeeper 弹窗不是本 Gate 的结果。若本机要启动未签名构建，可右键 app 后选择“打开”。
 
-## 2. 记录模板（每 Gate 一条，贴入 issue #49）
+## 2. issue #49 记录模板
 
-```
-Gate X — <名称>
+每个 Gate 单独发一条记录。失败或阻塞也要记录，不要以自动化结果代替人工结论。
+
+```text
+Gate <A/B/C/D>: <名称>
 - 日期：YYYY-MM-DD
 - 操作者：<姓名>
 - build commit：<CANDIDATE_COMMIT>
-- 输入摘要：<Home 分类 / 候选技能与 lock / 窗口尺寸矩阵 / 系统语言序列>
-- 结果：PASS / FAIL（FAIL 附错误面与复现）
-- 资产链接：<截图/命令输出/gist 链接>
+- DMG SHA-256：<hash>
+- 输入摘要：<Home 分类、候选、窗口 viewport、系统语言序列>
+- 结果：PASS / FAIL / BLOCKED
+- 证据：<已脱敏的截图、命令输出或文件链接>
+- 未记录内容：Skill 正文、token、凭据、remote response body
 ```
 
-## 3. Gate A — 本机数据恢复
+## 3. Gate A：本机数据恢复
 
-### 3.1 确认无 writer（启动前必做）
-
-- [ ] `pgrep -fl skill-man` 为空
-- [ ] `lsof "$HOME/Library/Application Support/skill-man/skill-man.sqlite3"` 无输出
-
-### 3.2 只读证据（写操作前全部采集）
+### 3.1 启动前证明无 writer
 
 ```bash
-DB="$HOME/Library/Application Support/skill-man/skill-man.sqlite3"
-sqlite3 "$DB" 'PRAGMA integrity_check;'                    # → ok
-sqlite3 "$DB" 'PRAGMA foreign_key_check;'                  # → 空
-sqlite3 "$DB" 'SELECT schema_version, snapshot_version FROM catalog_meta;'
-# 注：`home_id` 列只在 v5+（Bound）schema 存在；v4 Legacy 库查询会报
-# “no such column: home_id”——这是未绑定 Legacy 的预期证据，并非错误。
-# 绑定/恢复完成后（v5+）再查 home_id 确认身份。
-sqlite3 "$DB" "SELECT 'skills',count(*) FROM skills UNION ALL SELECT 'agents',count(*) FROM agents UNION ALL SELECT 'activations',count(*) FROM activations UNION ALL SELECT 'file_sources',count(*) FROM file_sources UNION ALL SELECT 'remote_sources',count(*) FROM remote_sources;"
+export DB="$HOME/Library/Application Support/skill-man/skill-man.sqlite3"
+test -f "$DB"
+pgrep -fl skill-man
+lsof "$DB"
 ```
 
-- [ ] integrity `ok`、FK 无违规、row counts 已存档（已知起点见 §0.1——若与本机实际不符，以当次输出为准）
+- [ ] `pgrep -fl skill-man` 无输出。
+- [ ] `lsof "$DB"` 无输出。若有进程，先退出该进程，重新执行这两条命令。
+- [ ] 记录命令执行时间。不要在自己的 SQLite 只读检查仍打开时宣称“无 writer”。
+
+### 3.2 写操作前的只读证据
+
+所有 SQLite 命令都使用 `-readonly`，避免测试本身创建 WAL 或改变状态。
+
+```bash
+sqlite3 -readonly "$DB" 'PRAGMA integrity_check;'
+sqlite3 -readonly "$DB" 'PRAGMA foreign_key_check;'
+sqlite3 -readonly "$DB" 'SELECT schema_version, snapshot_version FROM catalog_meta;'
+sqlite3 -readonly "$DB" "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
+```
+
+按上一步的 schema version 选择 row count 查询，并保留原始输出到本地脱敏证据中。
+
+```bash
+# schema v4 或 v5：remote_sources 仍存在
+sqlite3 -readonly "$DB" "
+SELECT 'skills', count(*) FROM skills
+UNION ALL SELECT 'agents', count(*) FROM agents
+UNION ALL SELECT 'activations', count(*) FROM activations
+UNION ALL SELECT 'file_sources', count(*) FROM file_sources
+UNION ALL SELECT 'remote_sources', count(*) FROM remote_sources;"
+
+# schema v6：remote_sources 已被 remote source parent/binding 表取代
+sqlite3 -readonly "$DB" "
+SELECT 'skills', count(*) FROM skills
+UNION ALL SELECT 'agents', count(*) FROM agents
+UNION ALL SELECT 'activations', count(*) FROM activations
+UNION ALL SELECT 'file_sources', count(*) FROM file_sources
+UNION ALL SELECT 'remote_source_parents', count(*) FROM remote_source_parents
+UNION ALL SELECT 'remote_source_aliases', count(*) FROM remote_source_aliases
+UNION ALL SELECT 'remote_bindings', count(*) FROM remote_bindings;"
+```
+
+- [ ] `integrity_check` 为 `ok`，`foreign_key_check` 无输出。
+- [ ] row counts、schema version 和 table set 已记录。恢复后先重新读取 schema version 和 table set，再选择对应的计数查询，不能机械复用恢复前的 v4/v5 块。
+- [ ] `catalog_meta.home_id` 仅在 v5 及以上存在。即使它非空，也不能单独证明 Bound，只有 locator、Home marker 和 Catalog 三方一致才是 Bound。让 app 的 bootstrap 分类作最终判断。
 
 ### 3.3 启动 app，记录 bootstrap 分类
 
-- [ ] 截图首屏分类。按分类走对应分支：
+- [ ] 启动 §1 的候选 `.app`，截取 Skill Man 窗口首屏。
+- [ ] 不点击写操作，先记录 route、路径和 diagnostic。
 
-| 分类 | 分支 |
-|---|---|
-| Fixture Recovery Lock | §3.4 恢复流 |
-| LegacyDetected | §3.5 Legacy 过渡 |
-| Bound | 正常进入 Library，记录 home_id |
-| HomeUnavailable | Reconnect/Restore 流（§10.3 Gate A 的不可用分支） |
-| Abandoned | 只读确认不可再绑定，走 §3.6 说明 |
+| app 分类                               | 人工操作边界                                                                       |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| Fixture Recovery Lock                  | 进入 §3.4，只能使用 RecoveryView 的确认流程                                        |
+| LegacyDetected                         | 进入 §3.5，只有在没有 Fixture Recovery Lock 时才可绑定                             |
+| Bound                                  | 记录 home_id 与当前可读状态，不重复首次绑定                                        |
+| HomeUnavailable / HomeIdentityMismatch | 记录 diagnostic，只使用该 route 允许的 Reconnect、Restore 或 Abandon 流程          |
+| Abandoned                              | 旧 Home 不会重新绑定。Default 应保持不可用，只能通过 Choose 选择新的合法 Home 候选 |
+| AppStateUnavailable                    | 不写、不绑，记录 diagnostic 后停止                                                 |
 
-### 3.4 Fixture Recovery Lock → 恢复流（本机预期路径）
+### 3.4 Fixture Recovery Lock：恢复流
 
-- [ ] RecoveryView 展示 Pure 分类与完整证据（缺表/行/树不符逐项列出；本机应为空）
-- [ ] 截图证据区
-- [ ] **等用户确认后** 执行恢复（plan → apply）
-- [ ] 记录 Safety Snapshot 路径：`~/Library/Application Support/skill-man.snapshot-<op-id>/`（同级目录）
-- [ ] 记录 manifest hash（结果/快照列表展示）
-- [ ] 恢复后重跑 §3.2 命令：integrity、FK、row counts 前后对比写入记录
-- [ ] `list_safety_snapshots` 截图存证（SafetySnapshots 面板）
-- [ ] 恢复完成后 bootstrap 转 LegacyDetected → 首次绑定流（§3.5）
+本机预期走这条路径。
 
-### 3.5 Legacy 过渡（首次绑定）
+- [ ] RecoveryView 的 Preview 显示分类、Catalog evidence、tree evidence 和所有原因。
+- [ ] 截取已脱敏的证据区。Pure 分类不应通过手工修改数据库或目录获得。
+- [ ] 由操作者明确确认后才执行页面上的 recovery plan、apply、confirm 流程。
+- [ ] 记录 Safety Snapshot 路径，格式为 `<Home>.snapshot-<op-id>/`，以及 manifest hash。
+- [ ] Recovery 完成后重跑 §3.2 的完整只读证据，记录前后 row counts。
+- [ ] 在 SafetySnapshots 页面记录 snapshot 的存在。不要手动删除 snapshot。
+- [ ] Legacy recovery 成功确认后，bootstrap 才应进入 LegacyDetected，再继续 §3.5。
 
-- [ ] Legacy summary（含 path）截图
-- [ ] Use Default 或 Choose → 确认页核对 `{path}` 与 explicit-confirm 文案
-- [ ] 确认绑定后记录新 home_id 与绑定结果
-- [ ] **Rescan 只报告真实 Untracked**；无自动 Adopt/Enable/Repair（勾选一项验证）
-- [ ] 结果确认后才开放写；确认前不点任何写操作
+### 3.5 Legacy 首次绑定与 Rescan
 
-### 3.6 纪律（全过程）
+- [ ] 记录 Legacy summary 和原始 Home path。
+- [ ] 选择 Use Default 时，确认它是 Legacy 原位绑定。选择 Choose 时，确认它走的是唯一一次 copy 过渡。
+- [ ] 在确认页核对 path、模式和 explicit confirmation 文案后，再由操作者确认。
+- [ ] 绑定后记录新 home_id、Home marker 和 Catalog 状态。
+- [ ] 运行 Rescan，只允许它报告真实 Untracked。不得出现自动 Adopt、Enable 或 Activation Repair。
+- [ ] Rescan 结果经操作者确认前，不执行任何普通产品写操作。
 
-- [ ] 恢复前不手动删除 `fixture-entities/`、不跑 fixture 测试
-- [ ] 不手动 Relocate/改址/普通 re-home；新建身份只能走 Abandon 流程
-- [ ] locale 独立可用；Agent skills 目录不属于 Home
+### 3.6 全程禁止项
 
-## 4. Gate B — 真实多跳 Adopt
+- [ ] 不删除 `fixture-entities/`，不运行会向真实 Home 注入 fixture 的测试。
+- [ ] 不手动 Relocate、改址或普通 re-home。绑定后只能 Reconnect、Restore 或 Abandon。
+- [ ] locale 是 Home 外状态，Agent skills 目录不是 Home 内容。
 
-### 4.1 候选选择（真实环境，各选一个）
+## 4. Gate B：真实多跳 Adopt
 
-- [ ] **Local Link 多跳/多 appearance**：`~/.agents/skills` 下经 symlink 链到达、或出现在多个 agent 目录的技能
-- [ ] **lock-managed remote**：`~/.agents/.skill-lock.json` 中有声明的技能（建议 branch 或 tag，验证 anchor 规则）
+仅在 Gate A 已完成、app 处于允许写入的 Bound 状态后执行。候选必须来自真实环境的 Evidence Ledger，不能通过新建 symlink、修改 `.skill-lock.json` 或插入数据库行来伪造。
 
-### 4.2 账本核对（EvidenceLedger，逐项）
+### 4.1 候选选择
 
-- [ ] 每一 hop：路径 + 类型（Symlink/Dir/…）与磁盘一致
-- [ ] lock path：`~/.agents/.skill-lock.json`（或 XDG 变体）与账本一致
-- [ ] Verification Anchor commit、requested ref disposition（head/branch/tag/commit）
-- [ ] local/remote tree hash 与 `trees_match`
-- [ ] 显式 Include 开关只在 selectable 候选上出现
-- [ ] 最终 owner/verdict（Local/Verified/Modified/Conflict/Deferred/Blocked/Excluded）与预期一致
+- [ ] 选一个 Ledger 中的 **Local Link** 候选，要求有多 hop 或多 appearance。
+- [ ] 选一个 Ledger 中的真实 **lock-managed remote** 候选。
+- [ ] Agent roots 包含 app 已配置的各 Agent skills path，另加共享 `~/.agents/skills`。不要把共享目录误当成唯一扫描根。
+- [ ] lock path 以 Ledger 实际显示的路径为准。默认 lock 是 `~/.agents/.skill-lock.json`，也可能显示 XDG 变体。
+- [ ] 没有符合条件的真实候选时，记录 BLOCKED。不要把 fixture 或临时目录包装成候选。
 
-### 4.3 Apply 前后取证（正文/凭据不记录）
+### 4.2 Evidence Ledger 核对表
+
+每个候选逐项记录，不贴 lock 正文或 Skill 正文。
+
+- [ ] appearance、每个 hop 的路径和类型与磁盘一致。
+- [ ] lock path、entry name、lock fingerprint、requested ref 和 ref disposition 一致。
+- [ ] Verification Anchor、local tree hash、remote tree hash、`trees_match` 已记录。
+- [ ] Include 只出现在 selectable 候选，Blocked、Deferred、Excluded 不可 Include。
+- [ ] verdict 和最终 owner 与证据一致。
+
+### 4.3 Apply 前后证据
+
+`tree-sha256-v1` 由 Evidence Ledger 提供，是 source/Home 树比对的权威值。不要用单个 `cmp SKILL.md` 代替整棵树验证，也不要复制 Skill 正文作为证据。
+
+- [ ] Apply 前记录 source path、Home path、source/Home tree hash、lock fingerprint 和 Activation 状态。
+- [ ] 从 app 的 Activation 信息取得绝对 activation path，记录它是否存在及当前 symlink target。
 
 ```bash
-DB="$HOME/Library/Application Support/skill-man/skill-man.sqlite3"
-# source 与 Home 副本字节一致（期望无输出 = 相同）：
-cmp <source>/SKILL.md <home-copy>/SKILL.md
-# Apply 前的 activation 记录：
-sqlite3 "$DB" 'SELECT skill_id, agent_id, path FROM activations;'
-# 对每个 activation path 记录 symlink target：
-readlink "<path>"
+# 仅对 app 显示的实际 path 执行。不要猜测 activations 表有 path 列。
+export ACTIVATION_PATH="/absolute/path/shown-by-the-app"
+if [ -L "$ACTIVATION_PATH" ]; then
+  readlink "$ACTIVATION_PATH"
+else
+  printf '%s\n' 'activation absent or not a symlink'
+fi
+
+# 只记录 lock 的 hash，不显示其内容。
+shasum -a 256 "/absolute/path/to/the-ledger-lock-file"
 ```
 
-- [ ] Apply 前：source/Home tree hash、activation symlink target 已记录
-- [ ] Apply（勾选 Include）→ 记录 source/Home hash 与 symlink target 前后值
-- [ ] 最终 owner 与预期一致（Local Link 注册 / remote 转 ownership）
+- [ ] 操作者勾选 Include 后执行 Apply。
+- [ ] Apply 后重新记录 source/Home tree hash、activation target、最终 owner 和 Ledger verdict。
+- [ ] 只在 issue 中记录 hash、路径摘要和结果，不上传正文、token、凭据或 lock 内容。
 
-## 5. Gate C — Tauri/WKWebView 视觉
+## 5. Gate C：Tauri/WKWebView 视觉
 
-### 5.1 窗口尺寸矩阵
+Gate C 的证据必须来自 §1 构建的真实 `.app`。`npm run matrix:layout` 只是在浏览器中运行的辅助预检，不能代替 Tauri/WKWebView 截图或 VoiceOver 记录。
+
+### 5.1 尺寸与状态矩阵
+
+布局断点读取 `window.innerWidth`：760 至 1059 为 mid，1060 及以上为 wide。窗口外框尺寸和 WebView viewport 可能不同，使用 DevTools 时以 `window.innerWidth`、`window.innerHeight` 为准。
 
 ```bash
-# 需辅助功能权限；或用鼠标拖到目标尺寸
+# 仅对从 DMG 打开的 Skill Man.app 有效。
+# Terminal 或 iTerm 需要在“系统设置 > 隐私与安全性 > 辅助功能”中获准控制电脑。
 osascript -e 'tell application "System Events" to tell process "Skill Man" to set size of window 1 to {760, 520}'
 ```
 
-- [ ] **760×520**（最小）截图
-- [ ] **1059px 宽**截图
-- [ ] **1060px 宽**截图
-- [ ] **高窗口**（如 1180×1200）截图
+- [ ] 若上述命令报 `-1719`，这是终端没有辅助功能权限，不是 app 失败。授权后重试，或手动 resize 并记录实际 viewport。
+- [ ] 在 760×520、1059px、1060px、高窗口分别截图。每张图写明实际 `window.innerWidth × window.innerHeight`。
+- [ ] 760 至 1059 宽度核对 mid 布局和 Agent drawer，1060 宽度核对 wide 三栏布局。
+- [ ] 每个尺寸核对 0、1、multiple Notice，empty、error、dense English、dense 简体中文，以及没有 page 横向溢出。
 
-每个尺寸下检查：
-
-- [ ] 0/1/multiple Notice 三态
-- [ ] empty 状态（无技能/无激活）与 error 状态
-- [ ] dense English 与简体中文文案
-- [ ] 无 page 横向溢出（底部无横向滚动条）
+不要在真实 Home 中插 fixture、改数据库或制造损坏来产生 Notice、empty 或 error。只能使用已有的可逆 UI 路径或独立、可丢弃的 QA Home。若某状态不能安全复现，记录 BLOCKED 和原因。
 
 ### 5.2 跨断点 overlay
 
-- [ ] 打开 sheet/drawer：Preferences（工具栏齿轮）、Adopt 账本、Import
-- [ ] 打开后跨断点 resize，逐个核对：
-  - [ ] scroll owner：三栏/双栏/drawer 各自滚动、Toolbar 固定不滚
-  - [ ] 无空白区、无横向溢出
-  - [ ] focus trap：Tab 仅在 overlay 内循环
-  - [ ] Escape 关闭
-  - [ ] busy 态按钮禁用（如 Apply/Check 进行中）
-  - [ ] 关闭后焦点回到触发器（如 Preferences 后焦点回齿轮按钮）
-- [ ] resize 不 remount（内容状态保持，如已选 Include 不丢）
+- [ ] 打开 Preferences、Adopt Evidence Ledger 或 Import sheet/drawer。
+- [ ] 保持 overlay 打开，跨 1059/1060 断点 resize。
+- [ ] 核对三栏、双栏/drawer、Notice tray 各自的 scroll owner，Toolbar 固定。
+- [ ] 核对没有空白区和横向溢出。
+- [ ] Tab 焦点被限制在 dialog/drawer；Escape 关闭；关闭后焦点回触发器。
+- [ ] busy 只用已经允许且可逆的操作触发。不要为了观察 disabled 态执行 Fixture Recovery 或未确认的 Apply。
+- [ ] resize 后已选 Include、表单输入和 overlay DOM 不 remount、不丢失。
 
-### 5.3 可访问性基础记录
+### 5.3 VoiceOver 与截图
 
-- [ ] 每尺寸窗口截图存档（命名含尺寸）
-- [ ] VoiceOver：⌘F5 开启 → Tab 走查 → 记录关键元素 role/label（至少标题、列表、按钮、dialog）
+- [ ] 用 ⌘F5 开启 VoiceOver，记录标题、列表、按钮、dialog 的 role 和 label。
+- [ ] 每个截图只含 app 窗口，文件名包含 Gate、locale、viewport 和时间。
+- [ ] 截图中出现本地路径、远程 URL 或 diagnostic 时，上传前审查是否含敏感信息。
 
-## 6. Gate D — 双语 native QA
+## 6. Gate D：双语 native QA
 
-### 6.1 系统语言与 override 序列
+### 6.1 测试顺序
 
-- [ ] 系统 English：系统设置 → 通用 → 语言与地区，重启 app，首帧英文截图
-- [ ] 手动 override：LanguageControl（bootstrap/恢复页底部或 Library 工具栏）切简体中文 → 立即生效
-- [ ] 切回 **System** → 跟随系统
-- [ ] 系统切换为 简体中文：重启 app，首帧中文截图
-- [ ] 重激活（焦点/重开窗口）与重启后 locale 持久
+系统语言切换会影响整台 Mac。优先使用测试 macOS 用户，或在开始前记录如何恢复原系统语言。
 
-### 6.2 核对面（每个 locale）
+- [ ] 系统语言设为 English，冷启动 release app，记录首帧。
+- [ ] 在当前 route 的 LanguageControl 选择简体中文，确认即时生效。
+- [ ] 选择 System，确认回到系统首选语言。
+- [ ] 系统语言改为简体中文，关闭并重新启动 app，记录首帧。
+- [ ] 重激活 app 后再重启一次，确认 selection 和 effective locale 一致。
 
-- [ ] 首帧语言正确
-- [ ] DevTools 查 `document.documentElement.lang`（`en` / `zh-Hans`）
-- [ ] Preferences（齿轮 → 设置项文案）
-- [ ] tray（菜单栏图标：最近技能/打开窗口/退出，文案随 locale 变）
-- [ ] native menu（app 菜单文案、⌘Q 可用）
-- [ ] ARIA labels / role（VoiceOver 复核）
-- [ ] 日期/数字/单位格式化（如 `formatDateTime` 输出）
-- [ ] 公开错误文案（制造一次可逆错误，如恢复/绑定失败路径）
+LanguageControl 的位置取决于 route：Fixture Recovery、Binding、Lifecycle route 内直接可见；Bound 状态在 Settings 齿轮打开的 Preferences sheet 内。不要假定它固定在页面底部或工具栏。
 
-### 6.3 byte equality 与 diagnostic 分区
+### 6.2 每个 locale 的核对项
 
-- [ ] 同一 Source Content（如同一候选的 evidence 文本/chain 描述）在两种 locale 下各导出一份
-- [ ] `shasum -a 256 file-en.txt file-zh.txt` 两 hash 一致（Source Content 不因 locale 翻译而变）
-- [ ] raw diagnostic（错误详情原文）保持未翻译、与 UI 文案明确分区
+- [ ] WebView 首帧、LanguageControl 和 Preferences。
+- [ ] 在单独的 `npm run tauri dev` 会话中打开 Inspector，执行 `document.documentElement.lang`，记录 `en` 或 `zh-Hans`。完成后退出 dev app，再继续 release app 验收。
+- [ ] menu-bar tray：Open Window、Quit、最近启用技能和 count/health 文案。
+- [ ] macOS native menu：Window、Help、Quit（⌘Q）。locale 切换后关闭并重新打开菜单核对更新。
+- [ ] VoiceOver 的 ARIA role/label。
+- [ ] 日期、数字、byte size 等格式化。
+- [ ] 公开错误的 UI 文案与 raw diagnostic 的技术内容明确分区。不要破坏 Home、SQLite 或 lock 来制造错误。
+
+### 6.3 Source Content byte equality
+
+选择同一个 Evidence Ledger 候选，比较两种 locale 下的 **原始字段值**，不是翻译后的 App Copy。建议固定比较 final entity、每个 hop path/target、lock path/fingerprint、requested ref、Verification Anchor、local/remote tree hash。
+
+- [ ] 在 English 与简体中文下分别打开同一个候选，不改变 Scan generation 或候选。
+- [ ] 逐项核对上述 raw fields 字符串完全一致，只有 verdict、标题、按钮等 App Copy 可以翻译。
+- [ ] 若需要本地 hash 证据，只把这些非正文 raw fields 写进两个临时 UTF-8 文件，执行 `cmp -s en.txt zh.txt`，期望 exit code 为 0；记录两个 SHA-256 和比较结果后删除临时文件。
+- [ ] 不把临时文件、Skill 正文、token、凭据、完整 lock 或 remote response body 上传到 issue。
 
 ## 7. 完成与关闭
 
-- [ ] 四 Gate 全部 PASS，每项含 §2 模板字段与资产链接
-- [ ] 在 issue #49 发布最终结果评论，`gh issue close 49`
-- [ ] 签名/公证/Gatekeeper/真实 updater 升级继续由 #31/#17 跟踪
+- [ ] Gate A 至 D 全部为 PASS，每项都有 §2 所需字段和可审计资产链接。
+- [ ] 某项 FAIL 或 BLOCKED 时保持 #49 打开，写明可复现条件和缺失证据。
+- [ ] 只有人类操作者确认四项全过后，才在 #49 发布最终结果并关闭 issue。
+- [ ] 签名、公证、Gatekeeper、真实 updater 升级和回滚继续由发布 Gate 跟踪。
