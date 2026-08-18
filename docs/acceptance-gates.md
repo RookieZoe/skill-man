@@ -6,8 +6,8 @@
 
 ## 0. 前置条件
 
-- [ ] 候选 build commit 已固定：`e34844f`（`fix: green the full suite for the #49 human gates`）
-- [ ] CI 全绿：run [31819015110](https://github.com/RookieZoe/skill-man/actions/runs/31819015110)（全步骤通过，含 Tauri no-bundle 构建）
+- [ ] 候选 build commit 已固定：记录待测 checkout 的 `git rev-parse HEAD` 为 `CANDIDATE_COMMIT`
+- [ ] 同一 `CANDIDATE_COMMIT` 的 CI 全绿（全步骤通过，含 Tauri no-bundle 构建）
 - [ ] 旧 Skill Man 完全退出且无 SQLite writer：
 
 ```bash
@@ -36,7 +36,8 @@ lsof "$HOME/Library/Application Support/skill-man/skill-man.sqlite3"   # 期望�
 
 ```bash
 cd /Users/zoe/Codes/AI/skill-man
-git checkout e34844f          # 或确认 HEAD 已是它
+git checkout <CI-green-candidate-SHA>
+git rev-parse HEAD            # 复制为 Gate 记录中的 CANDIDATE_COMMIT
 npm ci
 npm run tauri build -- --target aarch64-apple-darwin
 # 产物：src-tauri/target/release/bundle/macos/Skill Man.app
@@ -52,7 +53,7 @@ npm run tauri build -- --target aarch64-apple-darwin
 Gate X — <名称>
 - 日期：YYYY-MM-DD
 - 操作者：<姓名>
-- build commit：e34844f
+- build commit：<CANDIDATE_COMMIT>
 - 输入摘要：<Home 分类 / 候选技能与 lock / 窗口尺寸矩阵 / 系统语言序列>
 - 结果：PASS / FAIL（FAIL 附错误面与复现）
 - 资产链接：<截图/命令输出/gist 链接>
