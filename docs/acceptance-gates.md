@@ -13,7 +13,16 @@
 - [ ] Gate C 和 Gate D 的截图只截 Skill Man 窗口，避免把聊天、文件列表或其他桌面内容带入验收资产。
 - [ ] 本票只验证未签名或开发构建的产品行为。Developer ID 签名、公证、Gatekeeper、真实 updater 升级和回滚属于发布 Gate，不是本票的通过条件。
 
-### 0.1 本机 Gate A 已知基线
+### 0.1 选择本轮测试模式
+
+| 当前磁盘状态                                 | 应执行的测试                     | 不应做的事                                      |
+| -------------------------------------------- | -------------------------------- | ----------------------------------------------- |
+| 默认 Home 中已有真实 Legacy 或 Bound Catalog | Gate A，先收集只读证据再考虑恢复 | 不要先删除 Home、SQLite、marker 或 app-state    |
+| 默认 Home 和 `skill-man.sqlite3` 都不存在    | 首次启动 smoke，不是 Gate A      | 不要手工创建 SQLite 或 fixture 伪造 Gate A 输入 |
+
+首次启动的产品契约是 **Unconfigured**：在操作者确认 Home Candidate 前，app 不创建 Home、Catalog SQLite、Home marker 或 binding。没有真实 Legacy/Bound Home 时，Gate A 应记录为 BLOCKED；只能从可信的现有备份或 Safety Snapshot 恢复真实输入，不能用新建数据库替代。
+
+### 0.2 本机 Gate A 已知基线
 
 以下是本轮首次只读采集的基线，不是可重复注入的 fixture。每次写操作前仍必须重跑 §3.2，并以当次结果为准。
 
@@ -72,24 +81,41 @@ Gate <A/B/C/D>: <名称>
 - 未记录内容：Skill 正文、token、凭据、remote response body
 ```
 
-## 3. Gate A：本机数据恢复
+## 3. Gate A：本机数据恢复（仅已有 Legacy/Bound Home）
 
-### 3.1 启动前证明无 writer
+### 3.1 已有 Home 时，启动前证明无 writer
+
+Gate A 的 writer 检查只在 Home 和 Catalog 已存在时执行。对干净首次启动，DB 路径不存在是预期状态，`lsof` 因而会报“no such file or directory”，这不是 app 错误。
 
 ```bash
+export HOME_ROOT="$HOME/Library/Application Support/skill-man"
 export DB="$HOME/Library/Application Support/skill-man/skill-man.sqlite3"
+test -d "$HOME_ROOT"
 test -f "$DB"
 pgrep -fl skill-man
 lsof "$DB"
 ```
 
+- [ ] `test -d "$HOME_ROOT"` 和 `test -f "$DB"` 都通过后，才执行 `lsof "$DB"`。
 - [ ] `pgrep -fl skill-man` 无输出。
 - [ ] `lsof "$DB"` 无输出。若有进程，先退出该进程，重新执行这两条命令。
 - [ ] 记录命令执行时间。不要在自己的 SQLite 只读检查仍打开时宣称“无 writer”。
+- [ ] 任一 `test` 失败时：不要运行 `lsof` 或 §3.2 的 SQLite 查询。记录“no existing Home/Catalog”，转到 §3.1a；若本轮目标是 Gate A，则记录 BLOCKED。
+
+### 3.1a 干净首次启动 smoke（补充测试，不是 Gate A）
+
+此分支验证首次绑定边界，不产生可替代 Gate A 的恢复证据。
+
+- [ ] 确认默认 Home 和 `skill-man.sqlite3` 都不存在后启动 app。
+- [ ] app 首屏应为 Unconfigured，不能显示 LegacyDetected、Bound 或 Fixture Recovery Lock。
+- [ ] 在尚未确认 Home Candidate 前，再次检查默认 Home 和 `skill-man.sqlite3` 仍不存在。
+- [ ] 可进入 Use Default 或 Choose 的候选确认页，验证取消后仍保持 Unconfigured、零 Home/SQLite artifact。
+- [ ] 只有准备验证首次绑定时，才由操作者确认 Candidate。该确认会创建 Home 和 Catalog，改变当前测试环境。
+- [ ] 不要在此干净状态手工创建数据库、复制 fixture 或修改 locator 来继续 Gate A。
 
 ### 3.2 写操作前的只读证据
 
-所有 SQLite 命令都使用 `-readonly`，避免测试本身创建 WAL 或改变状态。
+仅在 §3.1 的 Home/Catalog 存在检查通过后执行。所有 SQLite 命令都使用 `-readonly`，避免测试本身创建 WAL 或改变状态。
 
 ```bash
 sqlite3 -readonly "$DB" 'PRAGMA integrity_check;'
@@ -131,6 +157,7 @@ UNION ALL SELECT 'remote_bindings', count(*) FROM remote_bindings;"
 
 | app 分类                               | 人工操作边界                                                                       |
 | -------------------------------------- | ---------------------------------------------------------------------------------- |
+| Unconfigured                           | 干净首次启动 smoke，不是 Gate A。按 §3.1a 验证或记录 Gate A BLOCKED                |
 | Fixture Recovery Lock                  | 进入 §3.4，只能使用 RecoveryView 的确认流程                                        |
 | LegacyDetected                         | 进入 §3.5，只有在没有 Fixture Recovery Lock 时才可绑定                             |
 | Bound                                  | 记录 home_id 与当前可读状态，不重复首次绑定                                        |
