@@ -426,12 +426,13 @@ impl HomeBindingService {
                 return Err(self.invalid(CandidateInvalidReason::NotDirectory, &normalized));
             }
         }
-        if exists {
+        let volume_anchor = if exists {
             // A Legacy in-place transition targets an existing Home by
             // definition; only fresh/copy destinations must be empty.
             if non_empty && mode != CandidateMode::LegacyInPlace {
                 return Err(self.invalid(CandidateInvalidReason::NotEmpty, &normalized));
             }
+            normalized.as_path()
         } else {
             let Some(parent) = normalized.parent() else {
                 return Err(self.invalid(CandidateInvalidReason::ParentMissing, &normalized));
@@ -450,15 +451,20 @@ impl HomeBindingService {
             {
                 return Err(self.invalid(CandidateInvalidReason::ParentNotWritable, &normalized));
             }
-        }
+            // A fresh candidate has no inode yet. Its parent was just proven
+            // to exist and be writable, so it is the only valid anchor for
+            // the prospective candidate's volume identity.
+            parent
+        };
 
-        let volume = match self.volume.volume_identity(&normalized).map_err(|error| {
-            HomeBindingError::CandidateInvalid {
+        let volume = match self
+            .volume
+            .volume_identity(volume_anchor)
+            .map_err(|error| HomeBindingError::CandidateInvalid {
                 reason: CandidateInvalidReason::NoVolumeIdentity,
                 path: normalized.clone(),
                 detail: error.to_string(),
-            }
-        })? {
+            })? {
             Some(volume) => volume,
             None => {
                 return Err(self.invalid(CandidateInvalidReason::NoVolumeIdentity, &normalized));

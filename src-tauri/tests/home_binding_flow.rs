@@ -17,6 +17,7 @@ use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::sqlite::{
     SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
 };
+use skill_man_lib::adapters::volume_identity::MacOsVolumeIdentitySource;
 use skill_man_lib::core::bootstrap::{BootstrapConfig, BootstrapService, BootstrapSnapshot};
 use skill_man_lib::core::fixture_recovery::SystemFixtureClassifier;
 use skill_man_lib::core::home::{BoundHome, HomeId, HomeMarker, VolumeIdentity};
@@ -43,6 +44,14 @@ impl VolumeIdentitySource for FixedVolumeIdentity {
     }
 }
 
+struct ExistingPathVolumeIdentity(VolumeIdentity);
+
+impl VolumeIdentitySource for ExistingPathVolumeIdentity {
+    fn volume_identity(&self, path: &Path) -> Result<Option<VolumeIdentity>, VolumeIdentityError> {
+        Ok(path.exists().then(|| self.0.clone()))
+    }
+}
+
 struct Composition {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -61,6 +70,10 @@ impl Composition {
 }
 
 fn compose(volume: Option<VolumeIdentity>) -> Composition {
+    compose_with_volume_source(Arc::new(FixedVolumeIdentity(volume)))
+}
+
+fn compose_with_volume_source(volume: Arc<dyn VolumeIdentitySource>) -> Composition {
     let dir = tempfile::tempdir().expect("temp dir");
     // tempfile paths under /var are symlinks to /private/var; the product
     // normalizes every candidate path, so the test roots must be canonical
@@ -90,7 +103,7 @@ fn compose(volume: Option<VolumeIdentity>) -> Composition {
     };
     let bootstrap = Arc::new(BootstrapService::new(
         app_state.clone(),
-        Arc::new(FixedVolumeIdentity(volume.clone())),
+        volume.clone(),
         probe.clone(),
         filesystem.clone(),
         classifier,
@@ -98,7 +111,7 @@ fn compose(volume: Option<VolumeIdentity>) -> Composition {
     ));
     let binding = Arc::new(HomeBindingService::new(
         app_state,
-        Arc::new(FixedVolumeIdentity(volume)),
+        volume,
         probe,
         filesystem.clone(),
         Arc::new(SystemFixtureClassifier::new(
@@ -335,6 +348,34 @@ fn fresh_default_confirm_binds_and_verifies() {
 
     // A second inspect is still Bound (no re-selection, no re-binding).
     assert!(is_bound(&composition.bootstrap.inspect()));
+}
+
+#[test]
+fn fresh_missing_candidate_uses_its_existing_parent_volume() {
+    let composition = compose_with_volume_source(Arc::new(ExistingPathVolumeIdentity(volume())));
+
+    let candidate = composition
+        .binding
+        .prepare_home(&composition.default_home)
+        .expect("fresh candidate on an existing parent volume");
+
+    assert_eq!(candidate.mode, CandidateMode::Fresh);
+    assert_eq!(candidate.path, composition.default_home);
+}
+
+#[test]
+fn system_volume_identity_allows_an_empty_fresh_candidate_directory() {
+    let composition = compose_with_volume_source(Arc::new(MacOsVolumeIdentitySource::new()));
+    let candidate_path = composition.home_root().join("SkillMan");
+    std::fs::create_dir(&candidate_path).expect("create empty candidate");
+
+    let candidate = composition
+        .binding
+        .prepare_home(&candidate_path)
+        .expect("empty fresh candidate on the system volume");
+
+    assert_eq!(candidate.mode, CandidateMode::Fresh);
+    assert_eq!(candidate.path, candidate_path);
 }
 
 #[test]
