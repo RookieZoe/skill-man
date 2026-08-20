@@ -14,22 +14,33 @@ use rusqlite::Connection;
 use skill_man_lib::adapters::app_state_store::AppStateStoreFileSystem;
 use skill_man_lib::adapters::catalog_probe::SqliteCatalogProbe;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
+use skill_man_lib::adapters::runtime_catalog::{RuntimeCatalogStore, RuntimeStoreSwitch};
 use skill_man_lib::adapters::sqlite::{
     SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
 };
 use skill_man_lib::adapters::volume_identity::MacOsVolumeIdentitySource;
 use skill_man_lib::core::bootstrap::{BootstrapConfig, BootstrapService, BootstrapSnapshot};
+use skill_man_lib::core::domain::CatalogFilter;
 use skill_man_lib::core::fixture_recovery::SystemFixtureClassifier;
 use skill_man_lib::core::home::{BoundHome, HomeId, HomeMarker, VolumeIdentity};
 use skill_man_lib::core::home_binding::{
     CandidateInvalidReason, CandidateMode, HomeBindingConfig, HomeBindingError, HomeBindingService,
 };
+use skill_man_lib::core::startup::StartupService;
+use skill_man_lib::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
 use skill_man_lib::seams::app_state_store::{
     AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
 };
 use skill_man_lib::seams::catalog_probe::CatalogProbe;
+use skill_man_lib::seams::catalog_store::CatalogStore;
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::volume_identity::{VolumeIdentityError, VolumeIdentitySource};
+use skill_man_lib::tauri_adapter::bootstrap_api::{BootstrapApi, BootstrapChangedEmitter};
+use skill_man_lib::tauri_adapter::dto::{
+    BootstrapChangedPayloadDto, BootstrapSnapshotDto, CatalogAccessDto, CatalogReadOnlyReasonDto,
+    ConfirmHomeRequestDto, PrepareHomeRequestDto, StartupInfoDto,
+};
+use skill_man_lib::tauri_adapter::home_binding_api::HomeBindingApi;
 
 use common::{CATALOG_FILE_NAME, LIBRARY_ROOT_NAME, STATE_DIR_NAME};
 
@@ -50,6 +61,12 @@ impl VolumeIdentitySource for ExistingPathVolumeIdentity {
     fn volume_identity(&self, path: &Path) -> Result<Option<VolumeIdentity>, VolumeIdentityError> {
         Ok(path.exists().then(|| self.0.clone()))
     }
+}
+
+struct DiscardingBootstrapEmitter;
+
+impl BootstrapChangedEmitter for DiscardingBootstrapEmitter {
+    fn emit_changed(&self, _payload: &BootstrapChangedPayloadDto) {}
 }
 
 struct Composition {
@@ -348,6 +365,119 @@ fn fresh_default_confirm_binds_and_verifies() {
 
     // A second inspect is still Bound (no re-selection, no re-binding).
     assert!(is_bound(&composition.bootstrap.inspect()));
+}
+
+#[test]
+fn fresh_custom_confirm_opens_runtime_catalog_and_write_gate() {
+    let composition = compose(Some(volume()));
+    let runtime_store = Arc::new(RuntimeCatalogStore::closed(composition.filesystem.clone()));
+    let gate = Arc::new(WriteGate::new(WriteGateState::Closed {
+        reason: ClosedReason::Unconfigured,
+    }));
+    let api = HomeBindingApi::new(
+        composition.binding.clone(),
+        composition.bootstrap.clone(),
+        Arc::new(RuntimeStoreSwitch::new(
+            runtime_store.clone(),
+            CATALOG_FILE_NAME.into(),
+        )),
+        Arc::new(BootstrapApi::new(
+            composition.bootstrap.clone(),
+            gate.clone(),
+            Arc::new(DiscardingBootstrapEmitter),
+        )),
+    );
+    let custom_home = composition.home_root().join("custom-library");
+    let candidate = api
+        .prepare_home(PrepareHomeRequestDto {
+            path: custom_home.to_string_lossy().into_owned(),
+        })
+        .expect("prepare custom Home");
+
+    let snapshot = api
+        .confirm_home(ConfirmHomeRequestDto {
+            candidate_token: candidate.token,
+        })
+        .expect("confirm custom Home");
+
+    assert!(matches!(snapshot, BootstrapSnapshotDto::Bound { .. }));
+    assert_bound_home(&composition, &custom_home);
+    assert!(
+        runtime_store
+            .list(CatalogFilter::All)
+            .expect("confirmed Home catalog must be readable")
+            .is_empty()
+    );
+    assert!(matches!(gate.snapshot().state, WriteGateState::Open(_)));
+    let startup = StartupService::new(
+        runtime_store.clone(),
+        runtime_store,
+        composition.filesystem.clone(),
+    )
+    .with_home_context(gate);
+    let info = startup.startup_info().expect("read onboarding data");
+    assert_eq!(info.library_path.as_deref(), Some(custom_home.as_path()));
+    assert_eq!(
+        StartupInfoDto::from(info).library_path.as_deref(),
+        Some(custom_home.to_string_lossy().as_ref())
+    );
+    assert!(
+        !composition.default_home.exists(),
+        "the onboarding path must not fall back to the unbound default Home"
+    );
+}
+
+#[test]
+fn confirmed_home_publishes_a_read_only_snapshot_when_catalog_reopen_fails() {
+    let composition = compose(Some(volume()));
+    let runtime_store = Arc::new(RuntimeCatalogStore::closed(composition.filesystem.clone()));
+    let gate = Arc::new(WriteGate::new(WriteGateState::Closed {
+        reason: ClosedReason::Unconfigured,
+    }));
+    let api = HomeBindingApi::new(
+        composition.binding.clone(),
+        composition.bootstrap.clone(),
+        Arc::new(RuntimeStoreSwitch::new(
+            runtime_store.clone(),
+            "missing-catalog.sqlite3".into(),
+        )),
+        Arc::new(BootstrapApi::new(
+            composition.bootstrap.clone(),
+            gate.clone(),
+            Arc::new(DiscardingBootstrapEmitter),
+        )),
+    );
+    let custom_home = composition.home_root().join("custom-library");
+    let candidate = api
+        .prepare_home(PrepareHomeRequestDto {
+            path: custom_home.to_string_lossy().into_owned(),
+        })
+        .expect("prepare custom Home");
+
+    let snapshot = api
+        .confirm_home(ConfirmHomeRequestDto {
+            candidate_token: candidate.token,
+        })
+        .expect("the committed binding must publish its authoritative route");
+
+    assert!(matches!(
+        snapshot,
+        BootstrapSnapshotDto::Bound {
+            catalog_access: CatalogAccessDto::ReadOnly,
+            catalog_readonly_reason: Some(CatalogReadOnlyReasonDto::OpenFailed),
+            ..
+        }
+    ));
+    assert!(matches!(
+        gate.snapshot().state,
+        WriteGateState::CatalogReadOnly {
+            reason: ReadOnlyReason::OpenFailed
+        }
+    ));
+    assert!(
+        runtime_store.list(CatalogFilter::All).is_err(),
+        "a failed reopen must not leave a writable Catalog facade behind"
+    );
 }
 
 #[test]

@@ -26,6 +26,7 @@ const REGION_SELECTORS = [
   ["Agent inspector", ".agent-inspector"],
   ["Agent backdrop", ".agent-drawer-backdrop"],
   ["Sheet backdrop", ".activation-sheet-backdrop"],
+  ["Operation status", ".operation-status-window"],
 ] as const;
 
 interface RegionMetric {
@@ -74,6 +75,7 @@ export function LayoutMatrix() {
   const [language, setLanguage] = useState("en");
   const [notices, setNotices] = useState("none");
   const [onboarding, setOnboarding] = useState(false);
+  const [operation, setOperation] = useState(false);
   const [metrics, setMetrics] = useState<MatrixMetrics>(EMPTY_METRICS);
   const frameRef = useRef<HTMLIFrameElement>(null);
 
@@ -97,6 +99,7 @@ export function LayoutMatrix() {
     density,
     language,
     notices,
+    operation: operation ? "adopt" : "none",
   });
   if (onboarding) frameParams.set("onboarding", "1");
   const frameUrl = `/?${frameParams}`;
@@ -266,6 +269,14 @@ export function LayoutMatrix() {
                 onChange={(event) => setOnboarding(event.currentTarget.checked)}
               />
               Tall onboarding overlay (low-height scroll evidence)
+            </label>
+            <label className="lm-check">
+              <input
+                type="checkbox"
+                checked={operation}
+                onChange={(event) => setOperation(event.currentTarget.checked)}
+              />
+              Active operation window
             </label>
           </fieldset>
           <p className="lm-hint">

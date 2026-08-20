@@ -205,6 +205,22 @@ export interface CommandFailure {
   diagnostic: { code: string; message: string } | null;
 }
 
+/** Closed candidate-validation reasons emitted by the native Home Binding API. */
+export type CandidateInvalidReason =
+  | "not_absolute"
+  | "not_utf8"
+  | "symlink_component"
+  | "state_dir_overlap"
+  | "agent_dir_overlap"
+  | "parent_missing"
+  | "parent_not_writable"
+  | "not_directory"
+  | "not_empty"
+  | "no_volume_identity"
+  | "insufficient_space"
+  | "not_legacy_home"
+  | "legacy_contaminated";
+
 /** The closed public error union (spec §4.7): presentation maps `code` to a
  * message key; typed fields carry Source Content only. */
 export type PublicError =
@@ -241,7 +257,7 @@ export type PublicError =
   | { code: "abandon_not_applicable" }
   | { code: "abandon_confirmation_mismatch" }
   | { code: "abandon_cas_conflict" }
-  | { code: "candidate_invalid"; reason: string }
+  | { code: "candidate_invalid"; reason: CandidateInvalidReason }
   | { code: "binding_step_failed"; cursor: string }
   | { code: "binding_state_ambiguous" }
   | { code: "binding_not_cancellable" }
@@ -409,6 +425,8 @@ export interface StartupAgent {
 
 export interface StartupInfo {
   firstRun: boolean;
+  /** The bootstrap-verified Home path, present in the product runtime. */
+  libraryPath?: string | null;
   agents: StartupAgent[];
 }
 

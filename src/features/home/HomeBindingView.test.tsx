@@ -109,13 +109,13 @@ test("Choose… uses the injected directory picker", async () => {
   );
 });
 
-test("candidate rejection renders the typed reason with diagnostics", async () => {
+test("candidate rejection renders a reason-specific message with diagnostics", async () => {
   const prepare = vi.fn(async () => {
     throw {
-      error: { code: "candidate_invalid", reason: "symlink_component" },
+      error: { code: "candidate_invalid", reason: "not_empty" },
       diagnostic: {
         code: "candidate_invalid",
-        message: "/tmp/x: path contains a symlink",
+        message: "/tmp/x: candidate path: /tmp/x",
       },
     } as CommandFailure;
   });
@@ -130,11 +130,13 @@ test("candidate rejection renders the typed reason with diagnostics", async () =
     }),
   ).toBeInTheDocument();
   expect(
-    screen.getByText("This location cannot be used as a Skill Man Home."),
+    screen.getByText(
+      "This folder is not empty. Choose an empty folder to set up a new Home.",
+    ),
   ).toBeInTheDocument();
   // Raw technical detail stays in the explicitly labeled region.
   expect(
-    screen.getByText("/tmp/x: path contains a symlink"),
+    screen.getByText("/tmp/x: candidate path: /tmp/x"),
   ).toBeInTheDocument();
 });
 

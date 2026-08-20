@@ -294,7 +294,10 @@ pub struct ImportService {
     clock: Arc<dyn Clock>,
     file_source: Arc<dyn FileSource>,
     git_source: Arc<dyn GitSource>,
-    library_root: PathBuf,
+    configured_library_root: PathBuf,
+    /// Production binds this to the bootstrap-verified Home. Tests and
+    /// standalone compositions retain the explicit root passed to `new`.
+    home_context: Option<Arc<WriteGate>>,
     git_cache_root: Option<PathBuf>,
     plans: Mutex<HashMap<String, PlannedLinkImport>>,
     file_plans: Mutex<HashMap<String, PlannedFileImport>>,
@@ -319,7 +322,8 @@ impl ImportService {
             clock,
             file_source,
             git_source: Arc::new(crate::adapters::git_source::SystemGitSource::new()),
-            library_root,
+            configured_library_root: library_root,
+            home_context: None,
             git_cache_root: None,
             plans: Mutex::new(HashMap::new()),
             file_plans: Mutex::new(HashMap::new()),
@@ -336,6 +340,14 @@ impl ImportService {
         self
     }
 
+    /// Use the bootstrap-verified Home instead of the construction-time
+    /// root. The context becomes available only after a Bound transition;
+    /// its absence fails closed rather than falling back to the default Home.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
+    }
+
     pub fn with_git_source(mut self, git_source: Arc<dyn GitSource>) -> Self {
         self.git_source = git_source;
         self
@@ -344,6 +356,24 @@ impl ImportService {
     pub fn with_git_cache_root(mut self, git_cache_root: PathBuf) -> Self {
         self.git_cache_root = Some(git_cache_root);
         self
+    }
+
+    fn active_library_root(&self) -> Result<PathBuf, ImportError> {
+        match &self.home_context {
+            Some(context) => context.bound_home().map(|home| home.path).map_err(|error| {
+                ImportError::Internal(format!("active Home unavailable: {error}"))
+            }),
+            None => Ok(self.configured_library_root.clone()),
+        }
+    }
+
+    fn active_git_cache_root(&self) -> Result<PathBuf, ImportError> {
+        if self.home_context.is_some() {
+            return Ok(self.active_library_root()?.join("cache"));
+        }
+        self.git_cache_root
+            .clone()
+            .ok_or_else(|| ImportError::Internal("Git cache root is not configured".into()))
     }
 
     pub fn discover_link(&self, source_path: &Path) -> Result<LinkImportCandidate, ImportError> {
@@ -360,7 +390,7 @@ impl ImportService {
         let final_entity_path = source_snapshot.final_entity_path.clone();
         let library_root = self
             .filesystem
-            .normalize_configured_path(&self.library_root)?;
+            .normalize_configured_path(&self.active_library_root()?)?;
         if source_snapshot.entry_path.starts_with(&library_root)
             || final_entity_path.starts_with(&library_root)
         {
@@ -518,7 +548,10 @@ impl ImportService {
     pub fn discover_file(&self, source_path: &Path) -> Result<FileImportCandidate, ImportError> {
         self.ensure_writes_ready()?;
         let operation_id = self.next_file_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let (mut candidates, staging_fingerprint, _) =
             self.stage_and_validate_file(source_path, &staging_operation_root)?;
         let result = if candidates.len() == 1 {
@@ -531,7 +564,7 @@ impl ImportService {
         };
         let cleanup = self.filesystem.discard_staging(
             &staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(&staging_fingerprint),
         );
         match (result, cleanup) {
@@ -547,7 +580,10 @@ impl ImportService {
     ) -> Result<FileImportDiscovery, ImportError> {
         self.ensure_writes_ready()?;
         let operation_id = self.next_file_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let (staged, staging_fingerprint, truncated) =
             self.stage_and_validate_file(source_path, &staging_operation_root)?;
         let discovery = FileImportDiscovery {
@@ -559,7 +595,7 @@ impl ImportService {
         };
         match self.filesystem.discard_staging(
             &staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(&staging_fingerprint),
         ) {
             Ok(()) => Ok(discovery),
@@ -576,7 +612,10 @@ impl ImportService {
     ) -> Result<FileImportSelectionPreview, ImportError> {
         self.ensure_writes_ready()?;
         let operation_id = self.next_file_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let selected = selected_directory_names
             .iter()
             .cloned()
@@ -609,7 +648,10 @@ impl ImportService {
             .fold(0_u64, u64::saturating_add)
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = match self.filesystem.available_space(&self.library_root) {
+        let available_space = match self
+            .filesystem
+            .available_space(&self.active_library_root()?)
+        {
             Ok(space) => space,
             Err(error) => {
                 return self.cleanup_staging_after_error(
@@ -647,7 +689,7 @@ impl ImportService {
                 }
             };
             let final_entity_path = self
-                .library_root
+                .active_library_root()?
                 .join("skills")
                 .join(&candidate.directory_name);
             let skill_id = SkillId(format!(
@@ -700,7 +742,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &batch.operation_id,
@@ -821,7 +863,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &batch.operation_id,
@@ -835,7 +877,7 @@ impl ImportService {
             match self.filesystem.install_staged_skill(
                 &item.staged_source.staged_content_root,
                 &item.final_entity_path,
-                &self.library_root,
+                &self.active_library_root()?,
                 &batch.operation_id,
                 &item.tree_snapshot,
             ) {
@@ -845,12 +887,12 @@ impl ImportService {
                     installed.push((item.final_entity_path.clone(), fingerprint));
                     if let Err(error) = self
                         .filesystem
-                        .write_file_import_journal(&self.library_root, &journal)
+                        .write_file_import_journal(&self.active_library_root()?, &journal)
                     {
                         let rollback = self.rollback_installed_paths(&installed);
                         let cleanup = self.filesystem.discard_staging(
                             &batch.staging_operation_root,
-                            &self.library_root,
+                            &self.active_library_root()?,
                             Some(&batch.staging_fingerprint),
                         );
                         if rollback.is_ok() && cleanup.is_ok() {
@@ -859,7 +901,7 @@ impl ImportService {
                         }
                         let retry = self
                             .filesystem
-                            .write_file_import_journal(&self.library_root, &journal);
+                            .write_file_import_journal(&self.active_library_root()?, &journal);
                         return Err(ImportError::RecoveryRequired(format!(
                             "file Import batch journal progress failed: {error}; rollback: {rollback:?}; staging cleanup: {cleanup:?}; journal retry: {retry:?}"
                         )));
@@ -882,7 +924,7 @@ impl ImportService {
         }
         if let Err(error) = self.filesystem.discard_staging(
             &batch.staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(&batch.staging_fingerprint),
         ) {
             return Err(ImportError::RecoveryRequired(format!(
@@ -938,7 +980,7 @@ impl ImportService {
         journal.phase = FileImportJournalPhase::CatalogCommitted;
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return Err(ImportError::RecoveryRequired(format!(
                 "file Import batch committed the catalog, but journal progress could not be persisted: {error}"
@@ -946,7 +988,7 @@ impl ImportService {
         }
         if let Err(error) = self
             .filesystem
-            .finish_file_import_journal(&self.library_root, &batch.operation_id)
+            .finish_file_import_journal(&self.active_library_root()?, &batch.operation_id)
         {
             return Err(ImportError::RecoveryRequired(format!(
                 "file Import batch committed, but its journal could not be archived: {error}"
@@ -980,7 +1022,7 @@ impl ImportService {
         let rollback = self.rollback_installed_paths(installed);
         let cleanup = self.filesystem.discard_staging(
             &batch.staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(&batch.staging_fingerprint),
         );
         match (rollback, cleanup) {
@@ -994,10 +1036,13 @@ impl ImportService {
     fn rollback_installed_paths(
         &self,
         installed: &[(PathBuf, DirectoryFingerprint)],
-    ) -> Result<(), FileSystemError> {
+    ) -> Result<(), ImportError> {
         for (path, fingerprint) in installed.iter().rev() {
-            self.filesystem
-                .discard_installed_skill(path, &self.library_root, fingerprint)?;
+            self.filesystem.discard_installed_skill(
+                path,
+                &self.active_library_root()?,
+                fingerprint,
+            )?;
         }
         Ok(())
     }
@@ -1005,7 +1050,10 @@ impl ImportService {
     pub fn plan_file(&self, source_path: &Path) -> Result<FileImportPreview, ImportError> {
         self.ensure_writes_ready()?;
         let operation_id = self.next_file_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let (staged_candidates, staging_fingerprint, _) =
             self.stage_and_validate_file(source_path, &staging_operation_root)?;
         if staged_candidates.len() != 1 {
@@ -1026,7 +1074,10 @@ impl ImportService {
             .total_file_bytes
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = match self.filesystem.available_space(&self.library_root) {
+        let available_space = match self
+            .filesystem
+            .available_space(&self.active_library_root()?)
+        {
             Ok(space) => space,
             Err(error) => {
                 return self.cleanup_staging_after_error(
@@ -1057,7 +1108,7 @@ impl ImportService {
             }
         };
         let final_entity_path = self
-            .library_root
+            .active_library_root()?
             .join("skills")
             .join(&candidate.directory_name);
         let plan_number = self.next_plan_id.fetch_add(1, Ordering::Relaxed);
@@ -1090,7 +1141,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &plan.operation_id,
@@ -1130,7 +1181,10 @@ impl ImportService {
     ) -> Result<FileImportPreview, ImportError> {
         self.ensure_writes_ready()?;
         let operation_id = self.next_file_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let (staged_candidates, staging_fingerprint, _) =
             self.stage_and_validate_file(source_path, &staging_operation_root)?;
         if staged_candidates.len() != 1 {
@@ -1150,7 +1204,10 @@ impl ImportService {
             .total_file_bytes
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = match self.filesystem.available_space(&self.library_root) {
+        let available_space = match self
+            .filesystem
+            .available_space(&self.active_library_root()?)
+        {
             Ok(space) => space,
             Err(error) => {
                 return self.cleanup_staging_after_error(
@@ -1267,7 +1324,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &plan.operation_id,
@@ -1481,7 +1538,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &plan.operation_id,
@@ -1496,7 +1553,7 @@ impl ImportService {
                 .replace_staged_skill(
                     &plan.staged_source.staged_content_root,
                     &plan.final_entity_path,
-                    &self.library_root,
+                    &self.active_library_root()?,
                     &plan.operation_id,
                     &plan.tree_snapshot,
                     &reinstall.existing_tree_snapshot,
@@ -1507,7 +1564,7 @@ impl ImportService {
                 .install_staged_skill(
                     &plan.staged_source.staged_content_root,
                     &plan.final_entity_path,
-                    &self.library_root,
+                    &self.active_library_root()?,
                     &plan.operation_id,
                     &plan.tree_snapshot,
                 )
@@ -1521,7 +1578,7 @@ impl ImportService {
             Err(error) => {
                 self.filesystem.discard_staging(
                     &plan.staging_operation_root,
-                    &self.library_root,
+                    &self.active_library_root()?,
                     Some(&plan.staging_fingerprint),
                 )?;
                 let original = match error {
@@ -1540,12 +1597,12 @@ impl ImportService {
         journal.phase = FileImportJournalPhase::FileSystemApplied;
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             let rollback = self.rollback_applied_file(&plan, &applied);
             let cleanup = self.filesystem.discard_staging(
                 &plan.staging_operation_root,
-                &self.library_root,
+                &self.active_library_root()?,
                 Some(&plan.staging_fingerprint),
             );
             if rollback.is_ok() && cleanup.is_ok() {
@@ -1553,14 +1610,14 @@ impl ImportService {
             }
             let retry = self
                 .filesystem
-                .write_file_import_journal(&self.library_root, &journal);
+                .write_file_import_journal(&self.active_library_root()?, &journal);
             return Err(ImportError::RecoveryRequired(format!(
                 "file Import journal progress failed: {error}; rollback: {rollback:?}; staging cleanup: {cleanup:?}; journal retry: {retry:?}"
             )));
         }
         if let Err(error) = self.filesystem.discard_staging(
             &plan.staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(&plan.staging_fingerprint),
         ) {
             return match self.rollback_applied_file(&plan, &applied) {
@@ -1570,7 +1627,7 @@ impl ImportService {
                     journal.items[0].replacement = None;
                     let persisted = self
                         .filesystem
-                        .write_file_import_journal(&self.library_root, &journal);
+                        .write_file_import_journal(&self.active_library_root()?, &journal);
                     Err(ImportError::RecoveryRequired(format!(
                         "staging cleanup failed after filesystem apply: {error}; rollback succeeded; recovery journal reset: {persisted:?}"
                     )))
@@ -1644,7 +1701,7 @@ impl ImportService {
         journal.phase = FileImportJournalPhase::CatalogCommitted;
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return Err(ImportError::RecoveryRequired(format!(
                 "file Import committed the catalog, but journal progress could not be persisted: {error}"
@@ -1653,7 +1710,7 @@ impl ImportService {
         if let AppliedFileChange::Replacement(replacement) = &applied {
             if let Err(error) = self
                 .filesystem
-                .commit_replaced_skill(replacement, &self.library_root)
+                .commit_replaced_skill(replacement, &self.active_library_root()?)
             {
                 return Err(ImportError::RecoveryRequired(format!(
                     "file reinstall committed, but backup cleanup failed: {error}"
@@ -1662,7 +1719,7 @@ impl ImportService {
         }
         if let Err(error) = self
             .filesystem
-            .finish_file_import_journal(&self.library_root, &plan.operation_id)
+            .finish_file_import_journal(&self.active_library_root()?, &plan.operation_id)
         {
             return Err(ImportError::RecoveryRequired(format!(
                 "file Import committed, but its journal could not be archived: {error}"
@@ -1683,16 +1740,21 @@ impl ImportService {
         &self,
         plan: &PlannedFileImport,
         applied: &AppliedFileChange,
-    ) -> Result<(), FileSystemError> {
+    ) -> Result<(), ImportError> {
         match applied {
-            AppliedFileChange::New(fingerprint) => self.filesystem.discard_installed_skill(
-                &plan.final_entity_path,
-                &self.library_root,
-                fingerprint,
-            ),
-            AppliedFileChange::Replacement(replacement) => self
-                .filesystem
-                .rollback_replaced_skill(replacement, &self.library_root),
+            AppliedFileChange::New(fingerprint) => {
+                self.filesystem.discard_installed_skill(
+                    &plan.final_entity_path,
+                    &self.active_library_root()?,
+                    fingerprint,
+                )?;
+                Ok(())
+            }
+            AppliedFileChange::Replacement(replacement) => {
+                self.filesystem
+                    .rollback_replaced_skill(replacement, &self.active_library_root()?)?;
+                Ok(())
+            }
         }
     }
 
@@ -1736,7 +1798,7 @@ impl ImportService {
     ) -> Result<T, ImportError> {
         match self
             .filesystem
-            .finish_file_import_journal(&self.library_root, operation_id)
+            .finish_file_import_journal(&self.active_library_root()?, operation_id)
         {
             Ok(()) => Err(original),
             Err(error) => Err(ImportError::RecoveryRequired(format!(
@@ -1754,12 +1816,12 @@ impl ImportService {
     ) -> Result<T, ImportError> {
         let cleanup = self.filesystem.discard_staging(
             staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(staging_fingerprint),
         );
         let finish = self
             .filesystem
-            .finish_file_import_journal(&self.library_root, operation_id);
+            .finish_file_import_journal(&self.active_library_root()?, operation_id);
         match (cleanup, finish) {
             (Ok(()), Ok(())) => Err(original),
             (cleanup, finish) => Err(ImportError::RecoveryRequired(format!(
@@ -1859,7 +1921,10 @@ impl ImportService {
             validate_skill_path(&candidate.skill_path)?;
         }
         let operation_id = self.next_git_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let mut staged_sources = Vec::with_capacity(chosen.len());
         for candidate in &chosen {
             let destination = staging_operation_root.join(&candidate.directory_name);
@@ -1871,7 +1936,7 @@ impl ImportService {
             ) {
                 let cleanup = self.filesystem.discard_staging(
                     &staging_operation_root,
-                    &self.library_root,
+                    &self.active_library_root()?,
                     None,
                 );
                 return match cleanup {
@@ -1896,7 +1961,10 @@ impl ImportService {
             .fold(0_u64, u64::saturating_add)
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = match self.filesystem.available_space(&self.library_root) {
+        let available_space = match self
+            .filesystem
+            .available_space(&self.active_library_root()?)
+        {
             Ok(space) => space,
             Err(error) => {
                 return self.cleanup_staging_after_error(
@@ -1935,7 +2003,7 @@ impl ImportService {
                 }
             };
             let final_entity_path = self
-                .library_root
+                .active_library_root()?
                 .join("skills")
                 .join(&candidate.directory_name);
             let skill_id = SkillId(format!(
@@ -1993,7 +2061,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &batch.operation_id,
@@ -2109,15 +2177,20 @@ impl ImportService {
             )));
         }
         let operation_id = self.next_git_operation_id();
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         let destination = staging_operation_root.join(&record.directory_name);
         if let Err(error) = self
             .git_source
             .stage_skill(&mirror, &commit, &skill_path, &destination)
         {
-            let cleanup =
-                self.filesystem
-                    .discard_staging(&staging_operation_root, &self.library_root, None);
+            let cleanup = self.filesystem.discard_staging(
+                &staging_operation_root,
+                &self.active_library_root()?,
+                None,
+            );
             return match cleanup {
                 Ok(()) => Err(error.into()),
                 Err(cleanup) => Err(ImportError::RecoveryRequired(format!(
@@ -2138,7 +2211,10 @@ impl ImportService {
             .total_file_bytes
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = match self.filesystem.available_space(&self.library_root) {
+        let available_space = match self
+            .filesystem
+            .available_space(&self.active_library_root()?)
+        {
             Ok(space) => space,
             Err(error) => {
                 return self.cleanup_staging_after_error(
@@ -2233,7 +2309,7 @@ impl ImportService {
         );
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.library_root, &journal)
+            .write_file_import_journal(&self.active_library_root()?, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &plan.operation_id,
@@ -2306,10 +2382,7 @@ impl ImportService {
     }
 
     fn git_mirror_for(&self, spec: &GitSourceSpec) -> Result<PathBuf, ImportError> {
-        let cache_root = self
-            .git_cache_root
-            .clone()
-            .ok_or_else(|| ImportError::Internal("Git cache root is not configured".into()))?;
+        let cache_root = self.active_git_cache_root()?;
         Ok(git_mirror_path(&cache_root, &spec.url))
     }
 
@@ -2402,12 +2475,12 @@ impl ImportService {
     ) -> Result<(), ImportError> {
         let cleanup = self.filesystem.discard_staging(
             staging_operation_root,
-            &self.library_root,
+            &self.active_library_root()?,
             Some(staging_fingerprint),
         );
         let finish = self
             .filesystem
-            .finish_file_import_journal(&self.library_root, operation_id);
+            .finish_file_import_journal(&self.active_library_root()?, operation_id);
         match (cleanup, finish) {
             (Ok(()), Ok(())) => Ok(()),
             (cleanup, finish) => Err(ImportError::RecoveryRequired(format!(
@@ -2434,7 +2507,9 @@ impl ImportService {
         let required_space = estimated_bytes
             .saturating_mul(2)
             .saturating_add(DISK_SPACE_RESERVE_BYTES);
-        let available_space = self.filesystem.available_space(&self.library_root)?;
+        let available_space = self
+            .filesystem
+            .available_space(&self.active_library_root()?)?;
         if available_space < required_space {
             return Err(ImportError::DiskFull {
                 required_bytes: required_space,
@@ -2517,7 +2592,7 @@ impl ImportService {
             Ok(candidates) => Ok((candidates, staging_fingerprint)),
             Err(error) => match self.filesystem.discard_staging(
                 staging_operation_root,
-                &self.library_root,
+                &self.active_library_root()?,
                 Some(&staging_fingerprint),
             ) {
                 Ok(()) => Err(error),
@@ -2534,10 +2609,11 @@ impl ImportService {
         expected: Option<&DirectoryFingerprint>,
         original: ImportError,
     ) -> Result<T, ImportError> {
-        match self
-            .filesystem
-            .discard_staging(staging_operation_root, &self.library_root, expected)
-        {
+        match self.filesystem.discard_staging(
+            staging_operation_root,
+            &self.active_library_root()?,
+            expected,
+        ) {
             Ok(()) => Err(original),
             Err(cleanup) => Err(ImportError::RecoveryRequired(format!(
                 "{original}; staging cleanup also failed: {cleanup}"

@@ -89,7 +89,10 @@ impl RuntimeStoreSwitch {
     /// Align the facade after a lifecycle transition (Reconnect success,
     /// Restore commit): a fresh `inspect` clears a stale writable-open
     /// failure and recomputes the true catalog access, then the facade is
-    /// reopened writable, read-only or closed to match.
+    /// reopened writable, read-only or closed to match. A durable Bound
+    /// transition remains authoritative when reopening fails: close any old
+    /// facade, publish CatalogReadOnly/OpenFailed through Bootstrap, then
+    /// make one best-effort read-only open.
     pub fn reconcile_after_transition(
         &self,
         bootstrap: &BootstrapService,
@@ -100,7 +103,23 @@ impl RuntimeStoreSwitch {
         }
         let fresh = bootstrap.inspect();
         let bound_home = bootstrap.verified_bound_home();
-        self.reconcile(&fresh, bound_home.as_ref())
+        if let Err(error) = self.reconcile(&fresh, bound_home.as_ref()) {
+            // Never retain a facade from a previous Home after its successor
+            // was durably bound. The bootstrap snapshot records the failure
+            // so BootstrapApi can publish the new Bound, read-only route.
+            self.store.replace_store(None);
+            bootstrap.note_catalog_open_failure(error);
+
+            // A read-only open can still succeed after a writable one fails.
+            // If it cannot, leave the facade closed rather than exposing
+            // stale data; the OpenFailed snapshot remains authoritative.
+            let degraded = bootstrap.inspect();
+            let bound_home = bootstrap.verified_bound_home();
+            if self.reconcile(&degraded, bound_home.as_ref()).is_err() {
+                self.store.replace_store(None);
+            }
+        }
+        Ok(())
     }
 }
 

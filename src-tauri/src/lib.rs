@@ -258,6 +258,9 @@ pub fn run() {
                 _ => RuntimeCatalogStore::closed(filesystem.clone()),
             });
             let _ = write_gate.transition_to(gate_state);
+            write_gate
+                .synchronize_bound_home(bound_home.as_ref())
+                .map_err(|error| error.to_string())?;
 
             // Every service consumes the same facade: the real store when
             // Bound, otherwise the closed store — all catalog commands fail
@@ -295,6 +298,11 @@ pub fn run() {
             ));
             app.manage(HomeBindingApi::new(
                 home_binding_service,
+                bootstrap.clone(),
+                Arc::new(RuntimeStoreSwitch::new(
+                    runtime_store.clone(),
+                    catalog_file_name.clone(),
+                )),
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
                     write_gate.clone(),
@@ -338,6 +346,7 @@ pub fn run() {
                 resolved_library_root.clone(),
             )
             .with_write_gate(write_gate.clone())
+            .with_home_context(write_gate.clone())
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
             app.manage(CatalogApi::new(CatalogService::new(catalog_store.clone())));
@@ -345,6 +354,7 @@ pub fn run() {
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
                     .with_library_root(resolved_library_root.clone())
                     .with_write_gate(write_gate.clone())
+                    .with_home_context(write_gate.clone())
                     .begin_startup(),
             ));
             app.manage(ImportApi::new(import_service));
@@ -356,7 +366,8 @@ pub fn run() {
                 resolved_library_root.clone(),
                 git_cache_root,
                 write_gate.clone(),
-            )));
+            )
+            .with_home_context(write_gate.clone())));
             app.manage(AdoptApi::new(
                 AdoptService::new(
                     adopt_store.clone(),
@@ -366,6 +377,7 @@ pub fn run() {
                     home_directory.clone(),
                 )
                 .with_write_gate(write_gate.clone())
+                .with_home_context(write_gate.clone())
                 // The evidence ledger's lock discovery and remote
                 // verification seams (spec §4.6): strict v3 parse and
                 // fingerprint plus GitHub/GitLab/generic HTTPS Git
@@ -383,13 +395,15 @@ pub fn run() {
                     filesystem.clone(),
                     resolved_library_root,
                 )
-                .with_write_gate(write_gate)
+                .with_write_gate(write_gate.clone())
+                .with_home_context(write_gate.clone())
                 .with_agent_adapters(Arc::new(BuiltInAgentAdapters))
                 .with_conflict_checker(conflict_checker),
             ));
             app.manage(StartupApi::new(
                 PreferencesService::new(preferences_store.clone()),
-                StartupService::new(catalog_store.clone(), adopt_store.clone(), filesystem.clone()),
+                StartupService::new(catalog_store.clone(), adopt_store.clone(), filesystem.clone())
+                    .with_home_context(write_gate.clone()),
             ));
             // The concrete store surface is also managed directly so the run
             // loop can refresh the tray without a command round-trip.

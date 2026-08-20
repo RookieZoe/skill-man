@@ -1,6 +1,10 @@
 import en from "../../../resources/locales/en.json";
 import zhHans from "../../../resources/locales/zh-Hans.json";
-import type { EffectiveLocale } from "../../app/catalog-client";
+import type {
+  CandidateInvalidReason,
+  EffectiveLocale,
+  PublicError,
+} from "../../app/catalog-client";
 
 /**
  * Shared message catalog (spec §6.2): `en.json` is the complete baseline and
@@ -100,7 +104,29 @@ export function formatByteSize(locale: EffectiveLocale, bytes: number): string {
  * fall back to the generic recovery message (RecoveryView renders its own
  * specialized notice for `recovery_step_failed`).
  */
-export function errorMessageKey(code: string): MessageKey {
+const candidateInvalidMessageKeys: Readonly<
+  Record<CandidateInvalidReason, MessageKey>
+> = {
+  not_absolute: "error.candidate_invalid.not_absolute",
+  not_utf8: "error.candidate_invalid.not_utf8",
+  symlink_component: "error.candidate_invalid.symlink_component",
+  state_dir_overlap: "error.candidate_invalid.state_dir_overlap",
+  agent_dir_overlap: "error.candidate_invalid.agent_dir_overlap",
+  parent_missing: "error.candidate_invalid.parent_missing",
+  parent_not_writable: "error.candidate_invalid.parent_not_writable",
+  not_directory: "error.candidate_invalid.not_directory",
+  not_empty: "error.candidate_invalid.not_empty",
+  no_volume_identity: "error.candidate_invalid.no_volume_identity",
+  insufficient_space: "error.candidate_invalid.insufficient_space",
+  not_legacy_home: "error.candidate_invalid.not_legacy_home",
+  legacy_contaminated: "error.candidate_invalid.legacy_contaminated",
+};
+
+export function errorMessageKey(error: PublicError | string): MessageKey {
+  if (typeof error !== "string" && error.code === "candidate_invalid") {
+    return candidateInvalidMessageKeys[error.reason];
+  }
+  const code = typeof error === "string" ? error : error.code;
   switch (code) {
     case "validation":
       return "error.validation";
@@ -161,6 +187,7 @@ export function errorMessageKey(code: string): MessageKey {
     case "abandon_cas_conflict":
       return "error.abandon_cas_conflict";
     case "candidate_invalid":
+      // String-only callers have no typed reason, so retain a safe fallback.
       return "error.candidate_invalid";
     case "binding_step_failed":
       return "error.binding_step_failed";

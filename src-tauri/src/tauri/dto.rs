@@ -2317,6 +2317,7 @@ pub struct CreateAgentDirectoryRequestDto {
 #[serde(rename_all = "camelCase")]
 pub struct StartupInfoDto {
     pub first_run: bool,
+    pub library_path: Option<String>,
     pub agents: Vec<StartupAgentDto>,
 }
 
@@ -2742,6 +2743,9 @@ impl From<StartupInfo> for StartupInfoDto {
     fn from(value: StartupInfo) -> Self {
         Self {
             first_run: value.first_run,
+            library_path: value
+                .library_path
+                .map(|path| path.to_string_lossy().into_owned()),
             agents: value
                 .agents
                 .into_iter()

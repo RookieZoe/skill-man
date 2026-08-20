@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { expect, test, vi } from "vitest";
 
 import type {
+  CandidateInvalidReason,
   CatalogClient,
   EffectiveLocale,
   LocaleSelection,
@@ -13,7 +14,12 @@ import { App } from "../../app/App";
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import { LanguageControl } from "./LanguageControl";
 import { LocaleProvider } from "./LocaleProvider";
-import { errorMessageKey, translate, translatePlural } from "./messages";
+import {
+  errorMessageKey,
+  translate,
+  translatePlural,
+  type MessageKey,
+} from "./messages";
 
 function renderWithLocale(client: CatalogClient, ui: ReactNode) {
   return render(<LocaleProvider client={client}>{ui}</LocaleProvider>);
@@ -169,6 +175,49 @@ test("every public error code has a bilingual presentation", () => {
       expect(message).not.toBe(key);
     }
   }
+});
+
+test("every candidate validation reason has friendly bilingual copy", () => {
+  const expectedKeys: Record<CandidateInvalidReason, MessageKey> = {
+    not_absolute: "error.candidate_invalid.not_absolute",
+    not_utf8: "error.candidate_invalid.not_utf8",
+    symlink_component: "error.candidate_invalid.symlink_component",
+    state_dir_overlap: "error.candidate_invalid.state_dir_overlap",
+    agent_dir_overlap: "error.candidate_invalid.agent_dir_overlap",
+    parent_missing: "error.candidate_invalid.parent_missing",
+    parent_not_writable: "error.candidate_invalid.parent_not_writable",
+    not_directory: "error.candidate_invalid.not_directory",
+    not_empty: "error.candidate_invalid.not_empty",
+    no_volume_identity: "error.candidate_invalid.no_volume_identity",
+    insufficient_space: "error.candidate_invalid.insufficient_space",
+    not_legacy_home: "error.candidate_invalid.not_legacy_home",
+    legacy_contaminated: "error.candidate_invalid.legacy_contaminated",
+  };
+
+  for (const reason of Object.keys(expectedKeys) as CandidateInvalidReason[]) {
+    const key = errorMessageKey({ code: "candidate_invalid", reason });
+    expect(key).toBe(expectedKeys[reason]);
+    for (const locale of ["en", "zh-Hans"] as EffectiveLocale[]) {
+      const message = translate(locale, key);
+      expect(message.length).toBeGreaterThan(0);
+      expect(message).not.toBe(translate(locale, "error.candidate_invalid"));
+    }
+  }
+
+  expect(
+    translate(
+      "en",
+      errorMessageKey({ code: "candidate_invalid", reason: "not_empty" }),
+    ),
+  ).toBe(
+    "This folder is not empty. Choose an empty folder to set up a new Home.",
+  );
+  expect(
+    translate(
+      "zh-Hans",
+      errorMessageKey({ code: "candidate_invalid", reason: "not_empty" }),
+    ),
+  ).toBe("此文件夹不是空的。请使用空文件夹来创建新的 Home。");
 });
 
 test("conflict errors render the typed directory name as a param", () => {

@@ -25,7 +25,7 @@
 //! for remote intents is the handoff ticket).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -322,7 +322,8 @@ impl AdoptService {
         // raw root must be canonicalized before `starts_with`/equality
         // checks against canonical entities.
         let installer_root = self.seam_canonical_root(&shared_dir);
-        let library_root = self.seam_canonical_root(&self.library_root);
+        let active_library_root = self.active_library_root()?;
+        let library_root = self.seam_canonical_root(&active_library_root);
         let agent_roots = agents
             .iter()
             .filter(|agent| agent.detected)
@@ -340,11 +341,11 @@ impl AdoptService {
                 continue;
             }
             for entry in self.filesystem.scan_skills_evidence(&agent.skills_path)? {
-                self.accumulate_evidence(entry, Some(agent), false, &mut grouped);
+                self.accumulate_evidence(entry, Some(agent), false, &library_root, &mut grouped);
             }
         }
         for entry in self.filesystem.scan_skills_evidence(&shared_dir)? {
-            self.accumulate_evidence(entry, None, true, &mut grouped);
+            self.accumulate_evidence(entry, None, true, &library_root, &mut grouped);
         }
 
         let suggested = agents
@@ -410,6 +411,7 @@ impl AdoptService {
         entry: crate::seams::filesystem::ScannedSkillEvidence,
         agent: Option<&AdoptAgent>,
         shared: bool,
+        library_root: &Path,
         grouped: &mut BTreeMap<PathBuf, GroupedEvidence>,
     ) {
         if entry.name.starts_with('.') {
@@ -458,7 +460,7 @@ impl AdoptService {
                 Some(self.excluded_candidate(&entry, &final_entity));
             return;
         }
-        if final_entity.starts_with(self.seam_canonical_root(&self.library_root)) {
+        if final_entity.starts_with(library_root) {
             return;
         }
         if !self

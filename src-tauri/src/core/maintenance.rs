@@ -139,7 +139,10 @@ struct RelocateCandidate {
 pub struct MaintenanceService {
     store: Arc<dyn MaintenanceStore>,
     filesystem: Arc<dyn FileSystem>,
-    library_root: Option<PathBuf>,
+    configured_library_root: Option<PathBuf>,
+    /// Present only in the production composition, where Home paths must
+    /// follow the bootstrap-verified identity across transitions.
+    home_context: Option<Arc<WriteGate>>,
     write_gate: Arc<WriteGate>,
     relocate_plans: Arc<Mutex<HashMap<String, PlannedRelocate>>>,
     remove_plans: Arc<Mutex<HashMap<String, PlannedRemove>>>,
@@ -152,7 +155,8 @@ impl Clone for MaintenanceService {
         Self {
             store: self.store.clone(),
             filesystem: self.filesystem.clone(),
-            library_root: self.library_root.clone(),
+            configured_library_root: self.configured_library_root.clone(),
+            home_context: self.home_context.clone(),
             write_gate: self.write_gate.clone(),
             relocate_plans: self.relocate_plans.clone(),
             remove_plans: self.remove_plans.clone(),
@@ -167,7 +171,8 @@ impl MaintenanceService {
         Self {
             store,
             filesystem,
-            library_root: None,
+            configured_library_root: None,
+            home_context: None,
             write_gate: Arc::new(WriteGate::open_for_tests()),
             relocate_plans: Arc::new(Mutex::new(HashMap::new())),
             remove_plans: Arc::new(Mutex::new(HashMap::new())),
@@ -177,13 +182,32 @@ impl MaintenanceService {
     }
 
     pub fn with_library_root(mut self, library_root: PathBuf) -> Self {
-        self.library_root = Some(library_root);
+        self.configured_library_root = Some(library_root);
         self
     }
 
     pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
         self.write_gate = write_gate;
         self
+    }
+
+    /// Make Home-owned recovery, relocation and removal paths resolve from
+    /// the active Bound Home instead of the root chosen at process startup.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
+    }
+
+    fn active_library_root(&self) -> Result<Option<PathBuf>, MaintenanceError> {
+        match &self.home_context {
+            Some(context) => context
+                .bound_home()
+                .map(|home| Some(home.path))
+                .map_err(|error| {
+                    MaintenanceError::Internal(format!("active Home unavailable: {error}"))
+                }),
+            None => Ok(self.configured_library_root.clone()),
+        }
     }
 
     pub fn with_plan_ttl(mut self, plan_ttl: Duration) -> Self {
@@ -216,7 +240,7 @@ impl MaintenanceService {
     }
 
     fn recover_startup_operations(&self) -> Result<(), MaintenanceError> {
-        if let Some(library_root) = &self.library_root {
+        if let Some(library_root) = self.active_library_root()? {
             let baselines = self
                 .store
                 .installed_skill_baselines()?
@@ -228,7 +252,7 @@ impl MaintenanceService {
                 })
                 .collect::<Vec<_>>();
             self.filesystem
-                .recover_file_import_journals(library_root, &baselines)?;
+                .recover_file_import_journals(&library_root, &baselines)?;
             let entities = self
                 .store
                 .adopted_skill_entities()?
@@ -240,10 +264,10 @@ impl MaintenanceService {
                 })
                 .collect::<Vec<_>>();
             self.filesystem
-                .recover_adopt_journals(library_root, &baselines, &entities)?;
+                .recover_adopt_journals(&library_root, &baselines, &entities)?;
             let desired_activations = self.store.desired_activation_baselines()?;
             self.filesystem
-                .recover_activation_replace_journals(library_root, &desired_activations)?;
+                .recover_activation_replace_journals(&library_root, &desired_activations)?;
             let relocate_baselines = self
                 .store
                 .managed_skill_baselines()?
@@ -254,7 +278,7 @@ impl MaintenanceService {
                 })
                 .collect::<Vec<_>>();
             self.filesystem
-                .recover_relocate_journals(library_root, &relocate_baselines)?;
+                .recover_relocate_journals(&library_root, &relocate_baselines)?;
             let remove_baselines = self
                 .store
                 .managed_skill_baselines()?
@@ -264,8 +288,8 @@ impl MaintenanceService {
                 })
                 .collect::<Vec<_>>();
             self.filesystem
-                .recover_remove_journals(library_root, &remove_baselines)?;
-            self.recover_handoff_operations(library_root)?;
+                .recover_remove_journals(&library_root, &remove_baselines)?;
+            self.recover_handoff_operations(&library_root)?;
         }
         Ok(())
     }
@@ -618,7 +642,7 @@ impl MaintenanceService {
             return Err(MaintenanceError::PlanStale);
         }
 
-        let library_root = self.library_root.clone().ok_or_else(|| {
+        let library_root = self.active_library_root()?.ok_or_else(|| {
             MaintenanceError::Internal("Maintenance library root is not configured".into())
         })?;
         let operation_id = format!(
@@ -785,8 +809,8 @@ impl MaintenanceService {
     ) -> Result<(RelocateCandidate, LinkSourceSnapshot), MaintenanceError> {
         let source_snapshot = self.filesystem.inspect_link_source(source_path)?;
         let final_entity_path = source_snapshot.final_entity_path.clone();
-        if let Some(library_root) = &self.library_root {
-            let canonical_library = self.filesystem.normalize_configured_path(library_root)?;
+        if let Some(library_root) = self.active_library_root()? {
+            let canonical_library = self.filesystem.normalize_configured_path(&library_root)?;
             if source_snapshot.entry_path.starts_with(&canonical_library)
                 || final_entity_path.starts_with(&canonical_library)
             {
@@ -1049,7 +1073,7 @@ impl MaintenanceService {
             }
         }
 
-        let library_root = self.library_root.clone().ok_or_else(|| {
+        let library_root = self.active_library_root()?.ok_or_else(|| {
             MaintenanceError::Internal("Maintenance library root is not configured".into())
         })?;
         let operation_id = format!(

@@ -207,7 +207,10 @@ pub struct AdoptService {
     clock: Arc<dyn Clock>,
     lock_store: Arc<dyn InstallerLockStore>,
     remote_provider: Arc<dyn RemoteProvider>,
-    library_root: PathBuf,
+    configured_library_root: PathBuf,
+    /// Production reads the current verified Home through this context;
+    /// standalone test compositions keep their explicit construction root.
+    home_context: Option<Arc<WriteGate>>,
     home_directory: PathBuf,
     plans: Mutex<HashMap<String, PlannedAdoptBatch>>,
     evidence_plans: Mutex<HashMap<String, EvidencePlannedBatch>>,
@@ -239,7 +242,8 @@ impl AdoptService {
             // evidence. The composition root wires the system adapters.
             lock_store: Arc::new(EmptyInstallerLockStore),
             remote_provider: Arc::new(UnavailableRemoteProvider),
-            library_root,
+            configured_library_root: library_root,
+            home_context: None,
             home_directory,
             plans: Mutex::new(HashMap::new()),
             evidence_plans: Mutex::new(HashMap::new()),
@@ -258,6 +262,13 @@ impl AdoptService {
         self
     }
 
+    /// Make Home-scoped plans resolve their paths from the bootstrap-verified
+    /// Home rather than from the process's startup configuration.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
+    }
+
     pub fn with_lock_store(mut self, lock_store: Arc<dyn InstallerLockStore>) -> Self {
         self.lock_store = lock_store;
         self
@@ -266,6 +277,16 @@ impl AdoptService {
     pub fn with_remote_provider(mut self, remote_provider: Arc<dyn RemoteProvider>) -> Self {
         self.remote_provider = remote_provider;
         self
+    }
+
+    fn active_library_root(&self) -> Result<PathBuf, AdoptError> {
+        match &self.home_context {
+            Some(context) => context
+                .bound_home()
+                .map(|home| home.path)
+                .map_err(|error| AdoptError::Internal(format!("active Home unavailable: {error}"))),
+            None => Ok(self.configured_library_root.clone()),
+        }
     }
 
     fn build_planned_batch(
@@ -279,12 +300,15 @@ impl AdoptService {
         // clock, stable across plan/batch registration).
         let plan_number = plan_token.strip_prefix("adopt-plan-").unwrap_or("0");
         let operation_id = format!("adopt-{}-{plan_number}", self.clock.unix_epoch_nanos());
-        let staging_operation_root = self.library_root.join("staging").join(&operation_id);
+        let staging_operation_root = self
+            .active_library_root()?
+            .join("staging")
+            .join(&operation_id);
         // Ownership Handoff items keep their own durable journal and
         // staging operation (spec §8.4); both derive from the plan number.
         let handoff_operation_id = format!("handoff-{plan_number}");
         let handoff_staging_root = self
-            .library_root
+            .active_library_root()?
             .join("staging")
             .join(&handoff_operation_id);
         let mut planned_items = Vec::with_capacity(items.len());
@@ -299,7 +323,9 @@ impl AdoptService {
                             | AdoptPlanIntent::RemoteInstallDiscardModified
                     ) =>
                 {
-                    self.library_root.join("skills").join(&item.directory_name)
+                    self.active_library_root()?
+                        .join("skills")
+                        .join(&item.directory_name)
                 }
                 Some(handoff)
                     if matches!(
@@ -371,7 +397,9 @@ impl AdoptService {
                 0
             };
             if required_space > 0 {
-                let available_space = self.filesystem.available_space(&self.library_root)?;
+                let available_space = self
+                    .filesystem
+                    .available_space(&self.active_library_root()?)?;
                 if available_space < required_space {
                     return Err(AdoptError::Validation(format!(
                         "Adopt requires {required_space} bytes of free space, but only {available_space} bytes are available"
@@ -632,13 +660,13 @@ impl AdoptService {
             journal.phase = AdoptJournalPhase::Applying;
             if let Err(error) = self
                 .filesystem
-                .write_adopt_journal(&self.library_root, &journal)
+                .write_adopt_journal(&self.active_library_root()?, &journal)
             {
                 return Err(self.block_for_recovery("persist Adopt intent", error));
             }
             journal.staging_fingerprint = match self
                 .filesystem
-                .create_adopt_staging_operation(&self.library_root, &journal.operation_id)
+                .create_adopt_staging_operation(&self.active_library_root()?, &journal.operation_id)
             {
                 Ok(fingerprint) => fingerprint,
                 Err(error) => {
@@ -647,7 +675,7 @@ impl AdoptService {
             };
             if let Err(error) = self
                 .filesystem
-                .write_adopt_journal(&self.library_root, &journal)
+                .write_adopt_journal(&self.active_library_root()?, &journal)
             {
                 return Err(self.block_for_recovery("persist Adopt staging intent", error));
             }
@@ -656,22 +684,23 @@ impl AdoptService {
         if let Some(handoff_journal) = handoff_journal.as_mut() {
             if let Err(error) = self
                 .filesystem
-                .write_handoff_journal(&self.library_root, handoff_journal)
+                .write_handoff_journal(&self.active_library_root()?, handoff_journal)
             {
                 return Err(self.block_for_recovery("persist Handoff intent", error));
             }
-            handoff_journal.staging_fingerprint = match self
-                .filesystem
-                .create_adopt_staging_operation(&self.library_root, &handoff_journal.operation_id)
-            {
-                Ok(fingerprint) => fingerprint,
-                Err(error) => {
-                    return Err(self.block_for_recovery("prepare Handoff staging", error));
-                }
-            };
+            handoff_journal.staging_fingerprint =
+                match self.filesystem.create_adopt_staging_operation(
+                    &self.active_library_root()?,
+                    &handoff_journal.operation_id,
+                ) {
+                    Ok(fingerprint) => fingerprint,
+                    Err(error) => {
+                        return Err(self.block_for_recovery("prepare Handoff staging", error));
+                    }
+                };
             if let Err(error) = self
                 .filesystem
-                .write_handoff_journal(&self.library_root, handoff_journal)
+                .write_handoff_journal(&self.active_library_root()?, handoff_journal)
             {
                 return Err(self.block_for_recovery("persist Handoff staging intent", error));
             }
@@ -771,7 +800,7 @@ impl AdoptService {
         if has_adopt_items {
             if let Err(error) = self.filesystem.discard_staging(
                 &journal.staging_operation_root,
-                &self.library_root,
+                &self.active_library_root()?,
                 Some(&journal.staging_fingerprint),
             ) {
                 return Err(self.block_for_recovery("clean Adopt staging after Apply", error));
@@ -779,7 +808,7 @@ impl AdoptService {
             journal.phase = AdoptJournalPhase::Committed;
             if let Err(error) = self
                 .filesystem
-                .write_adopt_journal(&self.library_root, &journal)
+                .write_adopt_journal(&self.active_library_root()?, &journal)
             {
                 return Err(self.block_for_recovery("persist committed Adopt batch", error));
             }
@@ -791,7 +820,7 @@ impl AdoptService {
             batch.handoff_journal = Some(handoff_journal.clone());
             if let Err(error) = self.filesystem.discard_staging(
                 &handoff_journal.staging_operation_root,
-                &self.library_root,
+                &self.active_library_root()?,
                 Some(&handoff_journal.staging_fingerprint),
             ) {
                 return Err(self.block_for_recovery("clean Handoff staging after Apply", error));
@@ -816,16 +845,16 @@ impl AdoptService {
             if has_adopt_items {
                 if let Err(error) = self
                     .filesystem
-                    .finish_adopt_journal(&self.library_root, &operation_id)
+                    .finish_adopt_journal(&self.active_library_root()?, &operation_id)
                 {
                     return Err(self.block_for_recovery("archive empty Adopt batch", error));
                 }
             }
             if let Some(handoff_journal) = &batch.handoff_journal {
-                if let Err(error) = self
-                    .filesystem
-                    .finish_handoff_journal(&self.library_root, &handoff_journal.operation_id)
-                {
+                if let Err(error) = self.filesystem.finish_handoff_journal(
+                    &self.active_library_root()?,
+                    &handoff_journal.operation_id,
+                ) {
                     return Err(self.block_for_recovery("archive empty Handoff batch", error));
                 }
             }
@@ -871,7 +900,7 @@ impl AdoptService {
             }
             journal.items[index].phase = AdoptItemPhase::Staged;
             self.filesystem
-                .write_adopt_journal(&self.library_root, journal)?;
+                .write_adopt_journal(&self.active_library_root()?, journal)?;
             return Ok(());
         }
 
@@ -879,7 +908,7 @@ impl AdoptService {
             .filesystem
             .stage_external_directory_in_adopt_operation(
                 &item.canonical_entity,
-                &self.library_root,
+                &self.active_library_root()?,
                 &journal.operation_id,
                 &item.directory_name,
                 &journal.staging_fingerprint,
@@ -888,7 +917,7 @@ impl AdoptService {
         journal.items[index].staged_fingerprint = staged_fingerprint;
         journal.items[index].phase = AdoptItemPhase::Staged;
         self.filesystem
-            .write_adopt_journal(&self.library_root, journal)?;
+            .write_adopt_journal(&self.active_library_root()?, journal)?;
 
         let staged_snapshot = self.filesystem.staged_tree_snapshot(&item.staged_root)?;
         if staged_snapshot.content_hash != item.source_snapshot.content_hash
@@ -912,7 +941,7 @@ impl AdoptService {
             let fingerprint = self.filesystem.install_staged_skill(
                 &item.staged_root,
                 &item.final_entity_path,
-                &self.library_root,
+                &self.active_library_root()?,
                 &journal.operation_id,
                 snapshot,
             )?;
@@ -920,7 +949,7 @@ impl AdoptService {
             entry.installed_fingerprint = Some(fingerprint);
             entry.phase = AdoptItemPhase::EntityInstalled;
             self.filesystem
-                .write_adopt_journal(&self.library_root, journal)?;
+                .write_adopt_journal(&self.active_library_root()?, journal)?;
         }
         let record = AdoptedSkillRecord {
             skill_id: item.skill_id.clone(),
@@ -955,12 +984,12 @@ impl AdoptService {
         let snapshot_version = self.store.insert_adopted(record)?;
         journal.items[index].phase = AdoptItemPhase::CatalogCommitted;
         self.filesystem
-            .write_adopt_journal(&self.library_root, journal)?;
+            .write_adopt_journal(&self.active_library_root()?, journal)?;
         self.filesystem
             .apply_adopt_appearances(&journal.items[index].appearances, &item.activations)?;
         journal.items[index].phase = AdoptItemPhase::Done;
         self.filesystem
-            .write_adopt_journal(&self.library_root, journal)?;
+            .write_adopt_journal(&self.active_library_root()?, journal)?;
         if let Some(source_fingerprint) = &journal.items[index].source_fingerprint {
             self.filesystem.discard_isolated_adopt_source(
                 &item.canonical_entity,
@@ -1005,7 +1034,7 @@ impl AdoptService {
         entry.installed_fingerprint = None;
         entry.phase = AdoptItemPhase::Planned;
         self.filesystem
-            .write_adopt_journal(&self.library_root, journal)?;
+            .write_adopt_journal(&self.active_library_root()?, journal)?;
         Ok(())
     }
 
@@ -1113,7 +1142,7 @@ impl AdoptService {
         }
         handoff_journal.items[index].phase = HandoffItemPhase::Staged;
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
 
         // 2. Source Isolated: atomically rename the external canonical
         // directory to its same-parent hidden operation path and re-verify
@@ -1137,7 +1166,7 @@ impl AdoptService {
         handoff_journal.items[index].isolated_path = Some(isolated.clone());
         handoff_journal.items[index].phase = HandoffItemPhase::SourceIsolated;
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
         item.handoff
             .as_mut()
             .expect("handoff plan present")
@@ -1150,7 +1179,7 @@ impl AdoptService {
             AdoptPlanIntent::LocalLinkWithMove => {
                 handoff_journal.items[index].phase = HandoffItemPhase::OwnershipReleased;
                 self.filesystem
-                    .write_handoff_journal(&self.library_root, handoff_journal)?;
+                    .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
             }
             _ => {
                 // The exact-entry CAS (spec §8.4 step 4). The full-file
@@ -1188,7 +1217,7 @@ impl AdoptService {
                         }
                         handoff_journal.items[index].phase = HandoffItemPhase::OwnershipReleased;
                         self.filesystem
-                            .write_handoff_journal(&self.library_root, handoff_journal)?;
+                            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
                     }
                     Err(error) => {
                         // In-place restore; the lock was never written. The
@@ -1227,7 +1256,7 @@ impl AdoptService {
             self.filesystem.install_staged_skill(
                 &handoff_journal.items[index].staged_root,
                 &item.final_entity_path,
-                &self.library_root,
+                &self.active_library_root()?,
                 &handoff_journal.operation_id,
                 &staged_snapshot,
             )?;
@@ -1257,10 +1286,10 @@ impl AdoptService {
             // new Binding commits under it (ADR-0013 §4.3: a mismatched
             // parent closes new Bindings too; only Update/alias are gated
             // elsewhere — this is the handoff's own gate).
-            if let Ok(Some(manifest)) = self
-                .filesystem
-                .read_remote_parent_manifest(&self.library_root.join("remotes"), &remote_id)
-            {
+            if let Ok(Some(manifest)) = self.filesystem.read_remote_parent_manifest(
+                &self.active_library_root()?.join("remotes"),
+                &remote_id,
+            ) {
                 if manifest.remote_id != remote_id || manifest.canonical_url != canonical_url {
                     return Err(AdoptError::Validation(format!(
                         "Remote Source Identity Conflict: the parent '{remote_id}' manifest does \
@@ -1285,8 +1314,10 @@ impl AdoptService {
                     .unwrap_or_default(),
                 created_at: crate::seams::clock::iso_timestamp(self.clock.unix_epoch_nanos()),
             };
-            self.filesystem
-                .write_remote_parent_manifest(&self.library_root.join("remotes"), &manifest)?;
+            self.filesystem.write_remote_parent_manifest(
+                &self.active_library_root()?.join("remotes"),
+                &manifest,
+            )?;
             let current_baseline = handoff_journal.items[index].current_baseline_hash.clone();
             let remote_baseline = remote_journal.remote_baseline_hash.clone();
             let record = RemoteAdoptedSkillRecord {
@@ -1352,7 +1383,7 @@ impl AdoptService {
         )?;
         handoff_journal.items[index].phase = HandoffItemPhase::ManagedCommitted;
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
 
         // 6. Finalized: verify the Catalog, Home entity, private
         // Activations and the absent external canonical path.
@@ -1380,7 +1411,7 @@ impl AdoptService {
         }
         handoff_journal.items[index].phase = HandoffItemPhase::Finalized;
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
         Ok(snapshot_version)
     }
 
@@ -1395,14 +1426,14 @@ impl AdoptService {
     ) -> Result<(), AdoptError> {
         let handoff_journal = handoff_journal
             .ok_or_else(|| AdoptError::Internal("a handoff item has no handoff journal".into()))?;
-        if let Err(error) = self
-            .filesystem
-            .rollback_handoff_item(&self.library_root, &mut handoff_journal.items[index])
-        {
+        if let Err(error) = self.filesystem.rollback_handoff_item(
+            &self.active_library_root()?,
+            &mut handoff_journal.items[index],
+        ) {
             return Err(self.block_for_recovery("roll back handoff item", error));
         }
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
         Ok(())
     }
 
@@ -1633,7 +1664,7 @@ impl AdoptService {
             }
             if let Err(error) = self
                 .filesystem
-                .finish_handoff_journal(&self.library_root, &handoff_journal.operation_id)
+                .finish_handoff_journal(&self.active_library_root()?, &handoff_journal.operation_id)
             {
                 return Err(self.block_for_recovery("archive completed Handoff Undo", error));
             }
@@ -1641,7 +1672,7 @@ impl AdoptService {
         if !batch.journal.items.is_empty() {
             if let Err(error) = self
                 .filesystem
-                .finish_adopt_journal(&self.library_root, operation_id)
+                .finish_adopt_journal(&self.active_library_root()?, operation_id)
             {
                 return Err(self.block_for_recovery("archive completed Adopt Undo", error));
             }
@@ -1860,7 +1891,7 @@ impl AdoptService {
         entry.installed_fingerprint = None;
         entry.phase = AdoptItemPhase::Planned;
         self.filesystem
-            .write_adopt_journal(&self.library_root, journal)?;
+            .write_adopt_journal(&self.active_library_root()?, journal)?;
         Ok(version)
     }
 
@@ -1902,8 +1933,10 @@ impl AdoptService {
         let version = self.store.remove_adopted_skill(&item.skill_id)?;
         if let Some(remote_id) = &journal_item.remote_id {
             self.store.delete_remote_parent_if_last_child(remote_id)?;
-            self.filesystem
-                .remove_remote_parent_manifest(&self.library_root.join("remotes"), remote_id)?;
+            self.filesystem.remove_remote_parent_manifest(
+                &self.active_library_root()?.join("remotes"),
+                remote_id,
+            )?;
         }
         if is_home_install {
             self.filesystem
@@ -1937,7 +1970,7 @@ impl AdoptService {
         handoff_journal.items[index].isolated_path = None;
         handoff_journal.items[index].phase = HandoffItemPhase::Planned;
         self.filesystem
-            .write_handoff_journal(&self.library_root, handoff_journal)?;
+            .write_handoff_journal(&self.active_library_root()?, handoff_journal)?;
         Ok(version)
     }
 
@@ -1957,7 +1990,7 @@ impl AdoptService {
         };
         if !batch.journal.items.is_empty() {
             self.filesystem
-                .finish_adopt_journal(&self.library_root, operation_id)?;
+                .finish_adopt_journal(&self.active_library_root()?, operation_id)?;
         }
         if let Some(handoff_journal) = &batch.handoff_journal {
             // The result window closes: discard the isolation copies and
@@ -1972,8 +2005,10 @@ impl AdoptService {
                     }
                 }
             }
-            self.filesystem
-                .finish_handoff_journal(&self.library_root, &handoff_journal.operation_id)?;
+            self.filesystem.finish_handoff_journal(
+                &self.active_library_root()?,
+                &handoff_journal.operation_id,
+            )?;
         }
         Ok(())
     }

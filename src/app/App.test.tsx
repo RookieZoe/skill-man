@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
-import type { AdoptEvidenceCandidate } from "./catalog-client";
+import type {
+  AdoptEvidenceCandidate,
+  AdoptEvidenceReport,
+} from "./catalog-client";
 import { App } from "./App";
 
 function evidenceCandidate(
@@ -53,6 +56,16 @@ function evidenceReport(candidates: AdoptEvidenceCandidate[]): {
   candidates: AdoptEvidenceCandidate[];
 } {
   return { generation: 1, truncated: false, lockFiles: [], candidates };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  return {
+    promise: new Promise<T>((next) => {
+      resolve = next;
+    }),
+    resolve,
+  };
 }
 
 function createAdoptableFixtureCatalogClient() {
@@ -967,6 +980,39 @@ test("opens the Adopt sheet and reports a fixture rejection", async () => {
   ).not.toBeInTheDocument();
 });
 
+test("shows operation content while an Adopt scan is running", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const scanned = deferred<AdoptEvidenceReport>();
+  client.scanAdopt = () => scanned.promise;
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+
+  const operationWindow = await screen.findByRole("region", {
+    name: "Current activity",
+  });
+  expect(
+    within(operationWindow).getByRole("heading", { name: "Scanning" }),
+  ).toBeInTheDocument();
+  expect(operationWindow).toHaveTextContent(
+    "Reading configured Agent and shared Skill directories.",
+  );
+  expect(
+    within(operationWindow).getByRole("progressbar", { name: "Scanning" }),
+  ).toBeInTheDocument();
+
+  await act(async () => {
+    scanned.resolve(evidenceReport([]));
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("region", { name: "Current activity" }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
 test("labels an Adopt preview failure separately from a scan failure", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
@@ -1213,6 +1259,7 @@ test("shows the three-step onboarding on first run and Skip records completion",
   let completed = 0;
   client.startupInfo = async () => ({
     firstRun: true,
+    libraryPath: "/Users/zoe/SkillMan",
     agents: [
       {
         id: "claude-code",
@@ -1238,7 +1285,8 @@ test("shows the three-step onboarding on first run and Skip records completion",
   const dialog = await screen.findByRole("dialog", {
     name: "Welcome to Skill Man",
   });
-  expect(dialog).toHaveTextContent("Create the Library");
+  expect(dialog).toHaveTextContent("Your Library");
+  expect(dialog).toHaveTextContent("/Users/zoe/SkillMan");
   await user.click(screen.getByRole("button", { name: "Continue" }));
   expect(await screen.findByText("Check Agent Presets")).toBeInTheDocument();
   expect(screen.getByText("Not detected")).toBeInTheDocument();
@@ -1249,6 +1297,97 @@ test("shows the three-step onboarding on first run and Skip records completion",
   expect(
     await screen.findByRole("main", { name: "Skill detail" }),
   ).toBeInTheDocument();
+});
+
+test("returns to the Library step when preset checking fails", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const info = {
+    firstRun: true,
+    libraryPath: "/Users/zoe/SkillMan",
+    agents: [],
+  };
+  let startupCalls = 0;
+  client.startupInfo = () => {
+    startupCalls += 1;
+    return startupCalls === 1
+      ? Promise.resolve(info)
+      : Promise.reject(new Error("preset check failed"));
+  };
+  render(<App client={client} />);
+
+  await screen.findByRole("heading", { name: "Your Library" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "preset check failed",
+  );
+  expect(
+    screen.getByRole("heading", { name: "Your Library" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: "Check Agent Presets" }),
+  ).not.toBeInTheDocument();
+});
+
+test("shows honest busy progress while checking presets and scanning untracked Skills", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const info = {
+    firstRun: true,
+    libraryPath: "/Users/zoe/SkillMan",
+    agents: [],
+  };
+  const checked = deferred<typeof info>();
+  const scanned = deferred<ReturnType<typeof evidenceReport>>();
+  let startupCalls = 0;
+  client.startupInfo = () => {
+    startupCalls += 1;
+    return startupCalls === 1 ? Promise.resolve(info) : checked.promise;
+  };
+  client.scanAdopt = () => scanned.promise;
+  render(<App client={client} />);
+
+  await screen.findByRole("heading", { name: "Your Library" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(
+    await screen.findByRole("progressbar", {
+      name: "Checking Agent presets…",
+    }),
+  ).toHaveAttribute("aria-valuetext", "Checking Agent presets…");
+
+  checked.resolve(info);
+  await screen.findByRole("heading", { name: "Check Agent Presets" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("progressbar", {
+        name: "Checking Agent presets…",
+      }),
+    ).not.toBeInTheDocument(),
+  );
+
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(
+    await screen.findByRole("progressbar", {
+      name: "Scanning Agent and shared directories…",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: "Scan existing Skills" }),
+  ).toBeInTheDocument();
+
+  scanned.resolve(
+    evidenceReport([
+      evidenceCandidate("~/.claude/skills/prompt-linter", {
+        verdict: "verified",
+      }),
+    ]),
+  );
+  await screen.findByText("1 Untracked Skill found. Nothing changed yet.");
+  const untrackedList = document.querySelector(".onboarding-untracked-list");
+  expect(untrackedList).toBeInTheDocument();
+  expect(untrackedList).toHaveTextContent("~/.claude/skills/prompt-linter");
+  expect(untrackedList).toHaveTextContent("Verified Remote Source");
 });
 
 test("onboarding full scan hands off to Adopt with nothing selected", async () => {

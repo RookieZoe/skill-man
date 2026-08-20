@@ -180,7 +180,10 @@ struct AppliedReplacement {
 pub struct ActivationService {
     store: Arc<dyn ActivationStore>,
     filesystem: Arc<dyn FileSystem>,
-    library_root: PathBuf,
+    configured_library_root: PathBuf,
+    /// Production resolves this from the current bootstrap-verified Home;
+    /// standalone test compositions use the root passed to `new`.
+    home_context: Option<Arc<WriteGate>>,
     agent_adapters: Arc<dyn AgentAdapterRegistry>,
     conflict_checker: Option<Arc<dyn ActivationConflictChecker>>,
     plans: Mutex<HashMap<String, PlannedActivation>>,
@@ -200,7 +203,8 @@ impl ActivationService {
         Self {
             store,
             filesystem,
-            library_root,
+            configured_library_root: library_root,
+            home_context: None,
             agent_adapters: Arc::new(ClaudeOnlyAgentAdapter),
             conflict_checker: None,
             plans: Mutex::new(HashMap::new()),
@@ -230,6 +234,22 @@ impl ActivationService {
     pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
         self.write_gate = write_gate;
         self
+    }
+
+    /// Resolve all Home-owned entities and journals against the active Bound
+    /// Home, never against the startup default after a first-time bind.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
+    }
+
+    fn active_library_root(&self) -> Result<PathBuf, ActivationError> {
+        match &self.home_context {
+            Some(context) => context.bound_home().map(|home| home.path).map_err(|error| {
+                ActivationError::Internal(format!("active Home unavailable: {error}"))
+            }),
+            None => Ok(self.configured_library_root.clone()),
+        }
     }
 
     pub fn plan(&self, request: SetActivation) -> Result<ActivationPreview, ActivationError> {
@@ -614,8 +634,9 @@ impl ActivationService {
                             .skill_directory_is_readable(&inspection.final_entity_path)?;
                         if summary.is_skill {
                             summary.adoptable = true;
-                            let canonical_library =
-                                self.filesystem.canonical_directory(&self.library_root)?;
+                            let canonical_library = self
+                                .filesystem
+                                .canonical_directory(&self.active_library_root()?)?;
                             if inspection.final_entity_path.starts_with(&canonical_library) {
                                 summary.adoptable = false;
                                 summary.not_adoptable_reason =
@@ -826,6 +847,7 @@ impl ActivationService {
         {
             return Err(ActivationError::PlanStale);
         }
+        let library_root = self.active_library_root()?;
         let journal = ActivationReplaceJournal {
             version: 1,
             operation_id: plan.operation_id.clone(),
@@ -838,11 +860,11 @@ impl ActivationService {
             occupant: plan.occupant.clone(),
         };
         self.filesystem
-            .write_activation_replace_journal(&self.library_root, &journal)?;
+            .write_activation_replace_journal(&library_root, &journal)?;
         if let Err(error) = self.filesystem.move_occupant_to_backup(
             &plan.entry_path,
             &plan.backup_path,
-            &self.library_root,
+            &library_root,
             &plan.occupant,
         ) {
             let state = self.filesystem.activation_snapshot(&plan.entry_path)?;
@@ -895,7 +917,7 @@ impl ActivationService {
                 let mut committed = journal.clone();
                 committed.phase = ActivationReplacePhase::Committed;
                 self.filesystem
-                    .write_activation_replace_journal(&self.library_root, &committed)?;
+                    .write_activation_replace_journal(&library_root, &committed)?;
                 self.applied_replacements
                     .lock()
                     .map_err(|_| {
@@ -933,7 +955,7 @@ impl ActivationService {
                     self.filesystem.restore_occupant_from_backup(
                         &plan.backup_path,
                         &plan.entry_path,
-                        &self.library_root,
+                        &library_root,
                         &plan.occupant,
                     )
                 });
@@ -979,7 +1001,7 @@ impl ActivationService {
         let mut journal = applied.journal.clone();
         journal.phase = ActivationReplacePhase::Undoing;
         self.filesystem
-            .write_activation_replace_journal(&self.library_root, &journal)?;
+            .write_activation_replace_journal(&self.active_library_root()?, &journal)?;
         match self.filesystem.activation_snapshot(&journal.entry_path)? {
             ActivationEntrySnapshot::Missing => {}
             ActivationEntrySnapshot::Symlink { target } if target == journal.target_path => {
@@ -989,7 +1011,7 @@ impl ActivationService {
                 let mut committed = journal;
                 committed.phase = ActivationReplacePhase::Committed;
                 self.filesystem
-                    .write_activation_replace_journal(&self.library_root, &committed)?;
+                    .write_activation_replace_journal(&self.active_library_root()?, &committed)?;
                 return Ok(ActivationReplaceUndoResult {
                     undone: false,
                     error: Some(
@@ -1003,7 +1025,7 @@ impl ActivationService {
         if let Err(error) = self.filesystem.restore_occupant_from_backup(
             &journal.backup_path,
             &journal.entry_path,
-            &self.library_root,
+            &self.active_library_root()?,
             &journal.occupant,
         ) {
             return Err(ActivationError::RecoveryRequired {
@@ -1021,8 +1043,10 @@ impl ActivationService {
         };
         match self.store.record(record) {
             Ok(snapshot_version) => {
-                self.filesystem
-                    .finish_activation_replace_journal(&self.library_root, operation_id)?;
+                self.filesystem.finish_activation_replace_journal(
+                    &self.active_library_root()?,
+                    operation_id,
+                )?;
                 Ok(ActivationReplaceUndoResult {
                     undone: true,
                     error: None,
@@ -1053,11 +1077,11 @@ impl ActivationService {
             .ok_or(ActivationError::PlanNotFound)?;
         self.filesystem.discard_replace_backup(
             &applied.journal.backup_path,
-            &self.library_root,
+            &self.active_library_root()?,
             &applied.journal.occupant,
         )?;
         self.filesystem
-            .finish_activation_replace_journal(&self.library_root, operation_id)?;
+            .finish_activation_replace_journal(&self.active_library_root()?, operation_id)?;
         Ok(())
     }
 
@@ -1082,9 +1106,9 @@ impl ActivationService {
         let mut committed = journal.clone();
         committed.phase = ActivationReplacePhase::Committed;
         self.filesystem
-            .write_activation_replace_journal(&self.library_root, &committed)?;
+            .write_activation_replace_journal(&self.active_library_root()?, &committed)?;
         self.filesystem
-            .finish_activation_replace_journal(&self.library_root, &journal.operation_id)
+            .finish_activation_replace_journal(&self.active_library_root()?, &journal.operation_id)
             .map_err(ActivationError::from)
     }
 
@@ -1099,7 +1123,7 @@ impl ActivationService {
         let restore = self.filesystem.restore_occupant_from_backup(
             &plan.backup_path,
             &plan.entry_path,
-            &self.library_root,
+            &self.active_library_root()?,
             &plan.occupant,
         );
         if let Err(compensation) = restore {
@@ -1183,7 +1207,9 @@ impl ActivationService {
         selected_agent_id: &AgentId,
         selected_path: &Path,
     ) -> Result<PathBuf, ActivationError> {
-        let library_root = self.filesystem.canonical_directory(&self.library_root)?;
+        let library_root = self
+            .filesystem
+            .canonical_directory(&self.active_library_root()?)?;
         if paths_overlap(selected_path, &library_root) {
             return Err(ActivationError::PathOverlap);
         }

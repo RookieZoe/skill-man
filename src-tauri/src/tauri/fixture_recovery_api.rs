@@ -172,8 +172,9 @@ impl FixtureRecoveryApi {
                     message: error,
                 }),
             })?;
-        self.bootstrap.publish_changed();
-        Ok(BootstrapSnapshotDto::from(&snapshot))
+        // Re-resolve through BootstrapApi so the write gate's active Home
+        // context changes with the promoted Home before the Library mounts.
+        self.bootstrap.get_bootstrap_snapshot()
     }
 
     pub fn list_safety_snapshots(&self) -> Result<Vec<SafetySnapshotDto>, CommandFailureDto> {

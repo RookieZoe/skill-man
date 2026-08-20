@@ -166,7 +166,7 @@ pub fn install_app_update(
 }
 
 #[tauri::command]
-pub fn plan_activation(
+pub async fn plan_activation(
     state: State<'_, ActivationApi>,
     request: PlanActivationRequestDto,
 ) -> Result<ActivationPreviewDto, CommandFailureDto> {
@@ -174,7 +174,7 @@ pub fn plan_activation(
 }
 
 #[tauri::command]
-pub fn plan_activation_repair(
+pub async fn plan_activation_repair(
     state: State<'_, ActivationApi>,
     request: PlanActivationRepairRequestDto,
 ) -> Result<ActivationPreviewDto, CommandFailureDto> {
@@ -192,7 +192,7 @@ pub async fn run_activation_health_check(
 }
 
 #[tauri::command]
-pub fn relocate_link(
+pub async fn relocate_link(
     state: State<'_, HealthApi>,
     request: RelocateLinkRequestDto,
 ) -> Result<RelocateLinkPreviewDto, CommandFailureDto> {
@@ -200,7 +200,7 @@ pub fn relocate_link(
 }
 
 #[tauri::command]
-pub fn apply_relocate_link(
+pub async fn apply_relocate_link(
     app: AppHandle,
     state: State<'_, HealthApi>,
     request: ApplyRelocateLinkRequestDto,
@@ -219,7 +219,7 @@ pub fn cancel_relocate_link(
 }
 
 #[tauri::command]
-pub fn plan_remove_skill(
+pub async fn plan_remove_skill(
     state: State<'_, HealthApi>,
     request: PlanRemoveSkillRequestDto,
 ) -> Result<RemoveSkillPreviewDto, CommandFailureDto> {
@@ -227,7 +227,7 @@ pub fn plan_remove_skill(
 }
 
 #[tauri::command]
-pub fn apply_remove_skill(
+pub async fn apply_remove_skill(
     app: AppHandle,
     state: State<'_, HealthApi>,
     request: ApplyRemoveSkillRequestDto,
@@ -246,7 +246,7 @@ pub fn cancel_remove_skill(
 }
 
 #[tauri::command]
-pub fn apply_activation(
+pub async fn apply_activation(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationRequestDto,
@@ -272,7 +272,7 @@ pub fn activation_conflict_details(
 }
 
 #[tauri::command]
-pub fn plan_activation_replace(
+pub async fn plan_activation_replace(
     state: State<'_, ActivationApi>,
     request: PlanActivationReplaceRequestDto,
 ) -> Result<ActivationReplacePreviewDto, CommandFailureDto> {
@@ -280,7 +280,7 @@ pub fn plan_activation_replace(
 }
 
 #[tauri::command]
-pub fn apply_activation_replace(
+pub async fn apply_activation_replace(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: ApplyActivationReplaceRequestDto,
@@ -299,7 +299,7 @@ pub fn cancel_activation_replace(
 }
 
 #[tauri::command]
-pub fn undo_activation_replace(
+pub async fn undo_activation_replace(
     app: AppHandle,
     state: State<'_, ActivationApi>,
     request: UndoActivationReplaceRequestDto,
@@ -342,7 +342,7 @@ pub fn list_agents(
 }
 
 #[tauri::command]
-pub fn discover_link_import(
+pub async fn discover_link_import(
     state: State<'_, ImportApi>,
     request: DiscoverLinkImportRequestDto,
 ) -> Result<LinkImportCandidateDto, CommandFailureDto> {
@@ -350,7 +350,7 @@ pub fn discover_link_import(
 }
 
 #[tauri::command]
-pub fn plan_link_import(
+pub async fn plan_link_import(
     state: State<'_, ImportApi>,
     request: PlanLinkImportRequestDto,
 ) -> Result<LinkImportPreviewDto, CommandFailureDto> {
@@ -358,7 +358,7 @@ pub fn plan_link_import(
 }
 
 #[tauri::command]
-pub fn apply_link_import(
+pub async fn apply_link_import(
     state: State<'_, ImportApi>,
     request: ApplyLinkImportRequestDto,
 ) -> Result<LinkImportResultDto, CommandFailureDto> {
@@ -374,7 +374,7 @@ pub fn cancel_link_import(
 }
 
 #[tauri::command]
-pub fn discover_file_import(
+pub async fn discover_file_import(
     state: State<'_, ImportApi>,
     request: DiscoverFileImportRequestDto,
 ) -> Result<FileImportCandidateDto, CommandFailureDto> {
@@ -382,7 +382,7 @@ pub fn discover_file_import(
 }
 
 #[tauri::command]
-pub fn discover_file_import_collection(
+pub async fn discover_file_import_collection(
     state: State<'_, ImportApi>,
     request: DiscoverFileImportCollectionRequestDto,
 ) -> Result<FileImportDiscoveryDto, CommandFailureDto> {
@@ -390,7 +390,7 @@ pub fn discover_file_import_collection(
 }
 
 #[tauri::command]
-pub fn plan_file_import(
+pub async fn plan_file_import(
     state: State<'_, ImportApi>,
     request: PlanFileImportRequestDto,
 ) -> Result<FileImportPreviewDto, CommandFailureDto> {
@@ -398,7 +398,7 @@ pub fn plan_file_import(
 }
 
 #[tauri::command]
-pub fn plan_file_reinstall(
+pub async fn plan_file_reinstall(
     state: State<'_, ImportApi>,
     request: PlanFileReinstallRequestDto,
 ) -> Result<FileImportPreviewDto, CommandFailureDto> {
@@ -406,7 +406,7 @@ pub fn plan_file_reinstall(
 }
 
 #[tauri::command]
-pub fn plan_file_import_selection(
+pub async fn plan_file_import_selection(
     state: State<'_, ImportApi>,
     request: PlanFileImportSelectionRequestDto,
 ) -> Result<FileImportSelectionPreviewDto, CommandFailureDto> {
@@ -414,7 +414,7 @@ pub fn plan_file_import_selection(
 }
 
 #[tauri::command]
-pub fn apply_file_import(
+pub async fn apply_file_import(
     state: State<'_, ImportApi>,
     request: ApplyFileImportRequestDto,
 ) -> Result<FileImportResultDto, CommandFailureDto> {
@@ -422,7 +422,7 @@ pub fn apply_file_import(
 }
 
 #[tauri::command]
-pub fn apply_file_import_selection(
+pub async fn apply_file_import_selection(
     state: State<'_, ImportApi>,
     request: ApplyFileImportSelectionRequestDto,
 ) -> Result<FileImportSelectionResultDto, CommandFailureDto> {
@@ -438,7 +438,7 @@ pub fn cancel_file_import(
 }
 
 #[tauri::command]
-pub fn discover_git_import(
+pub async fn discover_git_import(
     state: State<'_, ImportApi>,
     request: DiscoverGitImportRequestDto,
 ) -> Result<GitImportDiscoveryDto, CommandFailureDto> {
@@ -446,7 +446,7 @@ pub fn discover_git_import(
 }
 
 #[tauri::command]
-pub fn plan_git_import_selection(
+pub async fn plan_git_import_selection(
     state: State<'_, ImportApi>,
     request: PlanGitImportSelectionRequestDto,
 ) -> Result<GitImportSelectionPreviewDto, CommandFailureDto> {
@@ -454,7 +454,7 @@ pub fn plan_git_import_selection(
 }
 
 #[tauri::command]
-pub fn apply_git_import_selection(
+pub async fn apply_git_import_selection(
     state: State<'_, ImportApi>,
     request: ApplyGitImportSelectionRequestDto,
 ) -> Result<GitImportSelectionResultDto, CommandFailureDto> {
@@ -470,7 +470,7 @@ pub fn cancel_git_import_selection(
 }
 
 #[tauri::command]
-pub fn check_skill_updates(
+pub async fn check_skill_updates(
     state: State<'_, UpdateApi>,
     request: CheckSkillUpdatesRequestDto,
 ) -> Result<UpdateCheckReportDto, CommandFailureDto> {
@@ -478,7 +478,7 @@ pub fn check_skill_updates(
 }
 
 #[tauri::command]
-pub fn plan_skill_updates(
+pub async fn plan_skill_updates(
     state: State<'_, UpdateApi>,
     request: PlanSkillUpdatesRequestDto,
 ) -> Result<UpdatePlanDto, CommandFailureDto> {
@@ -486,7 +486,7 @@ pub fn plan_skill_updates(
 }
 
 #[tauri::command]
-pub fn apply_skill_updates(
+pub async fn apply_skill_updates(
     state: State<'_, UpdateApi>,
     request: ApplySkillUpdatesRequestDto,
 ) -> Result<UpdateResultDto, CommandFailureDto> {
@@ -494,7 +494,7 @@ pub fn apply_skill_updates(
 }
 
 #[tauri::command]
-pub fn pin_skill_updates(
+pub async fn pin_skill_updates(
     state: State<'_, UpdateApi>,
     request: PinSkillUpdatesRequestDto,
 ) -> Result<(), CommandFailureDto> {
@@ -502,12 +502,14 @@ pub fn pin_skill_updates(
 }
 
 #[tauri::command]
-pub fn scan_adopt(state: State<'_, AdoptApi>) -> Result<AdoptEvidenceReportDto, CommandFailureDto> {
+pub async fn scan_adopt(
+    state: State<'_, AdoptApi>,
+) -> Result<AdoptEvidenceReportDto, CommandFailureDto> {
     state.scan_adopt()
 }
 
 #[tauri::command]
-pub fn plan_adopt(
+pub async fn plan_adopt(
     state: State<'_, AdoptApi>,
     request: PlanAdoptRequestDto,
 ) -> Result<AdoptPlanDto, CommandFailureDto> {
@@ -515,7 +517,7 @@ pub fn plan_adopt(
 }
 
 #[tauri::command]
-pub fn apply_adopt(
+pub async fn apply_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
     request: ApplyAdoptRequestDto,
@@ -526,7 +528,7 @@ pub fn apply_adopt(
 }
 
 #[tauri::command]
-pub fn undo_adopt(
+pub async fn undo_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
     request: UndoAdoptRequestDto,

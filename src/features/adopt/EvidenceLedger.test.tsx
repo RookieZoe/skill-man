@@ -68,6 +68,7 @@ function renderLedger(
   reportValue: AdoptEvidenceReport,
   selections: Record<string, never> = {},
   plan: AdoptPlan | null = null,
+  activity: "idle" | "scanning" | "planning" | "applying" | "undoing" = "idle",
 ) {
   return render(
     <EvidenceLedger
@@ -78,7 +79,7 @@ function renderLedger(
       undo={null}
       error={null}
       errorHeading="app.notice.scan_failed"
-      activity="idle"
+      activity={activity}
       onToggle={noop}
       onSetBranch={noop}
       onRescan={noop}
@@ -89,6 +90,15 @@ function renderLedger(
     />,
   );
 }
+
+test("shows an indeterminate progress bar while rescanning", () => {
+  renderLedger(report([candidate()]), {}, null, "scanning");
+
+  expect(screen.getByRole("progressbar", { name: "Scanning" })).toHaveAttribute(
+    "aria-valuetext",
+    "Scanning",
+  );
+});
 
 test("renders the three columns with the source chain fully expanded by default", () => {
   renderLedger(

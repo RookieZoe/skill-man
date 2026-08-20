@@ -5,9 +5,10 @@
 //! Nothing here writes Home or the lock; mirrors and materialized trees live
 //! in the caller workspace.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -17,7 +18,7 @@ use crate::seams::remote_provider::{
     AnchorResolution, RefDisposition, RemoteKind, RemoteProvider, RemoteProviderError,
     RemoteRequest, RemoteTreeFacts,
 };
-use crate::seams::source::GitSource;
+use crate::seams::source::{GitFetchReport, GitSource};
 
 /// Bounded ancestry walk for moving-ref anchors: the newest commit whose
 /// skill subtree matches the lock hash, up to this many path-touching
@@ -27,11 +28,21 @@ const LOCAL_GIT_TIMEOUT_SECONDS: u64 = 60;
 
 pub struct SystemRemoteProvider {
     git: Arc<dyn GitSource>,
+    fetch_cache: Mutex<HashMap<(PathBuf, String), FetchOutcome>>,
+}
+
+#[derive(Clone)]
+enum FetchOutcome {
+    Fetched(GitFetchReport),
+    Deferred(String),
 }
 
 impl SystemRemoteProvider {
     pub fn new(git: Arc<dyn GitSource>) -> Self {
-        Self { git }
+        Self {
+            git,
+            fetch_cache: Mutex::new(HashMap::new()),
+        }
     }
 
     fn is_ref_kind(&self, mirror_dir: &Path, namespace: &str, reference: &str) -> bool {
@@ -132,6 +143,43 @@ impl SystemRemoteProvider {
                 ))
             })
     }
+
+    /// An evidence scan creates one workspace for every normalized remote.
+    /// Reuse the transport result inside that workspace while keeping each
+    /// Skill's ref, anchor, and materialized tree verification independent.
+    fn fetch_mirror_once(
+        &self,
+        request: &RemoteRequest,
+        workspace: &Path,
+        mirror_dir: &Path,
+    ) -> Result<GitFetchReport, RemoteProviderError> {
+        let mut cache = self.fetch_cache.lock().map_err(|_| {
+            RemoteProviderError::Deferred("remote verification cache is unavailable".into())
+        })?;
+        cache.retain(|(cached_workspace, _), _| cached_workspace.is_dir());
+        let key = (workspace.to_path_buf(), request.canonical_url.clone());
+        if let Some(outcome) = cache.get(&key) {
+            return match outcome {
+                FetchOutcome::Fetched(report) => Ok(report.clone()),
+                FetchOutcome::Deferred(detail) => {
+                    Err(RemoteProviderError::Deferred(detail.clone()))
+                }
+            };
+        }
+
+        let outcome = match self.git.fetch_mirror(&request.canonical_url, mirror_dir) {
+            Ok(report) => FetchOutcome::Fetched(report),
+            Err(error) => {
+                FetchOutcome::Deferred(format!("cannot reach '{}': {error}", request.canonical_url))
+            }
+        };
+        let result = match &outcome {
+            FetchOutcome::Fetched(report) => Ok(report.clone()),
+            FetchOutcome::Deferred(detail) => Err(RemoteProviderError::Deferred(detail.clone())),
+        };
+        cache.insert(key, outcome);
+        result
+    }
 }
 
 impl RemoteProvider for SystemRemoteProvider {
@@ -214,15 +262,7 @@ impl RemoteProvider for SystemRemoteProvider {
         let url_hash = format!("{:x}", Sha256::digest(request.canonical_url.as_bytes()));
         let url_hash = &url_hash[..16];
         let mirror_dir = workspace.join(format!("mirror-{url_hash}.git"));
-        let fetch_report = self
-            .git
-            .fetch_mirror(&request.canonical_url, &mirror_dir)
-            .map_err(|error| {
-                RemoteProviderError::Deferred(format!(
-                    "cannot reach '{}': {error}",
-                    request.canonical_url
-                ))
-            })?;
+        let fetch_report = self.fetch_mirror_once(request, workspace, &mirror_dir)?;
         let default_branch = fetch_report.default_branch.clone();
 
         let (disposition, resolved_commit) = if request.requested_ref == "HEAD" {
@@ -670,7 +710,88 @@ mod tests {
     use super::*;
     use crate::adapters::git_source::SystemGitSource;
     use crate::seams::remote_provider::RemoteProvider;
+    use crate::seams::source::{GitFetchReport, GitSource, GitTreeEntry, SourceError};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingGitSource {
+        inner: SystemGitSource,
+        fetches: AtomicUsize,
+        fetch_error: Option<String>,
+    }
+
+    impl CountingGitSource {
+        fn new() -> Self {
+            Self {
+                inner: SystemGitSource::new(),
+                fetches: AtomicUsize::new(0),
+                fetch_error: None,
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                inner: SystemGitSource::new(),
+                fetches: AtomicUsize::new(0),
+                fetch_error: Some("offline".into()),
+            }
+        }
+
+        fn fetch_count(&self) -> usize {
+            self.fetches.load(Ordering::Relaxed)
+        }
+    }
+
+    impl GitSource for CountingGitSource {
+        fn fetch_mirror(
+            &self,
+            url: &str,
+            mirror_dir: &Path,
+        ) -> Result<GitFetchReport, SourceError> {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = &self.fetch_error {
+                return Err(SourceError::Git(error.clone()));
+            }
+            self.inner.fetch_mirror(url, mirror_dir)
+        }
+
+        fn resolve_commit(
+            &self,
+            mirror_dir: &Path,
+            rev: &str,
+        ) -> Result<Option<String>, SourceError> {
+            self.inner.resolve_commit(mirror_dir, rev)
+        }
+
+        fn list_tree(
+            &self,
+            mirror_dir: &Path,
+            commit: &str,
+        ) -> Result<Vec<GitTreeEntry>, SourceError> {
+            self.inner.list_tree(mirror_dir, commit)
+        }
+
+        fn read_blob(
+            &self,
+            mirror_dir: &Path,
+            commit: &str,
+            path: &str,
+            max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, SourceError> {
+            self.inner.read_blob(mirror_dir, commit, path, max_bytes)
+        }
+
+        fn stage_skill(
+            &self,
+            mirror_dir: &Path,
+            commit: &str,
+            skill_path: &str,
+            destination: &Path,
+        ) -> Result<(), SourceError> {
+            self.inner
+                .stage_skill(mirror_dir, commit, skill_path, destination)
+        }
+    }
 
     fn entry(
         source_type: &str,
@@ -889,6 +1010,116 @@ mod tests {
         assert!(!facts.anchor.original_install_commit_known);
         assert!(facts.provider_hash_matched);
         assert!(facts.materialized_root.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn verify_fetches_a_remote_once_per_shared_workspace() {
+        let root = tempfile::tempdir().expect("temporary verify root");
+        let repo = fixture_repo(
+            root.path(),
+            &[
+                ("skills/networking/SKILL.md", "# Networking\n"),
+                ("skills/debugging/SKILL.md", "# Debugging\n"),
+            ],
+            "main",
+        );
+        let url = format!("file://{}", repo.display());
+        let networking_hash =
+            cli_skill_folder_hash(&repo.join("skills/networking")).expect("networking hash");
+        let debugging_hash =
+            cli_skill_folder_hash(&repo.join("skills/debugging")).expect("debugging hash");
+        let git = Arc::new(CountingGitSource::new());
+        let provider = SystemRemoteProvider::new(git.clone());
+        let networking = provider
+            .parse_request(&entry(
+                "git",
+                &url,
+                &url,
+                None,
+                "skills/networking",
+                &networking_hash,
+            ))
+            .expect("parse networking");
+        let debugging = provider
+            .parse_request(&entry(
+                "git",
+                &url,
+                &url,
+                None,
+                "skills/debugging",
+                &debugging_hash,
+            ))
+            .expect("parse debugging");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        provider
+            .verify(&networking, &workspace)
+            .expect("verify networking");
+        provider
+            .verify(&debugging, &workspace)
+            .expect("verify debugging");
+
+        assert_eq!(
+            git.fetch_count(),
+            1,
+            "one Adopt scan must fetch a normalized remote only once"
+        );
+
+        let next_workspace = root.path().join("next-workspace");
+        fs::create_dir_all(&next_workspace).expect("create next workspace");
+        provider
+            .verify(&networking, &next_workspace)
+            .expect("verify networking in next scan");
+        assert_eq!(
+            git.fetch_count(),
+            2,
+            "a later Adopt scan must refresh the remote"
+        );
+    }
+
+    #[test]
+    fn verify_reuses_a_deferred_fetch_in_the_shared_workspace() {
+        let root = tempfile::tempdir().expect("temporary verify root");
+        let url = "https://example.invalid/acme/skills";
+        let git = Arc::new(CountingGitSource::unavailable());
+        let provider = SystemRemoteProvider::new(git.clone());
+        let alpha = provider
+            .parse_request(&entry(
+                "git",
+                url,
+                url,
+                None,
+                "skills/alpha",
+                &"a".repeat(64),
+            ))
+            .expect("parse alpha");
+        let beta = provider
+            .parse_request(&entry(
+                "git",
+                url,
+                url,
+                None,
+                "skills/beta",
+                &"b".repeat(64),
+            ))
+            .expect("parse beta");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        assert!(matches!(
+            provider.verify(&alpha, &workspace),
+            Err(RemoteProviderError::Deferred(_))
+        ));
+        assert!(matches!(
+            provider.verify(&beta, &workspace),
+            Err(RemoteProviderError::Deferred(_))
+        ));
+        assert_eq!(
+            git.fetch_count(),
+            1,
+            "one unavailable remote must defer the whole scan group without retrying"
+        );
     }
 
     #[test]

@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
+use crate::core::bootstrap::BootstrapService;
 use crate::core::home_binding::{CandidateMode, HomeBindingError, HomeBindingService};
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::dto::{
@@ -14,12 +16,24 @@ use crate::tauri_adapter::dto::{
 
 pub struct HomeBindingApi {
     service: Arc<HomeBindingService>,
+    bootstrap_service: Arc<BootstrapService>,
+    store_switch: Arc<RuntimeStoreSwitch>,
     bootstrap: Arc<BootstrapApi>,
 }
 
 impl HomeBindingApi {
-    pub fn new(service: Arc<HomeBindingService>, bootstrap: Arc<BootstrapApi>) -> Self {
-        Self { service, bootstrap }
+    pub fn new(
+        service: Arc<HomeBindingService>,
+        bootstrap_service: Arc<BootstrapService>,
+        store_switch: Arc<RuntimeStoreSwitch>,
+        bootstrap: Arc<BootstrapApi>,
+    ) -> Self {
+        Self {
+            service,
+            bootstrap_service,
+            store_switch,
+            bootstrap,
+        }
     }
 
     /// Read-only candidate validation; returns the token `confirm_home`
@@ -35,8 +49,9 @@ impl HomeBindingApi {
     }
 
     /// Explicit user confirmation: create/migrate/copy, verify, then commit
-    /// the locator — the only binding commit point. Publishes
-    /// `bootstrap://changed` with the fresh snapshot.
+    /// the locator — the only binding commit point. Reopens the shared
+    /// Catalog facade and aligns the write gate before returning the fresh
+    /// snapshot, so the Library is immediately readable after first setup.
     pub fn confirm_home(
         &self,
         request: ConfirmHomeRequestDto,
@@ -45,8 +60,7 @@ impl HomeBindingApi {
             .service
             .confirm_home(&request.candidate_token)
             .map_err(|error| failure(&error))?;
-        self.bootstrap.publish_changed();
-        Ok(BootstrapSnapshotDto::from(&snapshot))
+        self.finish_transition(&snapshot)
     }
 
     /// Resume an interrupted operation from its durable cursor.
@@ -58,8 +72,7 @@ impl HomeBindingApi {
             .service
             .continue_candidate(&request.operation_id)
             .map_err(|error| failure(&error))?;
-        self.bootstrap.publish_changed();
-        Ok(BootstrapSnapshotDto::from(&snapshot))
+        self.finish_transition(&snapshot)
     }
 
     /// Cancel an interrupted operation: delete only operation-created,
@@ -72,8 +85,26 @@ impl HomeBindingApi {
             .service
             .cancel_candidate(&request.operation_id)
             .map_err(|error| failure(&error))?;
-        self.bootstrap.publish_changed();
-        Ok(BootstrapSnapshotDto::from(&snapshot))
+        self.finish_transition(&snapshot)
+    }
+
+    /// Every successful binding transition changes the bootstrap authority.
+    /// The long-lived Catalog facade and write gate must change with it:
+    /// startup begins closed, while a confirmed Home is immediately Bound.
+    fn finish_transition(
+        &self,
+        snapshot: &crate::core::bootstrap::BootstrapSnapshot,
+    ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+        self.store_switch
+            .reconcile_after_transition(&self.bootstrap_service, snapshot)
+            .map_err(|error| CommandFailureDto {
+                error: PublicErrorDto::CatalogUnavailable,
+                diagnostic: Some(DiagnosticDto {
+                    code: "catalog_reconcile_failed".into(),
+                    message: error,
+                }),
+            })?;
+        self.bootstrap.get_bootstrap_snapshot()
     }
 }
 

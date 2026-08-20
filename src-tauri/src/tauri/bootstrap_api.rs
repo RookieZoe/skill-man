@@ -61,6 +61,15 @@ impl BootstrapApi {
     pub fn get_bootstrap_snapshot(&self) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
         let snapshot = self.service.inspect();
         let bound_home = self.service.verified_bound_home();
+        self.write_gate
+            .synchronize_bound_home(bound_home.as_ref())
+            .map_err(|error| CommandFailureDto {
+                error: PublicErrorDto::BootstrapUnavailable,
+                diagnostic: Some(DiagnosticDto {
+                    code: "write_gate_poisoned".into(),
+                    message: error.to_string(),
+                }),
+            })?;
         let desired = snapshot.write_gate_state(bound_home.as_ref());
         let current = self.write_gate.snapshot();
         // A Recovery state is operation-owned (startup recovery in progress):

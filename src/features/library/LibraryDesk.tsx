@@ -42,6 +42,7 @@ import type {
 import { EvidenceLedger } from "../adopt/EvidenceLedger";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
+import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
@@ -173,8 +174,9 @@ interface LibraryDeskProps {
   isOnboardingOpen: boolean;
   onboardingStep: number;
   onboardingAgents: StartupAgent[];
+  onboardingLibraryPath: string | null;
   onboardingReport: AdoptEvidenceReport | null;
-  onboardingActivity: "idle" | "scanning";
+  onboardingActivity: "idle" | "checking" | "scanning";
   onboardingError: string | null;
   onOpenPreferences: () => void;
   onClosePreferences: () => void;
@@ -293,6 +295,7 @@ export function LibraryDesk({
   isOnboardingOpen,
   onboardingStep,
   onboardingAgents,
+  onboardingLibraryPath,
   onboardingReport,
   onboardingActivity,
   onboardingError,
@@ -663,6 +666,7 @@ export function LibraryDesk({
         <OnboardingSheet
           step={onboardingStep}
           agents={onboardingAgents}
+          libraryPath={onboardingLibraryPath}
           report={onboardingReport}
           activity={onboardingActivity}
           error={onboardingError}
@@ -2400,12 +2404,10 @@ function occupierKindLabel(kind: OccupierKind, t: LocaleContextValue["t"]) {
 const onboardingSteps: Array<{
   titleKey: MessageKey;
   bodyKey: MessageKey;
-  note?: string;
 }> = [
   {
     titleKey: "library.onboarding.step1_title",
     bodyKey: "library.onboarding.step1_body",
-    note: "~/Library/Application Support/skill-man",
   },
   {
     titleKey: "library.onboarding.step2_title",
@@ -2420,6 +2422,7 @@ const onboardingSteps: Array<{
 function OnboardingSheet({
   step,
   agents,
+  libraryPath,
   report,
   activity,
   error,
@@ -2430,8 +2433,9 @@ function OnboardingSheet({
 }: {
   step: number;
   agents: StartupAgent[];
+  libraryPath: string | null;
   report: AdoptEvidenceReport | null;
-  activity: "idle" | "scanning";
+  activity: "idle" | "checking" | "scanning";
   error: string | null;
   onSkip: () => void;
   onAdvance: () => void;
@@ -2441,28 +2445,33 @@ function OnboardingSheet({
   const { t, tPlural } = useLocale();
   const closeButton = useRef<HTMLButtonElement>(null);
   const advanceButton = useRef<HTMLButtonElement>(null);
+  const isBusy = activity !== "idle";
   const isScanning = activity === "scanning";
+  const progressLabel =
+    activity === "checking"
+      ? t("library.onboarding.checking")
+      : t("library.onboarding.scanning");
   const candidates = report?.candidates ?? [];
 
   useLayoutEffect(() => {
-    if (step === 2 && !isScanning) advanceButton.current?.focus();
+    if (step === 2 && !isBusy) advanceButton.current?.focus();
     else closeButton.current?.focus();
-  }, [step, isScanning]);
+  }, [step, isBusy]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isScanning) onSkip();
+      if (event.key === "Escape" && !isBusy) onSkip();
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isScanning, onSkip]);
+  }, [isBusy, onSkip]);
 
   const current = onboardingSteps[step];
   return (
     <div
       className="activation-sheet-backdrop"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target && !isScanning) onSkip();
+        if (event.currentTarget === event.target && !isBusy) onSkip();
       }}
     >
       <section
@@ -2491,13 +2500,19 @@ function OnboardingSheet({
           <h2>{t(current.titleKey)}</h2>
           <p>{t(current.bodyKey)}</p>
         </div>
-        {step === 0 && current.note ? (
+        {step === 0 && libraryPath ? (
           <dl className="activation-paths">
             <div>
               <dt>{t("library.pane.library")}</dt>
-              <dd>{current.note}</dd>
+              <dd>{libraryPath}</dd>
             </div>
           </dl>
+        ) : null}
+        {isBusy ? (
+          <IndeterminateProgress
+            className="onboarding-operation-progress"
+            label={progressLabel}
+          />
         ) : null}
         {step === 1 ? (
           <ul className="onboarding-agent-list">
@@ -2521,7 +2536,7 @@ function OnboardingSheet({
                     </span>
                     <button
                       type="button"
-                      disabled={isScanning}
+                      disabled={isBusy}
                       onClick={() => onCreateDirectory(agent.id)}
                     >
                       {t("library.onboarding.create_dir")}
@@ -2534,26 +2549,35 @@ function OnboardingSheet({
         ) : null}
         {step === 2 ? (
           <div className="onboarding-scan">
-            {isScanning ? (
-              <p role="status">{t("library.onboarding.scanning")}</p>
-            ) : report ? (
+            {!isScanning && report ? (
               <>
                 <p role="status">
                   {tPlural("library.onboarding.untracked", candidates.length)}
                 </p>
-                <ul className="git-import-candidates">
+                <ul className="onboarding-untracked-list">
                   {candidates.map((candidate) => (
                     <li key={candidate.canonicalEntity}>
-                      <span>
+                      <span className="onboarding-untracked-copy">
                         <strong>{candidate.directoryName}</strong>
                         <span className="candidate-path">
+                          {candidate.canonicalEntity}
+                        </span>
+                      </span>
+                      <span
+                        className={`onboarding-untracked-verdict adopt-verdict-${candidate.verdict}`}
+                      >
+                        <span>
                           {t(
                             `library.adopt.verdict.${candidate.verdict}` as MessageKey,
                           )}
-                          {candidate.requiresRelocation
-                            ? t("library.adopt.relocation_required")
-                            : ""}
                         </span>
+                        {candidate.requiresRelocation ? (
+                          <span className="onboarding-untracked-note">
+                            {t("library.adopt.relocation_required")}
+                          </span>
+                        ) : (
+                          ""
+                        )}
                       </span>
                     </li>
                   ))}
@@ -2575,7 +2599,7 @@ function OnboardingSheet({
           <button
             ref={closeButton}
             type="button"
-            disabled={isScanning}
+            disabled={isBusy}
             onClick={onSkip}
           >
             {t("library.onboarding.skip")}
@@ -2585,12 +2609,10 @@ function OnboardingSheet({
               ref={advanceButton}
               type="button"
               className="activation-confirm-button"
-              disabled={isScanning}
+              disabled={isBusy}
               onClick={onAdvance}
             >
-              {isScanning
-                ? t("library.onboarding.scanning_short")
-                : t("library.onboarding.continue")}
+              {t("library.onboarding.continue")}
             </button>
           ) : (
             <>
@@ -2598,7 +2620,7 @@ function OnboardingSheet({
                 ref={advanceButton}
                 type="button"
                 className="activation-confirm-button"
-                disabled={!report || isScanning}
+                disabled={!report || isBusy}
                 onClick={onFinishWithAdopt}
               >
                 {t("library.onboarding.review_adopt")}

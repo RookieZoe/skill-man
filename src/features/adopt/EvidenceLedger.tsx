@@ -10,6 +10,7 @@ import type {
   LockFileFault,
   ModifiedBranch,
 } from "../../app/catalog-client";
+import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import { useLocale } from "../locale/LocaleProvider";
 import type { MessageKey, PluralKey } from "../locale/messages";
 
@@ -231,6 +232,12 @@ function LedgerScan({
         <p>{t("library.adopt.scan_body")}</p>
       </div>
       <div className="adopt-ledger-body">
+        {activity === "scanning" ? (
+          <IndeterminateProgress
+            className="adopt-ledger-operation-progress"
+            label={t("library.adopt.rescanning")}
+          />
+        ) : null}
         {candidates.length === 0 && !isBusy ? (
           <p role="status">{t("library.adopt.none")}</p>
         ) : (

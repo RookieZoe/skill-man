@@ -10,6 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::core::domain::{AgentId, AgentKind};
+use crate::core::write_gate::WriteGate;
 use crate::seams::adopt_store::{AdoptStore, AdoptStoreError};
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::{FileSystem, FileSystemError};
@@ -26,6 +27,9 @@ pub struct StartupAgent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupInfo {
     pub first_run: bool,
+    /// Present in the product composition whenever the Catalog is Bound.
+    /// Test-only standalone startup services intentionally omit it.
+    pub library_path: Option<PathBuf>,
     /// Detected Agent Presets for the onboarding "Preset confirmation" step;
     /// missing directories are marked, never created without confirmation.
     pub agents: Vec<StartupAgent>,
@@ -36,6 +40,7 @@ pub struct StartupService {
     store: Arc<dyn CatalogStore>,
     agents: Arc<dyn AdoptStore>,
     filesystem: Arc<dyn FileSystem>,
+    home_context: Option<Arc<WriteGate>>,
 }
 
 impl StartupService {
@@ -48,11 +53,29 @@ impl StartupService {
             store,
             agents,
             filesystem,
+            home_context: None,
         }
+    }
+
+    /// Supply the bootstrap authority that owns the active Home identity.
+    /// Onboarding reads this once and renders the actual bound path instead
+    /// of inventing the historical default.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
     }
 
     pub fn startup_info(&self) -> Result<StartupInfo, StartupError> {
         let first_run = self.store.first_run_completed_at()?.is_none();
+        let library_path = self
+            .home_context
+            .as_ref()
+            .map(|context| {
+                context.bound_home().map(|home| home.path).map_err(|error| {
+                    StartupError::Internal(format!("active Home unavailable: {error}"))
+                })
+            })
+            .transpose()?;
         let agents = self
             .agents
             .list_agents()?
@@ -65,7 +88,11 @@ impl StartupService {
                 detected: agent.detected,
             })
             .collect();
-        Ok(StartupInfo { first_run, agents })
+        Ok(StartupInfo {
+            first_run,
+            library_path,
+            agents,
+        })
     }
 
     pub fn complete_onboarding(&self) -> Result<(), StartupError> {
@@ -105,4 +132,6 @@ pub enum StartupError {
     Agents(#[from] AdoptStoreError),
     #[error(transparent)]
     FileSystem(#[from] FileSystemError),
+    #[error("internal Startup error: {0}")]
+    Internal(String),
 }

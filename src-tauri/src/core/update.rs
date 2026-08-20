@@ -129,8 +129,10 @@ pub struct UpdateService {
     filesystem: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
     git: Arc<dyn GitSource>,
-    git_cache_root: PathBuf,
-    remotes_root: PathBuf,
+    configured_library_root: PathBuf,
+    configured_git_cache_root: PathBuf,
+    configured_remotes_root: PathBuf,
+    home_context: Option<Arc<WriteGate>>,
     import: ImportService,
 }
 
@@ -159,10 +161,43 @@ impl UpdateService {
             filesystem,
             clock,
             git,
-            git_cache_root,
-            remotes_root: library_root.join("remotes"),
+            configured_library_root: library_root.clone(),
+            configured_git_cache_root: git_cache_root,
+            configured_remotes_root: library_root.join("remotes"),
+            home_context: None,
             import,
         }
+    }
+
+    /// Make remote mirrors, manifests and nested Import operations follow
+    /// the current bootstrap-verified Home after a first-time bind.
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.import = self.import.with_home_context(home_context.clone());
+        self.home_context = Some(home_context);
+        self
+    }
+
+    fn active_library_root(&self) -> Result<PathBuf, UpdateError> {
+        match &self.home_context {
+            Some(context) => context.bound_home().map(|home| home.path).map_err(|error| {
+                UpdateError::Internal(format!("active Home unavailable: {error}"))
+            }),
+            None => Ok(self.configured_library_root.clone()),
+        }
+    }
+
+    fn active_git_cache_root(&self) -> Result<PathBuf, UpdateError> {
+        if self.home_context.is_some() {
+            return Ok(self.active_library_root()?.join("cache"));
+        }
+        Ok(self.configured_git_cache_root.clone())
+    }
+
+    fn active_remotes_root(&self) -> Result<PathBuf, UpdateError> {
+        if self.home_context.is_some() {
+            return Ok(self.active_library_root()?.join("remotes"));
+        }
+        Ok(self.configured_remotes_root.clone())
     }
 
     /// Check trackable remote Installs for updates. Each repository is
@@ -210,7 +245,7 @@ impl UpdateService {
                 // Within the cooldown: silent skip, as ADR-0004 requires.
                 continue;
             }
-            let mirror = self.git_mirror_for(repo_url);
+            let mirror = self.git_mirror_for(repo_url)?;
             let report = match self.git.fetch_mirror(repo_url, &mirror) {
                 Ok(report) => report,
                 Err(error) => {
@@ -333,7 +368,7 @@ impl UpdateService {
                 }
                 continue;
             }
-            let mirror = self.git_mirror_for(&repo_url);
+            let mirror = self.git_mirror_for(&repo_url)?;
             let fetch = self.git.fetch_mirror(&repo_url, &mirror);
             let default_resolved = match fetch {
                 Ok(report) => match report.default_branch.as_deref() {
@@ -438,6 +473,7 @@ impl UpdateService {
         requests: &[UpdateApplyRequest],
         abandon_changes: bool,
     ) -> Result<UpdateResult, UpdateError> {
+        let remotes_root = self.active_remotes_root()?;
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             match self
@@ -467,7 +503,7 @@ impl UpdateService {
                                 .unwrap_or_default();
                             let _ = ensure_parent_manifest(
                                 self.filesystem.as_ref(),
-                                &self.remotes_root,
+                                &remotes_root,
                                 record,
                                 self.clock.unix_epoch_nanos(),
                                 aliases,
@@ -509,8 +545,8 @@ impl UpdateService {
         Ok(())
     }
 
-    fn git_mirror_for(&self, repo_url: &str) -> PathBuf {
-        git_mirror_path(&self.git_cache_root, repo_url)
+    fn git_mirror_for(&self, repo_url: &str) -> Result<PathBuf, UpdateError> {
+        Ok(git_mirror_path(&self.active_git_cache_root()?, repo_url))
     }
 
     /// Resolve the commit for one tracked Install: "HEAD" uses the repository
@@ -549,9 +585,12 @@ impl UpdateService {
     /// is the only authority until the first verified write materializes
     /// the manifest); any present mismatch fails closed for this parent.
     fn parent_integrity_ok(&self, record: &RemoteInstallRecord) -> bool {
+        let Ok(remotes_root) = self.active_remotes_root() else {
+            return false;
+        };
         match self
             .filesystem
-            .read_remote_parent_manifest(&self.remotes_root, &record.remote_id)
+            .read_remote_parent_manifest(&remotes_root, &record.remote_id)
         {
             Ok(Some(manifest)) => self.parent_matches_manifest(record, &manifest),
             Ok(None) => true,

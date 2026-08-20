@@ -88,7 +88,7 @@ fn startup_command_error(error: StartupError) -> CommandFailureDto {
         {
             PublicErrorDto::PermissionDenied
         }
-        StartupError::FileSystem(_) => PublicErrorDto::Internal,
+        StartupError::FileSystem(_) | StartupError::Internal(_) => PublicErrorDto::Internal,
     };
     CommandFailureDto {
         error: public_error,

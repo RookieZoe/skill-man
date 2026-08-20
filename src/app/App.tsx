@@ -4,6 +4,10 @@ import { listen } from "@tauri-apps/api/event";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import {
+  OperationStatusWindow,
+  type OperationStatus,
+} from "../ui/OperationStatusWindow";
+import {
   useLocale,
   type LocaleContextValue,
 } from "../features/locale/LocaleProvider";
@@ -93,8 +97,134 @@ export interface AppUpdatePanelState {
   error: string | null;
 }
 
+type OperationCopy = Readonly<{
+  title: MessageKey;
+  detail: MessageKey;
+}>;
+
+const ADOPT_OPERATION_COPIES = {
+  scanning: {
+    title: "library.adopt.rescanning",
+    detail: "operation.detail.adopt.scan",
+  },
+  planning: {
+    title: "library.adopt.planning",
+    detail: "operation.detail.adopt.plan",
+  },
+  applying: {
+    title: "library.adopt.adopting",
+    detail: "operation.detail.adopt.apply",
+  },
+  undoing: {
+    title: "library.adopt.undoing",
+    detail: "operation.detail.adopt.undo",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const LINK_IMPORT_OPERATION_COPIES = {
+  discovering: {
+    title: "library.import.checking_source",
+    detail: "operation.detail.import.link.discover",
+  },
+  applying: {
+    title: "library.import.importing",
+    detail: "operation.detail.import.link.apply",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const GIT_IMPORT_OPERATION_COPIES = {
+  discovering: {
+    title: "library.import.fetching",
+    detail: "operation.detail.import.git.discover",
+  },
+  planning: {
+    title: "library.adopt.planning",
+    detail: "operation.detail.import.git.plan",
+  },
+  applying: {
+    title: "library.import.importing",
+    detail: "operation.detail.import.git.apply",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const UPDATE_OPERATION_COPIES = {
+  checking: {
+    title: "library.update.checking",
+    detail: "operation.detail.update.check",
+  },
+  planning: {
+    title: "library.adopt.planning",
+    detail: "operation.detail.update.plan",
+  },
+  applying: {
+    title: "library.update.updating",
+    detail: "operation.detail.update.apply",
+  },
+  pinning: {
+    title: "library.update.pinning",
+    detail: "operation.detail.update.pin",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const RELOCATE_OPERATION_COPIES = {
+  previewing: {
+    title: "library.relocate.checking",
+    detail: "operation.detail.relocate.check",
+  },
+  applying: {
+    title: "library.relocate.relocating",
+    detail: "operation.detail.relocate.apply",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const REMOVE_OPERATION_COPIES = {
+  planning: {
+    title: "library.adopt.planning",
+    detail: "operation.detail.remove.plan",
+  },
+  applying: {
+    title: "library.remove.removing",
+    detail: "operation.detail.remove.apply",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+const APP_UPDATE_OPERATION_COPIES = {
+  checking: {
+    title: "library.preferences.checking",
+    detail: "operation.detail.app_update.check",
+  },
+  downloading: {
+    title: "library.app_update.downloading",
+    detail: "operation.detail.app_update.download",
+  },
+  cancelling: {
+    title: "library.app_update.cancelling",
+    detail: "operation.detail.app_update.cancel",
+  },
+  installing: {
+    title: "library.app_update.installing",
+    detail: "operation.detail.app_update.install",
+  },
+} as const satisfies Record<string, OperationCopy>;
+
+function operationFromActivity(
+  id: string,
+  activity: string,
+  copies: Readonly<Record<string, OperationCopy>>,
+  t: LocaleContextValue["t"],
+): OperationStatus | null {
+  const copy = copies[activity];
+  return copy ? { id, title: t(copy.title), detail: t(copy.detail) } : null;
+}
+
+function isOperationStatus(
+  operation: OperationStatus | null,
+): operation is OperationStatus {
+  return operation !== null;
+}
+
 export function App({ client }: AppProps) {
-  const { t } = useLocale();
+  const { t, tPlural } = useLocale();
   // Effects only render errors via `t`; a locale switch must not re-run
   // catalog/health effects, so the current `t` is mirrored into a ref.
   const tRef = useRef(t);
@@ -123,12 +253,15 @@ export function App({ client }: AppProps) {
   });
   const appUpdateCheckRunId = useRef(0);
   const [startupAgents, setStartupAgents] = useState<StartupAgent[]>([]);
+  const [onboardingLibraryPath, setOnboardingLibraryPath] = useState<
+    string | null
+  >(null);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingReport, setOnboardingReport] =
     useState<AdoptEvidenceReport | null>(null);
   const [onboardingActivity, setOnboardingActivity] = useState<
-    "idle" | "scanning"
+    "idle" | "checking" | "scanning"
   >("idle");
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [activationConflict, setActivationConflict] =
@@ -252,6 +385,7 @@ export function App({ client }: AppProps) {
       .then((info) => {
         if (!current) return;
         setStartupAgents(info.agents);
+        setOnboardingLibraryPath(info.libraryPath ?? null);
         if (info.firstRun) {
           // Spec §8.7: the three-step onboarding runs on the first launch;
           // skipping still records completion so later launches light-scan.
@@ -1451,15 +1585,32 @@ export function App({ client }: AppProps) {
   }
 
   async function advanceOnboarding() {
+    if (onboardingStep === 0) {
+      setOnboardingActivity("checking");
+      setOnboardingError(null);
+      setOnboardingStep(1);
+      try {
+        const info = await client.startupInfo();
+        setStartupAgents(info.agents);
+        setOnboardingLibraryPath(info.libraryPath ?? null);
+      } catch (reason) {
+        setOnboardingStep(0);
+        setOnboardingError(readError(reason, t));
+      } finally {
+        setOnboardingActivity("idle");
+      }
+      return;
+    }
     if (onboardingStep === 1) {
       // Step 3: the first-run full scan is read-only and never adopts.
       setOnboardingActivity("scanning");
       setOnboardingError(null);
+      setOnboardingStep(2);
       try {
         const report = await client.scanAdopt();
         setOnboardingReport(report);
-        setOnboardingStep(2);
       } catch (reason) {
+        setOnboardingStep(1);
         setOnboardingError(readError(reason, t));
       } finally {
         setOnboardingActivity("idle");
@@ -1470,12 +1621,16 @@ export function App({ client }: AppProps) {
   }
 
   async function createOnboardingAgentDirectory(agentId: string) {
+    setOnboardingActivity("checking");
     setOnboardingError(null);
     try {
       const info = await client.createAgentDirectory(agentId);
       setStartupAgents(info.agents);
+      setOnboardingLibraryPath(info.libraryPath ?? null);
     } catch (reason) {
       setOnboardingError(readError(reason, t));
+    } finally {
+      setOnboardingActivity("idle");
     }
   }
 
@@ -1504,130 +1659,213 @@ export function App({ client }: AppProps) {
     setOnboardingReport(null);
   }
 
+  const activeOperations = [
+    operationFromActivity("adopt", adoptActivity, ADOPT_OPERATION_COPIES, t),
+    operationFromActivity(
+      "link-import",
+      linkImportActivity,
+      LINK_IMPORT_OPERATION_COPIES,
+      t,
+    ),
+    operationFromActivity(
+      "git-import",
+      gitImportActivity,
+      GIT_IMPORT_OPERATION_COPIES,
+      t,
+    ),
+    operationFromActivity(
+      "skill-update",
+      updatePanel.activity,
+      UPDATE_OPERATION_COPIES,
+      t,
+    ),
+    isPreferencesOpen
+      ? operationFromActivity(
+          "app-update",
+          appUpdatePanel.activity,
+          APP_UPDATE_OPERATION_COPIES,
+          t,
+        )
+      : null,
+    relocatePanel.isOpen
+      ? operationFromActivity(
+          "relocate",
+          relocatePanel.activity,
+          RELOCATE_OPERATION_COPIES,
+          t,
+        )
+      : null,
+    removePanel.isOpen
+      ? operationFromActivity(
+          "remove",
+          removePanel.activity,
+          REMOVE_OPERATION_COPIES,
+          t,
+        )
+      : null,
+    isApplyingActivation
+      ? {
+          id: "activation",
+          title: t("library.activation_preview.applying"),
+          detail: t("operation.detail.activation.apply"),
+        }
+      : null,
+    isApplyingReplace
+      ? {
+          id: "activation-replace",
+          title: t("library.activation_preview.applying"),
+          detail: t("operation.detail.activation.replace"),
+        }
+      : null,
+    isUndoingReplace
+      ? {
+          id: "activation-replace-undo",
+          title: t("library.adopt.undoing"),
+          detail: t("operation.detail.activation.undo"),
+        }
+      : null,
+  ].filter(isOperationStatus);
+
   return (
-    <LibraryDesk
-      filter={filter}
-      skills={skills}
-      libraryEmpty={libraryLoaded && skills.length === 0}
-      selectedId={selectedId}
-      detail={detail}
-      agents={agents}
-      error={error}
-      activationError={activationError}
-      activationConflict={activationConflict}
-      activationConflictMessage={activationConflictMessage}
-      replacePreview={replacePreview}
-      replaceResult={replaceResult}
-      replaceUndo={replaceUndo}
-      replaceError={replaceError}
-      isApplyingReplace={isApplyingReplace}
-      isUndoingReplace={isUndoingReplace}
-      activationPreview={activationPreview}
-      activationTriggerControlId={activationTriggerControlId}
-      pendingAgentId={pendingAgentId}
-      isApplyingActivation={isApplyingActivation}
-      isCheckingActivations={
-        !startupHealthComplete || agentsReadyForSkillId !== selectedId
-      }
-      isLinkImportOpen={isLinkImportOpen}
-      importKind={importKind}
-      linkImportPreview={linkImportPreview}
-      linkImportResult={linkImportResult}
-      linkImportError={linkImportError}
-      linkImportActivity={linkImportActivity}
-      gitImportSource={gitImportSource}
-      gitImportForceFullDepth={gitImportForceFullDepth}
-      gitImportDiscovery={gitImportDiscovery}
-      gitImportSelected={gitImportSelected}
-      gitImportPreview={gitImportPreview}
-      gitImportResult={gitImportResult}
-      gitImportError={gitImportError}
-      gitImportActivity={gitImportActivity}
-      updatePanel={updatePanel}
-      reselectPath={reselectPath}
-      onFilter={setFilter}
-      onSelect={setSelectedId}
-      onRequestActivation={requestActivation}
-      onRequestActivationRepair={requestActivationRepair}
-      onApplyActivation={applyActivation}
-      onCancelActivation={cancelActivation}
-      onCloseActivationConflict={closeActivationConflict}
-      onAdoptFromConflict={adoptFromConflict}
-      onPlanReplace={planReplace}
-      onApplyReplace={applyReplace}
-      onUndoReplace={undoReplace}
-      onOpenLinkImport={openImport}
-      onImportKindChange={setImportKind}
-      onPreviewLinkImport={previewLinkImport}
-      onApplyLinkImport={applyLinkImport}
-      onCloseLinkImport={closeImport}
-      onOpenImportedSkill={openImportedSkill}
-      onGitImportSourceChange={setGitImportSource}
-      onGitImportForceFullDepthChange={setGitImportForceFullDepth}
-      onDiscoverGitImport={discoverGitImport}
-      onGitImportSelectionChange={setGitImportSelected}
-      onPlanGitImport={planGitImport}
-      onApplyGitImport={applyGitImport}
-      onOpenImportedGitSkill={openImportedGitSkill}
-      onCheckSkillUpdates={checkSkillUpdates}
-      onPlanSkillUpdate={planSkillUpdate}
-      onApplySkillUpdate={applySkillUpdate}
-      onPinSkillUpdate={pinSkillUpdate}
-      onReselectPathChange={setReselectPath}
-      relocatePanel={relocatePanel}
-      onOpenRelocate={openRelocate}
-      onCloseRelocate={closeRelocate}
-      onRelocateSourcePathChange={(sourcePath) =>
-        setRelocatePanel((state) => ({ ...state, sourcePath }))
-      }
-      onPreviewRelocate={previewRelocate}
-      onApplyRelocate={applyRelocate}
-      removePanel={removePanel}
-      onOpenRemove={openRemove}
-      onCloseRemove={closeRemove}
-      onApplyRemove={applyRemove}
-      lockNotice={lockNotice}
-      onRetryRecovery={retryRecovery}
-      isAdoptOpen={isAdoptOpen}
-      adoptReport={adoptReport}
-      adoptSelections={adoptSelections}
-      adoptPlan={adoptPlan}
-      adoptResult={adoptResult}
-      adoptUndo={adoptUndo}
-      adoptError={adoptError}
-      adoptErrorHeading={adoptErrorHeading}
-      adoptActivity={adoptActivity}
-      onOpenAdopt={openAdopt}
-      onRescanAdopt={rescanAdopt}
-      onToggleAdoptCandidate={toggleAdoptCandidate}
-      onSetAdoptBranch={setAdoptModifiedBranch}
-      onPlanAdopt={planAdopt}
-      onApplyAdopt={applyAdopt}
-      onUndoAdopt={undoAdopt}
-      onCloseAdopt={closeAdopt}
-      isPreferencesOpen={isPreferencesOpen}
-      preferences={preferences}
-      preferencesWarning={preferencesWarning}
-      preferencesError={preferencesError}
-      appUpdatePanel={appUpdatePanel}
-      isOnboardingOpen={isOnboardingOpen}
-      onboardingStep={onboardingStep}
-      onboardingAgents={startupAgents}
-      onboardingReport={onboardingReport}
-      onboardingActivity={onboardingActivity}
-      onboardingError={onboardingError}
-      onOpenPreferences={() => setIsPreferencesOpen(true)}
-      onClosePreferences={() => setIsPreferencesOpen(false)}
-      onTogglePreference={togglePreference}
-      onCheckAppUpdate={checkAppUpdate}
-      onDownloadAppUpdate={downloadAppUpdate}
-      onInstallAppUpdate={installAppUpdate}
-      onCloseAppUpdate={closeAppUpdate}
-      onCompleteOnboarding={completeOnboarding}
-      onAdvanceOnboarding={advanceOnboarding}
-      onCreateAgentDirectory={createOnboardingAgentDirectory}
-      onFinishOnboardingWithAdopt={finishOnboardingWithAdopt}
-    />
+    <>
+      <LibraryDesk
+        filter={filter}
+        skills={skills}
+        libraryEmpty={libraryLoaded && skills.length === 0}
+        selectedId={selectedId}
+        detail={detail}
+        agents={agents}
+        error={error}
+        activationError={activationError}
+        activationConflict={activationConflict}
+        activationConflictMessage={activationConflictMessage}
+        replacePreview={replacePreview}
+        replaceResult={replaceResult}
+        replaceUndo={replaceUndo}
+        replaceError={replaceError}
+        isApplyingReplace={isApplyingReplace}
+        isUndoingReplace={isUndoingReplace}
+        activationPreview={activationPreview}
+        activationTriggerControlId={activationTriggerControlId}
+        pendingAgentId={pendingAgentId}
+        isApplyingActivation={isApplyingActivation}
+        isCheckingActivations={
+          !startupHealthComplete || agentsReadyForSkillId !== selectedId
+        }
+        isLinkImportOpen={isLinkImportOpen}
+        importKind={importKind}
+        linkImportPreview={linkImportPreview}
+        linkImportResult={linkImportResult}
+        linkImportError={linkImportError}
+        linkImportActivity={linkImportActivity}
+        gitImportSource={gitImportSource}
+        gitImportForceFullDepth={gitImportForceFullDepth}
+        gitImportDiscovery={gitImportDiscovery}
+        gitImportSelected={gitImportSelected}
+        gitImportPreview={gitImportPreview}
+        gitImportResult={gitImportResult}
+        gitImportError={gitImportError}
+        gitImportActivity={gitImportActivity}
+        updatePanel={updatePanel}
+        reselectPath={reselectPath}
+        onFilter={setFilter}
+        onSelect={setSelectedId}
+        onRequestActivation={requestActivation}
+        onRequestActivationRepair={requestActivationRepair}
+        onApplyActivation={applyActivation}
+        onCancelActivation={cancelActivation}
+        onCloseActivationConflict={closeActivationConflict}
+        onAdoptFromConflict={adoptFromConflict}
+        onPlanReplace={planReplace}
+        onApplyReplace={applyReplace}
+        onUndoReplace={undoReplace}
+        onOpenLinkImport={openImport}
+        onImportKindChange={setImportKind}
+        onPreviewLinkImport={previewLinkImport}
+        onApplyLinkImport={applyLinkImport}
+        onCloseLinkImport={closeImport}
+        onOpenImportedSkill={openImportedSkill}
+        onGitImportSourceChange={setGitImportSource}
+        onGitImportForceFullDepthChange={setGitImportForceFullDepth}
+        onDiscoverGitImport={discoverGitImport}
+        onGitImportSelectionChange={setGitImportSelected}
+        onPlanGitImport={planGitImport}
+        onApplyGitImport={applyGitImport}
+        onOpenImportedGitSkill={openImportedGitSkill}
+        onCheckSkillUpdates={checkSkillUpdates}
+        onPlanSkillUpdate={planSkillUpdate}
+        onApplySkillUpdate={applySkillUpdate}
+        onPinSkillUpdate={pinSkillUpdate}
+        onReselectPathChange={setReselectPath}
+        relocatePanel={relocatePanel}
+        onOpenRelocate={openRelocate}
+        onCloseRelocate={closeRelocate}
+        onRelocateSourcePathChange={(sourcePath) =>
+          setRelocatePanel((state) => ({ ...state, sourcePath }))
+        }
+        onPreviewRelocate={previewRelocate}
+        onApplyRelocate={applyRelocate}
+        removePanel={removePanel}
+        onOpenRemove={openRemove}
+        onCloseRemove={closeRemove}
+        onApplyRemove={applyRemove}
+        lockNotice={lockNotice}
+        onRetryRecovery={retryRecovery}
+        isAdoptOpen={isAdoptOpen}
+        adoptReport={adoptReport}
+        adoptSelections={adoptSelections}
+        adoptPlan={adoptPlan}
+        adoptResult={adoptResult}
+        adoptUndo={adoptUndo}
+        adoptError={adoptError}
+        adoptErrorHeading={adoptErrorHeading}
+        adoptActivity={adoptActivity}
+        onOpenAdopt={openAdopt}
+        onRescanAdopt={rescanAdopt}
+        onToggleAdoptCandidate={toggleAdoptCandidate}
+        onSetAdoptBranch={setAdoptModifiedBranch}
+        onPlanAdopt={planAdopt}
+        onApplyAdopt={applyAdopt}
+        onUndoAdopt={undoAdopt}
+        onCloseAdopt={closeAdopt}
+        isPreferencesOpen={isPreferencesOpen}
+        preferences={preferences}
+        preferencesWarning={preferencesWarning}
+        preferencesError={preferencesError}
+        appUpdatePanel={appUpdatePanel}
+        isOnboardingOpen={isOnboardingOpen}
+        onboardingStep={onboardingStep}
+        onboardingAgents={startupAgents}
+        onboardingLibraryPath={onboardingLibraryPath}
+        onboardingReport={onboardingReport}
+        onboardingActivity={onboardingActivity}
+        onboardingError={onboardingError}
+        onOpenPreferences={() => setIsPreferencesOpen(true)}
+        onClosePreferences={() => setIsPreferencesOpen(false)}
+        onTogglePreference={togglePreference}
+        onCheckAppUpdate={checkAppUpdate}
+        onDownloadAppUpdate={downloadAppUpdate}
+        onInstallAppUpdate={installAppUpdate}
+        onCloseAppUpdate={closeAppUpdate}
+        onCompleteOnboarding={completeOnboarding}
+        onAdvanceOnboarding={advanceOnboarding}
+        onCreateAgentDirectory={createOnboardingAgentDirectory}
+        onFinishOnboardingWithAdopt={finishOnboardingWithAdopt}
+      />
+      {activeOperations.length > 0 ? (
+        <OperationStatusWindow
+          ariaLabel={t("operation.status.label")}
+          heading={tPlural(
+            "operation.status.running",
+            activeOperations.length,
+            {
+              count: activeOperations.length,
+            },
+          )}
+          operations={activeOperations}
+        />
+      ) : null}
+    </>
   );
 }
 

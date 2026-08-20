@@ -158,7 +158,7 @@ export function HomeBindingView({
         <h1>{t("bootstrap.home.failed_title")}</h1>
         <p>
           {t(
-            errorMessageKey(step.error.error.code),
+            errorMessageKey(step.error.error),
             errorMessageParams(step.error.error),
           )}
         </p>

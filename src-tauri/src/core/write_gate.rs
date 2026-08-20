@@ -66,6 +66,8 @@ pub struct GateSnapshot {
 pub enum WriteGateError {
     #[error("the write gate lock is poisoned")]
     Poisoned,
+    #[error("no Bound Home is active")]
+    NoBoundHome,
 }
 
 /// A plan token records the gate generation it was issued under; Apply must
@@ -169,6 +171,33 @@ impl WriteGate {
         if let Some(bound) = bound {
             let _ = self.transition_to(WriteGateState::Open(bound));
         }
+    }
+
+    /// Align the runtime Home context with the bootstrap authority. A closed
+    /// gate must not retain a previously abandoned or unavailable Home path:
+    /// Home-scoped modules use this only after the bootstrap route has
+    /// verified the current identity.
+    pub fn synchronize_bound_home(
+        &self,
+        bound_home: Option<&BoundHome>,
+    ) -> Result<(), WriteGateError> {
+        let mut last_bound = self
+            .last_bound
+            .write()
+            .map_err(|_| WriteGateError::Poisoned)?;
+        *last_bound = bound_home.cloned();
+        Ok(())
+    }
+
+    /// The currently verified Home identity and path. This is deliberately
+    /// separate from `snapshot`: a Catalog-read-only session still has a
+    /// verified Home, while unavailable and abandoned states do not.
+    pub fn bound_home(&self) -> Result<BoundHome, WriteGateError> {
+        self.last_bound
+            .read()
+            .map_err(|_| WriteGateError::Poisoned)?
+            .clone()
+            .ok_or(WriteGateError::NoBoundHome)
     }
 
     /// Regular product writes are allowed only in `Open`; `Recovery` grants
@@ -281,5 +310,27 @@ mod tests {
         gate.mark_ready();
         assert!(gate.is_product_write_open());
         assert_eq!(gate.snapshot().state, WriteGateState::Open(bound()));
+    }
+
+    #[test]
+    fn synchronized_bound_home_never_survives_a_closed_bootstrap_state() {
+        let gate = WriteGate::new(WriteGateState::Closed {
+            reason: ClosedReason::Unconfigured,
+        });
+        assert!(matches!(
+            gate.bound_home(),
+            Err(WriteGateError::NoBoundHome)
+        ));
+
+        gate.synchronize_bound_home(Some(&bound()))
+            .expect("record verified Home");
+        assert_eq!(gate.bound_home().expect("verified Home"), bound());
+
+        gate.synchronize_bound_home(None)
+            .expect("clear unbound Home");
+        assert!(matches!(
+            gate.bound_home(),
+            Err(WriteGateError::NoBoundHome)
+        ));
     }
 }
