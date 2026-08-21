@@ -1,6 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
-import { expect, test } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { expect, test, vi } from "vitest";
 
+import "../../styles.css";
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import type {
   AdoptEvidenceCandidate,
@@ -100,7 +102,7 @@ test("shows an indeterminate progress bar while rescanning", () => {
   );
 });
 
-test("renders the three columns with the source chain fully expanded by default", () => {
+test("renders closed accordions and reveals the evidence on demand", async () => {
   renderLedger(
     report([
       candidate({
@@ -127,7 +129,28 @@ test("renders the three columns with the source chain fully expanded by default"
     ]),
   );
   const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
-  // Every hop is visible without any interaction (default fully expanded).
+  const accordion = dialog.querySelector(".adopt-ledger-candidate");
+  expect(accordion).toBeInTheDocument();
+  const disclosure = within(accordion as HTMLElement).getByRole("button", {
+    name: /networking/,
+  });
+  expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  expect(disclosure).toHaveTextContent("networking");
+  expect(
+    disclosure.querySelector(".adopt-ledger-summary-content"),
+  ).toBeInTheDocument();
+  const details = (accordion as HTMLElement).querySelector(
+    ".adopt-ledger-details",
+  ) as HTMLElement;
+  expect(details).toHaveAttribute("hidden");
+  expect(getComputedStyle(details).display).toBe("none");
+
+  await userEvent.click(disclosure);
+  expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  expect(details).not.toHaveAttribute("hidden");
+  expect(getComputedStyle(details).display).toBe("grid");
+  expect(getComputedStyle(details).gridTemplateColumns).toBe("1fr");
+  // Every hop is visible after the candidate is opened.
   expect(dialog).toHaveTextContent("hop 1");
   expect(dialog).toHaveTextContent("~/.claude/skills/networking");
   expect(dialog).toHaveTextContent("../../.agents/skills/networking");
@@ -145,9 +168,111 @@ test("renders the three columns with the source chain fully expanded by default"
   expect(
     within(dialog).getByRole("checkbox", { name: /Include/ }),
   ).toBeInTheDocument();
+  expect(
+    within(dialog)
+      .getByRole("checkbox", { name: /Include/ })
+      .closest(".adopt-ledger-summary"),
+  ).toBeInTheDocument();
 });
 
-test("shows Include controls only for selectable candidates", () => {
+test("uses the skill name color to signal an abnormal candidate", () => {
+  renderLedger(
+    report([
+      candidate({
+        directoryName: "provenance-conflict",
+        canonicalEntity: "~/.agents/skills/provenance-conflict",
+        verdict: "conflict",
+        reason: { kind: "ownership_conflict", managedDirectoryName: "managed" },
+        selectable: false,
+        adoptable: false,
+      }),
+    ]),
+  );
+
+  const name = screen.getByText("provenance-conflict");
+  expect(name).toHaveClass("adopt-verdict-conflict");
+  expect(name.closest(".adopt-ledger-candidate")).not.toHaveClass(
+    "adopt-ledger-candidate--expanded",
+  );
+});
+
+test("keeps normal skill names in the default text color", () => {
+  renderLedger(report([candidate()]));
+
+  expect(screen.getByText("networking")).toHaveClass("adopt-candidate-name");
+  expect(screen.getByText("networking")).not.toHaveClass("adopt-verdict-local");
+});
+
+test("keeps collapsed candidates from shrinking inside the scrolling ledger body", () => {
+  renderLedger(report([candidate()]));
+
+  const body = document.querySelector(".adopt-ledger-body") as HTMLElement;
+  const card = document.querySelector(".adopt-ledger-candidate") as HTMLElement;
+
+  expect(getComputedStyle(body).display).toBe("flex");
+  expect(getComputedStyle(body).flexDirection).toBe("column");
+  expect(getComputedStyle(card).overflow).toBe("hidden");
+  expect(getComputedStyle(card).flexShrink).toBe("0");
+});
+
+test("ships an explicit hidden-details rule for the native WebKit accordion", () => {
+  const rule = Array.from(document.styleSheets)
+    .flatMap((sheet) => Array.from(sheet.cssRules))
+    .find(
+      (candidate): candidate is CSSStyleRule =>
+        candidate instanceof CSSStyleRule &&
+        candidate.selectorText === ".adopt-ledger-details[hidden]",
+    );
+
+  expect(rule?.style.getPropertyValue("display")).toBe("none");
+  expect(rule?.style.getPropertyPriority("display")).toBe("important");
+});
+
+test("does not scale the accordion disclosure while it is pressed", () => {
+  const rule = Array.from(document.styleSheets)
+    .flatMap((sheet) => Array.from(sheet.cssRules))
+    .find(
+      (candidate): candidate is CSSStyleRule =>
+        candidate instanceof CSSStyleRule &&
+        candidate.selectorText ===
+          ".adopt-ledger-disclosure:active:not(:disabled)",
+    );
+
+  expect(rule?.style.getPropertyValue("transform")).toBe("none");
+});
+
+test("keeps the title Include control independent from disclosure", async () => {
+  const onToggle = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <EvidenceLedger
+      report={report([candidate()])}
+      selections={{}}
+      plan={null}
+      result={null}
+      undo={null}
+      error={null}
+      errorHeading="app.notice.scan_failed"
+      activity="idle"
+      onToggle={onToggle}
+      onSetBranch={noop}
+      onRescan={noop}
+      onPlan={noop}
+      onApply={noop}
+      onUndo={noop}
+      onClose={noop}
+    />,
+  );
+
+  const disclosure = screen.getByRole("button", { name: /networking/ });
+  const checkbox = screen.getByRole("checkbox", { name: /Include/ });
+  await user.click(checkbox);
+
+  expect(onToggle).toHaveBeenCalledWith("~/.agents/skills/networking", true);
+  expect(disclosure).toHaveAttribute("aria-expanded", "false");
+});
+
+test("shows disabled Include controls for non-selectable candidates", () => {
   renderLedger(
     report([
       candidate(),
@@ -191,14 +316,15 @@ test("shows Include controls only for selectable candidates", () => {
   );
   const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
   const checkboxes = within(dialog).getAllByRole("checkbox");
-  expect(checkboxes).toHaveLength(1);
-  expect(checkboxes[0].getAttribute("aria-label")).toBeNull();
-  expect(dialog).toHaveTextContent("No selection control");
-  expect(dialog).toHaveTextContent("Could not resolve host");
-  expect(dialog).toHaveTextContent("Fixture footprint");
+  expect(checkboxes).toHaveLength(4);
+  expect(checkboxes[0]).toBeEnabled();
+  for (const checkbox of checkboxes.slice(1)) {
+    expect(checkbox).toBeDisabled();
+  }
+  expect(dialog).not.toHaveTextContent("No selection control");
 });
 
-test("shows the three Modified branches simultaneously and requires a branch", () => {
+test("shows the three Modified branches simultaneously and requires a branch", async () => {
   const entity = "~/.agents/skills/modified";
   const modified = candidate({
     canonicalEntity: entity,
@@ -223,6 +349,9 @@ test("shows the three Modified branches simultaneously and requires a branch", (
   });
   const { rerender } = renderLedger(report([modified]));
   const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: /modified/ }),
+  );
   // All three branches are visible at once; keep-current is the
   // recommendation but the branch choice never includes the candidate.
   expect(
@@ -298,7 +427,7 @@ test("plan view shows the frozen intent and enables Apply for the handoff", () =
   expect(within(dialog).getByRole("button", { name: "Adopt" })).toBeEnabled();
 });
 
-test("ownership conflict reason renders as a closed conflict verdict", () => {
+test("ownership conflict reason renders as a closed conflict verdict", async () => {
   renderLedger(
     report([
       candidate({
@@ -313,11 +442,16 @@ test("ownership conflict reason renders as a closed conflict verdict", () => {
     ]),
   );
   const dialog = screen.getByRole("dialog", { name: "Adopt untracked Skills" });
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: /networking/ }),
+  );
   expect(dialog).toHaveTextContent(
     "The external installer reappeared for this Managed Skill",
   );
   expect(dialog).toHaveTextContent("Conflict");
-  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("checkbox", { name: /Include/ }),
+  ).toBeDisabled();
 });
 
 test("source content stays byte-identical in both locales", async () => {
@@ -377,6 +511,9 @@ test("source content stays byte-identical in both locales", async () => {
   const dialog = await within(rendered.container).findByRole("dialog", {
     name: "纳管未纳管技能",
   });
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: /networking/ }),
+  );
   // App Copy is localized; Source Content is untouched.
   expect(dialog).toHaveTextContent("已验证远程来源");
   expect(dialog).toHaveTextContent("https://github.com/acme/networking");

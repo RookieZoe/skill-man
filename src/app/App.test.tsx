@@ -663,8 +663,10 @@ test("Adopt conflict handoff leaves an unsafe candidate unselected", async () =>
   const dialog = await screen.findByRole("dialog", {
     name: "Adopt untracked Skills",
   });
-  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
-  expect(dialog).toHaveTextContent("No selection control");
+  expect(
+    within(dialog).getByRole("checkbox", { name: "Include" }),
+  ).toBeDisabled();
+  expect(dialog).not.toHaveTextContent("No selection control");
   expect(
     within(dialog).getByRole("button", { name: "Preview Adopt" }),
   ).toBeDisabled();
@@ -1073,7 +1075,9 @@ test("leaves an unsafe Adopt candidate unselected and shows its scan reason", as
     name: "Adopt untracked Skills",
   });
 
-  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("checkbox", { name: "Include" }),
+  ).toBeDisabled();
   expect(dialog).toHaveTextContent(
     "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
   );
@@ -1437,10 +1441,15 @@ test("onboarding full scan hands off to Adopt with nothing selected", async () =
     screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
   ).not.toBeInTheDocument();
   // Viewing is never selecting: the handoff opens the ledger with every
-  // Include control unchecked (spec §2.1 invariant 9).
+  // Include control unchecked, including disabled controls for blocked rows.
   const includeControls = screen.getAllByRole("checkbox", { name: /Include/ });
-  expect(includeControls).toHaveLength(1);
-  expect(includeControls[0]).not.toBeChecked();
+  expect(includeControls).toHaveLength(2);
+  for (const includeControl of includeControls) {
+    expect(includeControl).not.toBeChecked();
+  }
+  expect(
+    includeControls.filter((control) => (control as HTMLInputElement).disabled),
+  ).toHaveLength(1);
   expect(
     screen.queryByRole("checkbox", { name: /ask-matt/ }),
   ).not.toBeInTheDocument();

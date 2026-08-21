@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type {
   AdoptEvidenceCandidate,
   AdoptEvidenceReport,
@@ -15,12 +17,13 @@ import { useLocale } from "../locale/LocaleProvider";
 import type { MessageKey, PluralKey } from "../locale/messages";
 
 /**
- * The Adopt Evidence Ledger (spec §8.1, issue #39 resolution): three
- * columns — candidate context, the full source chain with every hop, lock
- * hit and remote/ref/Verification Anchor/tree evidence (default fully
- * expanded), and the verdict with its planned operation and ownership
- * result. Viewing is never selecting: only selectable candidates carry an
- * Include control, and Modified candidates show all three branches at once.
+ * The Adopt Evidence Ledger (spec §8.1, issue #39 resolution): each
+ * candidate keeps its identity and selection control in a compact summary,
+ * then reveals the full source chain with every hop, lock hit and
+ * remote/ref/Verification Anchor/tree evidence on demand. Viewing is never
+ * selecting: every summary carries an Include control, disabled when the
+ * candidate cannot be selected, and Modified candidates show all three
+ * branches at once.
  * Paths, URLs, refs, hashes and lock fields are Source Content and render
  * verbatim in every locale (spec §6.3).
  */
@@ -308,372 +311,408 @@ function LedgerCandidate({
 }) {
   const { t, tPlural } = useLocale();
   const id = `adopt-candidate-${candidate.directoryName}`;
+  const detailId = `${id}-details`;
+  const [isExpanded, setIsExpanded] = useState(false);
+  const selectionDisabled = isBusy || !candidate.selectable;
+  const nameTone = candidate.requiresRelocation
+    ? "candidate-warning"
+    : candidate.verdict === "local" || candidate.verdict === "verified"
+      ? ""
+      : `adopt-verdict-${candidate.verdict}`;
   return (
-    <section className="adopt-ledger-candidate" aria-labelledby={`${id}-name`}>
-      {/* Column 1: candidate context */}
-      <div className="adopt-ledger-col adopt-ledger-context">
-        <h3 id={`${id}-name`} className="adopt-candidate-name">
-          {candidate.directoryName}
-        </h3>
-        <p className="candidate-path" title={candidate.canonicalEntity}>
-          {candidate.canonicalEntity}
-        </p>
-        <p>
-          {tPlural(
-            "library.adopt.appearances" as PluralKey,
-            candidate.appearances.length,
-          )}
-        </p>
-        {candidate.requiresRelocation ? (
-          <p className="candidate-warning">
-            {t("library.adopt.relocation_required")}
-          </p>
-        ) : null}
-        {candidate.selectable ? (
-          <label className="adopt-include-control">
-            <input
-              type="checkbox"
-              checked={selected}
-              disabled={isBusy}
-              onChange={(event) =>
-                onToggle(candidate.canonicalEntity, event.currentTarget.checked)
-              }
-            />
-            <span>
-              {selected
-                ? t("library.adopt.included")
-                : t("library.adopt.include")}
+    <section
+      className={`adopt-ledger-candidate${
+        isExpanded ? " adopt-ledger-candidate--expanded" : ""
+      }`}
+    >
+      <div className="adopt-ledger-summary">
+        <button
+          type="button"
+          className="adopt-ledger-disclosure"
+          aria-expanded={isExpanded}
+          aria-controls={detailId}
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+        >
+          <span className="adopt-ledger-summary-content">
+            <span className="adopt-ledger-summary-chevron" aria-hidden="true" />
+            <span className="adopt-ledger-summary-main">
+              <span
+                id={`${id}-name`}
+                className={
+                  nameTone
+                    ? `adopt-candidate-name ${nameTone}`
+                    : "adopt-candidate-name"
+                }
+              >
+                {candidate.directoryName}
+              </span>
+              <span
+                className="adopt-candidate-summary-path"
+                title={candidate.canonicalEntity}
+              >
+                {candidate.canonicalEntity}
+              </span>
             </span>
-          </label>
-        ) : (
-          <p className="candidate-blocked">{t("library.adopt.no_control")}</p>
-        )}
+            <span className="adopt-candidate-summary-count">
+              {tPlural(
+                "library.adopt.appearances" as PluralKey,
+                candidate.appearances.length,
+              )}
+            </span>
+          </span>
+        </button>
+        <label
+          className={`adopt-include-control adopt-include-control--summary${
+            candidate.selectable ? "" : " adopt-include-control--disabled"
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            disabled={selectionDisabled}
+            onChange={(event) =>
+              onToggle(candidate.canonicalEntity, event.currentTarget.checked)
+            }
+          />
+          <span>
+            {selected
+              ? t("library.adopt.included")
+              : t("library.adopt.include")}
+          </span>
+        </label>
       </div>
-      {/* Column 2: full source chain / verification gates (default expanded) */}
-      <div className="adopt-ledger-col adopt-ledger-chain">
-        <h4>{t("library.adopt.chain.title")}</h4>
-        <ul className="adopt-chain-list">
-          {candidate.appearances.map((appearance) => (
-            <li key={appearance.entryPath}>
-              <p className="adopt-chain-entry">
-                <strong>
-                  {appearance.agentId
-                    ? t("library.adopt.chain.appearance_agent", {
-                        agent: appearance.agentId,
-                      })
-                    : appearance.shared
-                      ? t("library.adopt.chain.appearance_shared")
-                      : t("library.adopt.chain.appearance")}
-                </strong>{" "}
-                <span className="adopt-source-content">
-                  {appearance.entryPath}
-                </span>
-                {appearance.originalTarget ? (
-                  <span className="adopt-source-content adopt-hop-target">
-                    {" "}
-                    → {appearance.originalTarget}
+      <div id={detailId} className="adopt-ledger-details" hidden={!isExpanded}>
+        {/* Full source chain / verification gates, revealed on demand. */}
+        <div className="adopt-ledger-col adopt-ledger-chain">
+          <h4>{t("library.adopt.chain.title")}</h4>
+          <ul className="adopt-chain-list">
+            {candidate.appearances.map((appearance) => (
+              <li key={appearance.entryPath}>
+                <p className="adopt-chain-entry">
+                  <strong>
+                    {appearance.agentId
+                      ? t("library.adopt.chain.appearance_agent", {
+                          agent: appearance.agentId,
+                        })
+                      : appearance.shared
+                        ? t("library.adopt.chain.appearance_shared")
+                        : t("library.adopt.chain.appearance")}
+                  </strong>{" "}
+                  <span className="adopt-source-content">
+                    {appearance.entryPath}
                   </span>
-                ) : null}
-              </p>
-              {appearance.chain.hops.map((hop, hopIndex) => (
-                <p key={`${hop.path}-${hopIndex}`} className="adopt-hop">
-                  <span className="adopt-hop-index">
-                    {t("library.adopt.chain.hop", {
-                      number: hopIndex + 1,
-                    })}
-                  </span>{" "}
-                  <span className="adopt-source-content">{hop.path}</span>
-                  {hop.target !== null ? (
+                  {appearance.originalTarget ? (
                     <span className="adopt-source-content adopt-hop-target">
                       {" "}
-                      → {hop.target}
+                      → {appearance.originalTarget}
                     </span>
                   ) : null}
-                  <span className="adopt-hop-identity">
-                    {" "}
-                    dev={hop.device} ino={hop.inode}
-                  </span>
                 </p>
-              ))}
-              {appearance.chain.fault ? (
-                <p className="candidate-blocked" role="alert">
-                  {t(chainFaultKey(appearance.chain.fault))}
-                  {"at" in appearance.chain.fault ? (
-                    <span className="adopt-source-content">
+                {appearance.chain.hops.map((hop, hopIndex) => (
+                  <p key={`${hop.path}-${hopIndex}`} className="adopt-hop">
+                    <span className="adopt-hop-index">
+                      {t("library.adopt.chain.hop", {
+                        number: hopIndex + 1,
+                      })}
+                    </span>{" "}
+                    <span className="adopt-source-content">{hop.path}</span>
+                    {hop.target !== null ? (
+                      <span className="adopt-source-content adopt-hop-target">
+                        {" "}
+                        → {hop.target}
+                      </span>
+                    ) : null}
+                    <span className="adopt-hop-identity">
                       {" "}
-                      {appearance.chain.fault.at}
+                      dev={hop.device} ino={hop.inode}
                     </span>
-                  ) : null}
-                  {"detail" in appearance.chain.fault ? (
+                  </p>
+                ))}
+                {appearance.chain.fault ? (
+                  <p className="candidate-blocked" role="alert">
+                    {t(chainFaultKey(appearance.chain.fault))}
+                    {"at" in appearance.chain.fault ? (
+                      <span className="adopt-source-content">
+                        {" "}
+                        {appearance.chain.fault.at}
+                      </span>
+                    ) : null}
+                    {"detail" in appearance.chain.fault ? (
+                      <span className="adopt-source-content">
+                        {" "}
+                        {appearance.chain.fault.detail}
+                      </span>
+                    ) : null}
+                  </p>
+                ) : (
+                  <p className="adopt-hop">
+                    <span className="adopt-hop-index">
+                      {t("library.adopt.chain.final_entity")}
+                    </span>{" "}
                     <span className="adopt-source-content">
-                      {" "}
-                      {appearance.chain.fault.detail}
+                      {appearance.chain.finalEntity ?? ""}
                     </span>
-                  ) : null}
-                </p>
-              ) : (
-                <p className="adopt-hop">
-                  <span className="adopt-hop-index">
-                    {t("library.adopt.chain.final_entity")}
-                  </span>{" "}
-                  <span className="adopt-source-content">
-                    {appearance.chain.finalEntity ?? ""}
-                  </span>
-                </p>
-              )}
-            </li>
-          ))}
-        </ul>
-        {candidate.lock ? (
-          <div className="adopt-evidence-block">
-            <h4>{t("library.adopt.lock.title")}</h4>
-            <p className="adopt-hop">
-              <span className="adopt-hop-index">
-                {t("library.adopt.lock.path")}
-              </span>{" "}
-              <span className="adopt-source-content">
-                {candidate.lock.lockPath}
-              </span>
-            </p>
-            {candidate.lock.fileFault ? (
-              <p className="candidate-blocked">
-                {t(lockFaultKey(candidate.lock.fileFault))}
-                {"key" in candidate.lock.fileFault ? (
-                  <span className="adopt-source-content">
-                    {" "}
-                    {candidate.lock.fileFault.key}
-                  </span>
-                ) : null}
-                {"detail" in candidate.lock.fileFault ? (
-                  <span className="adopt-source-content">
-                    {" "}
-                    {candidate.lock.fileFault.detail}
-                  </span>
-                ) : null}
-              </p>
-            ) : null}
-            {candidate.lock.entryFault ? (
-              <p className="candidate-blocked">
-                {t("library.adopt.lock.entry_fault")}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+          {candidate.lock ? (
+            <div className="adopt-evidence-block">
+              <h4>{t("library.adopt.lock.title")}</h4>
+              <p className="adopt-hop">
+                <span className="adopt-hop-index">
+                  {t("library.adopt.lock.path")}
+                </span>{" "}
                 <span className="adopt-source-content">
-                  {" "}
-                  {candidate.lock.entryFault}
+                  {candidate.lock.lockPath}
                 </span>
               </p>
-            ) : null}
-            {candidate.lock.entry ? (
+              {candidate.lock.fileFault ? (
+                <p className="candidate-blocked">
+                  {t(lockFaultKey(candidate.lock.fileFault))}
+                  {"key" in candidate.lock.fileFault ? (
+                    <span className="adopt-source-content">
+                      {" "}
+                      {candidate.lock.fileFault.key}
+                    </span>
+                  ) : null}
+                  {"detail" in candidate.lock.fileFault ? (
+                    <span className="adopt-source-content">
+                      {" "}
+                      {candidate.lock.fileFault.detail}
+                    </span>
+                  ) : null}
+                </p>
+              ) : null}
+              {candidate.lock.entryFault ? (
+                <p className="candidate-blocked">
+                  {t("library.adopt.lock.entry_fault")}
+                  <span className="adopt-source-content">
+                    {" "}
+                    {candidate.lock.entryFault}
+                  </span>
+                </p>
+              ) : null}
+              {candidate.lock.entry ? (
+                <dl className="adopt-fact-list">
+                  <dt>{t("library.adopt.lock.entry_name")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.name}
+                  </dd>
+                  <dt>{t("library.adopt.lock.source_type")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.sourceType}
+                  </dd>
+                  <dt>{t("library.adopt.lock.source_url")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.sourceUrl}
+                  </dd>
+                  <dt>{t("library.adopt.lock.requested_ref")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.requestedRef ?? "HEAD"}
+                  </dd>
+                  <dt>{t("library.adopt.lock.skill_path")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.skillPath}
+                  </dd>
+                  <dt>{t("library.adopt.lock.provider_hash")}</dt>
+                  <dd className="adopt-source-content">
+                    {candidate.lock.entry.skillFolderHash}
+                  </dd>
+                </dl>
+              ) : null}
+              <p className="adopt-hop">
+                <span className="adopt-hop-index">
+                  {t("library.adopt.lock.fingerprint")}
+                </span>{" "}
+                <span className="adopt-source-content">
+                  {candidate.lock.lockFingerprint}
+                </span>
+              </p>
+            </div>
+          ) : null}
+          {candidate.remote ? (
+            <div className="adopt-evidence-block">
+              <h4>{t("library.adopt.remote.title")}</h4>
               <dl className="adopt-fact-list">
-                <dt>{t("library.adopt.lock.entry_name")}</dt>
+                <dt>{t("library.adopt.remote.canonical_url")}</dt>
                 <dd className="adopt-source-content">
-                  {candidate.lock.entry.name}
+                  {candidate.remote.canonicalUrl}
                 </dd>
-                <dt>{t("library.adopt.lock.source_type")}</dt>
+                <dt>{t("library.adopt.remote.requested_ref")}</dt>
                 <dd className="adopt-source-content">
-                  {candidate.lock.entry.sourceType}
+                  {candidate.remote.requestedRef}
                 </dd>
-                <dt>{t("library.adopt.lock.source_url")}</dt>
+                <dt>{t("library.adopt.remote.anchor")}</dt>
                 <dd className="adopt-source-content">
-                  {candidate.lock.entry.sourceUrl}
-                </dd>
-                <dt>{t("library.adopt.lock.requested_ref")}</dt>
-                <dd className="adopt-source-content">
-                  {candidate.lock.entry.requestedRef ?? "HEAD"}
-                </dd>
-                <dt>{t("library.adopt.lock.skill_path")}</dt>
-                <dd className="adopt-source-content">
-                  {candidate.lock.entry.skillPath}
-                </dd>
-                <dt>{t("library.adopt.lock.provider_hash")}</dt>
-                <dd className="adopt-source-content">
-                  {candidate.lock.entry.skillFolderHash}
+                  {candidate.remote.anchorCommit}
                 </dd>
               </dl>
-            ) : null}
-            <p className="adopt-hop">
-              <span className="adopt-hop-index">
-                {t("library.adopt.lock.fingerprint")}
-              </span>{" "}
-              <span className="adopt-source-content">
-                {candidate.lock.lockFingerprint}
-              </span>
-            </p>
-          </div>
-        ) : null}
-        {candidate.remote ? (
-          <div className="adopt-evidence-block">
-            <h4>{t("library.adopt.remote.title")}</h4>
-            <dl className="adopt-fact-list">
-              <dt>{t("library.adopt.remote.canonical_url")}</dt>
-              <dd className="adopt-source-content">
-                {candidate.remote.canonicalUrl}
-              </dd>
-              <dt>{t("library.adopt.remote.requested_ref")}</dt>
-              <dd className="adopt-source-content">
-                {candidate.remote.requestedRef}
-              </dd>
-              <dt>{t("library.adopt.remote.anchor")}</dt>
-              <dd className="adopt-source-content">
-                {candidate.remote.anchorCommit}
-              </dd>
-            </dl>
-            {!candidate.remote.originalInstallCommitKnown ? (
-              <p className="candidate-warning">
-                {t("library.adopt.remote.original_install_unknown")}
+              {!candidate.remote.originalInstallCommitKnown ? (
+                <p className="candidate-warning">
+                  {t("library.adopt.remote.original_install_unknown")}
+                </p>
+              ) : null}
+              <p className="adopt-hop">
+                <span className="adopt-hop-index">
+                  {t("library.adopt.remote.remote_tree")}
+                </span>{" "}
+                <span className="adopt-source-content">
+                  {candidate.remote.remoteTreeHash}
+                </span>
               </p>
-            ) : null}
+              <p className="adopt-hop">
+                <span className="adopt-hop-index">
+                  {t("library.adopt.remote.local_tree")}
+                </span>{" "}
+                <span className="adopt-source-content">
+                  {candidate.remote.localTreeHash}
+                </span>
+              </p>
+              <p
+                className={
+                  candidate.remote.treesMatch
+                    ? "candidate-clear"
+                    : "candidate-warning"
+                }
+              >
+                {candidate.remote.treesMatch
+                  ? t("library.adopt.remote.trees_match")
+                  : t("library.adopt.remote.trees_differ")}
+              </p>
+            </div>
+          ) : null}
+          {candidate.localTreeHash ? (
             <p className="adopt-hop">
               <span className="adopt-hop-index">
-                {t("library.adopt.remote.remote_tree")}
+                {t("library.adopt.chain.local_tree")}
               </span>{" "}
               <span className="adopt-source-content">
-                {candidate.remote.remoteTreeHash}
+                {candidate.localTreeHash}
               </span>
             </p>
-            <p className="adopt-hop">
-              <span className="adopt-hop-index">
-                {t("library.adopt.remote.local_tree")}
-              </span>{" "}
-              <span className="adopt-source-content">
-                {candidate.remote.localTreeHash}
-              </span>
+          ) : null}
+        </div>
+        {/* Verdict / planned operation / ownership result. */}
+        <div className="adopt-ledger-col adopt-ledger-verdict">
+          <h4>{t("library.adopt.verdict.title")}</h4>
+          <p className={`adopt-verdict adopt-verdict-${candidate.verdict}`}>
+            {t(verdictKey(candidate.verdict))}
+          </p>
+          {candidate.requiresRelocation ? (
+            <p className="candidate-warning">
+              {t("library.adopt.relocation_required")}
             </p>
-            <p
-              className={
-                candidate.remote.treesMatch
-                  ? "candidate-clear"
-                  : "candidate-warning"
-              }
-            >
-              {candidate.remote.treesMatch
-                ? t("library.adopt.remote.trees_match")
-                : t("library.adopt.remote.trees_differ")}
+          ) : null}
+          {candidate.reason ? (
+            <p className="adopt-reason">
+              {t(reasonLabelKey(candidate.reason))}
+              {"detail" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.detail}
+                </span>
+              ) : null}
+              {"otherLockPath" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.otherLockPath}
+                </span>
+              ) : null}
+              {"expected" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.expected}
+                </span>
+              ) : null}
+              {"names" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.names.join(", ")}
+                </span>
+              ) : null}
+              {"directoryName" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.directoryName}
+                </span>
+              ) : null}
+              {"reason" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.reason}
+                </span>
+              ) : null}
+              {"fault" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {"at" in candidate.reason.fault
+                    ? candidate.reason.fault.at
+                    : ""}
+                  {"detail" in candidate.reason.fault
+                    ? ` ${candidate.reason.fault.detail}`
+                    : ""}
+                </span>
+              ) : null}
+              {"lockPath" in candidate.reason ? (
+                <span className="adopt-source-content">
+                  {" "}
+                  {candidate.reason.lockPath}
+                </span>
+              ) : null}
             </p>
-          </div>
-        ) : null}
-        {candidate.localTreeHash ? (
-          <p className="adopt-hop">
-            <span className="adopt-hop-index">
-              {t("library.adopt.chain.local_tree")}
-            </span>{" "}
-            <span className="adopt-source-content">
-              {candidate.localTreeHash}
-            </span>
-          </p>
-        ) : null}
-      </div>
-      {/* Column 3: verdict / planned operation / ownership result */}
-      <div className="adopt-ledger-col adopt-ledger-verdict">
-        <h4>{t("library.adopt.verdict.title")}</h4>
-        <p className={`adopt-verdict adopt-verdict-${candidate.verdict}`}>
-          {t(verdictKey(candidate.verdict))}
-        </p>
-        {candidate.reason ? (
-          <p className="adopt-reason">
-            {t(reasonLabelKey(candidate.reason))}
-            {"detail" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.detail}
-              </span>
-            ) : null}
-            {"otherLockPath" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.otherLockPath}
-              </span>
-            ) : null}
-            {"expected" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.expected}
-              </span>
-            ) : null}
-            {"names" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.names.join(", ")}
-              </span>
-            ) : null}
-            {"directoryName" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.directoryName}
-              </span>
-            ) : null}
-            {"reason" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.reason}
-              </span>
-            ) : null}
-            {"fault" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {"at" in candidate.reason.fault
-                  ? candidate.reason.fault.at
-                  : ""}
-                {"detail" in candidate.reason.fault
-                  ? ` ${candidate.reason.fault.detail}`
-                  : ""}
-              </span>
-            ) : null}
-            {"lockPath" in candidate.reason ? (
-              <span className="adopt-source-content">
-                {" "}
-                {candidate.reason.lockPath}
-              </span>
-            ) : null}
-          </p>
-        ) : null}
-        {candidate.verdict === "modified" && candidate.selectable ? (
-          <fieldset className="adopt-branch-fieldset">
-            <legend>{t("library.adopt.modified.title")}</legend>
-            <label>
-              <input
-                type="radio"
-                name={`branch-${candidate.canonicalEntity}`}
-                checked={branch === "keep_current"}
-                disabled={isBusy || !selected}
-                onChange={() =>
-                  onSetBranch(candidate.canonicalEntity, "keep_current")
-                }
-              />
-              {t("library.adopt.modified.keep_current")}
-            </label>
-            <label>
-              <input
-                type="radio"
-                name={`branch-${candidate.canonicalEntity}`}
-                checked={branch === "discard_to_anchor"}
-                disabled={isBusy || !selected}
-                onChange={() =>
-                  onSetBranch(candidate.canonicalEntity, "discard_to_anchor")
-                }
-              />
-              {t("library.adopt.modified.discard_to_anchor")}
-            </label>
-            <label>
-              <input
-                type="radio"
-                name={`branch-${candidate.canonicalEntity}`}
-                checked={branch === "convert_to_local_link"}
-                disabled={isBusy || !selected}
-                onChange={() =>
-                  onSetBranch(
-                    candidate.canonicalEntity,
-                    "convert_to_local_link",
-                  )
-                }
-              />
-              {t("library.adopt.modified.convert_to_link")}
-            </label>
-          </fieldset>
-        ) : null}
-        {candidate.verdict === "modified" && !candidate.selectable ? (
-          <p className="candidate-blocked">
-            {t("library.adopt.modified.choose_before_plan")}
-          </p>
-        ) : null}
+          ) : null}
+          {candidate.verdict === "modified" && candidate.selectable ? (
+            <fieldset className="adopt-branch-fieldset">
+              <legend>{t("library.adopt.modified.title")}</legend>
+              <label>
+                <input
+                  type="radio"
+                  name={`branch-${candidate.canonicalEntity}`}
+                  checked={branch === "keep_current"}
+                  disabled={isBusy || !selected}
+                  onChange={() =>
+                    onSetBranch(candidate.canonicalEntity, "keep_current")
+                  }
+                />
+                {t("library.adopt.modified.keep_current")}
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name={`branch-${candidate.canonicalEntity}`}
+                  checked={branch === "discard_to_anchor"}
+                  disabled={isBusy || !selected}
+                  onChange={() =>
+                    onSetBranch(candidate.canonicalEntity, "discard_to_anchor")
+                  }
+                />
+                {t("library.adopt.modified.discard_to_anchor")}
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name={`branch-${candidate.canonicalEntity}`}
+                  checked={branch === "convert_to_local_link"}
+                  disabled={isBusy || !selected}
+                  onChange={() =>
+                    onSetBranch(
+                      candidate.canonicalEntity,
+                      "convert_to_local_link",
+                    )
+                  }
+                />
+                {t("library.adopt.modified.convert_to_link")}
+              </label>
+            </fieldset>
+          ) : null}
+          {candidate.verdict === "modified" && !candidate.selectable ? (
+            <p className="candidate-blocked">
+              {t("library.adopt.modified.choose_before_plan")}
+            </p>
+          ) : null}
+        </div>
       </div>
     </section>
   );
@@ -746,7 +785,6 @@ function LedgerPlan({
     </>
   );
 }
-
 function LedgerResult({
   result,
   undo,

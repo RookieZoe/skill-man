@@ -15,7 +15,7 @@ The MVP implementation covers the Library, Import, Activation, maintenance, Pref
 - atomic stable-path file Install/reinstall with `tree-sha256-v1`, `file_sources` provenance, crash-recovery journals, and persisted Modified health;
 - App Update checks with a persisted 24-hour cooldown, cancellable signed-archive download/discard, and separate Download / Install and Restart confirmations;
 - a protected tag-to-Draft release workflow for Apple Silicon DMG, notarization, updater metadata, and checksums;
-- CI gates for formatting, lint, typechecking, tests, capability boundaries, and builds.
+- local CI gates for formatting, lint, typechecking, tests, capability boundaries, and builds.
 
 ## Develop
 
@@ -43,17 +43,32 @@ These local artifacts are for development and personal testing. Public distribut
 
 ## Verify
 
+Run the full normal CI gate locally on an Apple Silicon Mac:
+
+```sh
+npm run ci:local
+```
+
+For a clean dependency install first, use `npm run ci:local:clean`. Pushes and
+pull requests do not start GitHub-hosted Actions automatically; the workflow is
+kept as a manual emergency fallback only.
+
+The local gate runs the following commands in the same order as the former
+hosted CI:
+
 ```sh
 npm run format:check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 npm run check:capabilities
+npm run check:locales
 npm run lint
 npm run typecheck
 npm test
 npm run test:release
-npm run build:web
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+npm run build:web
+npm run tauri build -- --no-bundle --target aarch64-apple-darwin
 ```
 
 The browser-only development surface is fixture-backed. Native bootstrap still contains the legacy fixture seed path; the [vNext implementation spec](docs/vnext-implementation-spec.md) defines its removal and the cutover to strict real-data authority. Filesystem, Git, updater, and lifecycle capabilities remain behind typed Rust adapters.

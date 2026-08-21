@@ -12,6 +12,8 @@
     "test": "vitest run",
     "test:release": "node --test scripts/release/*.node-test.mjs",
     "test:watch": "vitest",
+    "ci:local": "node scripts/ci-local.mjs",
+    "ci:local:clean": "npm ci && npm run ci:local",
     "lint": "eslint . --max-warnings 0",
     "check:capabilities": "node --test scripts/check-capabilities.node-test.mjs && node scripts/check-capabilities.mjs",
     "check:locales": "node --test scripts/check-locales.node-test.mjs && node scripts/check-locales.mjs",

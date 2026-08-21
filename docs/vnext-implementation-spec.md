@@ -471,7 +471,7 @@ Overlay 位于 inert App background 之外。跨 breakpoint resize 不 remount �
 
 ### 8.1 Evidence Ledger
 
-Adopt Preview 采用三栏证据账本：候选上下文、完整来源链/验证门、裁决/计划/所有权结果。760×520 起可完整滚动审阅。
+Adopt Preview 采用默认收起的手风琴证据账本：标题栏固定展示候选身份、来源路径、出现次数与可用的 Include 选择框，技能名称颜色提示异常状态；展开后展示完整来源链/验证门与裁决/计划/所有权结果。760×520 起可完整滚动审阅。
 
 每个候选必须显示：
 
@@ -493,7 +493,7 @@ Adopt Preview 采用三栏证据账本：候选上下文、完整来源链/验�
 | lock/schema/owner/identity/source/path/hash/commit/tree 矛盾 | Provenance Conflict；保持 Untracked；修复或满足 exact-entry CAS 后显式忽略 lock |
 | DNS/TLS/timeout/rate limit/401/403/404                       | Verification Deferred；Retry 或显式忽略；不自动降级                             |
 | unsafe tree                                                  | Home-owned 选项禁用；不通过 Adopt 绕过 Install 安全规则                         |
-| fixture 或无文件系统来源证明                                 | Excluded；无 selection control，由 Fixture Recovery 处理                        |
+| fixture 或无文件系统来源证明                                 | Excluded；标题中的 Include control 禁用，由 Fixture Recovery 处理               |
 
 时间字段和 `pluginName` 只展示，不参与信任。requested ref 缺失记录 `HEAD`；moving ref 使用 tip 或其 ancestry 中最新 subtree match 作为 Verification Anchor，并明确 original install commit unknown；pinned tag/commit 必须精确匹配。
 

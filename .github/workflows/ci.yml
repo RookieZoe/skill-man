@@ -1,9 +1,10 @@
-name: CI
+name: CI (manual fallback)
 
+# Normal verification runs on the maintainer's Mac with `npm run ci:local`.
+# Keep this only as an explicit emergency fallback so pushes and PRs never
+# consume GitHub-hosted Actions minutes automatically.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
