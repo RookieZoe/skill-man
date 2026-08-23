@@ -23,6 +23,10 @@ use crate::core::import::{
 use crate::core::maintenance::{
     ActivationHealthReport, RelocatePreview, RelocateResult, RemovePreview, RemoveResult,
 };
+use crate::core::source_group_preview::{
+    ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
+    RepositoryRefConflict, SourceGroupMember, SourceGroupPreview, SourceGroupPreviewOutcome,
+};
 use crate::core::startup::{StartupAgent, StartupInfo};
 use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
@@ -80,6 +84,176 @@ impl From<GitSourceCapabilityReport> for GitSourceCapabilityReportDto {
     fn from(value: GitSourceCapabilityReport) -> Self {
         Self {
             sources: value.sources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+// -- Fetch Latest and Manage Source Group Preview (ADR-0014, spec §8.4) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchLatestAndManageRequestDto {
+    pub source_type: String,
+    pub source_url: String,
+    pub tracking_ref: Option<String>,
+}
+
+impl From<FetchLatestAndManageRequestDto> for FetchLatestAndManageRequest {
+    fn from(value: FetchLatestAndManageRequestDto) -> Self {
+        Self {
+            source_type: value.source_type,
+            source_url: value.source_url,
+            tracking_ref: value.tracking_ref,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalOwnershipClaimDto {
+    pub lock_path: String,
+    pub entry_name: String,
+    pub requested_ref: String,
+}
+
+impl From<ExternalOwnershipClaim> for ExternalOwnershipClaimDto {
+    fn from(value: ExternalOwnershipClaim) -> Self {
+        Self {
+            lock_path: value.lock_path.to_string_lossy().into_owned(),
+            entry_name: value.entry_name,
+            requested_ref: value.requested_ref,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceGroupMemberDto {
+    pub directory_name: String,
+    pub display_name: String,
+    pub description: String,
+    pub skill_path: String,
+    pub tree_summary: String,
+}
+
+impl From<SourceGroupMember> for SourceGroupMemberDto {
+    fn from(value: SourceGroupMember) -> Self {
+        Self {
+            directory_name: value.directory_name,
+            display_name: value.display_name,
+            description: value.description,
+            skill_path: value.skill_path,
+            tree_summary: value.tree_summary,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceGroupPreviewDto {
+    pub provider: String,
+    pub source_url: String,
+    pub tracking_ref: String,
+    pub resolved_commit: String,
+    pub members: Vec<SourceGroupMemberDto>,
+    pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
+}
+
+impl From<SourceGroupPreview> for SourceGroupPreviewDto {
+    fn from(value: SourceGroupPreview) -> Self {
+        Self {
+            provider: value.provider,
+            source_url: value.source_url,
+            tracking_ref: value.tracking_ref,
+            resolved_commit: value.resolved_commit,
+            members: value.members.into_iter().map(Into::into).collect(),
+            external_ownership_claims: value
+                .external_ownership_claims
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryRefConflictDto {
+    pub provider: String,
+    pub source_url: String,
+    pub available_refs: Vec<String>,
+    pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
+}
+
+impl From<RepositoryRefConflict> for RepositoryRefConflictDto {
+    fn from(value: RepositoryRefConflict) -> Self {
+        Self {
+            provider: value.provider,
+            source_url: value.source_url,
+            available_refs: value.available_refs,
+            external_ownership_claims: value
+                .external_ownership_claims
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryOwnershipSplitDto {
+    pub provider: String,
+    pub source_url: String,
+    pub tracking_ref: String,
+    pub lock_paths: Vec<String>,
+    pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
+}
+
+impl From<RepositoryOwnershipSplit> for RepositoryOwnershipSplitDto {
+    fn from(value: RepositoryOwnershipSplit) -> Self {
+        Self {
+            provider: value.provider,
+            source_url: value.source_url,
+            tracking_ref: value.tracking_ref,
+            lock_paths: value
+                .lock_paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            external_ownership_claims: value
+                .external_ownership_claims
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SourceGroupPreviewOutcomeDto {
+    Preview { preview: SourceGroupPreviewDto },
+    RepositoryRefConflict { conflict: RepositoryRefConflictDto },
+    RepositoryOwnershipSplit { split: RepositoryOwnershipSplitDto },
+}
+
+impl From<SourceGroupPreviewOutcome> for SourceGroupPreviewOutcomeDto {
+    fn from(value: SourceGroupPreviewOutcome) -> Self {
+        match value {
+            SourceGroupPreviewOutcome::Preview(preview) => Self::Preview {
+                preview: preview.into(),
+            },
+            SourceGroupPreviewOutcome::RepositoryRefConflict(conflict) => {
+                Self::RepositoryRefConflict {
+                    conflict: conflict.into(),
+                }
+            }
+            SourceGroupPreviewOutcome::RepositoryOwnershipSplit(split) => {
+                Self::RepositoryOwnershipSplit {
+                    split: split.into(),
+                }
+            }
         }
     }
 }
@@ -2809,5 +2983,117 @@ impl From<StartupInfo> for StartupInfoDto {
                 .map(StartupAgentDto::from)
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn source_group_preview_outcomes_keep_the_typed_wire_contract() {
+        let claim = ExternalOwnershipClaim {
+            lock_path: PathBuf::from("/locks/source.lock.json"),
+            entry_name: "legacy-skill".into(),
+            requested_ref: "main".into(),
+        };
+        let preview = SourceGroupPreviewOutcomeDto::from(SourceGroupPreviewOutcome::Preview(
+            SourceGroupPreview {
+                provider: "github".into(),
+                source_url: "https://github.com/acme/source".into(),
+                tracking_ref: "main".into(),
+                resolved_commit: "a".repeat(40),
+                members: vec![SourceGroupMember {
+                    directory_name: "skill-a".into(),
+                    display_name: "Skill A".into(),
+                    description: "A complete member".into(),
+                    skill_path: "skills/skill-a".into(),
+                    tree_summary: "3 files".into(),
+                }],
+                external_ownership_claims: vec![claim.clone()],
+            },
+        ));
+        let conflict = SourceGroupPreviewOutcomeDto::from(
+            SourceGroupPreviewOutcome::RepositoryRefConflict(RepositoryRefConflict {
+                provider: "gitlab".into(),
+                source_url: "https://gitlab.com/acme/source".into(),
+                available_refs: vec!["main".into(), "release".into()],
+                external_ownership_claims: vec![claim.clone()],
+            }),
+        );
+        let split = SourceGroupPreviewOutcomeDto::from(
+            SourceGroupPreviewOutcome::RepositoryOwnershipSplit(RepositoryOwnershipSplit {
+                provider: "git".into(),
+                source_url: "https://example.com/acme/source".into(),
+                tracking_ref: "main".into(),
+                lock_paths: vec![
+                    PathBuf::from("/locks/one.lock.json"),
+                    PathBuf::from("/locks/two.lock.json"),
+                ],
+                external_ownership_claims: vec![claim],
+            }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(preview).expect("serialize preview"),
+            json!({
+                "kind": "preview",
+                "preview": {
+                    "provider": "github",
+                    "sourceUrl": "https://github.com/acme/source",
+                    "trackingRef": "main",
+                    "resolvedCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "members": [{
+                        "directoryName": "skill-a",
+                        "displayName": "Skill A",
+                        "description": "A complete member",
+                        "skillPath": "skills/skill-a",
+                        "treeSummary": "3 files"
+                    }],
+                    "externalOwnershipClaims": [{
+                        "lockPath": "/locks/source.lock.json",
+                        "entryName": "legacy-skill",
+                        "requestedRef": "main"
+                    }]
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(conflict).expect("serialize conflict"),
+            json!({
+                "kind": "repository_ref_conflict",
+                "conflict": {
+                    "provider": "gitlab",
+                    "sourceUrl": "https://gitlab.com/acme/source",
+                    "availableRefs": ["main", "release"],
+                    "externalOwnershipClaims": [{
+                        "lockPath": "/locks/source.lock.json",
+                        "entryName": "legacy-skill",
+                        "requestedRef": "main"
+                    }]
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(split).expect("serialize split"),
+            json!({
+                "kind": "repository_ownership_split",
+                "split": {
+                    "provider": "git",
+                    "sourceUrl": "https://example.com/acme/source",
+                    "trackingRef": "main",
+                    "lockPaths": ["/locks/one.lock.json", "/locks/two.lock.json"],
+                    "externalOwnershipClaims": [{
+                        "lockPath": "/locks/source.lock.json",
+                        "entryName": "legacy-skill",
+                        "requestedRef": "main"
+                    }]
+                }
+            })
+        );
     }
 }

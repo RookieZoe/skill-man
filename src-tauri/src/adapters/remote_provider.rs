@@ -781,6 +781,15 @@ mod tests {
             self.inner.read_blob(mirror_dir, commit, path, max_bytes)
         }
 
+        fn tree_summary(
+            &self,
+            mirror_dir: &Path,
+            commit: &str,
+            skill_path: &str,
+        ) -> Result<String, SourceError> {
+            self.inner.tree_summary(mirror_dir, commit, skill_path)
+        }
+
         fn stage_skill(
             &self,
             mirror_dir: &Path,

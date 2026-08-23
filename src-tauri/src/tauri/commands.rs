@@ -12,33 +12,32 @@ use crate::tauri_adapter::dto::{
     AdoptResultDto, AdoptUndoResultDto, AgentActivationDto, AppPreferencesDto, AppUpdateCheckDto,
     ApplyAbandonRequestDto, ApplyActivationReplaceRequestDto, ApplyActivationRequestDto,
     ApplyAdoptRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    ApplyFixtureRecoveryRequestDto, ApplyGitImportSelectionRequestDto, ApplyLinkImportRequestDto,
-    ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto,
-    BootstrapSnapshotDto, CancelActivationReplaceRequestDto, CancelActivationRequestDto,
-    CancelAdoptRequestDto, CancelAppUpdateRequestDto, CancelFileImportRequestDto,
-    CancelGitImportSelectionRequestDto, CancelLinkImportRequestDto, CancelRelocateLinkRequestDto,
-    CancelRemoveSkillRequestDto, CancelledAppUpdateDto, CandidateOperationRequestDto,
-    CatalogListDto, CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto, CommandFailureDto,
-    ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, CreateAgentDirectoryRequestDto,
-    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
-    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
-    DiscoverGitImportRequestDto, DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto,
-    DownloadedAppUpdateDto, FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto,
-    FileImportResultDto, FileImportSelectionPreviewDto, FileImportSelectionResultDto,
-    FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
-    FixtureRecoveryPreviewDto, GitImportDiscoveryDto, GitImportSelectionPreviewDto,
-    GitImportSelectionResultDto, GitSourceCapabilityReportDto, HomeCandidateDto,
-    InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto,
-    ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
+    ApplyFixtureRecoveryRequestDto, ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto,
+    ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto, BootstrapSnapshotDto,
+    CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
+    CancelAppUpdateRequestDto, CancelFileImportRequestDto, CancelLinkImportRequestDto,
+    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelledAppUpdateDto,
+    CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
+    CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmFixtureRecoveryRequestDto,
+    ConfirmHomeRequestDto, CreateAgentDirectoryRequestDto, DeleteSafetySnapshotRequestDto,
+    DeleteSnapshotPreviewDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
+    FetchLatestAndManageRequestDto, FileImportCandidateDto, FileImportDiscoveryDto,
+    FileImportPreviewDto, FileImportResultDto, FileImportSelectionPreviewDto,
+    FileImportSelectionResultDto, FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto,
+    FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto,
+    HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto,
+    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
     PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
-    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanGitImportSelectionRequestDto,
-    PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
-    PreferenceUpdatesDto, PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto,
-    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
-    RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
-    SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanLinkImportRequestDto,
+    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
+    PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
+    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
+    RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
+    SourceGroupPreviewOutcomeDto, StartupInfoDto, UndoActivationReplaceRequestDto,
+    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
+    UpdateResultDto,
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -47,6 +46,7 @@ use crate::tauri_adapter::home_binding_api::HomeBindingApi;
 use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::locale_api::LocaleApi;
+use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
@@ -117,6 +117,14 @@ pub fn get_git_source_capability(
     state: State<'_, GitSourceCapabilityApi>,
 ) -> Result<GitSourceCapabilityReportDto, CommandFailureDto> {
     state.get_git_source_capability()
+}
+
+#[tauri::command]
+pub fn fetch_latest_and_manage(
+    state: State<'_, SourceGroupPreviewApi>,
+    request: FetchLatestAndManageRequestDto,
+) -> Result<SourceGroupPreviewOutcomeDto, CommandFailureDto> {
+    state.fetch_latest_and_manage(request)
 }
 
 #[tauri::command]
@@ -443,38 +451,6 @@ pub fn cancel_file_import(
     request: CancelFileImportRequestDto,
 ) -> Result<bool, CommandFailureDto> {
     state.cancel_file_import(request)
-}
-
-#[tauri::command]
-pub async fn discover_git_import(
-    state: State<'_, ImportApi>,
-    request: DiscoverGitImportRequestDto,
-) -> Result<GitImportDiscoveryDto, CommandFailureDto> {
-    state.discover_git_import(request)
-}
-
-#[tauri::command]
-pub async fn plan_git_import_selection(
-    state: State<'_, ImportApi>,
-    request: PlanGitImportSelectionRequestDto,
-) -> Result<GitImportSelectionPreviewDto, CommandFailureDto> {
-    state.plan_git_import_selection(request)
-}
-
-#[tauri::command]
-pub async fn apply_git_import_selection(
-    state: State<'_, ImportApi>,
-    request: ApplyGitImportSelectionRequestDto,
-) -> Result<GitImportSelectionResultDto, CommandFailureDto> {
-    state.apply_git_import_selection(request)
-}
-
-#[tauri::command]
-pub fn cancel_git_import_selection(
-    state: State<'_, ImportApi>,
-    request: CancelGitImportSelectionRequestDto,
-) -> Result<bool, CommandFailureDto> {
-    state.cancel_git_import_selection(request)
 }
 
 #[tauri::command]

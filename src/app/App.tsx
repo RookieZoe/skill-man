@@ -33,9 +33,7 @@ import type {
   AvailableAppUpdate,
   CatalogClient,
   CatalogFilter,
-  GitImportDiscovery,
-  GitImportSelectionPreview,
-  GitImportSelectionResult,
+  GitRepositorySourceType,
   GitSourceCapabilityReport,
   LinkImportPreview,
   LinkImportResult,
@@ -47,6 +45,7 @@ import type {
   RemoveSkillResult,
   SkillDetail,
   SkillSummary,
+  SourceGroupPreviewOutcome,
   StartupAgent,
 } from "./catalog-client";
 
@@ -122,18 +121,10 @@ const LINK_IMPORT_OPERATION_COPIES = {
   },
 } as const satisfies Record<string, OperationCopy>;
 
-const GIT_IMPORT_OPERATION_COPIES = {
-  discovering: {
-    title: "library.import.fetching",
+const SOURCE_GROUP_OPERATION_COPIES = {
+  fetching: {
+    title: "library.source_group.fetching",
     detail: "operation.detail.import.git.discover",
-  },
-  planning: {
-    title: "library.adopt.planning",
-    detail: "operation.detail.import.git.plan",
-  },
-  applying: {
-    title: "library.import.importing",
-    detail: "operation.detail.import.git.apply",
   },
 } as const satisfies Record<string, OperationCopy>;
 
@@ -268,20 +259,17 @@ export function App({ client }: AppProps) {
   const [startupHealthComplete, setStartupHealthComplete] = useState(false);
   const [isLinkImportOpen, setIsLinkImportOpen] = useState(false);
   const [importKind, setImportKind] = useState<ImportKind>("link");
-  const [gitImportSource, setGitImportSource] = useState("");
-  const [gitImportForceFullDepth, setGitImportForceFullDepth] = useState(false);
-  const [gitImportDiscovery, setGitImportDiscovery] =
-    useState<GitImportDiscovery | null>(null);
-  const [gitImportSelected, setGitImportSelected] = useState<string[]>([]);
-  const [gitImportPreview, setGitImportPreview] =
-    useState<GitImportSelectionPreview | null>(null);
-  const [gitImportResult, setGitImportResult] =
-    useState<GitImportSelectionResult | null>(null);
-  const [gitImportError, setGitImportError] = useState<string | null>(null);
-  const [gitImportActivity, setGitImportActivity] = useState<
-    "idle" | "discovering" | "planning" | "applying"
+  const [sourceGroupType, setSourceGroupType] =
+    useState<GitRepositorySourceType>("github");
+  const [sourceGroupUrl, setSourceGroupUrl] = useState("");
+  const [sourceGroupRef, setSourceGroupRef] = useState("");
+  const [sourceGroupOutcome, setSourceGroupOutcome] =
+    useState<SourceGroupPreviewOutcome | null>(null);
+  const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
+  const [sourceGroupActivity, setSourceGroupActivity] = useState<
+    "idle" | "fetching"
   >("idle");
-  const gitImportRunId = useRef(0);
+  const sourceGroupRunId = useRef(0);
   const [relocatePanel, setRelocatePanel] = useState<RelocatePanelState>({
     isOpen: false,
     activity: "idle",
@@ -803,124 +791,59 @@ export function App({ client }: AppProps) {
 
   function openImport() {
     linkImportRunId.current += 1;
-    gitImportRunId.current += 1;
+    sourceGroupRunId.current += 1;
     setLinkImportPreview(null);
     setLinkImportResult(null);
     setLinkImportError(null);
-    setGitImportDiscovery(null);
-    setGitImportSelected([]);
-    setGitImportPreview(null);
-    setGitImportResult(null);
-    setGitImportError(null);
+    setSourceGroupType("github");
+    setSourceGroupUrl("");
+    setSourceGroupRef("");
+    setSourceGroupOutcome(null);
+    setSourceGroupError(null);
+    setSourceGroupActivity("idle");
     setImportKind("link");
     setIsLinkImportOpen(true);
   }
 
-  async function discoverGitImport(source: string, forceFullDepth: boolean) {
-    const runId = ++gitImportRunId.current;
-    setGitImportActivity("discovering");
-    setGitImportError(null);
-    setGitImportDiscovery(null);
-    setGitImportPreview(null);
-    setGitImportSelected([]);
+  async function fetchLatestAndManage() {
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("fetching");
+    setSourceGroupError(null);
+    setSourceGroupOutcome(null);
     try {
-      const discovery = await client.discoverGitImport(source, forceFullDepth);
-      if (runId !== gitImportRunId.current) return;
-      setGitImportDiscovery(discovery);
-      setGitImportSelected(
-        discovery.candidates.map((candidate) => candidate.directoryName),
-      );
+      const outcome = await client.fetchLatestAndManage({
+        sourceType: sourceGroupType,
+        sourceUrl: sourceGroupUrl,
+        trackingRef: sourceGroupRef.trim() || null,
+      });
+      if (runId !== sourceGroupRunId.current) return;
+      setSourceGroupOutcome(outcome);
     } catch (reason) {
-      if (runId === gitImportRunId.current) {
-        setGitImportError(readError(reason, t));
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
       }
     } finally {
-      if (runId === gitImportRunId.current) setGitImportActivity("idle");
-    }
-  }
-
-  async function planGitImport() {
-    if (!gitImportDiscovery || gitImportSelected.length === 0) return;
-    const runId = ++gitImportRunId.current;
-    setGitImportActivity("planning");
-    setGitImportError(null);
-    try {
-      const preview = await client.planGitImportSelection(
-        gitImportSource,
-        gitImportForceFullDepth,
-        gitImportSelected,
-      );
-      if (runId !== gitImportRunId.current) {
-        await client
-          .cancelGitImportSelection(preview.planToken)
-          .catch(() => undefined);
-        return;
-      }
-      setGitImportPreview(preview);
-    } catch (reason) {
-      if (runId === gitImportRunId.current) {
-        setGitImportError(readError(reason, t));
-      }
-    } finally {
-      if (runId === gitImportRunId.current) setGitImportActivity("idle");
-    }
-  }
-
-  async function applyGitImport() {
-    if (!gitImportPreview?.canApply) return;
-    const runId = ++gitImportRunId.current;
-    setGitImportActivity("applying");
-    setGitImportError(null);
-    try {
-      const result = await client.applyGitImportSelection(
-        gitImportPreview.planToken,
-      );
-      const snapshot = await client.listSkills(filter);
-      setSkills(snapshot.items);
-      setGitImportPreview(null);
-      setGitImportResult(result);
-    } catch (reason) {
-      setGitImportPreview(null);
-      setGitImportError(readError(reason, t));
-    } finally {
-      if (runId === gitImportRunId.current) setGitImportActivity("idle");
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
     }
   }
 
   async function closeImport() {
-    if (linkImportActivity === "applying" || gitImportActivity === "applying")
+    if (linkImportActivity === "applying" || sourceGroupActivity === "fetching")
       return;
     linkImportRunId.current += 1;
-    gitImportRunId.current += 1;
+    sourceGroupRunId.current += 1;
     const linkPlanToken = linkImportPreview?.planToken;
-    const gitPlanToken = gitImportPreview?.planToken;
     setIsLinkImportOpen(false);
     setLinkImportPreview(null);
     setLinkImportResult(null);
     setLinkImportError(null);
     setLinkImportActivity("idle");
-    setGitImportDiscovery(null);
-    setGitImportSelected([]);
-    setGitImportPreview(null);
-    setGitImportResult(null);
-    setGitImportError(null);
-    setGitImportActivity("idle");
+    setSourceGroupOutcome(null);
+    setSourceGroupError(null);
+    setSourceGroupActivity("idle");
     if (linkPlanToken) {
       await client.cancelLinkImport(linkPlanToken).catch(() => undefined);
     }
-    if (gitPlanToken) {
-      await client
-        .cancelGitImportSelection(gitPlanToken)
-        .catch(() => undefined);
-    }
-  }
-
-  function openImportedGitSkill(skillId: string) {
-    setFilter("all");
-    setSelectedId(skillId);
-    setIsLinkImportOpen(false);
-    setGitImportResult(null);
-    setGitImportError(null);
   }
 
   function openRelocate() {
@@ -1514,9 +1437,9 @@ export function App({ client }: AppProps) {
       t,
     ),
     operationFromActivity(
-      "git-import",
-      gitImportActivity,
-      GIT_IMPORT_OPERATION_COPIES,
+      "source-group-preview",
+      sourceGroupActivity,
+      SOURCE_GROUP_OPERATION_COPIES,
       t,
     ),
     isPreferencesOpen
@@ -1600,14 +1523,12 @@ export function App({ client }: AppProps) {
         linkImportResult={linkImportResult}
         linkImportError={linkImportError}
         linkImportActivity={linkImportActivity}
-        gitImportSource={gitImportSource}
-        gitImportForceFullDepth={gitImportForceFullDepth}
-        gitImportDiscovery={gitImportDiscovery}
-        gitImportSelected={gitImportSelected}
-        gitImportPreview={gitImportPreview}
-        gitImportResult={gitImportResult}
-        gitImportError={gitImportError}
-        gitImportActivity={gitImportActivity}
+        sourceGroupType={sourceGroupType}
+        sourceGroupUrl={sourceGroupUrl}
+        sourceGroupRef={sourceGroupRef}
+        sourceGroupOutcome={sourceGroupOutcome}
+        sourceGroupError={sourceGroupError}
+        sourceGroupActivity={sourceGroupActivity}
         onFilter={setFilter}
         onSelect={setSelectedId}
         onRequestActivation={requestActivation}
@@ -1625,13 +1546,21 @@ export function App({ client }: AppProps) {
         onApplyLinkImport={applyLinkImport}
         onCloseLinkImport={closeImport}
         onOpenImportedSkill={openImportedSkill}
-        onGitImportSourceChange={setGitImportSource}
-        onGitImportForceFullDepthChange={setGitImportForceFullDepth}
-        onDiscoverGitImport={discoverGitImport}
-        onGitImportSelectionChange={setGitImportSelected}
-        onPlanGitImport={planGitImport}
-        onApplyGitImport={applyGitImport}
-        onOpenImportedGitSkill={openImportedGitSkill}
+        onSourceGroupTypeChange={(sourceType) => {
+          setSourceGroupType(sourceType);
+          setSourceGroupOutcome(null);
+          setSourceGroupError(null);
+        }}
+        onSourceGroupUrlChange={(sourceUrl) => {
+          setSourceGroupUrl(sourceUrl);
+          setSourceGroupOutcome(null);
+          setSourceGroupError(null);
+        }}
+        onSourceGroupRefChange={(trackingRef) => {
+          setSourceGroupRef(trackingRef);
+          setSourceGroupError(null);
+        }}
+        onFetchLatestAndManage={fetchLatestAndManage}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}

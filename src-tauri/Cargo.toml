@@ -29,10 +29,8 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2.10.1"
+tempfile = "3.27.0"
 thiserror = "2.0.17"
 unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 zip = { version = "6.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-
-[dev-dependencies]
-tempfile = "3.27.0"

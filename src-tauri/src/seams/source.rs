@@ -78,6 +78,15 @@ pub trait GitSource: Send + Sync {
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, SourceError>;
 
+    /// Return the immutable Git tree object ID for the whole Skill directory
+    /// at `skill_path` (empty = repository root) in `commit`.
+    fn tree_summary(
+        &self,
+        mirror_dir: &Path,
+        commit: &str,
+        skill_path: &str,
+    ) -> Result<String, SourceError>;
+
     /// Materialize the Skill directory at `skill_path` (empty = repo root)
     /// of `commit` into `destination` as a regular directory tree.
     fn stage_skill(

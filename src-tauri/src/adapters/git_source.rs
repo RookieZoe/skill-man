@@ -353,6 +353,37 @@ impl GitSource for SystemGitSource {
         }
     }
 
+    fn tree_summary(
+        &self,
+        mirror_dir: &Path,
+        commit: &str,
+        skill_path: &str,
+    ) -> Result<String, SourceError> {
+        let revision = if skill_path.is_empty() {
+            format!("{commit}^{{tree}}")
+        } else {
+            format!("{commit}:{skill_path}")
+        };
+        let output = run_git(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "rev-parse",
+                "--verify",
+                &revision,
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            Some(128),
+        )?;
+        let tree = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if tree.len() != 40 || !tree.chars().all(|character| character.is_ascii_hexdigit()) {
+            return Err(SourceError::Git(format!(
+                "Git did not return a tree object ID for '{revision}'"
+            )));
+        }
+        Ok(tree)
+    }
+
     fn stage_skill(
         &self,
         mirror_dir: &Path,

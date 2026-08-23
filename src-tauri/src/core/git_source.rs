@@ -55,6 +55,8 @@ pub enum GitSourceParseError {
     InvalidShorthand(String),
     #[error("'{0}' is not a valid Git source reference")]
     InvalidRef(String),
+    #[error("Git sources must use the default HTTPS port; got '{0}'")]
+    NonDefaultPort(String),
     #[error("blob URLs point at a single file; use a tree URL or the repository root instead")]
     BlobUrlNotSupported,
     #[error("'{0}' contains an unsafe path component")]
@@ -154,15 +156,32 @@ fn valid_shorthand_component(component: &str) -> bool {
 }
 
 fn parse_url_spec(url: &str) -> Result<GitSourceSpec, GitSourceParseError> {
-    let rest = &url["https://".len().min(url.len())..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let scheme_end = url
+        .find("://")
+        .ok_or_else(|| GitSourceParseError::InvalidShorthand(url.into()))?;
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     if authority.contains('@') {
         return Err(GitSourceParseError::CredentialsNotSupported(url.into()));
     }
-    let host = authority.split(':').next().unwrap_or(authority);
-    let path = &rest[authority_end..];
-    match host {
+    let scheme = &url[..scheme_end];
+    let host = if let Some((host, port)) = authority.rsplit_once(':') {
+        let default_port =
+            (scheme == "https" && port == "443") || (scheme == "http" && port == "80");
+        if !default_port {
+            return Err(GitSourceParseError::NonDefaultPort(url.into()));
+        }
+        host
+    } else {
+        authority
+    }
+    .to_ascii_lowercase();
+    let path = rest[authority_end..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
+    match host.as_str() {
         "github.com" | "www.github.com" => parse_github_path(url, path),
         "gitlab.com" | "www.gitlab.com" => parse_gitlab_path(url, path),
         _ => parse_generic_path(url, path),
@@ -246,17 +265,60 @@ fn parse_gitlab_path(url: &str, path: &str) -> Result<GitSourceSpec, GitSourcePa
         }
         None => (segments.as_slice(), None, None),
     };
+    let mut canonical_segments = base_segments.to_vec();
+    let repository = canonical_segments
+        .last_mut()
+        .ok_or_else(|| GitSourceParseError::InvalidShorthand(url.into()))?;
+    if let Some(without_suffix) = repository.strip_suffix(".git") {
+        if without_suffix.is_empty() {
+            return Err(GitSourceParseError::InvalidShorthand(url.into()));
+        }
+        *repository = without_suffix.into();
+    }
+    if canonical_segments.len() < 2 {
+        return Err(GitSourceParseError::InvalidShorthand(url.into()));
+    }
     Ok(GitSourceSpec {
-        url: format!("https://gitlab.com/{}", base_segments.join("/")),
+        url: format!("https://gitlab.com/{}", canonical_segments.join("/")),
         requested_ref,
         path_prefix,
     })
 }
 
 fn parse_generic_path(url: &str, path: &str) -> Result<GitSourceSpec, GitSourceParseError> {
-    split_clean_path(path)?;
+    let repository_path = path.split(['?', '#']).next().unwrap_or_default();
+    let segments = split_clean_path(repository_path)?;
+    if segments.is_empty() {
+        return Err(GitSourceParseError::InvalidShorthand(url.into()));
+    }
+    let scheme_end = url
+        .find("://")
+        .ok_or_else(|| GitSourceParseError::InvalidShorthand(url.into()))?;
+    let scheme = &url[..scheme_end];
+    let authority = url[scheme_end + 3..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let authority = if let Some((host, port)) = authority.rsplit_once(':') {
+        let default_port =
+            (scheme == "https" && port == "443") || (scheme == "http" && port == "80");
+        if !default_port {
+            return Err(GitSourceParseError::NonDefaultPort(url.into()));
+        }
+        host
+    } else {
+        authority
+    }
+    .to_ascii_lowercase();
+    let mut normalized_path = segments.join("/");
+    if normalized_path.ends_with(".git") {
+        normalized_path.truncate(normalized_path.len() - 4);
+    }
+    if normalized_path.is_empty() {
+        return Err(GitSourceParseError::InvalidShorthand(url.into()));
+    }
     Ok(GitSourceSpec {
-        url: url.to_owned(),
+        url: format!("{scheme}://{authority}/{normalized_path}"),
         requested_ref: None,
         path_prefix: None,
     })
@@ -282,7 +344,8 @@ fn validate_ref_token(reference: &str) -> Result<(), GitSourceParseError> {
 /// itself, its immediate children, `<root>/skills/` and `<plugin>/skills/`);
 /// when nothing is found the scan recurses, unless the caller forced full
 /// depth. Candidates are sorted by directory name then path, deduplicated
-/// by path, and truncated at `MAX_SOURCE_SKILLS`.
+/// by path. Callers that need a bounded legacy picker apply their own limit;
+/// source-group discovery intentionally consumes the complete set.
 pub fn discover_skills_from_paths(
     repo_name: &str,
     tree_files: &[PathBuf],
@@ -601,10 +664,50 @@ mod tests {
     }
 
     #[test]
-    fn generic_https_url_passes_through() {
-        let spec = parse_git_source_input("https://example.com/team/repo.git").expect("generic");
-        assert_eq!(spec.url, "https://example.com/team/repo.git");
+    fn gitlab_url_with_git_suffix_normalizes() {
+        let spec =
+            parse_git_source_input("https://gitlab.com/group/subgroup/repo.git").expect("url");
+        assert_eq!(spec.url, "https://gitlab.com/group/subgroup/repo");
+    }
+
+    #[test]
+    fn provider_urls_normalize_host_case_and_drop_query_or_fragment() {
+        let github = parse_git_source_input("https://GITHUB.com/owner/repo?tab=readme")
+            .expect("GitHub repository URL");
+        assert_eq!(github.url, "https://github.com/owner/repo");
+
+        let gitlab = parse_git_source_input("https://GITLAB.com/group/repo/-/tree/main#members")
+            .expect("GitLab tree URL");
+        assert_eq!(gitlab.url, "https://gitlab.com/group/repo");
+        assert_eq!(gitlab.requested_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn provider_urls_reject_non_default_ports() {
+        let error = parse_git_source_input("https://github.com:8443/owner/repo")
+            .expect_err("non-default port");
+        assert_eq!(
+            error,
+            GitSourceParseError::NonDefaultPort("https://github.com:8443/owner/repo".into())
+        );
+    }
+
+    #[test]
+    fn generic_https_url_normalizes_repository_identity() {
+        let spec = parse_git_source_input("https://EXAMPLE.com:443/team/repo.git/?branch=main")
+            .expect("generic");
+        assert_eq!(spec.url, "https://example.com/team/repo");
         assert_eq!(spec.requested_ref, None);
+    }
+
+    #[test]
+    fn generic_https_url_rejects_a_non_default_port() {
+        let error = parse_git_source_input("https://example.com:8443/team/repo")
+            .expect_err("non-default port");
+        assert_eq!(
+            error,
+            GitSourceParseError::NonDefaultPort("https://example.com:8443/team/repo".into())
+        );
     }
 
     #[test]

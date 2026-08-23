@@ -2175,6 +2175,58 @@ button:active:not(:disabled) {
   background: var(--accent-soft);
 }
 
+.source-group-members h3,
+.source-group-claims h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.source-group-members .git-import-candidates li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+.source-group-members small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.source-group-members dl {
+  margin: 0;
+  text-align: right;
+}
+.source-group-members dt,
+.source-group-members dd {
+  margin: 0;
+}
+.source-group-members dt {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.source-group-members dd code {
+  font-size: 11px;
+}
+.source-group-claims {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.source-group-claims p {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.source-group-claims ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .update-result-ok {
   color: var(--healthy);
 }

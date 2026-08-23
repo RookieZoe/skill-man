@@ -44,6 +44,7 @@ pub fn run() {
     use crate::core::locale::LocaleService;
     use crate::core::maintenance::MaintenanceService;
     use crate::core::preferences::PreferencesService;
+    use crate::core::source_group_preview::SourceGroupPreviewService;
     use crate::core::startup::StartupService;
     use crate::core::update::UpdateService;
     use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
@@ -62,23 +63,22 @@ pub fn run() {
     use crate::tauri_adapter::commands::{
         activation_conflict_details, apply_abandon, apply_activation, apply_activation_replace,
         apply_adopt, apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
-        apply_fixture_recovery, apply_git_import_selection, apply_link_import, apply_relocate_link,
-        apply_remove_skill, apply_skill_updates, cancel_activation, cancel_activation_replace,
-        cancel_adopt, cancel_app_update, cancel_candidate, cancel_file_import,
-        cancel_git_import_selection, cancel_link_import, cancel_relocate_link, cancel_remove_skill,
-        check_app_update, check_skill_updates, complete_onboarding,
-        confirm_fixture_recovery_result, confirm_home, continue_candidate, create_agent_directory,
-        discover_file_import, discover_file_import_collection, discover_git_import,
-        discover_link_import, download_app_update, finalize_activation_replace, finalize_adopt,
-        get_bootstrap_snapshot, get_fixture_recovery_preview, get_git_source_capability,
-        get_locale_snapshot, inspect_skill, install_app_update, list_agents, list_safety_snapshots,
-        list_skills, load_preferences, pin_skill_updates, plan_abandon, plan_activation,
-        plan_activation_repair, plan_activation_replace, plan_adopt, plan_delete_safety_snapshot,
-        plan_file_import, plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
-        plan_git_import_selection, plan_link_import, plan_remove_skill, plan_restore,
-        plan_skill_updates, prepare_home, reconnect_same_home, refresh_system_languages,
-        relocate_link, restore_eligibility, run_activation_health_check, scan_adopt,
-        set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
+        apply_fixture_recovery, apply_link_import, apply_relocate_link, apply_remove_skill,
+        apply_skill_updates, cancel_activation, cancel_activation_replace, cancel_adopt,
+        cancel_app_update, cancel_candidate, cancel_file_import, cancel_link_import,
+        cancel_relocate_link, cancel_remove_skill, check_app_update, check_skill_updates,
+        complete_onboarding, confirm_fixture_recovery_result, confirm_home, continue_candidate,
+        create_agent_directory, discover_file_import, discover_file_import_collection,
+        discover_link_import, download_app_update, fetch_latest_and_manage,
+        finalize_activation_replace, finalize_adopt, get_bootstrap_snapshot,
+        get_fixture_recovery_preview, get_git_source_capability, get_locale_snapshot,
+        inspect_skill, install_app_update, list_agents, list_safety_snapshots, list_skills,
+        load_preferences, pin_skill_updates, plan_abandon, plan_activation, plan_activation_repair,
+        plan_activation_replace, plan_adopt, plan_delete_safety_snapshot, plan_file_import,
+        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_link_import,
+        plan_remove_skill, plan_restore, plan_skill_updates, prepare_home, reconnect_same_home,
+        refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
+        scan_adopt, set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
         update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -92,6 +92,7 @@ pub fn run() {
         LOCALE_CHANGED_EVENT, LocaleApi, TauriLocaleChangedEmitter,
     };
     use crate::tauri_adapter::menu;
+    use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
     use crate::tauri_adapter::startup_api::StartupApi;
     use crate::tauri_adapter::tray;
     use crate::tauri_adapter::update_api::UpdateApi;
@@ -361,6 +362,12 @@ pub fn run() {
                 ),
             )));
             app.manage(GitSourceCapabilityApi::new(git_source_capability_scan.clone()));
+            app.manage(SourceGroupPreviewApi::new(Arc::new(
+                SourceGroupPreviewService::new(
+                    Arc::new(SystemGitSource::new()),
+                    Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
+                ),
+            )));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
                     .with_library_root(resolved_library_root.clone())
@@ -492,6 +499,7 @@ pub fn run() {
             apply_abandon,
             get_bootstrap_snapshot,
             get_git_source_capability,
+            fetch_latest_and_manage,
             get_locale_snapshot,
             set_locale_selection,
             refresh_system_languages,
@@ -531,10 +539,6 @@ pub fn run() {
             apply_file_import,
             apply_file_import_selection,
             cancel_file_import,
-            discover_git_import,
-            plan_git_import_selection,
-            apply_git_import_selection,
-            cancel_git_import_selection,
             check_skill_updates,
             plan_skill_updates,
             apply_skill_updates,

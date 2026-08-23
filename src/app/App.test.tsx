@@ -921,23 +921,27 @@ test("shows Library Conflict in Link preview and blocks Import", async () => {
   ).not.toBeInTheDocument();
 });
 
-test("switches the Import sheet to Git and reports a source rejection", async () => {
+test("switches the Import sheet to Fetch Latest and Manage and reports a source rejection", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
 
   await user.click(screen.getByRole("button", { name: "Import" }));
-  await user.click(screen.getByRole("button", { name: "Install from Git" }));
+  await user.click(
+    screen.getByRole("button", { name: "Fetch Latest and Manage" }),
+  );
   expect(
     screen.getByRole("dialog", { name: "Import from Git" }),
   ).toBeInTheDocument();
-  expect(screen.getByText(/Public HTTPS repository/)).toBeInTheDocument();
+  expect(screen.getByText(/complete Source Release/)).toBeInTheDocument();
 
   await user.type(
-    screen.getByRole("textbox", { name: "Repository URL or owner/repo" }),
-    "owner/repo",
+    screen.getByRole("textbox", { name: "Repository URL" }),
+    "https://github.com/owner/repo",
   );
-  await user.click(screen.getByRole("button", { name: "Discover Skills" }));
+  await user.click(
+    screen.getByRole("button", { name: "Fetch latest preview" }),
+  );
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "not available in the preview fixture",
   );

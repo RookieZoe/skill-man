@@ -645,23 +645,10 @@ export function createFixtureCatalogClient(): CatalogClient {
     async cancelLinkImport(planToken) {
       return linkImportPlans.delete(planToken);
     },
-    async discoverGitImport() {
+    async fetchLatestAndManage() {
       return fixtureUnsupported(
-        "Git Import is not available in the preview fixture",
+        "Fetch Latest and Manage is not available in the preview fixture",
       );
-    },
-    async planGitImportSelection() {
-      return fixtureUnsupported(
-        "Git Import is not available in the preview fixture",
-      );
-    },
-    async applyGitImportSelection() {
-      return fixtureUnsupported(
-        "Git Import is not available in the preview fixture",
-      );
-    },
-    async cancelGitImportSelection() {
-      return false;
     },
     async checkSkillUpdates() {
       return { groups: [], errors: [], parentConflicts: [] };

@@ -577,6 +577,57 @@ export interface GitImportSelectionResult {
   snapshotVersion: number;
 }
 
+export type GitRepositorySourceType = "github" | "gitlab" | "git";
+
+export interface FetchLatestAndManageRequest {
+  sourceType: GitRepositorySourceType;
+  sourceUrl: string;
+  trackingRef: string | null;
+}
+
+export interface ExternalOwnershipClaim {
+  lockPath: string;
+  entryName: string;
+  requestedRef: string;
+}
+
+export interface SourceGroupMember {
+  directoryName: string;
+  displayName: string;
+  description: string;
+  skillPath: string;
+  treeSummary: string;
+}
+
+export interface SourceGroupPreview {
+  provider: string;
+  sourceUrl: string;
+  trackingRef: string;
+  resolvedCommit: string;
+  members: SourceGroupMember[];
+  externalOwnershipClaims: ExternalOwnershipClaim[];
+}
+
+export interface RepositoryRefConflict {
+  provider: string;
+  sourceUrl: string;
+  availableRefs: string[];
+  externalOwnershipClaims: ExternalOwnershipClaim[];
+}
+
+export interface RepositoryOwnershipSplit {
+  provider: string;
+  sourceUrl: string;
+  trackingRef: string;
+  lockPaths: string[];
+  externalOwnershipClaims: ExternalOwnershipClaim[];
+}
+
+export type SourceGroupPreviewOutcome =
+  | { kind: "preview"; preview: SourceGroupPreview }
+  | { kind: "repository_ref_conflict"; conflict: RepositoryRefConflict }
+  | { kind: "repository_ownership_split"; split: RepositoryOwnershipSplit };
+
 export interface UpdateCheckItem {
   skillId: string;
   directoryName: string;
@@ -923,17 +974,9 @@ export interface CatalogClient {
   planLinkImport(sourcePath: string): Promise<LinkImportPreview>;
   applyLinkImport(planToken: string): Promise<LinkImportResult>;
   cancelLinkImport(planToken: string): Promise<boolean>;
-  discoverGitImport(
-    source: string,
-    forceFullDepth: boolean,
-  ): Promise<GitImportDiscovery>;
-  planGitImportSelection(
-    source: string,
-    forceFullDepth: boolean,
-    selectedDirectoryNames: string[],
-  ): Promise<GitImportSelectionPreview>;
-  applyGitImportSelection(planToken: string): Promise<GitImportSelectionResult>;
-  cancelGitImportSelection(planToken: string): Promise<boolean>;
+  fetchLatestAndManage(
+    request: FetchLatestAndManageRequest,
+  ): Promise<SourceGroupPreviewOutcome>;
   checkSkillUpdates(force: boolean): Promise<UpdateCheckReport>;
   planSkillUpdates(selections: UpdateSelection[]): Promise<UpdatePlan>;
   applySkillUpdates(
@@ -1180,24 +1223,9 @@ const tauriCatalogClient: CatalogClient = {
       request: { planToken },
     });
   },
-  discoverGitImport(source, forceFullDepth) {
-    return invoke<GitImportDiscovery>("discover_git_import", {
-      request: { source, forceFullDepth },
-    });
-  },
-  planGitImportSelection(source, forceFullDepth, selectedDirectoryNames) {
-    return invoke<GitImportSelectionPreview>("plan_git_import_selection", {
-      request: { source, forceFullDepth, selectedDirectoryNames },
-    });
-  },
-  applyGitImportSelection(planToken) {
-    return invoke<GitImportSelectionResult>("apply_git_import_selection", {
-      request: { planToken },
-    });
-  },
-  cancelGitImportSelection(planToken) {
-    return invoke<boolean>("cancel_git_import_selection", {
-      request: { planToken },
+  fetchLatestAndManage(request) {
+    return invoke<SourceGroupPreviewOutcome>("fetch_latest_and_manage", {
+      request,
     });
   },
   checkSkillUpdates(force) {

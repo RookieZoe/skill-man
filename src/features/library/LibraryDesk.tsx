@@ -22,9 +22,7 @@ import type {
   AppPreferences,
   CatalogFilter,
   CompatibilityWarning,
-  GitImportDiscovery,
-  GitImportSelectionPreview,
-  GitImportSelectionResult,
+  GitRepositorySourceType,
   GitSourceCapabilityReport,
   Health,
   LinkImportPreview,
@@ -37,6 +35,7 @@ import type {
   SkillDetail,
   SkillSummary,
   SourceKind,
+  SourceGroupPreviewOutcome,
   StartupAgent,
 } from "../../app/catalog-client";
 import { EvidenceLedger } from "../adopt/EvidenceLedger";
@@ -50,6 +49,7 @@ import {
   GitSourceCapabilityNotice,
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
+import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
@@ -101,14 +101,12 @@ interface LibraryDeskProps {
   linkImportResult: LinkImportResult | null;
   linkImportError: string | null;
   linkImportActivity: "idle" | "discovering" | "applying";
-  gitImportSource: string;
-  gitImportForceFullDepth: boolean;
-  gitImportDiscovery: GitImportDiscovery | null;
-  gitImportSelected: string[];
-  gitImportPreview: GitImportSelectionPreview | null;
-  gitImportResult: GitImportSelectionResult | null;
-  gitImportError: string | null;
-  gitImportActivity: "idle" | "discovering" | "planning" | "applying";
+  sourceGroupType: GitRepositorySourceType;
+  sourceGroupUrl: string;
+  sourceGroupRef: string;
+  sourceGroupOutcome: SourceGroupPreviewOutcome | null;
+  sourceGroupError: string | null;
+  sourceGroupActivity: "idle" | "fetching";
   relocatePanel: RelocatePanelState;
   onOpenRelocate: () => void;
   onCloseRelocate: () => void;
@@ -147,13 +145,10 @@ interface LibraryDeskProps {
   onApplyLinkImport: () => void;
   onCloseLinkImport: () => void;
   onOpenImportedSkill: () => void;
-  onGitImportSourceChange: (source: string) => void;
-  onGitImportForceFullDepthChange: (force: boolean) => void;
-  onDiscoverGitImport: (source: string, forceFullDepth: boolean) => void;
-  onGitImportSelectionChange: (directoryNames: string[]) => void;
-  onPlanGitImport: () => void;
-  onApplyGitImport: () => void;
-  onOpenImportedGitSkill: (skillId: string) => void;
+  onSourceGroupTypeChange: (sourceType: GitRepositorySourceType) => void;
+  onSourceGroupUrlChange: (sourceUrl: string) => void;
+  onSourceGroupRefChange: (trackingRef: string) => void;
+  onFetchLatestAndManage: () => void;
   onOpenAdopt: () => void;
   onRescanAdopt: () => void;
   onToggleAdoptCandidate: (canonicalEntity: string, checked: boolean) => void;
@@ -220,14 +215,12 @@ export function LibraryDesk({
   linkImportResult,
   linkImportError,
   linkImportActivity,
-  gitImportSource,
-  gitImportForceFullDepth,
-  gitImportDiscovery,
-  gitImportSelected,
-  gitImportPreview,
-  gitImportResult,
-  gitImportError,
-  gitImportActivity,
+  sourceGroupType,
+  sourceGroupUrl,
+  sourceGroupRef,
+  sourceGroupOutcome,
+  sourceGroupError,
+  sourceGroupActivity,
   relocatePanel,
   onOpenRelocate,
   onCloseRelocate,
@@ -257,13 +250,10 @@ export function LibraryDesk({
   onApplyLinkImport,
   onCloseLinkImport,
   onOpenImportedSkill,
-  onGitImportSourceChange,
-  onGitImportForceFullDepthChange,
-  onDiscoverGitImport,
-  onGitImportSelectionChange,
-  onPlanGitImport,
-  onApplyGitImport,
-  onOpenImportedGitSkill,
+  onSourceGroupTypeChange,
+  onSourceGroupUrlChange,
+  onSourceGroupRefChange,
+  onFetchLatestAndManage,
   isAdoptOpen,
   adoptReport,
   adoptSelections,
@@ -631,26 +621,21 @@ export function LibraryDesk({
           result={linkImportResult}
           error={linkImportError}
           activity={linkImportActivity}
-          gitImportSource={gitImportSource}
-          gitImportForceFullDepth={gitImportForceFullDepth}
-          gitImportDiscovery={gitImportDiscovery}
-          gitImportSelected={gitImportSelected}
-          gitImportPreview={gitImportPreview}
-          gitImportResult={gitImportResult}
-          gitImportError={gitImportError}
-          gitImportActivity={gitImportActivity}
+          sourceGroupType={sourceGroupType}
+          sourceGroupUrl={sourceGroupUrl}
+          sourceGroupRef={sourceGroupRef}
+          sourceGroupOutcome={sourceGroupOutcome}
+          sourceGroupError={sourceGroupError}
+          sourceGroupActivity={sourceGroupActivity}
           onKindChange={onImportKindChange}
           onPreview={onPreviewLinkImport}
           onApply={onApplyLinkImport}
           onClose={onCloseLinkImport}
           onOpenImportedSkill={onOpenImportedSkill}
-          onGitImportSourceChange={onGitImportSourceChange}
-          onGitImportForceFullDepthChange={onGitImportForceFullDepthChange}
-          onDiscoverGitImport={onDiscoverGitImport}
-          onGitImportSelectionChange={onGitImportSelectionChange}
-          onPlanGitImport={onPlanGitImport}
-          onApplyGitImport={onApplyGitImport}
-          onOpenImportedGitSkill={onOpenImportedGitSkill}
+          onSourceGroupTypeChange={onSourceGroupTypeChange}
+          onSourceGroupUrlChange={onSourceGroupUrlChange}
+          onSourceGroupRefChange={onSourceGroupRefChange}
+          onFetchLatestAndManage={onFetchLatestAndManage}
         />
       ) : null}
       {isOnboardingOpen ? (
@@ -954,10 +939,6 @@ function SkillDetailPanel({
   );
 }
 
-function shortCommit(commit: string) {
-  return commit.length > 10 ? commit.slice(0, 10) : commit;
-}
-
 function AgentInspector({
   ref,
   dialog,
@@ -1102,52 +1083,42 @@ function LinkImportSheet({
   result,
   error,
   activity,
-  gitImportSource,
-  gitImportForceFullDepth,
-  gitImportDiscovery,
-  gitImportSelected,
-  gitImportPreview,
-  gitImportResult,
-  gitImportError,
-  gitImportActivity,
+  sourceGroupType,
+  sourceGroupUrl,
+  sourceGroupRef,
+  sourceGroupOutcome,
+  sourceGroupError,
+  sourceGroupActivity,
   onKindChange,
   onPreview,
   onApply,
   onClose,
   onOpenImportedSkill,
-  onGitImportSourceChange,
-  onGitImportForceFullDepthChange,
-  onDiscoverGitImport,
-  onGitImportSelectionChange,
-  onPlanGitImport,
-  onApplyGitImport,
-  onOpenImportedGitSkill,
+  onSourceGroupTypeChange,
+  onSourceGroupUrlChange,
+  onSourceGroupRefChange,
+  onFetchLatestAndManage,
 }: {
   kind: ImportKind;
   preview: LinkImportPreview | null;
   result: LinkImportResult | null;
   error: string | null;
   activity: "idle" | "discovering" | "applying";
-  gitImportSource: string;
-  gitImportForceFullDepth: boolean;
-  gitImportDiscovery: GitImportDiscovery | null;
-  gitImportSelected: string[];
-  gitImportPreview: GitImportSelectionPreview | null;
-  gitImportResult: GitImportSelectionResult | null;
-  gitImportError: string | null;
-  gitImportActivity: "idle" | "discovering" | "planning" | "applying";
+  sourceGroupType: GitRepositorySourceType;
+  sourceGroupUrl: string;
+  sourceGroupRef: string;
+  sourceGroupOutcome: SourceGroupPreviewOutcome | null;
+  sourceGroupError: string | null;
+  sourceGroupActivity: "idle" | "fetching";
   onKindChange: (kind: ImportKind) => void;
   onPreview: (sourcePath: string) => void;
   onApply: () => void;
   onClose: () => void;
   onOpenImportedSkill: () => void;
-  onGitImportSourceChange: (source: string) => void;
-  onGitImportForceFullDepthChange: (force: boolean) => void;
-  onDiscoverGitImport: (source: string, forceFullDepth: boolean) => void;
-  onGitImportSelectionChange: (directoryNames: string[]) => void;
-  onPlanGitImport: () => void;
-  onApplyGitImport: () => void;
-  onOpenImportedGitSkill: (skillId: string) => void;
+  onSourceGroupTypeChange: (sourceType: GitRepositorySourceType) => void;
+  onSourceGroupUrlChange: (sourceUrl: string) => void;
+  onSourceGroupRefChange: (trackingRef: string) => void;
+  onFetchLatestAndManage: () => void;
 }) {
   const { t } = useLocale();
   const [sourcePath, setSourcePath] = useState("");
@@ -1155,16 +1126,10 @@ function LinkImportSheet({
   const primaryButton = useRef<HTMLButtonElement>(null);
   const isDiscovering = activity === "discovering";
   const isApplying = activity === "applying";
-  const isRunning = activity !== "idle" || gitImportActivity !== "idle";
+  const isRunning = activity !== "idle" || sourceGroupActivity !== "idle";
   const isGit = kind === "git";
-  const gitIsApplying = gitImportActivity === "applying";
-  const gitStep = gitImportResult
-    ? "result"
-    : gitImportPreview
-      ? "preview"
-      : gitImportDiscovery
-        ? "discover"
-        : "source";
+  const sourceGroupIsFetching = sourceGroupActivity === "fetching";
+  const gitStep = sourceGroupOutcome?.kind === "preview" ? "preview" : "source";
   const currentStep = isGit
     ? gitStep
     : result
@@ -1176,27 +1141,21 @@ function LinkImportSheet({
           : "source";
 
   useLayoutEffect(() => {
-    if (result || preview || gitImportResult || gitImportPreview) {
+    if (result || preview || sourceGroupOutcome?.kind === "preview") {
       primaryButton.current?.focus();
     } else {
       sourceInput.current?.focus();
     }
-  }, [preview, result, gitImportPreview, gitImportResult]);
+  }, [preview, result, sourceGroupOutcome]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isApplying && !gitIsApplying) onClose();
+      if (event.key === "Escape" && !isApplying && !sourceGroupIsFetching)
+        onClose();
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isApplying, gitIsApplying, onClose]);
-
-  function toggleGitCandidate(directoryName: string, checked: boolean) {
-    const next = checked
-      ? [...gitImportSelected, directoryName]
-      : gitImportSelected.filter((name) => name !== directoryName);
-    onGitImportSelectionChange(next);
-  }
+  }, [isApplying, sourceGroupIsFetching, onClose]);
 
   return (
     <div
@@ -1205,7 +1164,7 @@ function LinkImportSheet({
         if (
           event.currentTarget === event.target &&
           !isApplying &&
-          !gitIsApplying
+          !sourceGroupIsFetching
         )
           onClose();
       }}
@@ -1217,11 +1176,9 @@ function LinkImportSheet({
         aria-label={
           result
             ? t("library.import.dialog_link")
-            : gitImportResult
-              ? t("library.import.dialog_git")
-              : isGit
-                ? t("library.import.dialog_from_git")
-                : t("library.import.dialog_link_import")
+            : isGit
+              ? t("library.import.dialog_from_git")
+              : t("library.import.dialog_link_import")
         }
       >
         <ol
@@ -1240,27 +1197,22 @@ function LinkImportSheet({
           )}
         </ol>
         {isGit ? (
-          <GitImportFlow
-            source={gitImportSource}
-            forceFullDepth={gitImportForceFullDepth}
-            discovery={gitImportDiscovery}
-            selected={gitImportSelected}
-            preview={gitImportPreview}
-            result={gitImportResult}
-            error={gitImportError}
-            activity={gitImportActivity}
-            onSourceChange={onGitImportSourceChange}
-            onForceFullDepthChange={onGitImportForceFullDepthChange}
-            onDiscover={onDiscoverGitImport}
-            onSelectionChange={toggleGitCandidate}
-            onPlan={onPlanGitImport}
-            onApply={onApplyGitImport}
-            onClose={onClose}
-            onKindChange={onKindChange}
-            onOpenImportedSkill={onOpenImportedGitSkill}
-            primaryButton={primaryButton}
-            sourceInput={sourceInput}
-          />
+          <>
+            <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
+            <SourceGroupPreviewFlow
+              sourceType={sourceGroupType}
+              sourceUrl={sourceGroupUrl}
+              trackingRef={sourceGroupRef}
+              outcome={sourceGroupOutcome}
+              error={sourceGroupError}
+              activity={sourceGroupActivity}
+              onSourceTypeChange={onSourceGroupTypeChange}
+              onSourceUrlChange={onSourceGroupUrlChange}
+              onTrackingRefChange={onSourceGroupRefChange}
+              onFetch={onFetchLatestAndManage}
+              onClose={onClose}
+            />
+          </>
         ) : result ? (
           <>
             <div className="activation-sheet-heading">
@@ -1446,288 +1398,6 @@ function SourceKindSwitch({
         {t("library.import.install_git")}
       </button>
     </div>
-  );
-}
-
-function GitImportFlow({
-  source,
-  forceFullDepth,
-  discovery,
-  selected,
-  preview,
-  result,
-  error,
-  activity,
-  onSourceChange,
-  onForceFullDepthChange,
-  onDiscover,
-  onSelectionChange,
-  onPlan,
-  onApply,
-  onClose,
-  onKindChange,
-  onOpenImportedSkill,
-  primaryButton,
-  sourceInput,
-}: {
-  source: string;
-  forceFullDepth: boolean;
-  discovery: GitImportDiscovery | null;
-  selected: string[];
-  preview: GitImportSelectionPreview | null;
-  result: GitImportSelectionResult | null;
-  error: string | null;
-  activity: "idle" | "discovering" | "planning" | "applying";
-  onSourceChange: (source: string) => void;
-  onForceFullDepthChange: (force: boolean) => void;
-  onDiscover: (source: string, forceFullDepth: boolean) => void;
-  onSelectionChange: (directoryName: string, checked: boolean) => void;
-  onPlan: () => void;
-  onApply: () => void;
-  onClose: () => void;
-  onKindChange: (kind: ImportKind) => void;
-  onOpenImportedSkill: (skillId: string) => void;
-  primaryButton: React.RefObject<HTMLButtonElement | null>;
-  sourceInput: React.RefObject<HTMLInputElement | null>;
-}) {
-  const { t, tPlural } = useLocale();
-  const isBusy = activity !== "idle";
-  const candidates = discovery?.candidates ?? [];
-  const selectedCount = selected.length;
-
-  if (result) {
-    return (
-      <>
-        <div className="activation-sheet-heading">
-          <span className="eyebrow">
-            {t("library.import.complete_eyebrow")}
-          </span>
-          <h2>
-            {tPlural("library.import.git_complete_title", result.items.length)}
-          </h2>
-          <p>
-            {t("library.import.git_installed", {
-              source: preview?.repoUrl ?? discovery?.repoUrl ?? "Git",
-              commit: shortCommit(
-                preview?.resolvedCommit ?? discovery?.resolvedCommit ?? "",
-              ),
-            })}
-          </p>
-        </div>
-        <ul className="git-import-results">
-          {result.items.map((item) => (
-            <li key={item.skillId}>
-              <span>{item.directoryName}</span>
-              <button
-                type="button"
-                onClick={() => onOpenImportedSkill(item.skillId)}
-              >
-                {t("library.import.view_in_library")}
-              </button>
-            </li>
-          ))}
-        </ul>
-        <div className="activation-sheet-actions">
-          <button type="button" disabled={isBusy} onClick={onClose}>
-            {t("library.import.close")}
-          </button>
-        </div>
-      </>
-    );
-  }
-
-  if (preview) {
-    const blocked = preview.items.some((item) => !item.canApply);
-    return (
-      <>
-        <div className="activation-sheet-heading">
-          <span className="eyebrow">
-            {t("library.import.git_preview_eyebrow")}
-          </span>
-          <h2>
-            {tPlural("library.import.preview_count", preview.items.length)}
-          </h2>
-          <p>
-            {preview.repoUrl} ·{" "}
-            <code>{shortCommit(preview.resolvedCommit)}</code>
-          </p>
-        </div>
-        <ul className="git-import-candidates git-import-preview-list">
-          {preview.items.map((item) => (
-            <li key={item.directoryName}>
-              <div>
-                <strong>{item.directoryName}</strong>
-                <span className="candidate-path">
-                  {item.skillPath || t("library.import.repo_root")}
-                </span>
-              </div>
-              {item.conflict ? (
-                <span className="candidate-conflict" role="alert">
-                  {t("library.import.conflict_with", {
-                    name: item.conflict.directoryName,
-                  })}
-                </span>
-              ) : (
-                <span className="candidate-clear">
-                  {t("library.adopt.ready")}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-        {blocked ? (
-          <div className="import-conflict" role="alert">
-            <strong>{t("library.import.conflict_heading")}</strong>
-            <span>{t("library.import.git_conflict_body")}</span>
-          </div>
-        ) : null}
-        <div className="activation-warning import-risk" role="status">
-          <strong>{t("library.import.review_instructions")}</strong>
-          <span>{t("library.import.review_git_body")}</span>
-        </div>
-        {error ? (
-          <div className="activation-error" role="alert">
-            <strong>{t("library.import.unchanged")}</strong>
-            <span>{error}</span>
-          </div>
-        ) : null}
-        <div className="activation-sheet-actions">
-          <button type="button" disabled={isBusy} onClick={onClose}>
-            {t("library.import.cancel")}
-          </button>
-          <button
-            ref={primaryButton}
-            type="button"
-            className="activation-confirm-button"
-            disabled={!preview.canApply || isBusy}
-            onClick={onApply}
-          >
-            {isBusy
-              ? t("library.import.importing")
-              : tPlural("library.import.install_count", selectedCount)}
-          </button>
-        </div>
-      </>
-    );
-  }
-
-  if (discovery) {
-    return (
-      <>
-        <div className="activation-sheet-heading">
-          <span className="eyebrow">
-            {t("library.import.discover_eyebrow")}
-          </span>
-          <h2>{tPlural("library.import.found_count", candidates.length)}</h2>
-          <p>
-            {discovery.repoUrl} ·{" "}
-            <code>{shortCommit(discovery.resolvedCommit)}</code>
-            {discovery.truncated ? t("library.import.list_truncated") : ""}
-          </p>
-        </div>
-        <ul className="git-import-candidates">
-          {candidates.map((candidate) => (
-            <li key={`${candidate.directoryName}:${candidate.skillPath}`}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={selected.includes(candidate.directoryName)}
-                  onChange={(event) =>
-                    onSelectionChange(
-                      candidate.directoryName,
-                      event.currentTarget.checked,
-                    )
-                  }
-                />
-                <span>
-                  <strong>{candidate.directoryName}</strong>
-                  <span className="candidate-path">
-                    {candidate.skillPath || t("library.import.repo_root")}
-                  </span>
-                </span>
-              </label>
-            </li>
-          ))}
-        </ul>
-        {error ? (
-          <div className="activation-error" role="alert">
-            <strong>{t("library.import.discovery_failed")}</strong>
-            <span>{error}</span>
-          </div>
-        ) : null}
-        <div className="activation-sheet-actions">
-          <button type="button" disabled={isBusy} onClick={onClose}>
-            {t("library.import.cancel")}
-          </button>
-          <button
-            ref={primaryButton}
-            type="button"
-            className="activation-confirm-button"
-            disabled={selectedCount === 0 || isBusy}
-            onClick={onPlan}
-          >
-            {activity === "planning"
-              ? t("library.adopt.preparing")
-              : tPlural("library.import.preview_count", selectedCount)}
-          </button>
-        </div>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <div className="activation-sheet-heading">
-        <span className="eyebrow">{t("library.import.git_eyebrow")}</span>
-        <h2>{t("library.import.git_title")}</h2>
-        <p>{t("library.import.git_body")}</p>
-      </div>
-      <SourceKindSwitch kind="git" onKindChange={onKindChange} />
-      <label className="import-source-field">
-        <span>{t("library.import.repo_label")}</span>
-        <input
-          ref={sourceInput}
-          type="text"
-          value={source}
-          disabled={isBusy}
-          placeholder="vercel-labs/skills"
-          onChange={(event) => onSourceChange(event.currentTarget.value)}
-        />
-      </label>
-      <label className="import-option">
-        <input
-          type="checkbox"
-          checked={forceFullDepth}
-          disabled={isBusy}
-          onChange={(event) =>
-            onForceFullDepthChange(event.currentTarget.checked)
-          }
-        />
-        <span>{t("library.import.force_full_depth")}</span>
-      </label>
-      {error ? (
-        <div className="activation-error" role="alert">
-          <strong>{t("library.import.source_unavailable")}</strong>
-          <span>{error}</span>
-        </div>
-      ) : null}
-      <div className="activation-sheet-actions">
-        <button type="button" disabled={isBusy} onClick={onClose}>
-          {t("library.import.cancel")}
-        </button>
-        <button
-          ref={primaryButton}
-          type="button"
-          className="activation-confirm-button"
-          disabled={!source.trim() || isBusy}
-          onClick={() => onDiscover(source, forceFullDepth)}
-        >
-          {activity === "discovering"
-            ? t("library.import.fetching")
-            : t("library.import.discover_button")}
-        </button>
-      </div>
-    </>
   );
 }
 
