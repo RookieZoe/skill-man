@@ -1627,7 +1627,6 @@ impl FixtureRecoveryService {
         match (&expected, &report.home_identity) {
             (Some(expected), Some(actual))
                 if actual.home_id == expected.home_id
-                    && actual.volume_fsid == expected.volume_fsid
                     && actual.volume_uuid == expected.volume_uuid => {}
             (Some(_), _) => {
                 return Err("the Catalog identity does not match the binding".into());
@@ -2625,9 +2624,9 @@ mod tests {
             other => panic!("expected NotApplicable, got {other:?}"),
         }
 
-        // Identity mismatch (volume changed): Restore never applies.
+        // Identity mismatch (persistent volume UUID changed): Restore never applies.
         let mut files = restore_files(&home);
-        files.binding.current.as_mut().unwrap().volume_fsid = "other-fsid".into();
+        files.binding.current.as_mut().unwrap().volume_uuid = "uuid-other".into();
         let service = restore_service(
             dir.path(),
             Arc::new(MemoryStateStore(Mutex::new(files))),

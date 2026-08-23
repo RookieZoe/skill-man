@@ -748,7 +748,7 @@ impl HomeBindingService {
         })?;
         let bound_at = op.created_at.clone();
         let volume = self.require_volume(&path)?;
-        match op.cursor.as_deref() {
+        let persisted_volume = match op.cursor.as_deref() {
             None | Some(cursors::PREPARING) | Some(cursors::CREATED) | Some(cursors::VERIFIED) => {
                 self.ensure_candidate_complete(
                     &op.operation_id,
@@ -756,7 +756,7 @@ impl HomeBindingService {
                     &path,
                     &volume,
                     &bound_at,
-                )?;
+                )?
             }
             Some(cursors::COMMITTED) => {
                 self.finish_operation(&op.operation_id, cursors::COMMITTED)?;
@@ -767,8 +767,8 @@ impl HomeBindingService {
                     "unknown candidate cursor {other:?}"
                 )));
             }
-        }
-        self.commit_locator(&home_id, &path, &volume, &bound_at)?;
+        };
+        self.commit_locator(&home_id, &path, &persisted_volume, &bound_at)?;
         self.finish_operation(&op.operation_id, cursors::COMMITTED)?;
         Ok(self.bootstrap.inspect())
     }
@@ -829,7 +829,7 @@ impl HomeBindingService {
         path: &Path,
         volume: &VolumeIdentity,
         bound_at: &str,
-    ) -> Result<(), HomeBindingError> {
+    ) -> Result<VolumeIdentity, HomeBindingError> {
         self.ensure_candidate_created(operation_id, home_id, path, volume, bound_at)?;
         self.step_verify_candidate(operation_id, home_id, path, volume, bound_at)
     }
@@ -942,10 +942,7 @@ impl HomeBindingService {
                         "the candidate Catalog has no Home identity".into(),
                     )
                 })?;
-                if identity.home_id != *home_id
-                    || identity.volume_fsid != volume.fsid
-                    || identity.volume_uuid != volume.uuid
-                {
+                if identity.home_id != *home_id || identity.volume_uuid != volume.uuid {
                     return Err(HomeBindingError::AmbiguousState(
                         "the candidate Catalog identity does not match the operation".into(),
                     ));
@@ -1136,7 +1133,7 @@ impl HomeBindingService {
         path: &Path,
         volume: &VolumeIdentity,
         bound_at: &str,
-    ) -> Result<(), HomeBindingError> {
+    ) -> Result<VolumeIdentity, HomeBindingError> {
         let catalog_path = path.join(&self.config.catalog_file_name);
         let report =
             self.probe
@@ -1173,10 +1170,7 @@ impl HomeBindingService {
                 message: "the candidate Catalog has no Home identity".into(),
             });
         };
-        if identity.home_id != *home_id
-            || identity.volume_fsid != volume.fsid
-            || identity.volume_uuid != volume.uuid
-        {
+        if identity.home_id != *home_id || identity.volume_uuid != volume.uuid {
             return Err(HomeBindingError::StepFailed {
                 cursor: cursors::VERIFIED.into(),
                 message: "the candidate Catalog identity does not match the binding".into(),
@@ -1193,7 +1187,6 @@ impl HomeBindingService {
                 message: "the Home marker is missing or invalid".into(),
             })?;
         if marker.home_id != *home_id
-            || marker.volume_fsid != volume.fsid
             || marker.volume_uuid != volume.uuid
             || marker.created_at != bound_at
         {
@@ -1215,7 +1208,13 @@ impl HomeBindingService {
             }
         }
         self.set_cursor(operation_id, cursors::VERIFIED)?;
-        Ok(())
+        Ok(VolumeIdentity {
+            // `fsid` is only a mount-scoped diagnostic. Retain the Catalog
+            // value through crash recovery so `open_bound` sees one coherent
+            // persistent identity after the next restart.
+            fsid: identity.volume_fsid.clone(),
+            uuid: identity.volume_uuid.clone(),
+        })
     }
 
     /// The locator atomic write is the single binding commit point

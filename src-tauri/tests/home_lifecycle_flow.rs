@@ -23,9 +23,13 @@ use skill_man_lib::core::fixture_recovery::{
     FixtureRecoveryService, RestoreEligibility, RestoreReason, SystemFixtureClassifier,
 };
 use skill_man_lib::core::home::{BoundHome, HomeId, HomeMarker, VolumeIdentity};
-use skill_man_lib::core::home_binding::{CandidateMode, HomeBindingConfig, HomeBindingService};
+use skill_man_lib::core::home_binding::{
+    CandidateMode, HOME_CANDIDATE_KIND, HomeBindingConfig, HomeBindingService,
+};
 use skill_man_lib::core::home_lifecycle::{HomeLifecycleError, HomeLifecycleService};
-use skill_man_lib::seams::app_state_store::AppStateStore;
+use skill_man_lib::seams::app_state_store::{
+    AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
+};
 use skill_man_lib::seams::catalog_probe::CatalogProbe;
 use skill_man_lib::seams::locale_store::{LocaleSelection, LocaleStore};
 use skill_man_lib::seams::volume_identity::{VolumeIdentityError, VolumeIdentitySource};
@@ -195,10 +199,7 @@ fn compose(home_path: Option<&Path>) -> Composition {
     ));
     let binding = Arc::new(HomeBindingService::new(
         app_state,
-        Arc::new(ToggleVolumeIdentitySource::new(Some(VolumeIdentity {
-            fsid: TEST_FSID.into(),
-            uuid: TEST_UUID.into(),
-        }))),
+        volume.clone(),
         probe,
         filesystem,
         Arc::new(SystemFixtureClassifier::new(
@@ -296,8 +297,8 @@ fn reconnect_never_rebinds_a_mismatched_volume() {
     // The volume comes back with a DIFFERENT identity: still Mismatch, and
     // the locator is never rewritten.
     composition.volume.set(Some(VolumeIdentity {
-        fsid: "other-fsid".into(),
-        uuid: TEST_UUID.into(),
+        fsid: TEST_FSID.into(),
+        uuid: "other-uuid".into(),
     }));
     match composition
         .lifecycle
@@ -320,6 +321,94 @@ fn reconnect_never_rebinds_a_mismatched_volume() {
             .expect("reconnect"),
         HOME_ID,
     );
+}
+
+#[test]
+fn candidate_recovery_keeps_the_catalog_fsid_after_a_same_uuid_restart() {
+    let composition = compose(None);
+    let candidate_path = composition.root.join("candidate-after-crash");
+    let candidate = BoundHome {
+        home_id: HomeId("a1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+        path: candidate_path.clone(),
+        volume_fsid: TEST_FSID.into(),
+        volume_uuid: TEST_UUID.into(),
+        bound_at: "2026-08-01T00:00:00Z".into(),
+    };
+    std::fs::create_dir_all(&candidate_path).expect("candidate root");
+    for directory in ["skills", "remotes", "operations", "cache", "staging"] {
+        std::fs::create_dir_all(candidate_path.join(directory)).expect("candidate layout");
+    }
+    std::fs::write(
+        candidate_path.join(HomeMarker::FILE_NAME),
+        serde_json::to_string_pretty(&HomeMarker {
+            schema_version: HomeMarker::SCHEMA_VERSION,
+            home_id: candidate.home_id.clone(),
+            volume_fsid: candidate.volume_fsid.clone(),
+            volume_uuid: candidate.volume_uuid.clone(),
+            created_at: candidate.bound_at.clone(),
+        })
+        .expect("candidate marker JSON"),
+    )
+    .expect("candidate marker");
+    let _catalog =
+        SqliteCatalogStore::create_bound(&candidate, &candidate_path.join(CATALOG_FILE_NAME))
+            .expect("candidate Catalog");
+
+    let store = AppStateStoreFileSystem::new(composition.state_dir.clone());
+    store
+        .write_locator(&HomeBindingFile {
+            schema_version: 1,
+            current: None,
+            abandoned: vec![],
+        })
+        .expect("unconfigured locator");
+    store
+        .write_recovery_ledger(&RecoveryLedgerFile {
+            schema_version: 1,
+            active: Some(RecoveryOperationRecord {
+                operation_id: "candidate-after-crash".into(),
+                kind: HOME_CANDIDATE_KIND.into(),
+                home_id: Some(candidate.home_id.clone()),
+                live_path: Some(candidate_path.clone()),
+                prepared_path: None,
+                snapshot_path: None,
+                manifest_hash: None,
+                external_probe: None,
+                cursor: Some("verified".into()),
+                commit_point: None,
+                created_at: candidate.bound_at.clone(),
+            }),
+            completed: vec![],
+        })
+        .expect("candidate recovery ledger");
+
+    // APFS can assign a new mount-scoped fsid after a restart while the
+    // persistent volume UUID remains unchanged.
+    composition.volume.set(Some(VolumeIdentity {
+        fsid: "fsid-after-restart".into(),
+        uuid: TEST_UUID.into(),
+    }));
+    let snapshot = composition
+        .binding
+        .continue_candidate("candidate-after-crash")
+        .expect("continue candidate");
+    assert_bound(&snapshot, &candidate.home_id.0);
+
+    let locator = composition.locator();
+    let current = locator.current.expect("committed locator");
+    assert_eq!(current.volume_fsid, TEST_FSID);
+    assert_eq!(current.volume_uuid, TEST_UUID);
+    SqliteCatalogStore::open_bound(
+        &BoundHome {
+            home_id: current.home_id,
+            path: current.path,
+            volume_fsid: current.volume_fsid,
+            volume_uuid: current.volume_uuid,
+            bound_at: current.bound_at,
+        },
+        &candidate_path.join(CATALOG_FILE_NAME),
+    )
+    .expect("the recovered binding reopens the Catalog writable");
 }
 
 // -- Restore Bound Home -----------------------------------------------------
@@ -469,8 +558,8 @@ fn restore_is_refused_for_a_healthy_or_mismatched_home() {
 
     // Mismatched volume: Restore never applies (Abandon is the only exit).
     composition.volume.set(Some(VolumeIdentity {
-        fsid: "other-fsid".into(),
-        uuid: TEST_UUID.into(),
+        fsid: TEST_FSID.into(),
+        uuid: "other-uuid".into(),
     }));
     assert!(matches!(
         composition.recovery.restore_eligibility().expect("probe"),

@@ -441,8 +441,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let home = dir.path().join("home");
         let other_volume = VolumeIdentity {
-            fsid: "other-fsid".into(),
-            uuid: "uuid-1".into(),
+            fsid: "fsid-1".into(),
+            uuid: "other-uuid".into(),
         };
         marker(dir.path(), &home, &other_volume);
         let files = bound_files(&home, &volume());

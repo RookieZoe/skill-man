@@ -1,7 +1,8 @@
-//! Stable volume identity seam (§4.2): `volume_fsid + volume_uuid` prove a
-//! Home path stays on the same volume. Either value being unavailable makes a
-//! Home path unconfirmable; the macOS adapter reads statfs plus the APFS
-//! volume UUID, a deterministic adapter drives tests.
+//! Volume identity seam (§4.2): the APFS `volume_uuid` proves a Home path
+//! remains on the same persistent volume. `volume_fsid` is retained as
+//! mount-scoped diagnostic data, because macOS may change it after restart.
+//! Both values are collected by the macOS adapter; an unavailable UUID makes
+//! a Home path unconfirmable.
 
 use std::path::Path;
 

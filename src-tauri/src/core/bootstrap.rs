@@ -328,15 +328,16 @@ impl BootstrapService {
                 };
             }
         };
-        if volume.fsid != current.volume_fsid || volume.uuid != current.volume_uuid {
+        if !volume.matches_persisted_uuid(&current.volume_uuid) {
             return BootstrapSnapshot::HomeIdentityMismatch {
                 home_id,
                 path,
                 diagnostic: Some(BootstrapDiagnostic::new(
                     "volume_identity_mismatch",
                     format!(
-                        "bound volume ({} / {}) differs from current ({} / {})",
-                        current.volume_fsid, current.volume_uuid, volume.fsid, volume.uuid
+                        "bound volume UUID ({}) differs from current ({}); \
+                         statfs fsid changed from {} to {}",
+                        current.volume_uuid, volume.uuid, current.volume_fsid, volume.fsid
                     ),
                 )),
             };
@@ -391,7 +392,7 @@ impl BootstrapService {
                 };
             }
         };
-        if marker.home_id != current.home_id || !marker.matches_volume(&volume) {
+        if marker.home_id != current.home_id || !marker.matches_persistent_volume(&volume) {
             return BootstrapSnapshot::HomeIdentityMismatch {
                 home_id,
                 path,
@@ -473,7 +474,6 @@ impl BootstrapService {
             };
         };
         if catalog_identity.home_id != current.home_id
-            || catalog_identity.volume_fsid != current.volume_fsid
             || catalog_identity.volume_uuid != current.volume_uuid
         {
             return BootstrapSnapshot::HomeIdentityMismatch {
@@ -1242,6 +1242,33 @@ mod tests {
             }
             other => panic!("expected HomeIdentityMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn changed_statfs_fsid_with_the_same_volume_uuid_remains_bound() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        let service = service(
+            MemoryAppStateStore::new(bound_files(&home)),
+            FixedVolumeIdentitySource {
+                volume: Some(VolumeIdentity {
+                    fsid: "fsid-after-reboot".into(),
+                    uuid: "uuid-1".into(),
+                }),
+                fail: false,
+            },
+            MemoryCatalogProbe::new(probe_report(5, Some(matching_identity()))),
+            Some(&valid_marker()),
+            &home,
+        );
+
+        assert!(matches!(
+            service.inspect(),
+            BootstrapSnapshot::Bound {
+                catalog_access: CatalogAccess::ReadWrite,
+                ..
+            }
+        ));
     }
 
     #[test]

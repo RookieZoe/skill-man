@@ -32,12 +32,21 @@ impl HomeId {
     }
 }
 
-/// Stable volume identity: `fsid` (statfs) plus the APFS volume UUID. Both
-/// values are required before a Home path can be confirmed.
+/// Volume facts observed for a path. `fsid` is mount-scoped diagnostic data;
+/// APFS `uuid` is the persistent volume identity used after a restart.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VolumeIdentity {
     pub fsid: String,
     pub uuid: String,
+}
+
+impl VolumeIdentity {
+    /// Compare the persistent part of a recorded volume identity. macOS can
+    /// assign a new `statfs.f_fsid` after restart, so using it to restore a
+    /// Home would reject the same APFS volume.
+    pub fn matches_persisted_uuid(&self, persisted_uuid: &str) -> bool {
+        self.uuid == persisted_uuid
+    }
 }
 
 /// The verified Home value object. Construction happens only inside the
@@ -95,8 +104,8 @@ impl HomeMarker {
         Some(marker)
     }
 
-    pub fn matches_volume(&self, volume: &VolumeIdentity) -> bool {
-        self.volume_fsid == volume.fsid && self.volume_uuid == volume.uuid
+    pub fn matches_persistent_volume(&self, volume: &VolumeIdentity) -> bool {
+        volume.matches_persisted_uuid(&self.volume_uuid)
     }
 }
 
@@ -144,9 +153,13 @@ mod tests {
             "created_at": "2026-08-01T00:00:00Z"
         }"#;
         let marker = HomeMarker::parse(valid).expect("valid marker parses");
-        assert!(marker.matches_volume(&VolumeIdentity {
-            fsid: "fsid-1".into(),
+        assert!(marker.matches_persistent_volume(&VolumeIdentity {
+            fsid: "fsid-after-reboot".into(),
             uuid: "uuid-1".into(),
+        }));
+        assert!(!marker.matches_persistent_volume(&VolumeIdentity {
+            fsid: "fsid-1".into(),
+            uuid: "uuid-other".into(),
         }));
 
         let bad_schema = valid.replace("\"schema_version\": 1", "\"schema_version\": 2");
