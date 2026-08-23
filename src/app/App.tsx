@@ -46,6 +46,7 @@ import type {
   SkillDetail,
   SkillSummary,
   SourceGroupPreviewOutcome,
+  SourceTransitionResult,
   StartupAgent,
 } from "./catalog-client";
 
@@ -125,6 +126,14 @@ const SOURCE_GROUP_OPERATION_COPIES = {
   fetching: {
     title: "library.source_group.fetching",
     detail: "operation.detail.import.git.discover",
+  },
+  confirming: {
+    title: "library.source_group.confirming",
+    detail: "operation.detail.import.git.apply",
+  },
+  undoing: {
+    title: "library.source_group.undoing",
+    detail: "operation.detail.import.git.undo",
   },
 } as const satisfies Record<string, OperationCopy>;
 
@@ -265,9 +274,11 @@ export function App({ client }: AppProps) {
   const [sourceGroupRef, setSourceGroupRef] = useState("");
   const [sourceGroupOutcome, setSourceGroupOutcome] =
     useState<SourceGroupPreviewOutcome | null>(null);
+  const [sourceTransitionResult, setSourceTransitionResult] =
+    useState<SourceTransitionResult | null>(null);
   const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
   const [sourceGroupActivity, setSourceGroupActivity] = useState<
-    "idle" | "fetching"
+    "idle" | "fetching" | "confirming" | "undoing"
   >("idle");
   const sourceGroupRunId = useRef(0);
   const [relocatePanel, setRelocatePanel] = useState<RelocatePanelState>({
@@ -799,6 +810,7 @@ export function App({ client }: AppProps) {
     setSourceGroupUrl("");
     setSourceGroupRef("");
     setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
     setImportKind("link");
@@ -810,6 +822,7 @@ export function App({ client }: AppProps) {
     setSourceGroupActivity("fetching");
     setSourceGroupError(null);
     setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
     try {
       const outcome = await client.fetchLatestAndManage({
         sourceType: sourceGroupType,
@@ -828,8 +841,18 @@ export function App({ client }: AppProps) {
   }
 
   async function closeImport() {
-    if (linkImportActivity === "applying" || sourceGroupActivity === "fetching")
+    if (linkImportActivity === "applying" || sourceGroupActivity !== "idle")
       return;
+    if (sourceTransitionResult) {
+      try {
+        await client.finalizeSourceTransition(
+          sourceTransitionResult.operationId,
+        );
+      } catch (reason) {
+        setSourceGroupError(readError(reason, t));
+        return;
+      }
+    }
     linkImportRunId.current += 1;
     sourceGroupRunId.current += 1;
     const linkPlanToken = linkImportPreview?.planToken;
@@ -839,10 +862,59 @@ export function App({ client }: AppProps) {
     setLinkImportError(null);
     setLinkImportActivity("idle");
     setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
     if (linkPlanToken) {
       await client.cancelLinkImport(linkPlanToken).catch(() => undefined);
+    }
+  }
+
+  async function confirmSourceTransition() {
+    if (sourceGroupOutcome?.kind !== "preview") return;
+    const preview = sourceGroupOutcome.preview;
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("confirming");
+    setSourceGroupError(null);
+    try {
+      const result = await client.confirmSourceTransition({
+        sourceType: sourceGroupType,
+        sourceUrl: preview.sourceUrl,
+        trackingRef: preview.trackingRef,
+        expectedResolvedCommit: preview.resolvedCommit,
+      });
+      if (runId !== sourceGroupRunId.current) return;
+      const snapshot = await client.listSkills(filter);
+      if (runId !== sourceGroupRunId.current) return;
+      setSkills(snapshot.items);
+      setSourceTransitionResult(result);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
+  async function undoSourceTransition() {
+    if (!sourceTransitionResult) return;
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("undoing");
+    setSourceGroupError(null);
+    try {
+      await client.undoSourceTransition(sourceTransitionResult.operationId);
+      const snapshot = await client.listSkills(filter);
+      if (runId !== sourceGroupRunId.current) return;
+      setSkills(snapshot.items);
+      setSourceTransitionResult(null);
+      setSourceGroupOutcome(null);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
     }
   }
 
@@ -1527,6 +1599,7 @@ export function App({ client }: AppProps) {
         sourceGroupUrl={sourceGroupUrl}
         sourceGroupRef={sourceGroupRef}
         sourceGroupOutcome={sourceGroupOutcome}
+        sourceTransitionResult={sourceTransitionResult}
         sourceGroupError={sourceGroupError}
         sourceGroupActivity={sourceGroupActivity}
         onFilter={setFilter}
@@ -1561,6 +1634,8 @@ export function App({ client }: AppProps) {
           setSourceGroupError(null);
         }}
         onFetchLatestAndManage={fetchLatestAndManage}
+        onConfirmSourceTransition={confirmSourceTransition}
+        onUndoSourceTransition={undoSourceTransition}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}

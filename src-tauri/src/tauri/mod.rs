@@ -16,6 +16,7 @@ pub mod locale_api;
 pub mod menu;
 pub mod native_message;
 pub mod source_group_preview_api;
+pub mod source_transition_api;
 pub mod startup_api;
 pub mod tray;
 pub mod update_api;

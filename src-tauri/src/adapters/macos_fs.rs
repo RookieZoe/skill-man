@@ -20,7 +20,8 @@ use crate::seams::filesystem::{
     OccupantSnapshot, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
     RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
     RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
-    SkillFingerprint, StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot,
+    SkillFingerprint, SourceTransitionJournal, StagedEntryKind, StagedTreeEntry,
+    StagedTreeSnapshot,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -648,6 +649,18 @@ impl FileSystem for MacOsFileSystem {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(source) => Err(FileSystemError::Io {
                 operation: "inspect directory existence",
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn path_is_occupied(&self, path: &Path) -> Result<bool, FileSystemError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "inspect path occupancy",
                 path: path.to_path_buf(),
                 source,
             }),
@@ -3719,7 +3732,7 @@ impl FileSystem for MacOsFileSystem {
         source: &Path,
         operation_id: &str,
     ) -> Result<PathBuf, FileSystemError> {
-        validate_handoff_operation_id(operation_id)?;
+        validate_isolation_operation_id(operation_id)?;
         let source = self.normalize_configured_path(source)?;
         let source_parent =
             source
@@ -3733,8 +3746,13 @@ impl FileSystem for MacOsFileSystem {
                 .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
                     path: source.clone(),
                 })?;
+        let isolation_prefix = if operation_id.starts_with("source-transition-") {
+            "source-transition"
+        } else {
+            "handoff"
+        };
         let isolated = source_parent.join(format!(
-            ".skill-man-handoff-{operation_id}-{}",
+            ".skill-man-{isolation_prefix}-{operation_id}-{}",
             source_name.to_string_lossy()
         ));
         if fs::symlink_metadata(&isolated).is_ok() {
@@ -3790,7 +3808,9 @@ impl FileSystem for MacOsFileSystem {
             .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
                 path: isolated.clone(),
             })?;
-        if !name.starts_with(".skill-man-handoff-") {
+        if !(name.starts_with(".skill-man-handoff-")
+            || name.starts_with(".skill-man-source-transition-"))
+        {
             return Err(FileSystemError::RecoveryRequired {
                 operation: "discard isolated external source",
                 path: isolated,
@@ -3984,6 +4004,195 @@ impl FileSystem for MacOsFileSystem {
             {
                 return Err(FileSystemError::InvalidConfiguredPath {
                     path: operation_root,
+                });
+            }
+            journals.push(journal);
+        }
+        Ok(journals)
+    }
+
+    fn write_source_transition_journal(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_transition_operation_id(&journal.operation_id)?;
+        let operation =
+            open_source_transition_operation_nofollow(&library_root, &journal.operation_id, true)?
+                .expect("create mode always returns a Source Transition operation directory");
+        let journal_name = CString::new("source-transition-journal.json").expect("static name");
+        let temporary_name = CString::new("source-transition-journal.tmp").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-transition-journal.json");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize Source Transition journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        write_owned_file_atomically_at(
+            &operation.operation,
+            &temporary_name,
+            &journal_name,
+            &journal_path,
+            &bytes,
+            "write Source Transition journal without following links",
+        )?;
+        sync_descriptor(
+            &operation.operation,
+            &operation.operation_path,
+            "sync Source Transition operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync Source Transition operations directory",
+        )
+    }
+
+    fn finish_source_transition_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_transition_operation_id(operation_id)?;
+        let Some(operation) =
+            open_source_transition_operation_nofollow(&library_root, operation_id, false)?
+        else {
+            return Ok(());
+        };
+        let journal_name = CString::new("source-transition-journal.json").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-transition-journal.json");
+        if let Some(journal_bytes) = read_owned_regular_file_at(
+            &operation.operation,
+            &journal_name,
+            &journal_path,
+            "read completed Source Transition journal without following links",
+        )? {
+            let history = open_source_transition_history_root_nofollow(&library_root, true)?;
+            let archive_name = CString::new(format!("{operation_id}.source-transition.json"))
+                .expect("validated operation identifier creates a valid archive name");
+            let temporary_name = CString::new(format!(".{operation_id}.source-transition.tmp"))
+                .expect("validated operation identifier creates a valid archive name");
+            let archive_path = history
+                .path
+                .join(format!("{operation_id}.source-transition.json"));
+            write_owned_file_atomically_at(
+                &history.directory,
+                &temporary_name,
+                &archive_name,
+                &archive_path,
+                &journal_bytes,
+                "write Source Transition history without following links",
+            )?;
+            sync_descriptor(
+                &history.directory,
+                &history.path,
+                "sync Source Transition operation history",
+            )?;
+        }
+        remove_owned_regular_file_at(
+            &operation.operation,
+            &journal_name,
+            &journal_path,
+            "remove completed Source Transition journal without following links",
+        )?;
+        remove_child_directory_at(
+            &operation.root.operations,
+            operation.root.operations_metadata.st_dev,
+            operation.operation_metadata.st_ino,
+            &operation.operation_name,
+            &operation.operation_path,
+            "remove completed Source Transition operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync cleaned Source Transition operations directory",
+        )
+    }
+
+    fn list_source_transition_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<SourceTransitionJournal>, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let Some(operations) =
+            open_source_transition_operations_root_nofollow(&library_root, false)?
+        else {
+            return Ok(Vec::new());
+        };
+        let entries = directory_entry_names(
+            &operations.operations,
+            &operations.operations_path,
+            "enumerate Source Transition recovery journals without following links",
+        )?;
+        let mut journals = Vec::new();
+        for operation_name in entries {
+            let Some(operation_id) = operation_name.to_str() else {
+                continue;
+            };
+            if !operation_id.starts_with("source-transition-") {
+                continue;
+            }
+            validate_source_transition_operation_id(operation_id)?;
+            let operation_name =
+                CString::new(operation_name.as_bytes()).map_err(|source| FileSystemError::Io {
+                    operation: "encode Source Transition recovery operation identifier",
+                    path: operations.operations_path.join(&operation_name),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                })?;
+            let operation_path = operations.operations_path.join(operation_id);
+            let (operation, operation_metadata) = open_directory_at_nofollow(
+                &operations.operations,
+                &operation_name,
+                &operation_path,
+                "open Source Transition recovery operation without following links",
+            )?;
+            if operation_metadata.st_dev != operations.operations_metadata.st_dev {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover Source Transition journal",
+                    path: operation_path,
+                    message:
+                        "the operation directory crosses the owned operations filesystem boundary"
+                            .into(),
+                });
+            }
+            let journal_name = CString::new("source-transition-journal.json").expect("static name");
+            let journal_path = operation_path.join("source-transition-journal.json");
+            let Some(bytes) = read_owned_regular_file_at(
+                &operation,
+                &journal_name,
+                &journal_path,
+                "read Source Transition recovery journal without following links",
+            )?
+            else {
+                continue;
+            };
+            let journal: SourceTransitionJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Source Transition recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            if journal.version != SOURCE_TRANSITION_JOURNAL_VERSION {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover Source Transition journal",
+                    path: journal_path,
+                    message: format!(
+                        "unsupported Source Transition journal version {}; staged content is retained",
+                        journal.version
+                    ),
+                });
+            }
+            validate_source_transition_operation_id(&journal.operation_id)?;
+            if journal.operation_id != operation_id {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_path,
                 });
             }
             journals.push(journal);
@@ -4188,6 +4397,9 @@ impl FileSystem for MacOsFileSystem {
 const REMOTE_PARENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// The durable handoff journal schema this build writes (spec §8.4).
 const HANDOFF_JOURNAL_VERSION: u32 = 1;
+/// The durable whole-source journal schema written for Git Repository
+/// Source transitions. It stays distinct from legacy per-Skill handoff.
+const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 1;
 
 fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;
@@ -4197,6 +4409,24 @@ fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemErr
         });
     }
     Ok(())
+}
+
+fn validate_source_transition_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    validate_operation_id(operation_id)?;
+    if !operation_id.starts_with("source-transition-") {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: PathBuf::from(operation_id),
+        });
+    }
+    Ok(())
+}
+
+fn validate_isolation_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    if operation_id.starts_with("handoff-") {
+        validate_handoff_operation_id(operation_id)
+    } else {
+        validate_source_transition_operation_id(operation_id)
+    }
 }
 
 #[derive(Clone)]
@@ -6525,6 +6755,346 @@ fn directory_entry_names(
     }
 }
 
+/// Pinned descriptors for the owned `<Home>/operations` root. Source
+/// Transition journals are recovery authority, so every operation below this
+/// root must stay descriptor-relative and reject a symlink swap.
+struct SourceTransitionOperationsRoot {
+    operations: OwnedFd,
+    operations_path: PathBuf,
+    operations_metadata: libc::stat,
+}
+
+struct SourceTransitionOperationDirectory {
+    root: SourceTransitionOperationsRoot,
+    operation: OwnedFd,
+    operation_name: CString,
+    operation_path: PathBuf,
+    operation_metadata: libc::stat,
+}
+
+struct SourceTransitionHistoryDirectory {
+    directory: OwnedFd,
+    path: PathBuf,
+}
+
+fn open_source_transition_operations_root_nofollow(
+    library_root: &Path,
+    create: bool,
+) -> Result<Option<SourceTransitionOperationsRoot>, FileSystemError> {
+    let (library, library_metadata) = open_directory_nofollow(
+        library_root,
+        "open Source Transition Library root without following links",
+    )?;
+    let operations_name = CString::new("operations").expect("static name");
+    let operations_path = library_root.join("operations");
+    if create {
+        let created = mkdirat_if_missing(
+            &library,
+            &operations_name,
+            &operations_path,
+            "create Source Transition operations root",
+        )?;
+        if created {
+            sync_descriptor(
+                &library,
+                library_root,
+                "sync Source Transition Library root after operations creation",
+            )?;
+        }
+    }
+    let (operations, operations_metadata) = match open_directory_at_nofollow(
+        &library,
+        &operations_name,
+        &operations_path,
+        "open Source Transition operations root without following links",
+    ) {
+        Ok(opened) => opened,
+        Err(error) if !create && file_system_error_is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if operations_metadata.st_dev != library_metadata.st_dev {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "open Source Transition operations root",
+            path: operations_path,
+            message: "the operations root crosses the owned Library filesystem boundary".into(),
+        });
+    }
+    Ok(Some(SourceTransitionOperationsRoot {
+        operations,
+        operations_path,
+        operations_metadata,
+    }))
+}
+
+fn open_source_transition_operation_nofollow(
+    library_root: &Path,
+    operation_id: &str,
+    create: bool,
+) -> Result<Option<SourceTransitionOperationDirectory>, FileSystemError> {
+    validate_source_transition_operation_id(operation_id)?;
+    let Some(root) = open_source_transition_operations_root_nofollow(library_root, create)? else {
+        return Ok(None);
+    };
+    let operation_name =
+        CString::new(operation_id.as_bytes()).map_err(|source| FileSystemError::Io {
+            operation: "encode Source Transition operation identifier",
+            path: root.operations_path.join(operation_id),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+        })?;
+    let operation_path = root.operations_path.join(operation_id);
+    if create {
+        let created = mkdirat_if_missing(
+            &root.operations,
+            &operation_name,
+            &operation_path,
+            "create Source Transition operation directory",
+        )?;
+        if created {
+            sync_descriptor(
+                &root.operations,
+                &root.operations_path,
+                "sync Source Transition operations root after operation creation",
+            )?;
+        }
+    }
+    let (operation, operation_metadata) = match open_directory_at_nofollow(
+        &root.operations,
+        &operation_name,
+        &operation_path,
+        "open Source Transition operation directory without following links",
+    ) {
+        Ok(opened) => opened,
+        Err(error) if !create && file_system_error_is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if operation_metadata.st_dev != root.operations_metadata.st_dev {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "open Source Transition operation directory",
+            path: operation_path,
+            message: "the operation directory crosses the owned operations filesystem boundary"
+                .into(),
+        });
+    }
+    Ok(Some(SourceTransitionOperationDirectory {
+        root,
+        operation,
+        operation_name,
+        operation_path,
+        operation_metadata,
+    }))
+}
+
+fn open_source_transition_history_root_nofollow(
+    library_root: &Path,
+    create: bool,
+) -> Result<SourceTransitionHistoryDirectory, FileSystemError> {
+    let (library, library_metadata) = open_directory_nofollow(
+        library_root,
+        "open Source Transition Library root for history without following links",
+    )?;
+    let history_name = CString::new("operation-history").expect("static name");
+    let history_path = library_root.join("operation-history");
+    if create {
+        let created = mkdirat_if_missing(
+            &library,
+            &history_name,
+            &history_path,
+            "create Source Transition operation history",
+        )?;
+        if created {
+            sync_descriptor(
+                &library,
+                library_root,
+                "sync Source Transition Library root after history creation",
+            )?;
+        }
+    }
+    let (history, history_metadata) = open_directory_at_nofollow(
+        &library,
+        &history_name,
+        &history_path,
+        "open Source Transition operation history without following links",
+    )?;
+    if history_metadata.st_dev != library_metadata.st_dev {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "open Source Transition operation history",
+            path: history_path,
+            message: "the operation history crosses the owned Library filesystem boundary".into(),
+        });
+    }
+    Ok(SourceTransitionHistoryDirectory {
+        directory: history,
+        path: history_path,
+    })
+}
+
+fn ensure_owned_regular_file(
+    metadata: &libc::stat,
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), FileSystemError> {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG || metadata.st_nlink != 1 {
+        return Err(FileSystemError::RecoveryRequired {
+            operation,
+            path: path.to_path_buf(),
+            message: "the owned journal file is not an unlinked regular file".into(),
+        });
+    }
+    Ok(())
+}
+
+fn read_owned_regular_file_at(
+    parent: &OwnedFd,
+    name: &CString,
+    path: &Path,
+    operation: &'static str,
+) -> Result<Option<Vec<u8>>, FileSystemError> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        let source = std::io::Error::last_os_error();
+        if source.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: a zero `fstat` return initializes the stat value.
+    let metadata = unsafe { metadata.assume_init() };
+    ensure_owned_regular_file(&metadata, path, operation)?;
+    let mut file = fs::File::from(descriptor);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|source| FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(Some(bytes))
+}
+
+fn write_owned_file_atomically_at(
+    parent: &OwnedFd,
+    temporary_name: &CString,
+    final_name: &CString,
+    final_path: &Path,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), FileSystemError> {
+    let parent_path = final_path.parent().unwrap_or(final_path);
+    let temporary_path = parent_path.join(std::ffi::OsStr::from_bytes(temporary_name.as_bytes()));
+    let mut attempts = 0;
+    let descriptor = loop {
+        let descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                temporary_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if descriptor >= 0 {
+            break descriptor;
+        }
+        let source = std::io::Error::last_os_error();
+        if source.kind() != std::io::ErrorKind::AlreadyExists || attempts == 1 {
+            return Err(FileSystemError::Io {
+                operation,
+                path: temporary_path.clone(),
+                source,
+            });
+        }
+        let metadata = metadata_at_nofollow(parent, temporary_name, &temporary_path, operation)?;
+        ensure_owned_regular_file(&metadata, &temporary_path, operation)?;
+        let status = unsafe { libc::unlinkat(parent.as_raw_fd(), temporary_name.as_ptr(), 0) };
+        if status != 0 {
+            return Err(FileSystemError::Io {
+                operation,
+                path: temporary_path.clone(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        attempts += 1;
+    };
+    // SAFETY: `openat` returned a new owned descriptor.
+    let mut file = fs::File::from(unsafe { OwnedFd::from_raw_fd(descriptor) });
+    file.write_all(bytes)
+        .map_err(|source| FileSystemError::Io {
+            operation,
+            path: temporary_path.clone(),
+            source,
+        })?;
+    file.sync_all().map_err(|source| FileSystemError::Io {
+        operation,
+        path: temporary_path.clone(),
+        source,
+    })?;
+    match metadata_at_nofollow(parent, final_name, final_path, operation) {
+        Ok(metadata) => ensure_owned_regular_file(&metadata, final_path, operation)?,
+        Err(error) if file_system_error_is_not_found(&error) => {}
+        Err(error) => return Err(error),
+    }
+    let status = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            temporary_name.as_ptr(),
+            parent.as_raw_fd(),
+            final_name.as_ptr(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(FileSystemError::Io {
+            operation,
+            path: final_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        })
+    }
+}
+
+fn remove_owned_regular_file_at(
+    parent: &OwnedFd,
+    name: &CString,
+    path: &Path,
+    operation: &'static str,
+) -> Result<(), FileSystemError> {
+    let metadata = match metadata_at_nofollow(parent, name, path, operation) {
+        Ok(metadata) => metadata,
+        Err(error) if file_system_error_is_not_found(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    ensure_owned_regular_file(&metadata, path, operation)?;
+    let status = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        })
+    }
+}
+
 fn metadata_at_nofollow(
     directory: &OwnedFd,
     name: &CString,
@@ -6722,11 +7292,14 @@ fn validate_adopt_operation_id(operation_id: &str) -> Result<(), FileSystemError
     Ok(())
 }
 
-/// Staging operation ids: `adopt-*` (Adopt) and `handoff-*` (Ownership
-/// Handoff) both live under the owned Library staging root.
+/// Staging operation ids: Adopt, Ownership Handoff and whole-source
+/// transitions all live under the owned Library staging root.
 fn validate_staging_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;
-    if !(operation_id.starts_with("adopt-") || operation_id.starts_with("handoff-")) {
+    if !(operation_id.starts_with("adopt-")
+        || operation_id.starts_with("handoff-")
+        || operation_id.starts_with("source-transition-"))
+    {
         return Err(FileSystemError::InvalidConfiguredPath {
             path: PathBuf::from(operation_id),
         });

@@ -31,6 +31,7 @@ use skill_man_lib::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, W
 use skill_man_lib::seams::app_state_store::{
     AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
 };
+use skill_man_lib::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION;
 use skill_man_lib::seams::catalog_probe::CatalogProbe;
 use skill_man_lib::seams::catalog_store::CatalogStore;
 use skill_man_lib::seams::filesystem::FileSystem;
@@ -188,9 +189,13 @@ fn seed_legacy_home(home_root: &Path) {
             )
             .expect("drop identity column");
     }
-    // The current schema also carries the Remote Source Parent tables; a
-    // real pre-identity v4 file has none of them.
+    // The current schema also carries the Git Repository Source and Remote
+    // Source Parent tables; a real pre-identity v4 file has none of them.
     for table in [
+        "git_source_release_members",
+        "git_source_members",
+        "git_repository_sources",
+        "git_source_releases",
         "remote_source_parents",
         "remote_source_aliases",
         "remote_bindings",
@@ -276,7 +281,7 @@ fn assert_bound_home(composition: &Composition, expected_path: &Path) {
     let report = SqliteCatalogProbe::new()
         .probe(&expected_path.join(CATALOG_FILE_NAME))
         .expect("probe Catalog");
-    assert_eq!(report.schema_version, Some(6));
+    assert_eq!(report.schema_version, Some(CURRENT_CATALOG_SCHEMA_VERSION));
     let identity = report.home_identity.expect("Catalog identity");
     assert_eq!(identity.home_id, current.home_id);
     assert_eq!(identity.volume_fsid, current.volume_fsid);

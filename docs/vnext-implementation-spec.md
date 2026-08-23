@@ -545,6 +545,7 @@ Source Group Draft
 → Journaled
 → Members Staged
 → Source Isolated
+→ Destinations Reserved              # all Home member names are held before the ownership CAS
 → External Ownership Released   # logical commit: one full-file CAS releases all applicable claims
 → Managed Release Committed
 → Finalized
@@ -691,7 +692,7 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 ## 11. 风险控制与实施纪律
 
 - 任何 ticket 若发现需要改变 Destination、领域不变量或用户可见行为，停止实施并新开决策票；不得在代码 review 中暗改。
-- 已发布的 schema v5、v6 migrations 不重写；后继 Git Repository Source migration 由单一 ticket 持有。运行时 Source Capability Scan 只检查实际结构与 manifest 能力，绝不以 migration/schema version 决定可提升、修复或 release。
+- 已发布的 schema v5、v6 migrations 不重写；schema v7 由 #63 增加 Git Repository Source 的 release/member 结构，且不自动提升已有 Legacy Per-Skill Git State。运行时 Source Capability Scan 只检查实际结构与 manifest 能力，绝不以 migration/schema version 决定可提升、修复或 release。
 - 每个 fault-injection point 使用稳定名称并写入测试矩阵；实现重构不能悄悄删除 crash coverage。
 - 计划 token 必须绑定 bootstrap/write-gate generation、Catalog snapshot、path identity 与该操作专属 evidence；任一变化即 stale。
 - recovery/operation logs 不记录 Skill 正文、token、credential 或 remote response body。

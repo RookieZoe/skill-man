@@ -45,12 +45,15 @@ function renderFlow(outcome: SourceGroupPreviewOutcome | null) {
       sourceUrl="https://github.com/acme/repository"
       trackingRef=""
       outcome={outcome}
+      result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
       onTrackingRefChange={vi.fn()}
       onFetch={vi.fn()}
+      onConfirm={vi.fn()}
+      onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
   );
@@ -70,6 +73,47 @@ test("renders the complete source group without per-member Include controls", ()
   expect(
     screen.queryByRole("button", { name: /include/i }),
   ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Confirm complete Source Release" }),
+  ).toBeInTheDocument();
+});
+
+test("offers only whole-source Undo in the completed result window", async () => {
+  const user = userEvent.setup();
+  const onUndo = vi.fn();
+  render(
+    <SourceGroupPreviewFlow
+      sourceType="github"
+      sourceUrl="https://github.com/acme/repository"
+      trackingRef="main"
+      outcome={preview}
+      result={{
+        operationId: "source-transition-1",
+        releaseId: "source-release-1",
+        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+        memberCount: 2,
+        snapshotVersion: 9,
+        undoAvailable: true,
+      }}
+      error={null}
+      activity="idle"
+      onSourceTypeChange={vi.fn()}
+      onSourceUrlChange={vi.fn()}
+      onTrackingRefChange={vi.fn()}
+      onFetch={vi.fn()}
+      onConfirm={vi.fn()}
+      onUndo={onUndo}
+      onClose={vi.fn()}
+    />,
+  );
+
+  expect(
+    screen.getByText("Whole Source Release is managed"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("source-release-1")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Source Undo" }));
+  expect(onUndo).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
 });
 
 test("requires a ref choice before re-fetching a typed ref conflict", async () => {
@@ -90,12 +134,15 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
           externalOwnershipClaims: [],
         },
       }}
+      result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
       onTrackingRefChange={onTrackingRefChange}
       onFetch={onFetch}
+      onConfirm={vi.fn()}
+      onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
   );
@@ -118,12 +165,15 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
           externalOwnershipClaims: [],
         },
       }}
+      result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
       onTrackingRefChange={onTrackingRefChange}
       onFetch={onFetch}
+      onConfirm={vi.fn()}
+      onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
   );

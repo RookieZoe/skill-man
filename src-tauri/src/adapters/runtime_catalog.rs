@@ -28,6 +28,9 @@ use crate::seams::maintenance_store::{
     MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline,
     RemoveTarget, SkillHealthObservation,
 };
+use crate::seams::source_transition_store::{
+    SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
+};
 
 pub struct RuntimeCatalogStore {
     /// The current SQLite store; `None` means the catalog is closed for
@@ -267,6 +270,56 @@ impl CatalogStore for RuntimeCatalogStore {
             return Ok(Vec::new());
         }
         self.require().recently_enabled_skills(limit)
+    }
+}
+
+impl SourceTransitionStore for RuntimeCatalogStore {
+    fn validate_new_source_transition(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<(), SourceTransitionStoreError> {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().validate_new_source_transition(record)
+    }
+
+    fn commit_source_transition(
+        &self,
+        record: SourceTransitionRecord,
+    ) -> Result<u64, SourceTransitionStoreError> {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().commit_source_transition(record)
+    }
+
+    fn source_transition_is_committed(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError> {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().source_transition_is_committed(record)
+    }
+
+    fn undo_source_transition(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<u64, SourceTransitionStoreError> {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().undo_source_transition(record)
     }
 }
 

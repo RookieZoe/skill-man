@@ -33,6 +33,9 @@ use crate::seams::maintenance_store::{
     SkillHealthObservation,
 };
 use crate::seams::preferences_store::PreferencesStoreError;
+use crate::seams::source_transition_store::{
+    SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
+};
 
 mod prepared;
 pub use prepared::SqlitePreparedCatalogFactory;
@@ -150,6 +153,45 @@ CREATE TABLE remote_bindings (
     last_updated_at INTEGER
 );
 
+CREATE TABLE git_repository_sources (
+    remote_id TEXT PRIMARY KEY REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    tracking_ref TEXT NOT NULL,
+    current_release_id TEXT REFERENCES git_source_releases(release_id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider, canonical_url)
+);
+
+CREATE TABLE git_source_releases (
+    release_id TEXT PRIMARY KEY,
+    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+    tracking_ref TEXT NOT NULL,
+    resolved_commit TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    UNIQUE (remote_id, resolved_commit)
+);
+
+CREATE TABLE git_source_release_members (
+    release_id TEXT NOT NULL REFERENCES git_source_releases(release_id) ON DELETE CASCADE,
+    skill_path TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    tree_hash TEXT NOT NULL,
+    provider_hash TEXT,
+    PRIMARY KEY (release_id, skill_path)
+);
+
+CREATE TABLE git_source_members (
+    skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+    current_skill_path TEXT NOT NULL,
+    remote_baseline_hash TEXT NOT NULL,
+    current_baseline_hash TEXT NOT NULL,
+    last_checked_at INTEGER,
+    last_updated_at INTEGER
+);
+
 CREATE TABLE preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     launch_at_login INTEGER NOT NULL DEFAULT 0 CHECK (launch_at_login IN (0, 1)),
@@ -161,7 +203,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 6, 0);
+VALUES (1, 7, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -206,7 +248,7 @@ pub struct SqliteCatalogStore {
 
 impl SqliteCatalogStore {
     /// Test/binding-internal convenience: opens an existing Catalog, creating
-    /// a fresh v6 file only when the path does not exist. Production
+    /// a fresh current-schema file only when the path does not exist. Production
     /// composition never calls this without a verified `BoundHome`; the
     /// bootstrap authority resolves state read-only first (spec §3.4: a
     /// pre-identity Catalog is only probed, never auto-migrated).
@@ -232,7 +274,7 @@ impl SqliteCatalogStore {
 
         // Pre-identity schemas (v1–v4) may only be probed read-only: the
         // one-time Legacy transition owns their migration (spec §3.4).
-        // Identity-bearing v5 Catalogs migrate in place to v6 below.
+        // Identity-bearing v5+ Catalogs migrate in place to the current schema below.
         if existing_schema_version != 0 && existing_schema_version < 5 {
             let connection = open_read_only(path)?;
             return Ok(Self {
@@ -254,9 +296,11 @@ impl SqliteCatalogStore {
         let mut connection = Connection::open(path).map_err(CatalogStoreOpenError::Open)?;
         configure_connection(&connection)?;
 
-        if existing_schema_version == 0 || existing_schema_version == 5 {
-            // Fresh file: create the current schema. Identity-bearing v5:
-            // migrate in place to v6 (spec §3.4). Ordinary open() never
+        if existing_schema_version == 0
+            || (5..CURRENT_SCHEMA_VERSION).contains(&existing_schema_version)
+        {
+            // Fresh file: create the current schema. Identity-bearing v5+:
+            // migrate in place to the current schema (spec §3.4). Ordinary open() never
             // migrates pre-identity data.
             if let Err(error) = migrate_to_current(&mut connection, existing_schema_version) {
                 connection
@@ -311,13 +355,13 @@ impl SqliteCatalogStore {
     /// the recorded identity against the bound value object (spec §3.4:
     /// `BoundCatalogStore` construction requires the four identity fields to
     /// be present and matching). An identity-bearing v5 Catalog migrates in
-    /// place to v6; anything else is refused.
+    /// place to the current schema; anything else is refused.
     pub fn open_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
         if !has_content(path) {
             return Err(BoundCatalogOpenError::Missing);
         }
         let schema = detect_schema_version(path);
-        if schema != CURRENT_SCHEMA_VERSION && schema != 5 {
+        if !(5..=CURRENT_SCHEMA_VERSION).contains(&schema) {
             return Err(BoundCatalogOpenError::SchemaNotBound { found: schema });
         }
         let mut connection = Connection::open(path).map_err(BoundCatalogOpenError::Open)?;
@@ -330,8 +374,9 @@ impl SqliteCatalogStore {
         {
             return Err(BoundCatalogOpenError::IdentityMismatch);
         }
-        if schema == 5 {
-            migrate_to_current(&mut connection, 5).map_err(BoundCatalogOpenError::Migration)?;
+        if schema < CURRENT_SCHEMA_VERSION {
+            migrate_to_current(&mut connection, schema)
+                .map_err(BoundCatalogOpenError::Migration)?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -343,7 +388,7 @@ impl SqliteCatalogStore {
         })
     }
 
-    /// Create a fresh v6 Catalog carrying `bound`'s identity. The primitive
+    /// Create a fresh current Catalog carrying `bound`'s identity. The primitive
     /// behind the Home Binding flow (ticket #45) and the test Home helper;
     /// refuses an existing file so it can never overwrite real data.
     pub fn create_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
@@ -1299,6 +1344,456 @@ pub struct PersistedSkillDetail {
     pub final_entity_path: PathBuf,
     pub updated_at: String,
     pub file_source_original_path: Option<String>,
+}
+
+impl SourceTransitionStore for SqliteCatalogStore {
+    fn validate_new_source_transition(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<(), SourceTransitionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceTransitionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        validate_new_source_transition(&connection, record)
+    }
+
+    fn commit_source_transition(
+        &self,
+        record: SourceTransitionRecord,
+    ) -> Result<u64, SourceTransitionStoreError> {
+        if record.members.is_empty() {
+            return Err(SourceTransitionStoreError::Conflict(
+                "a Source Release must contain at least one member".into(),
+            ));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceTransitionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+
+        let source_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM remote_source_parents WHERE canonical_url = ?1
+                 )",
+                [&record.canonical_url],
+                |row| row.get(0),
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        if source_exists {
+            if source_transition_matches(&transaction, &record)? {
+                let snapshot_version: i64 = transaction
+                    .query_row(
+                        "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+                transaction
+                    .commit()
+                    .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+                return u64::try_from(snapshot_version).map_err(|_| {
+                    SourceTransitionStoreError::Unavailable(
+                        "negative SQLite snapshot version".into(),
+                    )
+                });
+            }
+            return Err(SourceTransitionStoreError::Conflict(format!(
+                "the canonical repository '{}' already has a source parent",
+                record.canonical_url
+            )));
+        }
+        for member in &record.members {
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT directory_name FROM skills
+                     WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                     LIMIT 1",
+                    params![
+                        member.skill_id.0,
+                        member.directory_name,
+                        member.identity_key
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+            if let Some(directory_name) = existing {
+                return Err(SourceTransitionStoreError::Conflict(format!(
+                    "the Library already contains Managed Skill '{directory_name}'"
+                )));
+            }
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                 VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![record.remote_id, record.canonical_url],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        transaction
+            .execute(
+                "INSERT INTO git_repository_sources (
+                    remote_id, provider, canonical_url, tracking_ref, current_release_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, NULL,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.remote_id,
+                    record.provider,
+                    record.canonical_url,
+                    record.tracking_ref,
+                ],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        transaction
+            .execute(
+                "INSERT INTO git_source_releases (
+                    release_id, remote_id, tracking_ref, resolved_commit, discovered_at
+                 ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    record.release_id,
+                    record.remote_id,
+                    record.tracking_ref,
+                    record.resolved_commit,
+                ],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        for member in &record.members {
+            transaction
+                .execute(
+                    "INSERT INTO git_source_release_members (
+                        release_id, skill_path, skill_name, tree_hash, provider_hash
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        record.release_id,
+                        member.skill_path,
+                        member.directory_name,
+                        member.tree_hash,
+                        member.provider_hash,
+                    ],
+                )
+                .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+            transaction
+                .execute(
+                    "INSERT INTO skills (
+                        id, directory_name, identity_key, display_name, description,
+                        source_kind, library_entry_path, final_entity_path,
+                        recorded_content_hash, health, created_at, updated_at
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5,
+                        'remote_install', ?6, ?7, ?8, 'healthy',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     )",
+                    params![
+                        member.skill_id.0,
+                        member.directory_name,
+                        member.identity_key,
+                        member.display_name,
+                        member.description,
+                        member.library_entry_path.to_string_lossy(),
+                        member.final_entity_path.to_string_lossy(),
+                        member.tree_hash,
+                    ],
+                )
+                .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+            transaction
+                .execute(
+                    "INSERT INTO git_source_members (
+                        skill_id, remote_id, current_skill_path, remote_baseline_hash,
+                        current_baseline_hash, last_checked_at, last_updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch('now'), unixepoch('now'))",
+                    params![
+                        member.skill_id.0,
+                        record.remote_id,
+                        member.skill_path,
+                        member.tree_hash,
+                        member.tree_hash,
+                    ],
+                )
+                .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        }
+        transaction
+            .execute(
+                "UPDATE git_repository_sources
+                 SET current_release_id = ?2,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE remote_id = ?1",
+                params![record.remote_id, record.release_id],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        transaction
+            .commit()
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            SourceTransitionStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn source_transition_is_committed(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceTransitionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        source_transition_matches(&connection, record)
+    }
+
+    fn undo_source_transition(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<u64, SourceTransitionStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceTransitionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        if !source_transition_matches(&transaction, record)? {
+            return Err(SourceTransitionStoreError::Conflict(
+                "the Source Release no longer matches the frozen Source Undo result".into(),
+            ));
+        }
+        for member in &record.members {
+            let deleted = transaction
+                .execute("DELETE FROM skills WHERE id = ?1", [&member.skill_id.0])
+                .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+            if deleted != 1 {
+                return Err(SourceTransitionStoreError::Conflict(format!(
+                    "Managed Skill '{}' is no longer present",
+                    member.directory_name
+                )));
+            }
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM remote_source_parents WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        if deleted != 1 {
+            return Err(SourceTransitionStoreError::Conflict(
+                "the Git Repository Source is no longer present".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        transaction
+            .commit()
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            SourceTransitionStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+}
+
+fn validate_new_source_transition(
+    connection: &Connection,
+    record: &SourceTransitionRecord,
+) -> Result<(), SourceTransitionStoreError> {
+    if record.members.is_empty() {
+        return Err(SourceTransitionStoreError::Conflict(
+            "a Source Release must contain at least one member".into(),
+        ));
+    }
+    let source_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_source_parents WHERE canonical_url = ?1)",
+            [&record.canonical_url],
+            |row| row.get(0),
+        )
+        .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+    if source_exists {
+        return Err(SourceTransitionStoreError::Conflict(format!(
+            "the canonical repository '{}' already has a source parent",
+            record.canonical_url
+        )));
+    }
+    for member in &record.members {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT directory_name FROM skills
+                 WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                 LIMIT 1",
+                params![
+                    member.skill_id.0,
+                    member.directory_name,
+                    member.identity_key
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        if let Some(directory_name) = existing {
+            return Err(SourceTransitionStoreError::Conflict(format!(
+                "the Library already contains Managed Skill '{directory_name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Exact, source-level state check shared by idempotent post-CAS recovery and
+/// Source Undo. A legacy binding, a changed current member, or a later source
+/// release all make this false; callers then leave the whole source untouched.
+type SourceTransitionMemberState = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
+fn source_transition_matches(
+    connection: &Connection,
+    record: &SourceTransitionRecord,
+) -> Result<bool, SourceTransitionStoreError> {
+    if record.members.is_empty() {
+        return Ok(false);
+    }
+    let source: Option<(String, String, String, Option<String>)> = connection
+        .query_row(
+            "SELECT remote_id, provider, tracking_ref, current_release_id
+             FROM git_repository_sources WHERE canonical_url = ?1",
+            [&record.canonical_url],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+    let Some((remote_id, provider, tracking_ref, current_release_id)) = source else {
+        return Ok(false);
+    };
+    if remote_id != record.remote_id
+        || provider != record.provider
+        || tracking_ref != record.tracking_ref
+        || current_release_id.as_deref() != Some(record.release_id.as_str())
+    {
+        return Ok(false);
+    }
+    let release: Option<(String, String)> = connection
+        .query_row(
+            "SELECT remote_id, resolved_commit FROM git_source_releases WHERE release_id = ?1",
+            [&record.release_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+    if release != Some((record.remote_id.clone(), record.resolved_commit.clone())) {
+        return Ok(false);
+    }
+    let release_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = ?1",
+            [&record.release_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+    let current_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_members WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+    if release_count != record.members.len() as i64 || current_count != record.members.len() as i64
+    {
+        return Ok(false);
+    }
+    for member in &record.members {
+        let actual: Option<SourceTransitionMemberState> = connection
+            .query_row(
+                "SELECT s.directory_name, s.identity_key, s.display_name, s.description,
+                        s.library_entry_path, s.final_entity_path, s.recorded_content_hash,
+                        gm.current_skill_path, gm.remote_baseline_hash, gm.current_baseline_hash,
+                        rm.tree_hash,
+                        rm.provider_hash
+                 FROM skills s
+                 JOIN git_source_members gm ON gm.skill_id = s.id
+                 JOIN git_source_release_members rm
+                   ON rm.release_id = ?2 AND rm.skill_path = gm.current_skill_path
+                 WHERE s.id = ?1 AND gm.remote_id = ?3",
+                params![member.skill_id.0, record.release_id, record.remote_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
+        let expected = (
+            member.directory_name.clone(),
+            member.identity_key.clone(),
+            member.display_name.clone(),
+            member.description.clone(),
+            member.library_entry_path.to_string_lossy().into_owned(),
+            member.final_entity_path.to_string_lossy().into_owned(),
+            member.tree_hash.clone(),
+            member.skill_path.clone(),
+            member.tree_hash.clone(),
+            member.tree_hash.clone(),
+            member.tree_hash.clone(),
+            member.provider_hash.clone(),
+        );
+        if actual != Some(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl ImportStore for SqliteCatalogStore {
@@ -2868,6 +3363,49 @@ fn migrate_to_current(
              UPDATE catalog_meta SET schema_version = 6 WHERE singleton = 1;",
         )?;
     }
+    if matches!(existing_schema_version, 4..=6) {
+        // Schema v7: Git Repository Source facts (ADR-0014). Existing v6
+        // parents and per-Skill bindings deliberately remain Legacy; this
+        // migration creates no repository source, release or member rows.
+        transaction.execute_batch(
+            "CREATE TABLE git_repository_sources (
+                remote_id TEXT PRIMARY KEY REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                canonical_url TEXT NOT NULL,
+                tracking_ref TEXT NOT NULL,
+                current_release_id TEXT REFERENCES git_source_releases(release_id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (provider, canonical_url)
+             );
+             CREATE TABLE git_source_releases (
+                release_id TEXT PRIMARY KEY,
+                remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+                tracking_ref TEXT NOT NULL,
+                resolved_commit TEXT NOT NULL,
+                discovered_at TEXT NOT NULL,
+                UNIQUE (remote_id, resolved_commit)
+             );
+             CREATE TABLE git_source_release_members (
+                release_id TEXT NOT NULL REFERENCES git_source_releases(release_id) ON DELETE CASCADE,
+                skill_path TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                tree_hash TEXT NOT NULL,
+                provider_hash TEXT,
+                PRIMARY KEY (release_id, skill_path)
+             );
+             CREATE TABLE git_source_members (
+                skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+                remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+                current_skill_path TEXT NOT NULL,
+                remote_baseline_hash TEXT NOT NULL,
+                current_baseline_hash TEXT NOT NULL,
+                last_checked_at INTEGER,
+                last_updated_at INTEGER
+             );
+             UPDATE catalog_meta SET schema_version = 7 WHERE singleton = 1;",
+        )?;
+    }
     transaction.commit()
 }
 
@@ -3163,6 +3701,102 @@ mod tests {
         assert!(status.diagnostic.is_none());
         let identity = read_catalog_identity(&store.connection().expect("catalog connection"));
         assert!(identity.is_none(), "fresh Catalog has no Home identity");
+        let connection = store.connection().expect("catalog connection");
+        let repository_source_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                    'git_repository_sources',
+                    'git_source_releases',
+                    'git_source_release_members',
+                    'git_source_members'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("repository source tables");
+        assert_eq!(repository_source_tables, 4);
+    }
+
+    #[test]
+    fn commits_a_complete_git_source_release_and_current_members_together() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let store = SqliteCatalogStore::open(&path).expect("fresh open");
+        let version = SourceTransitionStore::commit_source_transition(
+            &store,
+            SourceTransitionRecord {
+                remote_id: "remote-source-1".into(),
+                provider: "github".into(),
+                canonical_url: "https://github.com/acme/source".into(),
+                tracking_ref: "main".into(),
+                release_id: "release-1".into(),
+                resolved_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                members: vec![
+                    crate::seams::source_transition_store::SourceTransitionMemberRecord {
+                        skill_id: SkillId("source-skill-a".into()),
+                        directory_name: "alpha".into(),
+                        identity_key: "alpha".into(),
+                        display_name: "Alpha".into(),
+                        description: "First source member".into(),
+                        library_entry_path: PathBuf::from("/Library/skills/alpha"),
+                        final_entity_path: PathBuf::from("/Library/skills/alpha"),
+                        skill_path: "skills/alpha".into(),
+                        tree_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                        provider_hash: None,
+                    },
+                    crate::seams::source_transition_store::SourceTransitionMemberRecord {
+                        skill_id: SkillId("source-skill-b".into()),
+                        directory_name: "beta".into(),
+                        identity_key: "beta".into(),
+                        display_name: "Beta".into(),
+                        description: "Second source member".into(),
+                        library_entry_path: PathBuf::from("/Library/skills/beta"),
+                        final_entity_path: PathBuf::from("/Library/skills/beta"),
+                        skill_path: "skills/beta".into(),
+                        tree_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                        provider_hash: Some("provider-hash".into()),
+                    },
+                ],
+            },
+        )
+        .expect("commit source transition");
+        assert_eq!(version, 1);
+
+        let connection = store.connection().expect("catalog connection");
+        let current_release: String = connection
+            .query_row(
+                "SELECT current_release_id FROM git_repository_sources
+                 WHERE remote_id = 'remote-source-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("current release");
+        assert_eq!(current_release, "release-1");
+        let release_member_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = 'release-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("release member count");
+        let current_member_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM git_source_members WHERE remote_id = 'remote-source-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("current member count");
+        assert_eq!(release_member_count, 2);
+        assert_eq!(current_member_count, 2);
+        let independent_member_versions: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM remote_bindings WHERE skill_id IN ('source-skill-a', 'source-skill-b')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy binding count");
+        assert_eq!(independent_member_versions, 0);
     }
 
     #[test]
@@ -3218,7 +3852,7 @@ mod tests {
                 .expect("rewind to the v4 shape");
         }
         let mut connection = Connection::open(&path).expect("reopen");
-        migrate_to_current(&mut connection, 4).expect("v4 → v6 migration");
+        migrate_to_current(&mut connection, 4).expect("v4 → current migration");
         let schema: u32 = connection
             .query_row(
                 "SELECT schema_version FROM catalog_meta WHERE singleton = 1",
@@ -3226,7 +3860,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema version");
-        assert_eq!(schema, 6);
+        assert_eq!(schema, CURRENT_SCHEMA_VERSION);
         let first_run: Option<String> = connection
             .query_row(
                 "SELECT first_run_completed_at FROM catalog_meta WHERE singleton = 1",
@@ -3416,7 +4050,7 @@ mod tests {
             );
         }
         let mut connection = Connection::open(&path).expect("reopen");
-        migrate_to_current(&mut connection, 5).expect("v5 → v6 migration");
+        migrate_to_current(&mut connection, 5).expect("v5 → current migration");
 
         let schema: u32 = connection
             .query_row(
@@ -3425,7 +4059,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("schema version");
-        assert_eq!(schema, 6);
+        assert_eq!(schema, CURRENT_SCHEMA_VERSION);
 
         // Integrity and foreign keys passed inside the migration transaction
         // before the old table was dropped; re-verify on the live file.
@@ -3657,7 +4291,10 @@ mod tests {
         }
         let store = SqliteCatalogStore::open(&path).expect("ordinary open migrates v5 in place");
         assert_eq!(store.startup_status().access, StartupAccess::ReadWrite);
-        assert_eq!(store.startup_status().schema_version, 6);
+        assert_eq!(
+            store.startup_status().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
         let remote_installs = store
             .load_remote_installs()
             .expect("migrated remote installs load");
@@ -3698,7 +4335,10 @@ mod tests {
         }
         let store = SqliteCatalogStore::open_bound(&bound, &path).expect("open_bound migrates v5");
         assert_eq!(store.startup_status().access, StartupAccess::ReadWrite);
-        assert_eq!(store.startup_status().schema_version, 6);
+        assert_eq!(
+            store.startup_status().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -3710,12 +4350,15 @@ mod tests {
 
         let opened = SqliteCatalogStore::open_bound(&bound, &path).expect("reopen bound Catalog");
         assert_eq!(opened.startup_status().access, StartupAccess::ReadWrite);
-        assert_eq!(opened.startup_status().schema_version, 6);
+        assert_eq!(
+            opened.startup_status().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
 
         let probe = crate::adapters::catalog_probe::SqliteCatalogProbe::new();
         let report = probe.probe(&path).expect("read-only probe");
         assert!(report.exists);
-        assert_eq!(report.schema_version, Some(6));
+        assert_eq!(report.schema_version, Some(CURRENT_SCHEMA_VERSION));
         assert!(report.integrity_ok);
         assert!(report.foreign_keys_ok);
         let identity = report.home_identity.expect("recorded identity");

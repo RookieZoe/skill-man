@@ -650,6 +650,21 @@ export function createFixtureCatalogClient(): CatalogClient {
         "Fetch Latest and Manage is not available in the preview fixture",
       );
     },
+    async confirmSourceTransition() {
+      return fixtureUnsupported(
+        "Source Transition is not available in the preview fixture",
+      );
+    },
+    async undoSourceTransition() {
+      return fixtureUnsupported(
+        "Source Undo is not available in the preview fixture",
+      );
+    },
+    async finalizeSourceTransition() {
+      return fixtureUnsupported(
+        "Source Transition is not available in the preview fixture",
+      );
+    },
     async checkSkillUpdates() {
       return { groups: [], errors: [], parentConflicts: [] };
     },

@@ -20,7 +20,7 @@ use skill_man_lib::core::fixture_recovery::{FixtureClassifier, SystemFixtureClas
 use skill_man_lib::core::home::{HomeId, HomeMarker, VolumeIdentity};
 use skill_man_lib::core::write_gate::{ReadOnlyReason, WriteGateState};
 use skill_man_lib::seams::app_state_store::AppStateStore;
-use skill_man_lib::seams::catalog_probe::CatalogProbe;
+use skill_man_lib::seams::catalog_probe::{CURRENT_CATALOG_SCHEMA_VERSION, CatalogProbe};
 use skill_man_lib::seams::volume_identity::{VolumeIdentityError, VolumeIdentitySource};
 
 struct FixedVolumeIdentity(Option<VolumeIdentity>);
@@ -411,7 +411,7 @@ fn unbound_catalog_identity_is_home_identity_mismatch() {
     let report = probe
         .probe(&home_path.join("skill-man.sqlite3"))
         .expect("probe unchanged Catalog");
-    assert_eq!(report.schema_version, Some(6));
+    assert_eq!(report.schema_version, Some(CURRENT_CATALOG_SCHEMA_VERSION));
     assert!(report.home_identity.is_none());
 }
 

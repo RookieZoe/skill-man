@@ -262,42 +262,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
     home.with_sql("seed current Git Repository Source", |connection| {
         connection
             .execute_batch(
-                "CREATE TABLE git_repository_sources (
-                    remote_id TEXT PRIMARY KEY REFERENCES remote_source_parents(remote_id),
-                    provider TEXT NOT NULL,
-                    canonical_url TEXT NOT NULL,
-                    tracking_ref TEXT NOT NULL,
-                    current_release_id TEXT REFERENCES git_source_releases(release_id),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(provider, canonical_url)
-                 );
-                 CREATE TABLE git_source_releases (
-                    release_id TEXT PRIMARY KEY,
-                    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id),
-                    tracking_ref TEXT NOT NULL,
-                    resolved_commit TEXT NOT NULL,
-                    discovered_at TEXT NOT NULL,
-                    UNIQUE(remote_id, resolved_commit)
-                 );
-                 CREATE TABLE git_source_release_members (
-                    release_id TEXT NOT NULL REFERENCES git_source_releases(release_id),
-                    skill_path TEXT NOT NULL,
-                    skill_name TEXT NOT NULL,
-                    tree_hash TEXT NOT NULL,
-                    provider_hash TEXT,
-                    PRIMARY KEY(release_id, skill_path)
-                 );
-                 CREATE TABLE git_source_members (
-                    skill_id TEXT PRIMARY KEY REFERENCES skills(id),
-                    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id),
-                    current_skill_path TEXT NOT NULL,
-                    remote_baseline_hash TEXT NOT NULL,
-                    current_baseline_hash TEXT NOT NULL,
-                    last_checked_at INTEGER,
-                    last_updated_at INTEGER
-                 );
-                 INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
                  VALUES ('parent-1', 'https://github.com/acme/skills', '2026-08-01T00:00:00Z');
                  INSERT INTO git_source_releases (
                     release_id, remote_id, tracking_ref, resolved_commit, discovered_at

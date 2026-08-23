@@ -478,6 +478,61 @@ pub struct HandoffJournal {
     pub items: Vec<HandoffJournalItem>,
 }
 
+/// A durable whole-repository transition. Unlike the legacy per-Skill
+/// handoff journal, one phase governs every member and the frozen lock claim
+/// set. It is the only startup authority for a post-CAS Source Transition;
+/// recovery never needs to fetch a newer remote tip.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceTransitionPhase {
+    Planned,
+    MembersStaged,
+    SourceIsolated,
+    DestinationsReserved,
+    OwnershipReleased,
+    ManagedCommitted,
+    Finalized,
+    Undoing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceTransitionJournalMember {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    pub canonical_entity: PathBuf,
+    pub isolated_path: Option<PathBuf>,
+    pub staged_root: PathBuf,
+    pub staged_snapshot: Option<StagedTreeSnapshot>,
+    pub final_entity_path: PathBuf,
+    pub skill_path: String,
+    pub tree_hash: String,
+    pub provider_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceTransitionJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: SourceTransitionPhase,
+    pub staging_operation_root: PathBuf,
+    pub staging_fingerprint: Option<DirectoryFingerprint>,
+    pub remote_id: String,
+    pub release_id: String,
+    pub provider: String,
+    pub canonical_url: String,
+    pub tracking_ref: String,
+    pub resolved_commit: String,
+    pub lock_path: PathBuf,
+    pub lock_fingerprint: String,
+    pub lock_entries: Vec<crate::seams::installer_lock_store::LockEntry>,
+    pub members: Vec<SourceTransitionJournalMember>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkSourceEntryKind {
     Directory,
@@ -1275,6 +1330,23 @@ pub trait FileSystem: Send + Sync {
         })
     }
 
+    /// Whether any filesystem entry occupies `path`. Unlike
+    /// `path_is_directory`, a symlink, regular file, or other non-directory
+    /// entry is still occupied. Source Transition uses this exact fact at
+    /// its ownership and Undo guards, where treating a non-directory as
+    /// absent could overwrite an external owner.
+    fn path_is_occupied(&self, path: &Path) -> Result<bool, FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "inspect path occupancy",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "path occupancy checks are not supported by this filesystem",
+            ),
+        })
+    }
+
     /// Create a directory and all missing ancestors. Used for the prepared
     /// Home layout; a path that already exists is an error (never reuse).
     fn create_directory_all(&self, path: &Path) -> Result<(), FileSystemError> {
@@ -1690,6 +1762,59 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "handoff journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Persist the whole-source transition intent and each durable cursor.
+    /// The journal must be on disk before any member is staged or isolated.
+    fn write_source_transition_journal(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, journal);
+        Err(FileSystemError::Io {
+            operation: "write Source Transition journal",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Transition journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Archive a completed Source Transition journal and close its result
+    /// window. The operation becomes ineligible for Source Undo afterwards.
+    fn finish_source_transition_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, operation_id);
+        Err(FileSystemError::Io {
+            operation: "finish Source Transition journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Transition journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Pending whole-source journals only; legacy Ownership Handoff journals
+    /// remain on their own recovery path.
+    fn list_source_transition_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<SourceTransitionJournal>, FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "list Source Transition journals",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Transition journals are not supported by this filesystem",
             ),
         })
     }

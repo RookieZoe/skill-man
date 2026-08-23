@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockFileReport, LockReleaseError,
-    parse_lock_bytes, release_lock_entry_bytes, restore_lock_entry_bytes,
+    parse_lock_bytes, release_lock_entries_bytes, release_lock_entry_bytes,
+    restore_lock_entries_bytes, restore_lock_entry_bytes,
 };
 
 /// Default lock location: `~/.agents/.skill-lock.json`.
@@ -85,6 +86,19 @@ impl InstallerLockStore for SystemInstallerLockStore {
         write_lock_atomically(lock_path, &rewritten)
     }
 
+    fn release_entries(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        entries: &[LockEntry],
+    ) -> Result<(), LockReleaseError> {
+        let bytes = fs::read(lock_path).map_err(|source| {
+            LockReleaseError::Io(format!("read {}: {source}", lock_path.display()))
+        })?;
+        let rewritten = release_lock_entries_bytes(&bytes, frozen_fingerprint, entries)?;
+        write_lock_atomically(lock_path, &rewritten)
+    }
+
     fn restore_entry(&self, lock_path: &Path, entry: &LockEntry) -> Result<(), LockReleaseError> {
         let bytes = match fs::read(lock_path) {
             Ok(bytes) => bytes,
@@ -109,6 +123,18 @@ impl InstallerLockStore for SystemInstallerLockStore {
             }
         };
         let rewritten = restore_lock_entry_bytes(&bytes, entry)?;
+        write_lock_atomically(lock_path, &rewritten)
+    }
+
+    fn restore_entries(
+        &self,
+        lock_path: &Path,
+        entries: &[LockEntry],
+    ) -> Result<(), LockReleaseError> {
+        let bytes = fs::read(lock_path).map_err(|source| {
+            LockReleaseError::Io(format!("read {}: {source}", lock_path.display()))
+        })?;
+        let rewritten = restore_lock_entries_bytes(&bytes, entries)?;
         write_lock_atomically(lock_path, &rewritten)
     }
 }

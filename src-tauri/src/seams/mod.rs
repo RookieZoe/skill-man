@@ -17,4 +17,5 @@ pub mod preferences_store;
 pub mod prepared_catalog;
 pub mod remote_provider;
 pub mod source;
+pub mod source_transition_store;
 pub mod volume_identity;

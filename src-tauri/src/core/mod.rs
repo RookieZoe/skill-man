@@ -15,6 +15,7 @@ pub mod locale;
 pub mod maintenance;
 pub mod preferences;
 pub mod source_group_preview;
+pub mod source_transition;
 pub mod startup;
 pub mod update;
 pub mod write_gate;

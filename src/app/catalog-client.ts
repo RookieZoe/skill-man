@@ -628,6 +628,28 @@ export type SourceGroupPreviewOutcome =
   | { kind: "repository_ref_conflict"; conflict: RepositoryRefConflict }
   | { kind: "repository_ownership_split"; split: RepositoryOwnershipSplit };
 
+export interface ConfirmSourceTransitionRequest {
+  sourceType: GitRepositorySourceType;
+  sourceUrl: string;
+  trackingRef: string;
+  expectedResolvedCommit: string;
+}
+
+export interface SourceTransitionResult {
+  operationId: string;
+  releaseId: string;
+  resolvedCommit: string;
+  memberCount: number;
+  snapshotVersion: number;
+  undoAvailable: boolean;
+}
+
+export interface SourceUndoResult {
+  operationId: string;
+  memberCount: number;
+  snapshotVersion: number;
+}
+
 export interface UpdateCheckItem {
   skillId: string;
   directoryName: string;
@@ -977,6 +999,11 @@ export interface CatalogClient {
   fetchLatestAndManage(
     request: FetchLatestAndManageRequest,
   ): Promise<SourceGroupPreviewOutcome>;
+  confirmSourceTransition(
+    request: ConfirmSourceTransitionRequest,
+  ): Promise<SourceTransitionResult>;
+  undoSourceTransition(operationId: string): Promise<SourceUndoResult>;
+  finalizeSourceTransition(operationId: string): Promise<void>;
   checkSkillUpdates(force: boolean): Promise<UpdateCheckReport>;
   planSkillUpdates(selections: UpdateSelection[]): Promise<UpdatePlan>;
   applySkillUpdates(
@@ -1226,6 +1253,21 @@ const tauriCatalogClient: CatalogClient = {
   fetchLatestAndManage(request) {
     return invoke<SourceGroupPreviewOutcome>("fetch_latest_and_manage", {
       request,
+    });
+  },
+  confirmSourceTransition(request) {
+    return invoke<SourceTransitionResult>("confirm_source_transition", {
+      request,
+    });
+  },
+  undoSourceTransition(operationId) {
+    return invoke<SourceUndoResult>("undo_source_transition", {
+      request: { operationId },
+    });
+  },
+  finalizeSourceTransition(operationId) {
+    return invoke<void>("finalize_source_transition", {
+      request: { operationId },
     });
   },
   checkSkillUpdates(force) {

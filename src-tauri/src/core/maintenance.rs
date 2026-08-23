@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::core::domain::{
     ActivationObservedState, Health, SkillId, SourceKind, parse_skill_metadata,
 };
+use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
 use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
 use crate::seams::filesystem::ActivationRecoveryBaseline;
@@ -42,6 +43,8 @@ pub enum MaintenanceError {
     Store(#[from] ActivationStoreError),
     #[error(transparent)]
     MaintenanceStore(#[from] MaintenanceStoreError),
+    #[error(transparent)]
+    SourceTransition(#[from] SourceTransitionError),
     #[error("the Managed Skill was not found: {0}")]
     SkillNotFound(String),
     #[error("the Skill is not a Link and cannot be relocated: {0}")]
@@ -148,6 +151,7 @@ pub struct MaintenanceService {
     remove_plans: Arc<Mutex<HashMap<String, PlannedRemove>>>,
     next_plan_id: Arc<AtomicU64>,
     plan_ttl: Duration,
+    source_transition_recovery: Option<Arc<SourceTransitionService>>,
 }
 
 impl Clone for MaintenanceService {
@@ -162,6 +166,7 @@ impl Clone for MaintenanceService {
             remove_plans: self.remove_plans.clone(),
             next_plan_id: self.next_plan_id.clone(),
             plan_ttl: self.plan_ttl,
+            source_transition_recovery: self.source_transition_recovery.clone(),
         }
     }
 }
@@ -178,6 +183,7 @@ impl MaintenanceService {
             remove_plans: Arc::new(Mutex::new(HashMap::new())),
             next_plan_id: Arc::new(AtomicU64::new(1)),
             plan_ttl: DEFAULT_PLAN_TTL,
+            source_transition_recovery: None,
         }
     }
 
@@ -212,6 +218,17 @@ impl MaintenanceService {
 
     pub fn with_plan_ttl(mut self, plan_ttl: Duration) -> Self {
         self.plan_ttl = plan_ttl;
+        self
+    }
+
+    /// Source Transition has its own whole-source journal and must recover
+    /// before the startup write gate opens. It is intentionally separate
+    /// from legacy per-Skill Ownership Handoff recovery below.
+    pub fn with_source_transition_recovery(
+        mut self,
+        source_transition: Arc<SourceTransitionService>,
+    ) -> Self {
+        self.source_transition_recovery = Some(source_transition);
         self
     }
 
@@ -289,6 +306,9 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_remove_journals(&library_root, &remove_baselines)?;
+            if let Some(source_transition) = &self.source_transition_recovery {
+                source_transition.recover_pending(&library_root)?;
+            }
             self.recover_handoff_operations(&library_root)?;
         }
         Ok(())

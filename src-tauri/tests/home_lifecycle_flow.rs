@@ -30,6 +30,7 @@ use skill_man_lib::core::home_lifecycle::{HomeLifecycleError, HomeLifecycleServi
 use skill_man_lib::seams::app_state_store::{
     AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
 };
+use skill_man_lib::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION;
 use skill_man_lib::seams::catalog_probe::CatalogProbe;
 use skill_man_lib::seams::locale_store::{LocaleSelection, LocaleStore};
 use skill_man_lib::seams::volume_identity::{VolumeIdentityError, VolumeIdentitySource};
@@ -521,7 +522,7 @@ fn restore_of_an_integrity_failed_home_promotes_the_same_identity() {
     let report = SqliteCatalogProbe::new()
         .probe(&composition.catalog_path())
         .expect("probe restored Catalog");
-    assert_eq!(report.schema_version, Some(6));
+    assert_eq!(report.schema_version, Some(CURRENT_CATALOG_SCHEMA_VERSION));
     assert!(report.integrity_ok && report.foreign_keys_ok);
     assert_eq!(
         report

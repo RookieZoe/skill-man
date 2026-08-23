@@ -27,6 +27,9 @@ use crate::core::source_group_preview::{
     ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
     RepositoryRefConflict, SourceGroupMember, SourceGroupPreview, SourceGroupPreviewOutcome,
 };
+use crate::core::source_transition::{
+    ConfirmSourceTransitionRequest, SourceTransitionResult, SourceUndoResult,
+};
 use crate::core::startup::{StartupAgent, StartupInfo};
 use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
@@ -254,6 +257,76 @@ impl From<SourceGroupPreviewOutcome> for SourceGroupPreviewOutcomeDto {
                     split: split.into(),
                 }
             }
+        }
+    }
+}
+
+// -- Git Repository Source Transition (ADR-0014, spec §8.4) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmSourceTransitionRequestDto {
+    pub source_type: String,
+    pub source_url: String,
+    pub tracking_ref: String,
+    pub expected_resolved_commit: String,
+}
+
+impl From<ConfirmSourceTransitionRequestDto> for ConfirmSourceTransitionRequest {
+    fn from(value: ConfirmSourceTransitionRequestDto) -> Self {
+        Self {
+            source_type: value.source_type,
+            source_url: value.source_url,
+            tracking_ref: value.tracking_ref,
+            expected_resolved_commit: value.expected_resolved_commit,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransitionOperationRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransitionResultDto {
+    pub operation_id: String,
+    pub release_id: String,
+    pub resolved_commit: String,
+    pub member_count: u32,
+    pub snapshot_version: u64,
+    pub undo_available: bool,
+}
+
+impl From<SourceTransitionResult> for SourceTransitionResultDto {
+    fn from(value: SourceTransitionResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            release_id: value.release_id,
+            resolved_commit: value.resolved_commit,
+            member_count: value.member_count,
+            snapshot_version: value.snapshot_version,
+            undo_available: value.undo_available,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUndoResultDto {
+    pub operation_id: String,
+    pub member_count: u32,
+    pub snapshot_version: u64,
+}
+
+impl From<SourceUndoResult> for SourceUndoResultDto {
+    fn from(value: SourceUndoResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            member_count: value.member_count,
+            snapshot_version: value.snapshot_version,
         }
     }
 }

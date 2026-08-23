@@ -295,8 +295,9 @@ pub fn classify_fixture(
     // -- Catalog facts (spec §3.5: exact tuples, no relations) --
 
     // The Legacy shape is the untouched v4 fixture Catalog; the Bound
-    // shape is the fixture after the one-time migration (schema v6, Remote
-    // Source Parent tables replace the legacy remote_sources table).
+    // shape is the fixture after the one-time migration (schema v7: Remote
+    // Source Parent and empty Git Repository Source tables replace the
+    // legacy remote_sources table).
     let mut expected_tables: Vec<&str> = match mode {
         FixtureShapeMode::Legacy => vec![
             "activations",
@@ -312,6 +313,10 @@ pub fn classify_fixture(
             "agents",
             "catalog_meta",
             "file_sources",
+            "git_repository_sources",
+            "git_source_releases",
+            "git_source_release_members",
+            "git_source_members",
             "preferences",
             "remote_bindings",
             "remote_source_aliases",
@@ -2184,6 +2189,10 @@ mod tests {
             "agents".into(),
             "catalog_meta".into(),
             "file_sources".into(),
+            "git_repository_sources".into(),
+            "git_source_releases".into(),
+            "git_source_release_members".into(),
+            "git_source_members".into(),
             "preferences".into(),
             "remote_bindings".into(),
             "remote_source_aliases".into(),

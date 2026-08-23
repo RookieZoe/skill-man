@@ -35,9 +35,9 @@ use crate::tauri_adapter::dto::{
     PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
     RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
     RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
-    SourceGroupPreviewOutcomeDto, StartupInfoDto, UndoActivationReplaceRequestDto,
-    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
-    UpdateResultDto,
+    SourceGroupPreviewOutcomeDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
+    SourceUndoResultDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -47,6 +47,7 @@ use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::locale_api::LocaleApi;
 use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
+use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
@@ -125,6 +126,30 @@ pub fn fetch_latest_and_manage(
     request: FetchLatestAndManageRequestDto,
 ) -> Result<SourceGroupPreviewOutcomeDto, CommandFailureDto> {
     state.fetch_latest_and_manage(request)
+}
+
+#[tauri::command]
+pub fn confirm_source_transition(
+    state: State<'_, SourceTransitionApi>,
+    request: crate::tauri_adapter::dto::ConfirmSourceTransitionRequestDto,
+) -> Result<SourceTransitionResultDto, CommandFailureDto> {
+    state.confirm(request)
+}
+
+#[tauri::command]
+pub fn undo_source_transition(
+    state: State<'_, SourceTransitionApi>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<SourceUndoResultDto, CommandFailureDto> {
+    state.undo(request)
+}
+
+#[tauri::command]
+pub fn finalize_source_transition(
+    state: State<'_, SourceTransitionApi>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.finalize(request)
 }
 
 #[tauri::command]

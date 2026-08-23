@@ -34,6 +34,7 @@ pub struct LockEntry {
     pub source_type: String,
     pub source: String,
     pub source_url: String,
+    #[serde(rename = "ref")]
     pub requested_ref: Option<String>,
     pub skill_path: String,
     pub skill_folder_hash: String,
@@ -136,6 +137,25 @@ pub trait InstallerLockStore: Send + Sync {
         ))
     }
 
+    /// CAS-release the complete set of applicable claims for one Source
+    /// Transition in a single full-file rewrite. This is deliberately not a
+    /// loop over `release_entry`: a partially released source would create
+    /// the forbidden partial-owner state before its logical commit point.
+    fn release_entries(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        entries: &[LockEntry],
+    ) -> Result<(), LockReleaseError> {
+        if entries.len() == 1 {
+            return self.release_entry(lock_path, frozen_fingerprint, &entries[0]);
+        }
+        let _ = (lock_path, frozen_fingerprint, entries);
+        Err(LockReleaseError::Invalid(
+            "this lock store cannot atomically rewrite a source claim set".into(),
+        ))
+    }
+
     /// CAS-restore one exact entry during conditional Undo (ADR-0013 §5.1):
     /// the lock must still parse strictly as v3 and the key must be
     /// unoccupied; every other value is preserved.
@@ -143,6 +163,23 @@ pub trait InstallerLockStore: Send + Sync {
         let _ = (lock_path, entry);
         Err(LockReleaseError::Invalid(
             "this lock store cannot rewrite lock files".into(),
+        ))
+    }
+
+    /// Conditionally restore the complete claim set for one Source Undo in
+    /// one rewrite. Any occupied key must refuse the whole Undo before the
+    /// external lock is touched.
+    fn restore_entries(
+        &self,
+        lock_path: &Path,
+        entries: &[LockEntry],
+    ) -> Result<(), LockReleaseError> {
+        if entries.len() == 1 {
+            return self.restore_entry(lock_path, &entries[0]);
+        }
+        let _ = (lock_path, entries);
+        Err(LockReleaseError::Invalid(
+            "this lock store cannot atomically restore a source claim set".into(),
         ))
     }
 }
@@ -444,6 +481,24 @@ pub fn release_lock_entry_bytes(
     frozen_fingerprint: &str,
     entry: &LockEntry,
 ) -> Result<Vec<u8>, LockReleaseError> {
+    release_lock_entries_bytes(bytes, frozen_fingerprint, std::slice::from_ref(entry))
+}
+
+/// Pure full-file CAS release for every claim of one Git Repository Source.
+/// All entries are verified before the returned JSON removes any of them, so
+/// the caller can publish exactly one rewritten lock file as the Source
+/// Ownership Commit Point. Entries from another source remain byte-faithful
+/// JSON values in the rewritten document.
+pub fn release_lock_entries_bytes(
+    bytes: &[u8],
+    frozen_fingerprint: &str,
+    entries: &[LockEntry],
+) -> Result<Vec<u8>, LockReleaseError> {
+    if entries.is_empty() {
+        return Err(LockReleaseError::Invalid(
+            "a source transition must release at least one lock entry".into(),
+        ));
+    }
     let current = format!("{:x}", Sha256::digest(bytes));
     if current != frozen_fingerprint {
         return Err(LockReleaseError::FingerprintChanged);
@@ -465,30 +520,42 @@ pub fn release_lock_entry_bytes(
         .get("skills")
         .and_then(|value| value.as_object())
         .ok_or_else(|| LockReleaseError::Invalid("skills must be an object".into()))?;
-    let live = skills
-        .get(&entry.name)
-        .ok_or_else(|| LockReleaseError::EntryMissing(entry.name.clone()))?;
-    // The entry object never carries its own key as a field; re-inject it
-    // so the strict LockEntry deserialization matches the frozen shape.
-    let mut live_with_name = live.clone();
-    live_with_name
-        .as_object_mut()
-        .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
-        .insert("name".into(), serde_json::Value::String(entry.name.clone()));
-    let live_entry: LockEntry = serde_json::from_value(live_with_name).map_err(|error| {
-        LockReleaseError::Invalid(format!("the entry is not a strict v3 entry: {error}"))
-    })?;
-    if &live_entry != entry {
-        return Err(LockReleaseError::Invalid(
-            "the exact entry changed since the plan was frozen".into(),
-        ));
+
+    let mut names = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if !names.insert(entry.name.as_str()) {
+            return Err(LockReleaseError::Invalid(format!(
+                "the source transition repeats lock entry '{}'",
+                entry.name
+            )));
+        }
+        let live = skills
+            .get(&entry.name)
+            .ok_or_else(|| LockReleaseError::EntryMissing(entry.name.clone()))?;
+        // The entry object never carries its own key as a field; re-inject it
+        // so the strict LockEntry deserialization matches the frozen shape.
+        let mut live_with_name = live.clone();
+        live_with_name
+            .as_object_mut()
+            .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
+            .insert("name".into(), serde_json::Value::String(entry.name.clone()));
+        let live_entry: LockEntry = serde_json::from_value(live_with_name).map_err(|error| {
+            LockReleaseError::Invalid(format!("the entry is not a strict v3 entry: {error}"))
+        })?;
+        if &live_entry != entry {
+            return Err(LockReleaseError::Invalid(
+                "the exact entry changed since the plan was frozen".into(),
+            ));
+        }
     }
     let mut rewritten = object.clone();
     let skills = rewritten
         .get_mut("skills")
         .and_then(|value| value.as_object_mut())
         .expect("skills object verified above");
-    skills.remove(&entry.name);
+    for entry in entries {
+        skills.remove(&entry.name);
+    }
     serde_json::to_vec_pretty(&rewritten)
         .map_err(|error| LockReleaseError::Invalid(error.to_string()))
 }
@@ -500,6 +567,21 @@ pub fn restore_lock_entry_bytes(
     bytes: &[u8],
     entry: &LockEntry,
 ) -> Result<Vec<u8>, LockReleaseError> {
+    restore_lock_entries_bytes(bytes, std::slice::from_ref(entry))
+}
+
+/// Pure complete-source conditional Undo. Every frozen claim must still be
+/// absent from the same strict v3 document; on a conflict this returns no
+/// rewritten bytes, preventing a partial external owner from being restored.
+pub fn restore_lock_entries_bytes(
+    bytes: &[u8],
+    entries: &[LockEntry],
+) -> Result<Vec<u8>, LockReleaseError> {
+    if entries.is_empty() {
+        return Err(LockReleaseError::Invalid(
+            "a source undo must restore at least one lock entry".into(),
+        ));
+    }
     let value = parse_json_no_duplicates(bytes).map_err(LockReleaseError::Invalid)?;
     let object = value
         .as_object()
@@ -517,21 +599,36 @@ pub fn restore_lock_entry_bytes(
         .get("skills")
         .and_then(|value| value.as_object())
         .ok_or_else(|| LockReleaseError::Invalid("skills must be an object".into()))?;
-    if skills.contains_key(&entry.name) {
-        return Err(LockReleaseError::EntryOccupied(entry.name.clone()));
+    let mut names = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if !names.insert(entry.name.as_str()) {
+            return Err(LockReleaseError::Invalid(format!(
+                "the source undo repeats lock entry '{}'",
+                entry.name
+            )));
+        }
+        if skills.contains_key(&entry.name) {
+            return Err(LockReleaseError::EntryOccupied(entry.name.clone()));
+        }
     }
-    let mut entry_value = serde_json::to_value(entry)
-        .map_err(|error| LockReleaseError::Invalid(error.to_string()))?;
-    entry_value
-        .as_object_mut()
-        .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
-        .remove("name");
     let mut rewritten = object.clone();
     let skills = rewritten
         .get_mut("skills")
         .and_then(|value| value.as_object_mut())
         .expect("skills object verified above");
-    skills.insert(entry.name.clone(), entry_value);
+    for entry in entries {
+        let mut entry_value = serde_json::to_value(entry)
+            .map_err(|error| LockReleaseError::Invalid(error.to_string()))?;
+        entry_value
+            .as_object_mut()
+            .ok_or_else(|| LockReleaseError::Invalid("the entry must be an object".into()))?
+            .remove("name");
+        entry_value
+            .as_object_mut()
+            .expect("entry object verified above")
+            .retain(|_, value| !value.is_null());
+        skills.insert(entry.name.clone(), entry_value);
+    }
     serde_json::to_vec_pretty(&rewritten)
         .map_err(|error| LockReleaseError::Invalid(error.to_string()))
 }
@@ -925,6 +1022,57 @@ mod tests {
     }
 
     #[test]
+    fn release_entries_removes_the_complete_source_claim_set_in_one_rewrite() {
+        let json = r#"{
+            "version": 3,
+            "installerVersion": "9.9.9",
+            "skills": {
+                "networking": {
+                    "sourceType": "github",
+                    "source": "acme/networking",
+                    "sourceUrl": "https://github.com/acme/networking",
+                    "skillPath": "skills/networking",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                },
+                "audio": {
+                    "sourceType": "github",
+                    "source": "acme/audio",
+                    "sourceUrl": "https://github.com/acme/audio",
+                    "skillPath": "skills/audio",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                },
+                "unrelated": {
+                    "sourceType": "github",
+                    "source": "other/unrelated",
+                    "sourceUrl": "https://github.com/other/unrelated",
+                    "skillPath": "skills/unrelated",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                }
+            }
+        }"#;
+        let bytes = json.as_bytes();
+
+        let rewritten = release_lock_entries_bytes(
+            bytes,
+            &fingerprint(bytes),
+            &[entry("audio"), entry("networking")],
+        )
+        .expect("one full-file CAS release");
+
+        let report = report(&rewritten);
+        assert_eq!(report.fault, None);
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unrelated"],
+            "every source claim is released together while unrelated state survives"
+        );
+    }
+
+    #[test]
     fn release_entry_keeps_a_valid_empty_lock_after_the_last_entry() {
         let bytes = valid_entry_json().into_bytes();
         let mut frozen = entry("networking");
@@ -993,5 +1141,54 @@ mod tests {
         assert_eq!(report.fault, None);
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].name, "networking");
+    }
+
+    #[test]
+    fn restore_entries_restores_a_complete_source_claim_set_or_nothing() {
+        let json = r#"{
+            "version": 3,
+            "skills": {
+                "networking": {
+                    "sourceType": "github",
+                    "source": "acme/networking",
+                    "sourceUrl": "https://github.com/acme/networking",
+                    "skillPath": "skills/networking",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                },
+                "audio": {
+                    "sourceType": "github",
+                    "source": "acme/audio",
+                    "sourceUrl": "https://github.com/acme/audio",
+                    "skillPath": "skills/audio",
+                    "skillFolderHash": "0123456789abcdef0123456789abcdef01234567"
+                }
+            }
+        }"#;
+        let bytes = json.as_bytes();
+        let released = release_lock_entries_bytes(
+            bytes,
+            &fingerprint(bytes),
+            &[entry("audio"), entry("networking")],
+        )
+        .expect("release complete source");
+
+        let restored =
+            restore_lock_entries_bytes(&released, &[entry("audio"), entry("networking")])
+                .expect("restore complete source");
+        let report = report(&restored);
+        assert_eq!(report.fault, None);
+        assert!(report.entry_faults.is_empty(), "{:?}", report.entry_faults);
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["audio", "networking"]
+        );
+
+        let error = restore_lock_entries_bytes(&restored, &[entry("audio"), entry("networking")])
+            .expect_err("a pre-existing claim refuses the complete undo");
+        assert!(matches!(error, LockReleaseError::EntryOccupied(name) if name == "audio"));
     }
 }

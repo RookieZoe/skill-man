@@ -2,6 +2,7 @@ import type {
   ExternalOwnershipClaim,
   GitRepositorySourceType,
   SourceGroupPreviewOutcome,
+  SourceTransitionResult,
 } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
 
@@ -10,28 +11,83 @@ export function SourceGroupPreviewFlow({
   sourceUrl,
   trackingRef,
   outcome,
+  result,
   error,
   activity,
   onSourceTypeChange,
   onSourceUrlChange,
   onTrackingRefChange,
   onFetch,
+  onConfirm,
+  onUndo,
   onClose,
 }: {
   sourceType: GitRepositorySourceType;
   sourceUrl: string;
   trackingRef: string;
   outcome: SourceGroupPreviewOutcome | null;
+  result: SourceTransitionResult | null;
   error: string | null;
-  activity: "idle" | "fetching";
+  activity: "idle" | "fetching" | "confirming" | "undoing";
   onSourceTypeChange: (sourceType: GitRepositorySourceType) => void;
   onSourceUrlChange: (sourceUrl: string) => void;
   onTrackingRefChange: (trackingRef: string) => void;
   onFetch: () => void;
+  onConfirm: () => void;
+  onUndo: () => void;
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const isBusy = activity === "fetching";
+  const isBusy = activity !== "idle";
+
+  if (result) {
+    return (
+      <>
+        <div className="activation-sheet-heading">
+          <span className="eyebrow">
+            {t("library.source_group.complete_eyebrow")}
+          </span>
+          <h2>{t("library.source_group.complete_title")}</h2>
+          <p>
+            {t("library.source_group.complete_body", {
+              count: result.memberCount,
+            })}
+          </p>
+        </div>
+        <dl className="activation-paths source-group-facts">
+          <div>
+            <dt>{t("library.source_group.release")}</dt>
+            <dd>
+              <code>{result.releaseId}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>{t("library.source_group.resolved_commit")}</dt>
+            <dd>
+              <code>{result.resolvedCommit}</code>
+            </dd>
+          </div>
+        </dl>
+        <div className="activation-sheet-actions">
+          <button type="button" disabled={isBusy} onClick={onClose}>
+            {t("library.source_group.close")}
+          </button>
+          {result.undoAvailable ? (
+            <button
+              type="button"
+              className="activation-confirm-button"
+              disabled={isBusy}
+              onClick={onUndo}
+            >
+              {activity === "undoing"
+                ? t("library.source_group.undoing")
+                : t("library.source_group.undo")}
+            </button>
+          ) : null}
+        </div>
+      </>
+    );
+  }
 
   if (outcome?.kind === "preview") {
     const { preview } = outcome;
@@ -95,8 +151,18 @@ export function SourceGroupPreviewFlow({
         </section>
         <ExternalClaims claims={preview.externalOwnershipClaims} />
         <div className="activation-sheet-actions">
-          <button type="button" onClick={onClose}>
+          <button type="button" disabled={isBusy} onClick={onClose}>
             {t("library.source_group.close")}
+          </button>
+          <button
+            type="button"
+            className="activation-confirm-button"
+            disabled={isBusy}
+            onClick={onConfirm}
+          >
+            {activity === "confirming"
+              ? t("library.source_group.confirming")
+              : t("library.source_group.confirm")}
           </button>
         </div>
       </>
