@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SkillId(pub String);
 
 pub fn skill_identity_key(directory_name: &str) -> String {
@@ -41,10 +42,11 @@ pub fn parse_skill_metadata(skill_markdown: &str) -> SkillMetadata {
     metadata
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct AgentId(pub String);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceKind {
     Link,
     RemoteInstall,
@@ -57,7 +59,8 @@ impl SourceKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Health {
     Healthy,
     Broken,
@@ -77,7 +80,8 @@ pub enum Compatibility {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActivationObservedState {
     Present,
     Missing,

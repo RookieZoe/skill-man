@@ -650,6 +650,63 @@ export interface SourceUndoResult {
   snapshotVersion: number;
 }
 
+export type SourcePromotionMemberState =
+  | "update_to_target"
+  | "modified_member_resolution_required"
+  | "upstream_member_removed";
+
+export interface SourcePromotionExistingMemberDraft {
+  skillId: string;
+  directoryName: string;
+  skillPath: string;
+  modified: boolean;
+  state: SourcePromotionMemberState;
+}
+
+export interface SourcePromotionTargetMemberDraft {
+  member: SourceGroupMember;
+  legacySkillId: string | null;
+}
+
+export interface SourcePromotionDraft {
+  remoteId: string;
+  provider: string;
+  canonicalUrl: string;
+  trackingRef: string;
+  resolvedCommit: string;
+  existingMembers: SourcePromotionExistingMemberDraft[];
+  targetMembers: SourcePromotionTargetMemberDraft[];
+}
+
+export type ModifiedMemberResolution = "keep_modified" | "replace_with_target";
+
+export type UpstreamMemberRemovedResolution =
+  | { kind: "remove" }
+  | { kind: "local_link"; targetDirectory: string }
+  | { kind: "explicit_member_mapping"; targetSkillPath: string };
+
+export interface SourcePromotionResolution {
+  skillId: string;
+  modified: ModifiedMemberResolution | null;
+  removed: UpstreamMemberRemovedResolution | null;
+}
+
+export interface ConfirmSourcePromotionRequest {
+  remoteId: string;
+  expectedResolvedCommit: string;
+  resolutions: SourcePromotionResolution[];
+}
+
+export interface SourcePromotionResult {
+  operationId: string;
+  remoteId: string;
+  releaseId: string;
+  resolvedCommit: string;
+  memberCount: number;
+  snapshotVersion: number;
+  undoAvailable: boolean;
+}
+
 export interface UpdateCheckItem {
   skillId: string;
   directoryName: string;
@@ -999,6 +1056,12 @@ export interface CatalogClient {
   fetchLatestAndManage(
     request: FetchLatestAndManageRequest,
   ): Promise<SourceGroupPreviewOutcome>;
+  previewSourcePromotion(remoteId: string): Promise<SourcePromotionDraft>;
+  confirmSourcePromotion(
+    request: ConfirmSourcePromotionRequest,
+  ): Promise<SourcePromotionResult>;
+  undoSourcePromotion(operationId: string): Promise<SourceUndoResult>;
+  finalizeSourcePromotion(operationId: string): Promise<void>;
   confirmSourceTransition(
     request: ConfirmSourceTransitionRequest,
   ): Promise<SourceTransitionResult>;
@@ -1253,6 +1316,26 @@ const tauriCatalogClient: CatalogClient = {
   fetchLatestAndManage(request) {
     return invoke<SourceGroupPreviewOutcome>("fetch_latest_and_manage", {
       request,
+    });
+  },
+  previewSourcePromotion(remoteId) {
+    return invoke<SourcePromotionDraft>("preview_source_promotion", {
+      request: { remoteId },
+    });
+  },
+  confirmSourcePromotion(request) {
+    return invoke<SourcePromotionResult>("confirm_source_promotion", {
+      request,
+    });
+  },
+  undoSourcePromotion(operationId) {
+    return invoke<SourceUndoResult>("undo_source_promotion", {
+      request: { operationId },
+    });
+  },
+  finalizeSourcePromotion(operationId) {
+    return invoke<void>("finalize_source_promotion", {
+      request: { operationId },
     });
   },
   confirmSourceTransition(request) {

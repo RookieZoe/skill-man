@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -33,6 +34,11 @@ use crate::seams::maintenance_store::{
     SkillHealthObservation,
 };
 use crate::seams::preferences_store::PreferencesStoreError;
+use crate::seams::source_promotion_store::{
+    LegacySourcePromotionMemberRecord, LegacySourcePromotionRecord,
+    SourcePromotionActivationRecord, SourcePromotionMemberOrigin, SourcePromotionRecord,
+    SourcePromotionRemovedMemberRecord, SourcePromotionStore, SourcePromotionStoreError,
+};
 use crate::seams::source_transition_store::{
     SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
@@ -1346,6 +1352,606 @@ pub struct PersistedSkillDetail {
     pub file_source_original_path: Option<String>,
 }
 
+impl SourcePromotionStore for SqliteCatalogStore {
+    fn read_legacy_source_promotion(
+        &self,
+        remote_id: &str,
+    ) -> Result<LegacySourcePromotionRecord, SourcePromotionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourcePromotionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        if integrity != "ok" {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the Catalog integrity check is not clean".into(),
+            ));
+        }
+        let mut foreign_key_check = connection
+            .prepare("PRAGMA foreign_key_check")
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        if foreign_key_check
+            .query([])
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .next()
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .is_some()
+        {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the Catalog foreign-key check is not clean".into(),
+            ));
+        }
+        let (canonical_url, created_at): (String, String) = connection
+            .query_row(
+                "SELECT canonical_url, created_at FROM remote_source_parents WHERE remote_id = ?1",
+                [remote_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                SourcePromotionStoreError::Conflict("the selected parent no longer exists".into())
+            })?;
+        let already_promoted: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM git_repository_sources WHERE remote_id = ?1)",
+                [remote_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        if already_promoted {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the selected parent is already a Git Repository Source".into(),
+            ));
+        }
+        let aliases = connection
+            .prepare(
+                "SELECT alias_url FROM remote_source_aliases
+                 WHERE remote_id = ?1 ORDER BY alias_url",
+            )
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .query_map([remote_id], |row| row.get::<_, String>(0))
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                        skills.display_name, skills.description, skills.library_entry_path,
+                        skills.final_entity_path, skills.recorded_content_hash, skills.health,
+                        remote_bindings.skill_path, remote_bindings.current_baseline_hash,
+                        remote_bindings.requested_ref,
+                        remote_bindings.verification_anchor_commit,
+                        remote_bindings.original_commit_known, remote_bindings.provider_hash,
+                        remote_bindings.remote_baseline_hash,
+                        remote_bindings.last_checked_at, remote_bindings.last_updated_at,
+                        skills.source_kind
+                 FROM remote_bindings
+                 JOIN skills ON skills.id = remote_bindings.skill_id
+                 WHERE remote_bindings.remote_id = ?1
+                 ORDER BY remote_bindings.skill_path, skills.id",
+            )
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        let rows = statement
+            .query_map([remote_id], |row| {
+                Ok((
+                    LegacySourcePromotionMemberRecord {
+                        skill_id: SkillId(row.get(0)?),
+                        directory_name: row.get(1)?,
+                        identity_key: row.get(2)?,
+                        display_name: row.get(3)?,
+                        description: row.get(4)?,
+                        library_entry_path: PathBuf::from(row.get::<_, String>(5)?),
+                        final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
+                        recorded_content_hash: row.get(7)?,
+                        health: parse_health(&row.get::<_, String>(8)?)?,
+                        skill_path: row.get(9)?,
+                        current_baseline_hash: row.get(10)?,
+                        requested_ref: row.get(11)?,
+                        verification_anchor_commit: row.get(12)?,
+                        original_commit_known: row.get(13)?,
+                        provider_hash: row.get(14)?,
+                        remote_baseline_hash: row.get(15)?,
+                        last_checked_at: row.get(16)?,
+                        last_updated_at: row.get(17)?,
+                        activations: Vec::new(),
+                    },
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(18)?,
+                ))
+            })
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        if rows.is_empty() {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the selected parent has no Legacy Per-Skill Git State members".into(),
+            ));
+        }
+        let refs = rows
+            .iter()
+            .map(|(_, requested_ref, _)| requested_ref.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if refs.len() != 1 || refs.first().is_none_or(|value| value.is_empty()) {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the selected parent does not have one non-empty tracking ref".into(),
+            ));
+        }
+        let tracking_ref = refs.first().expect("one checked ref").to_string();
+        if rows
+            .iter()
+            .any(|(_, _, source_kind)| source_kind != "remote_install")
+        {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the selected parent has a non-remote Legacy member".into(),
+            ));
+        }
+        let mut member_paths = std::collections::BTreeSet::new();
+        let mut member_ids = std::collections::BTreeSet::new();
+        for (member, _, _) in &rows {
+            if !member_paths.insert(member.skill_path.as_str())
+                || !member_ids.insert(member.skill_id.0.as_str())
+                || member.current_baseline_hash.is_empty()
+            {
+                return Err(SourcePromotionStoreError::Conflict(
+                    "the selected parent has incomplete or ambiguous Legacy member facts".into(),
+                ));
+            }
+        }
+        let forbidden_local_link_roots = connection
+            .prepare("SELECT skills_path FROM agents ORDER BY id")
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let members = rows
+            .into_iter()
+            .map(|(mut member, _, _)| {
+                member.activations = connection
+                    .prepare(
+                        "SELECT agent_id, expected_entry_path, expected_target_path,
+                                desired_enabled, observed_state, last_enabled_at, last_checked_at
+                         FROM activations
+                         WHERE skill_id = ?1
+                         ORDER BY agent_id",
+                    )
+                    .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+                    .query_map([&member.skill_id.0], |row| {
+                        Ok(SourcePromotionActivationRecord {
+                            agent_id: AgentId(row.get(0)?),
+                            entry_path: PathBuf::from(row.get::<_, String>(1)?),
+                            target_path: PathBuf::from(row.get::<_, String>(2)?),
+                            desired_enabled: row.get(3)?,
+                            observed_state: parse_observed_state(&row.get::<_, String>(4)?)?,
+                            last_enabled_at: row.get(5)?,
+                            last_checked_at: row.get(6)?,
+                        })
+                    })
+                    .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+                Ok(member)
+            })
+            .collect::<Result<Vec<_>, SourcePromotionStoreError>>()?;
+        Ok(LegacySourcePromotionRecord {
+            remote_id: remote_id.into(),
+            canonical_url,
+            aliases,
+            created_at,
+            tracking_ref,
+            members,
+            forbidden_local_link_roots,
+        })
+    }
+
+    fn validate_source_promotion(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<(), SourcePromotionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourcePromotionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        validate_source_promotion_record(&connection, record)
+    }
+
+    fn commit_source_promotion(
+        &self,
+        record: SourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourcePromotionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?;
+        validate_source_promotion_record(&transaction, &record)?;
+
+        transaction
+            .execute(
+                "INSERT INTO git_repository_sources (
+                    remote_id, provider, canonical_url, tracking_ref, current_release_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, NULL,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 )",
+                params![
+                    record.remote_id,
+                    record.provider,
+                    record.canonical_url,
+                    record.tracking_ref,
+                ],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "INSERT INTO git_source_releases (
+                    release_id, remote_id, tracking_ref, resolved_commit, discovered_at
+                 ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    record.release_id,
+                    record.remote_id,
+                    record.tracking_ref,
+                    record.resolved_commit,
+                ],
+            )
+            .map_err(source_promotion_sql_error)?;
+
+        for member in &record.members {
+            transaction
+                .execute(
+                    "INSERT INTO git_source_release_members (
+                        release_id, skill_path, skill_name, tree_hash, provider_hash
+                     ) VALUES (?1, ?2, ?3, ?4, NULL)",
+                    params![
+                        record.release_id,
+                        member.skill_path,
+                        member.directory_name,
+                        member.remote_baseline_hash,
+                    ],
+                )
+                .map_err(source_promotion_sql_error)?;
+            match member.origin {
+                SourcePromotionMemberOrigin::Legacy => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE skills
+                             SET display_name = ?1,
+                                 description = ?2,
+                                 source_kind = 'remote_install',
+                                 library_entry_path = ?3,
+                                 final_entity_path = ?3,
+                                 recorded_content_hash = ?4,
+                                 health = ?5,
+                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                             WHERE id = ?6",
+                            params![
+                                member.display_name,
+                                member.description,
+                                member.final_entity_path.to_string_lossy(),
+                                member.current_baseline_hash,
+                                health_value(member.health),
+                                member.skill_id.0,
+                            ],
+                        )
+                        .map_err(source_promotion_sql_error)?;
+                    if changed != 1 {
+                        return Err(SourcePromotionStoreError::Conflict(format!(
+                            "Legacy member '{}' disappeared during Source Promotion",
+                            member.directory_name
+                        )));
+                    }
+                }
+                SourcePromotionMemberOrigin::New => {
+                    transaction
+                        .execute(
+                            "INSERT INTO skills (
+                                id, directory_name, identity_key, display_name, description,
+                                source_kind, library_entry_path, final_entity_path,
+                                recorded_content_hash, health, created_at, updated_at
+                             ) VALUES (
+                                ?1, ?2, ?3, ?4, ?5,
+                                'remote_install', ?6, ?6, ?7, ?8,
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                             )",
+                            params![
+                                member.skill_id.0,
+                                member.directory_name,
+                                member.identity_key,
+                                member.display_name,
+                                member.description,
+                                member.final_entity_path.to_string_lossy(),
+                                member.current_baseline_hash,
+                                health_value(member.health),
+                            ],
+                        )
+                        .map_err(source_promotion_sql_error)?;
+                }
+            }
+            transaction
+                .execute(
+                    "INSERT INTO git_source_members (
+                        skill_id, remote_id, current_skill_path, remote_baseline_hash,
+                        current_baseline_hash, last_checked_at, last_updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch('now'), unixepoch('now'))",
+                    params![
+                        member.skill_id.0,
+                        record.remote_id,
+                        member.skill_path,
+                        member.remote_baseline_hash,
+                        member.current_baseline_hash,
+                    ],
+                )
+                .map_err(source_promotion_sql_error)?;
+        }
+
+        for removed in &record.removed_members {
+            match removed {
+                SourcePromotionRemovedMemberRecord::Remove { skill_id } => {
+                    let deleted = transaction
+                        .execute("DELETE FROM skills WHERE id = ?1", [&skill_id.0])
+                        .map_err(source_promotion_sql_error)?;
+                    if deleted != 1 {
+                        return Err(SourcePromotionStoreError::Conflict(format!(
+                            "Legacy removed member '{}' disappeared during Source Promotion",
+                            skill_id.0
+                        )));
+                    }
+                }
+                SourcePromotionRemovedMemberRecord::LocalLink {
+                    skill_id,
+                    final_entity_path,
+                } => {
+                    let updated = transaction
+                        .execute(
+                            "UPDATE skills
+                             SET source_kind = 'link',
+                                 library_entry_path = NULL,
+                                 final_entity_path = ?1,
+                                 recorded_content_hash = NULL,
+                                 health = 'healthy',
+                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                             WHERE id = ?2",
+                            params![final_entity_path.to_string_lossy(), skill_id.0],
+                        )
+                        .map_err(source_promotion_sql_error)?;
+                    if updated != 1 {
+                        return Err(SourcePromotionStoreError::Conflict(format!(
+                            "Legacy Local Link member '{}' disappeared during Source Promotion",
+                            skill_id.0
+                        )));
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE activations SET expected_target_path = ?1 WHERE skill_id = ?2",
+                            params![final_entity_path.to_string_lossy(), skill_id.0],
+                        )
+                        .map_err(source_promotion_sql_error)?;
+                }
+            }
+        }
+        transaction
+            .execute(
+                "DELETE FROM remote_bindings WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "UPDATE git_repository_sources
+                 SET current_release_id = ?2,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE remote_id = ?1",
+                params![record.remote_id, record.release_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(source_promotion_sql_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction.commit().map_err(source_promotion_sql_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            SourcePromotionStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn source_promotion_is_committed(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<bool, SourcePromotionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourcePromotionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        source_promotion_matches(&connection, record)
+    }
+
+    fn undo_source_promotion(
+        &self,
+        record: &SourcePromotionRecord,
+        legacy: &LegacySourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourcePromotionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(source_promotion_sql_error)?;
+        if !source_promotion_matches(&transaction, record)? {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the Source Release no longer matches the frozen Source Promotion result".into(),
+            ));
+        }
+
+        transaction
+            .execute(
+                "UPDATE git_repository_sources SET current_release_id = NULL WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM git_source_releases WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM git_source_members WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM git_repository_sources WHERE remote_id = ?1",
+                [&record.remote_id],
+            )
+            .map_err(source_promotion_sql_error)?;
+
+        for member in &record.members {
+            if member.origin == SourcePromotionMemberOrigin::New {
+                transaction
+                    .execute("DELETE FROM skills WHERE id = ?1", [&member.skill_id.0])
+                    .map_err(source_promotion_sql_error)?;
+            }
+        }
+        for member in &legacy.members {
+            let updated = transaction
+                .execute(
+                    "UPDATE skills
+                     SET directory_name = ?1, identity_key = ?2, display_name = ?3,
+                         description = ?4, source_kind = 'remote_install',
+                         library_entry_path = ?5, final_entity_path = ?6,
+                         recorded_content_hash = ?7, health = ?8,
+                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?9",
+                    params![
+                        member.directory_name,
+                        member.identity_key,
+                        member.display_name,
+                        member.description,
+                        member.library_entry_path.to_string_lossy(),
+                        member.final_entity_path.to_string_lossy(),
+                        member.recorded_content_hash,
+                        health_value(member.health),
+                        member.skill_id.0,
+                    ],
+                )
+                .map_err(source_promotion_sql_error)?;
+            if updated == 0 {
+                transaction
+                    .execute(
+                        "INSERT INTO skills (
+                            id, directory_name, identity_key, display_name, description,
+                            source_kind, library_entry_path, final_entity_path,
+                            recorded_content_hash, health, created_at, updated_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, 'remote_install', ?6, ?7, ?8, ?9,
+                                   strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                                   strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                        params![
+                            member.skill_id.0,
+                            member.directory_name,
+                            member.identity_key,
+                            member.display_name,
+                            member.description,
+                            member.library_entry_path.to_string_lossy(),
+                            member.final_entity_path.to_string_lossy(),
+                            member.recorded_content_hash,
+                            health_value(member.health),
+                        ],
+                    )
+                    .map_err(source_promotion_sql_error)?;
+            }
+            transaction
+                .execute(
+                    "DELETE FROM activations WHERE skill_id = ?1",
+                    [&member.skill_id.0],
+                )
+                .map_err(source_promotion_sql_error)?;
+            for activation in &member.activations {
+                transaction
+                    .execute(
+                        "INSERT INTO activations (
+                            skill_id, agent_id, desired_enabled, expected_entry_path,
+                            expected_target_path, observed_state, last_enabled_at, last_checked_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            member.skill_id.0,
+                            activation.agent_id.0,
+                            activation.desired_enabled,
+                            activation.entry_path.to_string_lossy(),
+                            activation.target_path.to_string_lossy(),
+                            observed_state_value(activation.observed_state),
+                            activation.last_enabled_at,
+                            activation.last_checked_at,
+                        ],
+                    )
+                    .map_err(source_promotion_sql_error)?;
+            }
+            transaction
+                .execute(
+                    "INSERT INTO remote_bindings (
+                        skill_id, remote_id, requested_ref, verification_anchor_commit,
+                        original_commit_known, skill_path, provider_hash,
+                        remote_baseline_hash, current_baseline_hash, last_checked_at, last_updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        member.skill_id.0,
+                        legacy.remote_id,
+                        member.requested_ref,
+                        member.verification_anchor_commit,
+                        member.original_commit_known,
+                        member.skill_path,
+                        member.provider_hash,
+                        member.remote_baseline_hash,
+                        member.current_baseline_hash,
+                        member.last_checked_at,
+                        member.last_updated_at,
+                    ],
+                )
+                .map_err(source_promotion_sql_error)?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(source_promotion_sql_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(source_promotion_sql_error)?;
+        transaction.commit().map_err(source_promotion_sql_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            SourcePromotionStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+}
+
 impl SourceTransitionStore for SqliteCatalogStore {
     fn validate_new_source_transition(
         &self,
@@ -1621,6 +2227,426 @@ impl SourceTransitionStore for SqliteCatalogStore {
             SourceTransitionStoreError::Unavailable("negative SQLite snapshot version".into())
         })
     }
+}
+
+/// Exact current-release test for Promotion recovery and Source Undo. This
+/// intentionally compares only new Git Repository Source facts; frozen
+/// Legacy binding facts remain journal/audit evidence, never release truth.
+type SourcePromotionCurrentMemberState = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+fn source_promotion_matches(
+    connection: &Connection,
+    record: &SourcePromotionRecord,
+) -> Result<bool, SourcePromotionStoreError> {
+    let source: Option<(String, String, String, Option<String>)> = connection
+        .query_row(
+            "SELECT remote_id, provider, tracking_ref, current_release_id
+             FROM git_repository_sources WHERE remote_id = ?1 AND canonical_url = ?2",
+            params![record.remote_id, record.canonical_url],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(source_promotion_sql_error)?;
+    if source
+        != Some((
+            record.remote_id.clone(),
+            record.provider.clone(),
+            record.tracking_ref.clone(),
+            Some(record.release_id.clone()),
+        ))
+    {
+        return Ok(false);
+    }
+    let release: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT remote_id, tracking_ref, resolved_commit
+             FROM git_source_releases WHERE release_id = ?1",
+            [&record.release_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(source_promotion_sql_error)?;
+    if release
+        != Some((
+            record.remote_id.clone(),
+            record.tracking_ref.clone(),
+            record.resolved_commit.clone(),
+        ))
+    {
+        return Ok(false);
+    }
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_members WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| row.get(0),
+        )
+        .map_err(source_promotion_sql_error)?;
+    if count != record.members.len() as i64 {
+        return Ok(false);
+    }
+    for member in &record.members {
+        let actual: Option<SourcePromotionCurrentMemberState> = connection
+            .query_row(
+                "SELECT s.directory_name, s.identity_key, s.final_entity_path,
+                            s.recorded_content_hash, s.health, gm.current_skill_path,
+                            gm.remote_baseline_hash, gm.current_baseline_hash
+                     FROM skills s
+                     JOIN git_source_members gm ON gm.skill_id = s.id
+                     WHERE s.id = ?1 AND gm.remote_id = ?2",
+                params![member.skill_id.0, record.remote_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(source_promotion_sql_error)?;
+        let expected = (
+            member.directory_name.clone(),
+            member.identity_key.clone(),
+            member.final_entity_path.to_string_lossy().into_owned(),
+            member.current_baseline_hash.clone(),
+            health_value(member.health).into(),
+            member.skill_path.clone(),
+            member.remote_baseline_hash.clone(),
+            member.current_baseline_hash.clone(),
+        );
+        if actual != Some(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_source_promotion_record(
+    connection: &Connection,
+    record: &SourcePromotionRecord,
+) -> Result<(), SourcePromotionStoreError> {
+    if record.remote_id.is_empty()
+        || record.provider.is_empty()
+        || record.canonical_url.is_empty()
+        || record.tracking_ref.is_empty()
+        || record.release_id.is_empty()
+        || record.resolved_commit.is_empty()
+        || record.operation_id.is_empty()
+        || record.members.is_empty()
+    {
+        return Err(SourcePromotionStoreError::Conflict(
+            "the Source Promotion record is missing whole-source facts".into(),
+        ));
+    }
+    let parent: Option<(String, String)> = connection
+        .query_row(
+            "SELECT canonical_url, created_at FROM remote_source_parents WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(source_promotion_sql_error)?;
+    let aliases = connection
+        .prepare(
+            "SELECT alias_url FROM remote_source_aliases
+             WHERE remote_id = ?1 ORDER BY alias_url",
+        )
+        .map_err(source_promotion_sql_error)?
+        .query_map([&record.remote_id], |row| row.get::<_, String>(0))
+        .map_err(source_promotion_sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(source_promotion_sql_error)?;
+    if parent
+        != Some((
+            record.canonical_url.clone(),
+            record.legacy.created_at.clone(),
+        ))
+        || aliases != record.legacy.aliases
+    {
+        return Err(SourcePromotionStoreError::Conflict(
+            "the Legacy parent no longer matches the frozen source facts".into(),
+        ));
+    }
+    let promoted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM git_repository_sources WHERE remote_id = ?1)",
+            [&record.remote_id],
+            |row| row.get(0),
+        )
+        .map_err(source_promotion_sql_error)?;
+    if promoted {
+        return Err(SourcePromotionStoreError::Conflict(
+            "the selected parent is no longer Legacy Per-Skill Git State".into(),
+        ));
+    }
+
+    let actual_legacy_ids = connection
+        .prepare("SELECT skill_id FROM remote_bindings WHERE remote_id = ?1 ORDER BY skill_id")
+        .map_err(source_promotion_sql_error)?
+        .query_map([&record.remote_id], |row| row.get::<_, String>(0))
+        .map_err(source_promotion_sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(source_promotion_sql_error)?;
+    let expected_legacy_ids = record
+        .legacy_member_ids
+        .iter()
+        .map(|id| id.0.clone())
+        .collect::<BTreeSet<_>>();
+    if expected_legacy_ids.len() != record.legacy_member_ids.len()
+        || actual_legacy_ids.len() != expected_legacy_ids.len()
+        || actual_legacy_ids.iter().collect::<BTreeSet<_>>()
+            != expected_legacy_ids.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(SourcePromotionStoreError::Conflict(
+            "the Legacy member set changed after the Source Group Draft".into(),
+        ));
+    }
+    if record.legacy.remote_id != record.remote_id
+        || record.legacy.canonical_url != record.canonical_url
+        || record.legacy.tracking_ref != record.tracking_ref
+        || record.legacy.members.len() != expected_legacy_ids.len()
+    {
+        return Err(SourcePromotionStoreError::Conflict(
+            "the frozen Legacy source facts do not match the promotion target".into(),
+        ));
+    }
+    for legacy in &record.legacy.members {
+        // Keep this as a named value rather than a long tuple: standard
+        // library tuple comparisons stop before this many facts, and losing
+        // any one of these fields would turn a Legacy audit snapshot into a
+        // stale write precondition.
+        let actual: Option<LegacyPromotionBindingFacts> = connection
+            .query_row(
+                "SELECT b.requested_ref, b.verification_anchor_commit,
+                        b.original_commit_known, b.skill_path, b.provider_hash,
+                        b.remote_baseline_hash, b.current_baseline_hash,
+                        b.last_checked_at, b.last_updated_at,
+                        s.source_kind, s.directory_name, s.identity_key,
+                        s.display_name, s.description, s.library_entry_path,
+                        s.final_entity_path, s.recorded_content_hash, s.health
+                 FROM remote_bindings b
+                 JOIN skills s ON s.id = b.skill_id
+                 WHERE b.remote_id = ?1 AND b.skill_id = ?2",
+                params![record.remote_id, legacy.skill_id.0],
+                |row| {
+                    Ok(LegacyPromotionBindingFacts {
+                        requested_ref: row.get(0)?,
+                        verification_anchor_commit: row.get(1)?,
+                        original_commit_known: row.get(2)?,
+                        skill_path: row.get(3)?,
+                        provider_hash: row.get(4)?,
+                        remote_baseline_hash: row.get(5)?,
+                        current_baseline_hash: row.get(6)?,
+                        last_checked_at: row.get(7)?,
+                        last_updated_at: row.get(8)?,
+                        source_kind: row.get(9)?,
+                        directory_name: row.get(10)?,
+                        identity_key: row.get(11)?,
+                        display_name: row.get(12)?,
+                        description: row.get(13)?,
+                        library_entry_path: row.get(14)?,
+                        final_entity_path: row.get(15)?,
+                        recorded_content_hash: row.get(16)?,
+                        health: row.get(17)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(source_promotion_sql_error)?;
+        let expected = LegacyPromotionBindingFacts {
+            requested_ref: legacy.requested_ref.clone(),
+            verification_anchor_commit: legacy.verification_anchor_commit.clone(),
+            original_commit_known: legacy.original_commit_known,
+            skill_path: legacy.skill_path.clone(),
+            provider_hash: legacy.provider_hash.clone(),
+            remote_baseline_hash: legacy.remote_baseline_hash.clone(),
+            current_baseline_hash: legacy.current_baseline_hash.clone(),
+            last_checked_at: legacy.last_checked_at,
+            last_updated_at: legacy.last_updated_at,
+            source_kind: "remote_install".into(),
+            directory_name: legacy.directory_name.clone(),
+            identity_key: legacy.identity_key.clone(),
+            display_name: legacy.display_name.clone(),
+            description: legacy.description.clone(),
+            library_entry_path: legacy.library_entry_path.to_string_lossy().into_owned(),
+            final_entity_path: legacy.final_entity_path.to_string_lossy().into_owned(),
+            recorded_content_hash: legacy.recorded_content_hash.clone(),
+            health: health_value(legacy.health).into(),
+        };
+        if actual != Some(expected) {
+            return Err(SourcePromotionStoreError::Conflict(
+                "a frozen Legacy binding changed after the Source Group Draft".into(),
+            ));
+        }
+        let activations = connection
+            .prepare(
+                "SELECT agent_id, expected_entry_path, expected_target_path,
+                        desired_enabled, observed_state, last_enabled_at, last_checked_at
+                 FROM activations WHERE skill_id = ?1 ORDER BY agent_id",
+            )
+            .map_err(source_promotion_sql_error)?
+            .query_map([&legacy.skill_id.0], |row| {
+                Ok(SourcePromotionActivationRecord {
+                    agent_id: AgentId(row.get(0)?),
+                    entry_path: PathBuf::from(row.get::<_, String>(1)?),
+                    target_path: PathBuf::from(row.get::<_, String>(2)?),
+                    desired_enabled: row.get(3)?,
+                    observed_state: parse_observed_state(&row.get::<_, String>(4)?)?,
+                    last_enabled_at: row.get(5)?,
+                    last_checked_at: row.get(6)?,
+                })
+            })
+            .map_err(source_promotion_sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(source_promotion_sql_error)?;
+        if activations != legacy.activations {
+            return Err(SourcePromotionStoreError::Conflict(
+                "a frozen Legacy Activation changed after the Source Group Draft".into(),
+            ));
+        }
+    }
+
+    let mut consumed_legacy = BTreeSet::new();
+    let mut target_paths = BTreeSet::new();
+    let mut directory_names = BTreeSet::new();
+    let mut identity_keys = BTreeSet::new();
+    let mut member_ids = BTreeSet::new();
+    for member in &record.members {
+        if member.skill_id.0.is_empty()
+            || member.directory_name.is_empty()
+            || member.identity_key.is_empty()
+            || member.remote_baseline_hash.is_empty()
+            || member.current_baseline_hash.is_empty()
+            || !target_paths.insert(member.skill_path.as_str())
+            || !directory_names.insert(member.directory_name.as_str())
+            || !identity_keys.insert(member.identity_key.as_str())
+            || !member_ids.insert(member.skill_id.0.as_str())
+        {
+            return Err(SourcePromotionStoreError::Conflict(
+                "the target Source Release contains incomplete or duplicate members".into(),
+            ));
+        }
+        match member.origin {
+            SourcePromotionMemberOrigin::Legacy => {
+                if !expected_legacy_ids.contains(&member.skill_id.0)
+                    || !consumed_legacy.insert(member.skill_id.0.as_str())
+                {
+                    return Err(SourcePromotionStoreError::Conflict(
+                        "a target Source Member does not map to one selected Legacy member".into(),
+                    ));
+                }
+                let existing: Option<(String, String, String)> = connection
+                    .query_row(
+                        "SELECT directory_name, identity_key, final_entity_path
+                         FROM skills WHERE id = ?1",
+                        [&member.skill_id.0],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(source_promotion_sql_error)?;
+                let Some((directory_name, identity_key, final_entity_path)) = existing else {
+                    return Err(SourcePromotionStoreError::Conflict(
+                        "a selected Legacy member disappeared".into(),
+                    ));
+                };
+                if directory_name != member.directory_name
+                    || identity_key != member.identity_key
+                    || final_entity_path != member.final_entity_path.to_string_lossy()
+                {
+                    return Err(SourcePromotionStoreError::Conflict(
+                        "a selected Legacy member changed identity or location".into(),
+                    ));
+                }
+            }
+            SourcePromotionMemberOrigin::New => {
+                let collision: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM skills
+                            WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                         )",
+                        params![
+                            member.skill_id.0,
+                            member.directory_name,
+                            member.identity_key
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(source_promotion_sql_error)?;
+                if collision {
+                    return Err(SourcePromotionStoreError::Conflict(
+                        "a new target Source Member conflicts with an existing Managed Skill"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    }
+    for removed in &record.removed_members {
+        let (skill_id, valid_link_target) = match removed {
+            SourcePromotionRemovedMemberRecord::Remove { skill_id } => (skill_id, true),
+            SourcePromotionRemovedMemberRecord::LocalLink {
+                skill_id,
+                final_entity_path,
+            } => (skill_id, !final_entity_path.as_os_str().is_empty()),
+        };
+        if !valid_link_target
+            || !expected_legacy_ids.contains(&skill_id.0)
+            || !consumed_legacy.insert(skill_id.0.as_str())
+        {
+            return Err(SourcePromotionStoreError::Conflict(
+                "a removed Legacy member is missing, duplicated, or unresolved".into(),
+            ));
+        }
+    }
+    if consumed_legacy.len() != expected_legacy_ids.len() {
+        return Err(SourcePromotionStoreError::Conflict(
+            "every selected Legacy member must become a Source Member or an explicit removal"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct LegacyPromotionBindingFacts {
+    requested_ref: String,
+    verification_anchor_commit: String,
+    original_commit_known: bool,
+    skill_path: String,
+    provider_hash: Option<String>,
+    remote_baseline_hash: String,
+    current_baseline_hash: String,
+    last_checked_at: Option<i64>,
+    last_updated_at: Option<i64>,
+    source_kind: String,
+    directory_name: String,
+    identity_key: String,
+    display_name: String,
+    description: String,
+    library_entry_path: String,
+    final_entity_path: String,
+    recorded_content_hash: String,
+    health: String,
+}
+
+fn source_promotion_sql_error(error: rusqlite::Error) -> SourcePromotionStoreError {
+    SourcePromotionStoreError::Unavailable(error.to_string())
 }
 
 fn validate_new_source_transition(

@@ -650,6 +650,26 @@ export function createFixtureCatalogClient(): CatalogClient {
         "Fetch Latest and Manage is not available in the preview fixture",
       );
     },
+    async previewSourcePromotion() {
+      return fixtureUnsupported(
+        "Source Promotion is not available in the preview fixture",
+      );
+    },
+    async confirmSourcePromotion() {
+      return fixtureUnsupported(
+        "Source Promotion is not available in the preview fixture",
+      );
+    },
+    async undoSourcePromotion() {
+      return fixtureUnsupported(
+        "Source Promotion is not available in the preview fixture",
+      );
+    },
+    async finalizeSourcePromotion() {
+      return fixtureUnsupported(
+        "Source Promotion is not available in the preview fixture",
+      );
+    },
     async confirmSourceTransition() {
       return fixtureUnsupported(
         "Source Transition is not available in the preview fixture",

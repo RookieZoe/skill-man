@@ -1376,6 +1376,37 @@ pub trait FileSystem: Send + Sync {
         })
     }
 
+    /// Move a verified directory without resolving either its parent at the
+    /// point of mutation.  Source Promotion uses this narrow capability for
+    /// Local Link so a replacement of an external target parent cannot
+    /// redirect the library entity.  Implementations must bind both parent
+    /// directories by descriptor, require an absent destination, and reject
+    /// a source whose identity/content no longer match `expected`.
+    fn move_directory_nofollow(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: &StagedTreeSnapshot,
+        expected_source_parent: &DirectoryFingerprint,
+        expected_destination_parent: &DirectoryFingerprint,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = (
+            from,
+            to,
+            expected,
+            expected_source_parent,
+            expected_destination_parent,
+        );
+        Err(FileSystemError::Io {
+            operation: "move verified directory without following links",
+            path: from.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "descriptor-relative directory moves are not supported by this filesystem",
+            ),
+        })
+    }
+
     /// fsync a directory so a completed rename is durable (spec §3.2
     /// protocol; the recovery snapshot/promote/commit protocol relies on it).
     fn fsync_directory(&self, path: &Path) -> Result<(), FileSystemError> {
@@ -1815,6 +1846,63 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "Source Transition journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Persist an opaque, versioned Source Promotion journal. Promotion is a
+    /// Source Transition over an already-managed Legacy source, so it needs
+    /// the same durable whole-source recovery authority without teaching the
+    /// filesystem seam about Catalog domain records.
+    fn write_source_promotion_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, operation_id, bytes);
+        Err(FileSystemError::Io {
+            operation: "write Source Promotion journal",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Promotion journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Archive a completed Source Promotion journal and close its Source
+    /// Undo result window.
+    fn finish_source_promotion_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, operation_id);
+        Err(FileSystemError::Io {
+            operation: "finish Source Promotion journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Promotion journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Return only pending whole-source Promotion journals. The opaque bytes
+    /// are decoded and version-checked by Core so their domain schema can
+    /// evolve independently of this physical filesystem seam.
+    fn list_source_promotion_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<(String, Vec<u8>)>, FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "list Source Promotion journals",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Source Promotion journals are not supported by this filesystem",
             ),
         })
     }

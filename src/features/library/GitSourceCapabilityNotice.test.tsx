@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
-import { expect, test } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { expect, test, vi } from "vitest";
 
 import type { GitSourceCapabilityReport } from "../../app/catalog-client";
 import { GitSourceCapabilityNotice } from "./GitSourceCapabilityNotice";
@@ -24,7 +25,7 @@ const report: GitSourceCapabilityReport = {
   ],
 };
 
-test("renders every typed source state without promising unavailable follow-up actions", () => {
+test("renders every typed source state without opening source actions by default", () => {
   render(<GitSourceCapabilityNotice report={report} failure={null} />);
 
   expect(
@@ -45,9 +46,31 @@ test("renders every typed source state without promising unavailable follow-up a
   ).toHaveLength(1);
   expect(
     screen.getByText(
-      "Reading, Disable, and Remove remain available. Source-level Fetch Latest, Update, and Promotion are closed.",
+      "Reading, Disable, and Remove remain available. Promote this complete Legacy Source after reviewing a fresh Source Group Draft.",
     ),
   ).toBeInTheDocument();
+});
+
+test("offers Promotion only for a Legacy Per-Skill Git State", async () => {
+  const onPromote = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <GitSourceCapabilityNotice
+      report={report}
+      failure={null}
+      onPromote={onPromote}
+    />,
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "Promote Legacy Source" }),
+  );
+
+  expect(onPromote).toHaveBeenCalledWith(
+    "legacy-source",
+    expect.any(HTMLButtonElement),
+  );
+  expect(screen.getAllByRole("button")).toHaveLength(1);
 });
 
 test("surfaces a localized scan failure and keeps its raw diagnostic collapsed", () => {

@@ -720,6 +720,114 @@ impl FileSystem for MacOsFileSystem {
         })
     }
 
+    fn move_directory_nofollow(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected: &StagedTreeSnapshot,
+        expected_source_parent: &DirectoryFingerprint,
+        expected_destination_parent: &DirectoryFingerprint,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let source = self.normalize_configured_path(from)?;
+        let destination = self.normalize_configured_path(to)?;
+        // The caller freezes both raw, already-normalized paths.  Never
+        // follow a newly introduced symlink while "normalizing" again: that
+        // would bind a substituted external parent rather than the Draft.
+        if destination != to || expected.root.canonical_path != source {
+            return Err(FileSystemError::PlanStale { path: destination });
+        }
+        let source_parent_path = source
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: source.clone(),
+            })?
+            .to_path_buf();
+        let destination_parent_path = destination
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: destination.clone(),
+            })?
+            .to_path_buf();
+        let source_name = cstring_path_component(
+            source.file_name(),
+            &source,
+            "encode Source Promotion Local Link source name",
+        )?;
+        let destination_name = cstring_path_component(
+            destination.file_name(),
+            &destination,
+            "encode Source Promotion Local Link target name",
+        )?;
+        let (source_parent, _) = open_absolute_directory_chain_nofollow(
+            &source_parent_path,
+            "open Source Promotion Local Link source parent without following links",
+        )?;
+        let (destination_parent, _) = open_absolute_directory_chain_nofollow(
+            &destination_parent_path,
+            "open Source Promotion Local Link target parent without following links",
+        )?;
+        let actual_source_parent =
+            directory_descriptor_fingerprint(&source_parent, &source_parent_path)?;
+        let actual_destination_parent =
+            directory_descriptor_fingerprint(&destination_parent, &destination_parent_path)?;
+        if actual_source_parent != *expected_source_parent
+            || actual_destination_parent != *expected_destination_parent
+        {
+            return Err(FileSystemError::PlanStale { path: destination });
+        }
+        let source_metadata = metadata_at_nofollow(
+            &source_parent,
+            &source_name,
+            &source,
+            "reidentify Source Promotion Local Link source",
+        )?;
+        if source_metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || source_metadata.st_dev as u64 != expected.root.device
+            || source_metadata.st_ino != expected.root.inode
+        {
+            return Err(FileSystemError::PlanStale { path: source });
+        }
+        ensure_entry_missing_at(
+            &destination_parent,
+            &destination_name,
+            &destination,
+            "reserve Source Promotion Local Link target",
+        )?;
+        let status = unsafe {
+            libc::renameat(
+                source_parent.as_raw_fd(),
+                source_name.as_ptr(),
+                destination_parent.as_raw_fd(),
+                destination_name.as_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(FileSystemError::Io {
+                operation: "move Source Promotion Local Link directory",
+                path: source,
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        sync_descriptor(
+            &source_parent,
+            &source_parent_path,
+            "sync Source Promotion Local Link source parent",
+        )?;
+        sync_descriptor(
+            &destination_parent,
+            &destination_parent_path,
+            "sync Source Promotion Local Link target parent",
+        )?;
+        let moved = staged_tree_snapshot_at(&destination)?;
+        if moved.content_hash != expected.content_hash
+            || moved.root.device != expected.root.device
+            || moved.root.inode != expected.root.inode
+        {
+            return Err(FileSystemError::PlanStale { path: destination });
+        }
+        Ok(moved.root)
+    }
+
     fn fsync_directory(&self, path: &Path) -> Result<(), FileSystemError> {
         let dir = fs::File::open(path).map_err(|source| FileSystemError::Io {
             operation: "fsync directory",
@@ -4200,6 +4308,169 @@ impl FileSystem for MacOsFileSystem {
         Ok(journals)
     }
 
+    fn write_source_promotion_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_promotion_operation_id(operation_id)?;
+        let operation =
+            open_source_transition_operation_nofollow(&library_root, operation_id, true)?
+                .expect("create mode always returns a Source Promotion operation directory");
+        let journal_name = CString::new("source-promotion-journal.json").expect("static name");
+        let temporary_name = CString::new("source-promotion-journal.tmp").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-promotion-journal.json");
+        write_owned_file_atomically_at(
+            &operation.operation,
+            &temporary_name,
+            &journal_name,
+            &journal_path,
+            bytes,
+            "write Source Promotion journal without following links",
+        )?;
+        sync_descriptor(
+            &operation.operation,
+            &operation.operation_path,
+            "sync Source Promotion operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync Source Promotion operations directory",
+        )
+    }
+
+    fn finish_source_promotion_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_promotion_operation_id(operation_id)?;
+        let Some(operation) =
+            open_source_transition_operation_nofollow(&library_root, operation_id, false)?
+        else {
+            return Ok(());
+        };
+        let journal_name = CString::new("source-promotion-journal.json").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-promotion-journal.json");
+        if let Some(journal_bytes) = read_owned_regular_file_at(
+            &operation.operation,
+            &journal_name,
+            &journal_path,
+            "read completed Source Promotion journal without following links",
+        )? {
+            let history = open_source_transition_history_root_nofollow(&library_root, true)?;
+            let archive_name = CString::new(format!("{operation_id}.source-promotion.json"))
+                .expect("validated operation identifier creates a valid archive name");
+            let temporary_name = CString::new(format!(".{operation_id}.source-promotion.tmp"))
+                .expect("validated operation identifier creates a valid archive name");
+            let archive_path = history
+                .path
+                .join(format!("{operation_id}.source-promotion.json"));
+            write_owned_file_atomically_at(
+                &history.directory,
+                &temporary_name,
+                &archive_name,
+                &archive_path,
+                &journal_bytes,
+                "write Source Promotion history without following links",
+            )?;
+            sync_descriptor(
+                &history.directory,
+                &history.path,
+                "sync Source Promotion operation history",
+            )?;
+        }
+        remove_owned_regular_file_at(
+            &operation.operation,
+            &journal_name,
+            &journal_path,
+            "remove completed Source Promotion journal without following links",
+        )?;
+        remove_child_directory_at(
+            &operation.root.operations,
+            operation.root.operations_metadata.st_dev,
+            operation.operation_metadata.st_ino,
+            &operation.operation_name,
+            &operation.operation_path,
+            "remove completed Source Promotion operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync cleaned Source Promotion operations directory",
+        )
+    }
+
+    fn list_source_promotion_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<(String, Vec<u8>)>, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let Some(operations) =
+            open_source_transition_operations_root_nofollow(&library_root, false)?
+        else {
+            return Ok(Vec::new());
+        };
+        let entries = directory_entry_names(
+            &operations.operations,
+            &operations.operations_path,
+            "enumerate Source Promotion recovery journals without following links",
+        )?;
+        let mut journals = Vec::new();
+        for operation_name in entries {
+            let Some(operation_id) = operation_name.to_str() else {
+                continue;
+            };
+            if !operation_id.starts_with("source-promotion-") {
+                continue;
+            }
+            validate_source_promotion_operation_id(operation_id)?;
+            let operation_name =
+                CString::new(operation_name.as_bytes()).map_err(|source| FileSystemError::Io {
+                    operation: "encode Source Promotion recovery operation identifier",
+                    path: operations.operations_path.join(&operation_name),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                })?;
+            let operation_path = operations.operations_path.join(operation_id);
+            let (operation, operation_metadata) = open_directory_at_nofollow(
+                &operations.operations,
+                &operation_name,
+                &operation_path,
+                "open Source Promotion recovery operation without following links",
+            )?;
+            if operation_metadata.st_dev != operations.operations_metadata.st_dev {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover Source Promotion journal",
+                    path: operation_path,
+                    message:
+                        "the operation directory crosses the owned operations filesystem boundary"
+                            .into(),
+                });
+            }
+            let journal_name = CString::new("source-promotion-journal.json").expect("static name");
+            let journal_path = operation_path.join("source-promotion-journal.json");
+            let Some(bytes) = read_owned_regular_file_at(
+                &operation,
+                &journal_name,
+                &journal_path,
+                "read Source Promotion recovery journal without following links",
+            )?
+            else {
+                continue;
+            };
+            journals.push((operation_id.to_owned(), bytes));
+        }
+        Ok(journals)
+    }
+
     fn roll_forward_handoff_item(
         &self,
         library_root: &Path,
@@ -4414,6 +4685,16 @@ fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemErr
 fn validate_source_transition_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;
     if !operation_id.starts_with("source-transition-") {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: PathBuf::from(operation_id),
+        });
+    }
+    Ok(())
+}
+
+fn validate_source_promotion_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    validate_operation_id(operation_id)?;
+    if !operation_id.starts_with("source-promotion-") {
         return Err(FileSystemError::InvalidConfiguredPath {
             path: PathBuf::from(operation_id),
         });
@@ -5795,6 +6076,78 @@ fn open_directory_nofollow(
     Ok((descriptor, metadata))
 }
 
+/// Open every component of an absolute directory one descriptor at a time.
+/// `open(..., O_NOFOLLOW)` protects only its final component; this helper is
+/// intentionally used for Local Link parents, whose external ancestors are
+/// not owned by the application and may otherwise be swapped after preview.
+fn open_absolute_directory_chain_nofollow(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(OwnedFd, libc::stat), FileSystemError> {
+    if !path.is_absolute() {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: path.to_path_buf(),
+        });
+    }
+    let root = CString::new("/").expect("root path has no NUL");
+    let descriptor = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    let mut current = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let mut current_path = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                current_path.push(name);
+                let encoded =
+                    CString::new(name.as_bytes()).map_err(|source| FileSystemError::Io {
+                        operation,
+                        path: current_path.clone(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                    })?;
+                let (next, _) =
+                    open_directory_at_nofollow(&current, &encoded, &current_path, operation)?;
+                current = next;
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    }
+    let metadata = directory_descriptor_metadata(&current, path)?;
+    Ok((current, metadata))
+}
+
+fn cstring_path_component(
+    name: Option<&std::ffi::OsStr>,
+    path: &Path,
+    operation: &'static str,
+) -> Result<CString, FileSystemError> {
+    let name = name.ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+        path: path.to_path_buf(),
+    })?;
+    validate_path_component_bytes(name.as_bytes(), operation)?;
+    CString::new(name.as_bytes()).map_err(|source| FileSystemError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+    })
+}
+
 fn open_directory_at_nofollow(
     parent: &OwnedFd,
     name: &CString,
@@ -6831,7 +7184,10 @@ fn open_source_transition_operation_nofollow(
     operation_id: &str,
     create: bool,
 ) -> Result<Option<SourceTransitionOperationDirectory>, FileSystemError> {
-    validate_source_transition_operation_id(operation_id)?;
+    // The owned operations root is shared by both Source Transition and
+    // Source Promotion. Callers validate their own operation namespace
+    // before opening a descriptor-relative directory here.
+    validate_operation_id(operation_id)?;
     let Some(root) = open_source_transition_operations_root_nofollow(library_root, create)? else {
         return Ok(None);
     };
@@ -7140,6 +7496,18 @@ fn directory_descriptor_metadata(
     }
 }
 
+fn directory_descriptor_fingerprint(
+    directory: &OwnedFd,
+    canonical_path: &Path,
+) -> Result<DirectoryFingerprint, FileSystemError> {
+    let metadata = directory_descriptor_metadata(directory, canonical_path)?;
+    Ok(DirectoryFingerprint {
+        canonical_path: canonical_path.to_path_buf(),
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino,
+    })
+}
+
 fn ensure_directory_fingerprint(
     path: &Path,
     expected: &DirectoryFingerprint,
@@ -7390,6 +7758,130 @@ mod tests {
         assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
         assert!(source.join("replacement.txt").is_file());
         assert!(preserved.join("original.txt").is_file());
+    }
+
+    #[test]
+    fn source_promotion_local_link_move_rejects_a_replaced_source_identity() {
+        let root = tempfile::tempdir().expect("temporary Local Link move root");
+        let source_parent = root.path().join("source-parent");
+        let target_parent = root.path().join("target-parent");
+        let source = source_parent.join("legacy-skill");
+        let preserved = source_parent.join("preserved-original");
+        let raw_target = target_parent.join("local-link-skill");
+        fs::create_dir_all(&source).expect("create Local Link source");
+        fs::create_dir_all(&target_parent).expect("create Local Link target parent");
+        fs::write(source.join("SKILL.md"), "# Original\n").expect("write original Skill");
+        let expected = staged_tree_snapshot_at(&source).expect("snapshot original Local Link");
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let target = filesystem
+            .normalize_configured_path(&raw_target)
+            .expect("normalize Local Link target");
+        let expected_source_parent = filesystem
+            .directory_fingerprint(&source_parent)
+            .expect("fingerprint Local Link source parent");
+        let expected_target_parent = filesystem
+            .directory_fingerprint(&target_parent)
+            .expect("fingerprint Local Link target parent");
+
+        fs::rename(&source, &preserved).expect("preserve original Local Link");
+        fs::create_dir(&source).expect("replace Local Link source");
+        fs::write(source.join("SKILL.md"), "# Replacement\n").expect("write replacement Skill");
+
+        let result = filesystem.move_directory_nofollow(
+            &source,
+            &target,
+            &expected,
+            &expected_source_parent,
+            &expected_target_parent,
+        );
+
+        assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
+        assert!(source.join("SKILL.md").is_file());
+        assert!(!target.exists(), "a replacement must never be moved");
+        assert!(preserved.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn source_promotion_local_link_move_is_descriptor_relative_and_preserves_identity() {
+        let root = tempfile::tempdir().expect("temporary Local Link move root");
+        let source_parent = root.path().join("source-parent");
+        let target_parent = root.path().join("target-parent");
+        let source = source_parent.join("legacy-skill");
+        let raw_target = target_parent.join("local-link-skill");
+        fs::create_dir_all(&source).expect("create Local Link source");
+        fs::create_dir_all(&target_parent).expect("create Local Link target parent");
+        fs::write(source.join("SKILL.md"), "# Linked\n").expect("write Skill");
+        let expected = staged_tree_snapshot_at(&source).expect("snapshot Local Link source");
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let target = filesystem
+            .normalize_configured_path(&raw_target)
+            .expect("normalize Local Link target");
+        let expected_source_parent = filesystem
+            .directory_fingerprint(&source_parent)
+            .expect("fingerprint Local Link source parent");
+        let expected_target_parent = filesystem
+            .directory_fingerprint(&target_parent)
+            .expect("fingerprint Local Link target parent");
+
+        let moved = filesystem
+            .move_directory_nofollow(
+                &source,
+                &target,
+                &expected,
+                &expected_source_parent,
+                &expected_target_parent,
+            )
+            .expect("descriptor-relative Local Link move");
+
+        assert!(!source.exists());
+        assert_eq!(moved.device, expected.root.device);
+        assert_eq!(moved.inode, expected.root.inode);
+        assert_eq!(
+            staged_tree_snapshot_at(&target)
+                .expect("snapshot moved Local Link")
+                .content_hash,
+            expected.content_hash
+        );
+    }
+
+    #[test]
+    fn source_promotion_local_link_move_rejects_a_replaced_target_parent() {
+        let root = tempfile::tempdir().expect("temporary Local Link move root");
+        let source_parent = root.path().join("source-parent");
+        let target_parent = root.path().join("target-parent");
+        let replacement_parent = root.path().join("replacement-parent");
+        let source = source_parent.join("legacy-skill");
+        let raw_target = target_parent.join("local-link-skill");
+        fs::create_dir_all(&source).expect("create Local Link source");
+        fs::create_dir_all(&target_parent).expect("create Local Link target parent");
+        fs::write(source.join("SKILL.md"), "# Linked\n").expect("write Skill");
+        let expected = staged_tree_snapshot_at(&source).expect("snapshot Local Link source");
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let target = filesystem
+            .normalize_configured_path(&raw_target)
+            .expect("normalize Local Link target");
+        let expected_source_parent = filesystem
+            .directory_fingerprint(&source_parent)
+            .expect("fingerprint Local Link source parent");
+        let expected_target_parent = filesystem
+            .directory_fingerprint(&target_parent)
+            .expect("fingerprint Local Link target parent");
+
+        fs::rename(&target_parent, &replacement_parent).expect("replace Local Link parent");
+        fs::create_dir(&target_parent).expect("create substituted target parent");
+
+        let result = filesystem.move_directory_nofollow(
+            &source,
+            &target,
+            &expected,
+            &expected_source_parent,
+            &expected_target_parent,
+        );
+
+        assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
+        assert!(source.join("SKILL.md").is_file());
+        assert!(!target.exists(), "the substituted parent remains empty");
+        assert!(!replacement_parent.join("local-link-skill").exists());
     }
 
     #[test]

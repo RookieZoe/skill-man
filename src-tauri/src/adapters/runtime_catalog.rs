@@ -28,6 +28,10 @@ use crate::seams::maintenance_store::{
     MaintenanceStore, MaintenanceStoreError, ManagedSkillBaseline, RelocateActivationBaseline,
     RemoveTarget, SkillHealthObservation,
 };
+use crate::seams::source_promotion_store::{
+    LegacySourcePromotionRecord, SourcePromotionRecord, SourcePromotionStore,
+    SourcePromotionStoreError,
+};
 use crate::seams::source_transition_store::{
     SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
@@ -270,6 +274,69 @@ impl CatalogStore for RuntimeCatalogStore {
             return Ok(Vec::new());
         }
         self.require().recently_enabled_skills(limit)
+    }
+}
+
+impl SourcePromotionStore for RuntimeCatalogStore {
+    fn read_legacy_source_promotion(
+        &self,
+        remote_id: &str,
+    ) -> Result<LegacySourcePromotionRecord, SourcePromotionStoreError> {
+        if !self.is_writable() {
+            return Err(SourcePromotionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().read_legacy_source_promotion(remote_id)
+    }
+
+    fn validate_source_promotion(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<(), SourcePromotionStoreError> {
+        if !self.is_writable() {
+            return Err(SourcePromotionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().validate_source_promotion(record)
+    }
+
+    fn commit_source_promotion(
+        &self,
+        record: SourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        if !self.is_writable() {
+            return Err(SourcePromotionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().commit_source_promotion(record)
+    }
+
+    fn source_promotion_is_committed(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<bool, SourcePromotionStoreError> {
+        if !self.is_writable() {
+            return Err(SourcePromotionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().source_promotion_is_committed(record)
+    }
+
+    fn undo_source_promotion(
+        &self,
+        record: &SourcePromotionRecord,
+        legacy: &LegacySourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        if !self.is_writable() {
+            return Err(SourcePromotionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().undo_source_promotion(record, legacy)
     }
 }
 

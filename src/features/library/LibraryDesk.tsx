@@ -36,6 +36,9 @@ import type {
   SkillSummary,
   SourceKind,
   SourceGroupPreviewOutcome,
+  SourcePromotionDraft,
+  SourcePromotionResult,
+  SourcePromotionResolution,
   SourceTransitionResult,
   StartupAgent,
 } from "../../app/catalog-client";
@@ -51,6 +54,7 @@ import {
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
+import { SourcePromotionFlow } from "./SourcePromotionFlow";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
@@ -107,6 +111,9 @@ interface LibraryDeskProps {
   sourceGroupRef: string;
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
   sourceTransitionResult: SourceTransitionResult | null;
+  sourcePromotionActive: boolean;
+  sourcePromotionDraft: SourcePromotionDraft | null;
+  sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
   sourceGroupActivity: "idle" | "fetching" | "confirming" | "undoing";
   relocatePanel: RelocatePanelState;
@@ -152,6 +159,9 @@ interface LibraryDeskProps {
   onSourceGroupRefChange: (trackingRef: string) => void;
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
+  onPreviewSourcePromotion: (remoteId: string) => void;
+  onConfirmSourcePromotion: (resolutions: SourcePromotionResolution[]) => void;
+  onUndoSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
   onOpenAdopt: () => void;
   onRescanAdopt: () => void;
@@ -224,6 +234,9 @@ export function LibraryDesk({
   sourceGroupRef,
   sourceGroupOutcome,
   sourceTransitionResult,
+  sourcePromotionActive,
+  sourcePromotionDraft,
+  sourcePromotionResult,
   sourceGroupError,
   sourceGroupActivity,
   relocatePanel,
@@ -260,6 +273,9 @@ export function LibraryDesk({
   onSourceGroupRefChange,
   onConfirmSourceTransition,
   onUndoSourceTransition,
+  onPreviewSourcePromotion,
+  onConfirmSourcePromotion,
+  onUndoSourcePromotion,
   onFetchLatestAndManage,
   isAdoptOpen,
   adoptReport,
@@ -310,6 +326,7 @@ export function LibraryDesk({
   const [activePane, setActivePane] = useState<PaneKey>("library");
   const agentInspectorRef = useRef<HTMLElement | null>(null);
   const pendingDrawerFocus = useRef(false);
+  const promotionTrigger = useRef<HTMLButtonElement | null>(null);
   const lastOverlay = useRef<
     "activation" | "import" | "preferences" | "appUpdate" | null
   >(null);
@@ -413,7 +430,9 @@ export function LibraryDesk({
         );
         (trigger ?? fallback)?.focus();
       } else if (lastOverlay.current === "import") {
-        document.getElementById("link-import-trigger")?.focus();
+        const trigger = promotionTrigger.current;
+        promotionTrigger.current = null;
+        (trigger ?? document.getElementById("link-import-trigger"))?.focus();
       } else if (
         lastOverlay.current === "preferences" ||
         lastOverlay.current === "appUpdate"
@@ -458,7 +477,10 @@ export function LibraryDesk({
         layoutMode={layoutMode}
         agentDrawerOpen={agentDrawerOpen}
         onToggleAgentDrawer={toggleAgentDrawer}
-        onImport={onOpenLinkImport}
+        onImport={() => {
+          promotionTrigger.current = null;
+          onOpenLinkImport();
+        }}
         onAdopt={onOpenAdopt}
         onOpenPreferences={onOpenPreferences}
       />
@@ -486,6 +508,10 @@ export function LibraryDesk({
         <GitSourceCapabilityNotice
           report={gitSourceCapability}
           failure={gitSourceCapabilityFailure}
+          onPromote={(remoteId, trigger) => {
+            promotionTrigger.current = trigger;
+            onPreviewSourcePromotion(remoteId);
+          }}
         />
       </div>
       <div className="app-background" inert={hasOverlay ? true : undefined}>
@@ -633,6 +659,9 @@ export function LibraryDesk({
           sourceGroupRef={sourceGroupRef}
           sourceGroupOutcome={sourceGroupOutcome}
           sourceTransitionResult={sourceTransitionResult}
+          sourcePromotionActive={sourcePromotionActive}
+          sourcePromotionDraft={sourcePromotionDraft}
+          sourcePromotionResult={sourcePromotionResult}
           sourceGroupError={sourceGroupError}
           sourceGroupActivity={sourceGroupActivity}
           onKindChange={onImportKindChange}
@@ -646,6 +675,8 @@ export function LibraryDesk({
           onFetchLatestAndManage={onFetchLatestAndManage}
           onConfirmSourceTransition={onConfirmSourceTransition}
           onUndoSourceTransition={onUndoSourceTransition}
+          onConfirmSourcePromotion={onConfirmSourcePromotion}
+          onUndoSourcePromotion={onUndoSourcePromotion}
         />
       ) : null}
       {isOnboardingOpen ? (
@@ -1098,6 +1129,9 @@ function LinkImportSheet({
   sourceGroupRef,
   sourceGroupOutcome,
   sourceTransitionResult,
+  sourcePromotionActive,
+  sourcePromotionDraft,
+  sourcePromotionResult,
   sourceGroupError,
   sourceGroupActivity,
   onKindChange,
@@ -1111,6 +1145,8 @@ function LinkImportSheet({
   onFetchLatestAndManage,
   onConfirmSourceTransition,
   onUndoSourceTransition,
+  onConfirmSourcePromotion,
+  onUndoSourcePromotion,
 }: {
   kind: ImportKind;
   preview: LinkImportPreview | null;
@@ -1122,6 +1158,9 @@ function LinkImportSheet({
   sourceGroupRef: string;
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
   sourceTransitionResult: SourceTransitionResult | null;
+  sourcePromotionActive: boolean;
+  sourcePromotionDraft: SourcePromotionDraft | null;
+  sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
   sourceGroupActivity: "idle" | "fetching" | "confirming" | "undoing";
   onKindChange: (kind: ImportKind) => void;
@@ -1135,6 +1174,8 @@ function LinkImportSheet({
   onFetchLatestAndManage: () => void;
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
+  onConfirmSourcePromotion: (resolutions: SourcePromotionResolution[]) => void;
+  onUndoSourcePromotion: () => void;
 }) {
   const { t } = useLocale();
   const [sourcePath, setSourcePath] = useState("");
@@ -1145,11 +1186,12 @@ function LinkImportSheet({
   const isRunning = activity !== "idle" || sourceGroupActivity !== "idle";
   const isGit = kind === "git";
   const sourceGroupIsFetching = sourceGroupActivity !== "idle";
-  const gitStep = sourceTransitionResult
-    ? "result"
-    : sourceGroupOutcome?.kind === "preview"
-      ? "preview"
-      : "source";
+  const gitStep =
+    sourceTransitionResult || sourcePromotionResult
+      ? "result"
+      : sourceGroupOutcome?.kind === "preview" || sourcePromotionActive
+        ? "preview"
+        : "source";
   const currentStep = isGit
     ? gitStep
     : result
@@ -1165,13 +1207,23 @@ function LinkImportSheet({
       result ||
       preview ||
       sourceTransitionResult ||
+      sourcePromotionResult ||
+      sourcePromotionActive ||
       sourceGroupOutcome?.kind === "preview"
     ) {
       primaryButton.current?.focus();
     } else {
       sourceInput.current?.focus();
     }
-  }, [preview, result, sourceTransitionResult, sourceGroupOutcome]);
+  }, [
+    preview,
+    result,
+    sourceTransitionResult,
+    sourcePromotionDraft,
+    sourcePromotionResult,
+    sourcePromotionActive,
+    sourceGroupOutcome,
+  ]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1223,23 +1275,38 @@ function LinkImportSheet({
         </ol>
         {isGit ? (
           <>
-            <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
-            <SourceGroupPreviewFlow
-              sourceType={sourceGroupType}
-              sourceUrl={sourceGroupUrl}
-              trackingRef={sourceGroupRef}
-              outcome={sourceGroupOutcome}
-              result={sourceTransitionResult}
-              error={sourceGroupError}
-              activity={sourceGroupActivity}
-              onSourceTypeChange={onSourceGroupTypeChange}
-              onSourceUrlChange={onSourceGroupUrlChange}
-              onTrackingRefChange={onSourceGroupRefChange}
-              onFetch={onFetchLatestAndManage}
-              onConfirm={onConfirmSourceTransition}
-              onUndo={onUndoSourceTransition}
-              onClose={onClose}
-            />
+            {sourcePromotionActive ? (
+              <SourcePromotionFlow
+                draft={sourcePromotionDraft}
+                result={sourcePromotionResult}
+                error={sourceGroupError}
+                activity={sourceGroupActivity}
+                onConfirm={onConfirmSourcePromotion}
+                onUndo={onUndoSourcePromotion}
+                onClose={onClose}
+                initialFocusRef={primaryButton}
+              />
+            ) : (
+              <>
+                <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
+                <SourceGroupPreviewFlow
+                  sourceType={sourceGroupType}
+                  sourceUrl={sourceGroupUrl}
+                  trackingRef={sourceGroupRef}
+                  outcome={sourceGroupOutcome}
+                  result={sourceTransitionResult}
+                  error={sourceGroupError}
+                  activity={sourceGroupActivity}
+                  onSourceTypeChange={onSourceGroupTypeChange}
+                  onSourceUrlChange={onSourceGroupUrlChange}
+                  onTrackingRefChange={onSourceGroupRefChange}
+                  onFetch={onFetchLatestAndManage}
+                  onConfirm={onConfirmSourceTransition}
+                  onUndo={onUndoSourceTransition}
+                  onClose={onClose}
+                />
+              </>
+            )}
           </>
         ) : result ? (
           <>

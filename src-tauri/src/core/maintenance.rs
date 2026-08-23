@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::core::domain::{
     ActivationObservedState, Health, SkillId, SourceKind, parse_skill_metadata,
 };
+use crate::core::source_promotion::SourcePromotionService;
 use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
 use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
@@ -152,6 +153,7 @@ pub struct MaintenanceService {
     next_plan_id: Arc<AtomicU64>,
     plan_ttl: Duration,
     source_transition_recovery: Option<Arc<SourceTransitionService>>,
+    source_promotion_recovery: Option<Arc<SourcePromotionService>>,
 }
 
 impl Clone for MaintenanceService {
@@ -167,6 +169,7 @@ impl Clone for MaintenanceService {
             next_plan_id: self.next_plan_id.clone(),
             plan_ttl: self.plan_ttl,
             source_transition_recovery: self.source_transition_recovery.clone(),
+            source_promotion_recovery: self.source_promotion_recovery.clone(),
         }
     }
 }
@@ -184,6 +187,7 @@ impl MaintenanceService {
             next_plan_id: Arc::new(AtomicU64::new(1)),
             plan_ttl: DEFAULT_PLAN_TTL,
             source_transition_recovery: None,
+            source_promotion_recovery: None,
         }
     }
 
@@ -229,6 +233,16 @@ impl MaintenanceService {
         source_transition: Arc<SourceTransitionService>,
     ) -> Self {
         self.source_transition_recovery = Some(source_transition);
+        self
+    }
+
+    /// Legacy Source Promotion is also a whole-source transition and must
+    /// settle its frozen journal before normal product writes reopen.
+    pub fn with_source_promotion_recovery(
+        mut self,
+        source_promotion: Arc<SourcePromotionService>,
+    ) -> Self {
+        self.source_promotion_recovery = Some(source_promotion);
         self
     }
 
@@ -308,6 +322,11 @@ impl MaintenanceService {
                 .recover_remove_journals(&library_root, &remove_baselines)?;
             if let Some(source_transition) = &self.source_transition_recovery {
                 source_transition.recover_pending(&library_root)?;
+            }
+            if let Some(source_promotion) = &self.source_promotion_recovery {
+                source_promotion
+                    .recover_pending(&library_root)
+                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
             }
             self.recover_handoff_operations(&library_root)?;
         }

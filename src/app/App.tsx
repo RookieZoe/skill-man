@@ -46,6 +46,9 @@ import type {
   SkillDetail,
   SkillSummary,
   SourceGroupPreviewOutcome,
+  SourcePromotionDraft,
+  SourcePromotionResult,
+  SourcePromotionResolution,
   SourceTransitionResult,
   StartupAgent,
 } from "./catalog-client";
@@ -276,6 +279,13 @@ export function App({ client }: AppProps) {
     useState<SourceGroupPreviewOutcome | null>(null);
   const [sourceTransitionResult, setSourceTransitionResult] =
     useState<SourceTransitionResult | null>(null);
+  const [sourcePromotionRemoteId, setSourcePromotionRemoteId] = useState<
+    string | null
+  >(null);
+  const [sourcePromotionDraft, setSourcePromotionDraft] =
+    useState<SourcePromotionDraft | null>(null);
+  const [sourcePromotionResult, setSourcePromotionResult] =
+    useState<SourcePromotionResult | null>(null);
   const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
   const [sourceGroupActivity, setSourceGroupActivity] = useState<
     "idle" | "fetching" | "confirming" | "undoing"
@@ -811,6 +821,9 @@ export function App({ client }: AppProps) {
     setSourceGroupRef("");
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(null);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
     setImportKind("link");
@@ -823,6 +836,9 @@ export function App({ client }: AppProps) {
     setSourceGroupError(null);
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(null);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
     try {
       const outcome = await client.fetchLatestAndManage({
         sourceType: sourceGroupType,
@@ -853,6 +869,14 @@ export function App({ client }: AppProps) {
         return;
       }
     }
+    if (sourcePromotionResult) {
+      try {
+        await client.finalizeSourcePromotion(sourcePromotionResult.operationId);
+      } catch (reason) {
+        setSourceGroupError(readError(reason, t));
+        return;
+      }
+    }
     linkImportRunId.current += 1;
     sourceGroupRunId.current += 1;
     const linkPlanToken = linkImportPreview?.planToken;
@@ -863,6 +887,9 @@ export function App({ client }: AppProps) {
     setLinkImportActivity("idle");
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(null);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
     if (linkPlanToken) {
@@ -888,6 +915,94 @@ export function App({ client }: AppProps) {
       if (runId !== sourceGroupRunId.current) return;
       setSkills(snapshot.items);
       setSourceTransitionResult(result);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
+  async function previewSourcePromotion(remoteId: string) {
+    const runId = ++sourceGroupRunId.current;
+    linkImportRunId.current += 1;
+    setLinkImportPreview(null);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+    setImportKind("git");
+    setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(remoteId);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
+    setSourceGroupError(null);
+    setSourceGroupActivity("fetching");
+    setIsLinkImportOpen(true);
+    try {
+      const draft = await client.previewSourcePromotion(remoteId);
+      if (runId === sourceGroupRunId.current) setSourcePromotionDraft(draft);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
+  async function confirmSourcePromotion(
+    resolutions: SourcePromotionResolution[],
+  ) {
+    if (!sourcePromotionDraft) return;
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("confirming");
+    setSourceGroupError(null);
+    try {
+      const result = await client.confirmSourcePromotion({
+        remoteId: sourcePromotionDraft.remoteId,
+        expectedResolvedCommit: sourcePromotionDraft.resolvedCommit,
+        resolutions,
+      });
+      const snapshot = await client.listSkills(filter);
+      if (runId !== sourceGroupRunId.current) return;
+      setSkills(snapshot.items);
+      setSourcePromotionResult(result);
+      void client
+        .getGitSourceCapability()
+        .then((report) => {
+          if (runId !== sourceGroupRunId.current) return;
+          setGitSourceCapability(report);
+          setGitSourceCapabilityFailure(null);
+        })
+        .catch((reason: unknown) => {
+          if (runId !== sourceGroupRunId.current) return;
+          setGitSourceCapability(null);
+          setGitSourceCapabilityFailure({
+            diagnostic: readDiagnostic(reason, t),
+          });
+        });
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
+  async function undoSourcePromotion() {
+    if (!sourcePromotionResult) return;
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("undoing");
+    setSourceGroupError(null);
+    try {
+      await client.undoSourcePromotion(sourcePromotionResult.operationId);
+      const snapshot = await client.listSkills(filter);
+      if (runId !== sourceGroupRunId.current) return;
+      setSkills(snapshot.items);
+      setSourcePromotionResult(null);
+      setSourcePromotionDraft(null);
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
         setSourceGroupError(readError(reason, t));
@@ -1600,6 +1715,9 @@ export function App({ client }: AppProps) {
         sourceGroupRef={sourceGroupRef}
         sourceGroupOutcome={sourceGroupOutcome}
         sourceTransitionResult={sourceTransitionResult}
+        sourcePromotionActive={sourcePromotionRemoteId !== null}
+        sourcePromotionDraft={sourcePromotionDraft}
+        sourcePromotionResult={sourcePromotionResult}
         sourceGroupError={sourceGroupError}
         sourceGroupActivity={sourceGroupActivity}
         onFilter={setFilter}
@@ -1636,6 +1754,9 @@ export function App({ client }: AppProps) {
         onFetchLatestAndManage={fetchLatestAndManage}
         onConfirmSourceTransition={confirmSourceTransition}
         onUndoSourceTransition={undoSourceTransition}
+        onPreviewSourcePromotion={previewSourcePromotion}
+        onConfirmSourcePromotion={confirmSourcePromotion}
+        onUndoSourcePromotion={undoSourcePromotion}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}

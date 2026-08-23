@@ -45,6 +45,7 @@ pub fn run() {
     use crate::core::maintenance::MaintenanceService;
     use crate::core::preferences::PreferencesService;
     use crate::core::source_group_preview::SourceGroupPreviewService;
+    use crate::core::source_promotion::SourcePromotionService;
     use crate::core::source_transition::SourceTransitionService;
     use crate::core::startup::StartupService;
     use crate::core::update::UpdateService;
@@ -69,19 +70,21 @@ pub fn run() {
         cancel_app_update, cancel_candidate, cancel_file_import, cancel_link_import,
         cancel_relocate_link, cancel_remove_skill, check_app_update, check_skill_updates,
         complete_onboarding, confirm_fixture_recovery_result, confirm_home,
-        confirm_source_transition, continue_candidate, create_agent_directory,
-        discover_file_import, discover_file_import_collection, discover_link_import,
-        download_app_update, fetch_latest_and_manage, finalize_activation_replace, finalize_adopt,
+        confirm_source_promotion, confirm_source_transition, continue_candidate,
+        create_agent_directory, discover_file_import, discover_file_import_collection,
+        discover_link_import, download_app_update, fetch_latest_and_manage,
+        finalize_activation_replace, finalize_adopt, finalize_source_promotion,
         finalize_source_transition, get_bootstrap_snapshot, get_fixture_recovery_preview,
         get_git_source_capability, get_locale_snapshot, inspect_skill, install_app_update,
         list_agents, list_safety_snapshots, list_skills, load_preferences, pin_skill_updates,
         plan_abandon, plan_activation, plan_activation_repair, plan_activation_replace, plan_adopt,
         plan_delete_safety_snapshot, plan_file_import, plan_file_import_selection,
         plan_file_reinstall, plan_fixture_recovery, plan_link_import, plan_remove_skill,
-        plan_restore, plan_skill_updates, prepare_home, reconnect_same_home,
-        refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        scan_adopt, set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
-        undo_source_transition, update_preferences,
+        plan_restore, plan_skill_updates, prepare_home, preview_source_promotion,
+        reconnect_same_home, refresh_system_languages, relocate_link, restore_eligibility,
+        run_activation_health_check, scan_adopt, set_locale_selection, startup_info,
+        undo_activation_replace, undo_adopt, undo_source_promotion, undo_source_transition,
+        update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
     use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -95,6 +98,7 @@ pub fn run() {
     };
     use crate::tauri_adapter::menu;
     use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
+    use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
     use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
     use crate::tauri_adapter::startup_api::StartupApi;
     use crate::tauri_adapter::tray;
@@ -369,6 +373,19 @@ pub fn run() {
                 Arc::new(SystemGitSource::new()),
                 Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
             ));
+            let source_promotion = Arc::new(SourcePromotionService::new(
+                source_group_preview.clone(),
+                Arc::new(SystemGitSource::new()),
+                runtime_store.clone(),
+                filesystem.clone(),
+                Arc::new(SystemClock::new()),
+                resolved_library_root.clone(),
+            )
+            .with_write_gate(write_gate.clone())
+            .with_home_context(write_gate.clone())
+            .with_lock_store(Arc::new(SystemInstallerLockStore::new(
+                home_directory.clone(),
+            ))));
             let source_transition = Arc::new(
                 SourceTransitionService::new(
                     source_group_preview.clone(),
@@ -384,6 +401,7 @@ pub fn run() {
                 .with_home_context(write_gate.clone()),
             );
             app.manage(SourceGroupPreviewApi::new(source_group_preview));
+            app.manage(SourcePromotionApi::new(source_promotion.clone()));
             app.manage(SourceTransitionApi::new(source_transition.clone()));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
@@ -391,6 +409,7 @@ pub fn run() {
                     .with_write_gate(write_gate.clone())
                     .with_home_context(write_gate.clone())
                     .with_source_transition_recovery(source_transition)
+                    .with_source_promotion_recovery(source_promotion)
                     .begin_startup(),
             ));
             app.manage(ImportApi::new(import_service));
@@ -518,6 +537,10 @@ pub fn run() {
             get_bootstrap_snapshot,
             get_git_source_capability,
             fetch_latest_and_manage,
+            preview_source_promotion,
+            confirm_source_promotion,
+            undo_source_promotion,
+            finalize_source_promotion,
             confirm_source_transition,
             undo_source_transition,
             finalize_source_transition,

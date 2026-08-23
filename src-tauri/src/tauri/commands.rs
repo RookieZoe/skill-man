@@ -19,8 +19,9 @@ use crate::tauri_adapter::dto::{
     CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelledAppUpdateDto,
     CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
     CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmFixtureRecoveryRequestDto,
-    ConfirmHomeRequestDto, CreateAgentDirectoryRequestDto, DeleteSafetySnapshotRequestDto,
-    DeleteSnapshotPreviewDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto, CreateAgentDirectoryRequestDto,
+    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
     FetchLatestAndManageRequestDto, FileImportCandidateDto, FileImportDiscoveryDto,
     FileImportPreviewDto, FileImportResultDto, FileImportSelectionPreviewDto,
@@ -32,12 +33,14 @@ use crate::tauri_adapter::dto::{
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanLinkImportRequestDto,
     PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
-    PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
-    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
-    RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
-    SourceGroupPreviewOutcomeDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
-    SourceUndoResultDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    PreferencesWarningDto, PrepareHomeRequestDto, PreviewSourcePromotionRequestDto,
+    RecoveryResultDto, RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto,
+    RemoveSkillPreviewDto, RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto,
+    SetLocaleSelectionRequestDto, SkillDetailDto, SourceGroupPreviewOutcomeDto,
+    SourcePromotionDraftDto, SourcePromotionResultDto, SourcePromotionUndoResultDto,
+    SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
+    StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto,
+    UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -47,6 +50,7 @@ use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::locale_api::LocaleApi;
 use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
+use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
 use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
@@ -126,6 +130,38 @@ pub fn fetch_latest_and_manage(
     request: FetchLatestAndManageRequestDto,
 ) -> Result<SourceGroupPreviewOutcomeDto, CommandFailureDto> {
     state.fetch_latest_and_manage(request)
+}
+
+#[tauri::command]
+pub fn preview_source_promotion(
+    state: State<'_, SourcePromotionApi>,
+    request: PreviewSourcePromotionRequestDto,
+) -> Result<SourcePromotionDraftDto, CommandFailureDto> {
+    state.preview(request)
+}
+
+#[tauri::command]
+pub fn confirm_source_promotion(
+    state: State<'_, SourcePromotionApi>,
+    request: ConfirmSourcePromotionRequestDto,
+) -> Result<SourcePromotionResultDto, CommandFailureDto> {
+    state.confirm(request)
+}
+
+#[tauri::command]
+pub fn undo_source_promotion(
+    state: State<'_, SourcePromotionApi>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<SourcePromotionUndoResultDto, CommandFailureDto> {
+    state.undo(request)
+}
+
+#[tauri::command]
+pub fn finalize_source_promotion(
+    state: State<'_, SourcePromotionApi>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.finalize(request)
 }
 
 #[tauri::command]

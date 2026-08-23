@@ -8,9 +8,11 @@ export interface GitSourceCapabilityFailure {
 export function GitSourceCapabilityNotice({
   report,
   failure,
+  onPromote,
 }: {
   report: GitSourceCapabilityReport | null;
   failure: GitSourceCapabilityFailure | null;
+  onPromote?: (remoteId: string, trigger: HTMLButtonElement) => void;
 }) {
   const { t } = useLocale();
   if (failure) {
@@ -49,6 +51,17 @@ export function GitSourceCapabilityNotice({
               <h3>{t(`library.source_capability.${source.kind}`)}</h3>
               <p className="git-source-capability-url">{source.canonicalUrl}</p>
               <p>{t(`library.source_capability.${source.kind}_detail`)}</p>
+              {source.kind === "legacy_per_skill_git_state" && onPromote ? (
+                <button
+                  type="button"
+                  className="repair-button"
+                  onClick={(event) =>
+                    onPromote(source.remoteId, event.currentTarget)
+                  }
+                >
+                  {t("library.source_capability.promote")}
+                </button>
+              ) : null}
             </li>
           );
         })}

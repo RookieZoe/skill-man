@@ -2206,6 +2206,36 @@ button:active:not(:disabled) {
 .source-group-members dd code {
   font-size: 11px;
 }
+.source-promotion-resolution {
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.source-promotion-resolution legend {
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.source-promotion-resolution label {
+  padding: 0;
+  font-size: 12px;
+}
+.source-promotion-resolution input[type="text"],
+.source-promotion-resolution input:not([type]),
+.source-promotion-resolution select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
 .source-group-claims {
   margin: 0 0 16px;
   padding: 12px;

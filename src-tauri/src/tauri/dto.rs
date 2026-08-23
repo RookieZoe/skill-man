@@ -27,6 +27,11 @@ use crate::core::source_group_preview::{
     ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
     RepositoryRefConflict, SourceGroupMember, SourceGroupPreview, SourceGroupPreviewOutcome,
 };
+use crate::core::source_promotion::{
+    ConfirmSourcePromotionRequest, ModifiedMemberResolution, SourcePromotionDraft,
+    SourcePromotionExistingMemberDraft, SourcePromotionMemberState, SourcePromotionResolution,
+    SourcePromotionResult, SourcePromotionTargetMemberDraft, UpstreamMemberRemovedResolution,
+};
 use crate::core::source_transition::{
     ConfirmSourceTransitionRequest, SourceTransitionResult, SourceUndoResult,
 };
@@ -257,6 +262,218 @@ impl From<SourceGroupPreviewOutcome> for SourceGroupPreviewOutcomeDto {
                     split: split.into(),
                 }
             }
+        }
+    }
+}
+
+// -- Legacy Source Promotion Draft (ADR-0014, spec §8.3) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSourcePromotionRequestDto {
+    pub remote_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePromotionMemberStateDto {
+    UpdateToTarget,
+    ModifiedMemberResolutionRequired,
+    UpstreamMemberRemoved,
+}
+
+impl From<SourcePromotionMemberState> for SourcePromotionMemberStateDto {
+    fn from(value: SourcePromotionMemberState) -> Self {
+        match value {
+            SourcePromotionMemberState::UpdateToTarget => Self::UpdateToTarget,
+            SourcePromotionMemberState::ModifiedMemberResolutionRequired => {
+                Self::ModifiedMemberResolutionRequired
+            }
+            SourcePromotionMemberState::UpstreamMemberRemoved => Self::UpstreamMemberRemoved,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionExistingMemberDraftDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub skill_path: String,
+    pub modified: bool,
+    pub state: SourcePromotionMemberStateDto,
+}
+
+impl From<SourcePromotionExistingMemberDraft> for SourcePromotionExistingMemberDraftDto {
+    fn from(value: SourcePromotionExistingMemberDraft) -> Self {
+        Self {
+            skill_id: value.member.skill_id.0,
+            directory_name: value.member.directory_name,
+            skill_path: value.member.skill_path,
+            modified: value.member.current_tree_hash != value.member.current_baseline_hash,
+            state: value.state.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionTargetMemberDraftDto {
+    pub member: SourceGroupMemberDto,
+    pub legacy_skill_id: Option<String>,
+}
+
+impl From<SourcePromotionTargetMemberDraft> for SourcePromotionTargetMemberDraftDto {
+    fn from(value: SourcePromotionTargetMemberDraft) -> Self {
+        Self {
+            member: value.member.into(),
+            legacy_skill_id: value.legacy_skill_id.map(|id| id.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionDraftDto {
+    pub remote_id: String,
+    pub provider: String,
+    pub canonical_url: String,
+    pub tracking_ref: String,
+    pub resolved_commit: String,
+    pub existing_members: Vec<SourcePromotionExistingMemberDraftDto>,
+    pub target_members: Vec<SourcePromotionTargetMemberDraftDto>,
+}
+
+impl From<SourcePromotionDraft> for SourcePromotionDraftDto {
+    fn from(value: SourcePromotionDraft) -> Self {
+        Self {
+            remote_id: value.remote_id,
+            provider: value.provider,
+            canonical_url: value.canonical_url,
+            tracking_ref: value.tracking_ref,
+            resolved_commit: value.resolved_commit,
+            existing_members: value.existing_members.into_iter().map(Into::into).collect(),
+            target_members: value.target_members.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModifiedMemberResolutionDto {
+    KeepModified,
+    ReplaceWithTarget,
+}
+
+impl From<ModifiedMemberResolutionDto> for ModifiedMemberResolution {
+    fn from(value: ModifiedMemberResolutionDto) -> Self {
+        match value {
+            ModifiedMemberResolutionDto::KeepModified => Self::KeepModified,
+            ModifiedMemberResolutionDto::ReplaceWithTarget => Self::ReplaceWithTarget,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpstreamMemberRemovedResolutionDto {
+    Remove,
+    LocalLink { target_directory: String },
+    ExplicitMemberMapping { target_skill_path: String },
+}
+
+impl From<UpstreamMemberRemovedResolutionDto> for UpstreamMemberRemovedResolution {
+    fn from(value: UpstreamMemberRemovedResolutionDto) -> Self {
+        match value {
+            UpstreamMemberRemovedResolutionDto::Remove => Self::Remove,
+            UpstreamMemberRemovedResolutionDto::LocalLink { target_directory } => {
+                Self::LocalLink { target_directory }
+            }
+            UpstreamMemberRemovedResolutionDto::ExplicitMemberMapping { target_skill_path } => {
+                Self::ExplicitMemberMapping { target_skill_path }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionResolutionDto {
+    pub skill_id: String,
+    pub modified: Option<ModifiedMemberResolutionDto>,
+    pub removed: Option<UpstreamMemberRemovedResolutionDto>,
+}
+
+impl From<SourcePromotionResolutionDto> for SourcePromotionResolution {
+    fn from(value: SourcePromotionResolutionDto) -> Self {
+        Self {
+            skill_id: crate::core::domain::SkillId(value.skill_id),
+            modified: value.modified.map(Into::into),
+            removed: value.removed.map(Into::into),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmSourcePromotionRequestDto {
+    pub remote_id: String,
+    pub expected_resolved_commit: String,
+    pub resolutions: Vec<SourcePromotionResolutionDto>,
+}
+
+impl From<ConfirmSourcePromotionRequestDto> for ConfirmSourcePromotionRequest {
+    fn from(value: ConfirmSourcePromotionRequestDto) -> Self {
+        Self {
+            remote_id: value.remote_id,
+            expected_resolved_commit: value.expected_resolved_commit,
+            resolutions: value.resolutions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionResultDto {
+    pub operation_id: String,
+    pub remote_id: String,
+    pub release_id: String,
+    pub resolved_commit: String,
+    pub member_count: u32,
+    pub snapshot_version: u64,
+    pub undo_available: bool,
+}
+
+impl From<SourcePromotionResult> for SourcePromotionResultDto {
+    fn from(value: SourcePromotionResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            remote_id: value.remote_id,
+            release_id: value.release_id,
+            resolved_commit: value.resolved_commit,
+            member_count: value.member_count,
+            snapshot_version: value.snapshot_version,
+            undo_available: value.undo_available,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePromotionUndoResultDto {
+    pub operation_id: String,
+    pub member_count: u32,
+    pub snapshot_version: u64,
+}
+
+impl From<crate::core::source_promotion::SourcePromotionUndoResult>
+    for SourcePromotionUndoResultDto
+{
+    fn from(value: crate::core::source_promotion::SourcePromotionUndoResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            member_count: value.member_count,
+            snapshot_version: value.snapshot_version,
         }
     }
 }
