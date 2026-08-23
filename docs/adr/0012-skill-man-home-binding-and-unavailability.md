@@ -17,7 +17,7 @@ Skill Man 需要一个统一的 Home:它承载 Catalog 持久化内容与恢复�
 | `<Home>/staging/` | 操作暂存 | 瞬态,启动清理 |
 | `<Home>/fixture-entities/` | 仅污染的 Legacy Home 存在;恢复后消失 | — |
 
-`remotes/` 与 `skills/` 同级、互不为父子;remote_id、provenance-only parent、per-Skill Remote Binding 与认领规则由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 定案,本 ADR 只定布局。
+`remotes/` 与 `skills/` 同级、互不为父子;受支持 Git provider 的 `remote_id`、Git Repository Source、Source Release 与成员规则由 [ADR-0014](0014-git-repository-source-releases-and-transitions.md) 定案;非 Git sourceType 及 ADR-0013 保留的 provenance / lock 安全规则继续遵循 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md)。本 ADR 只定布局。
 
 ## 2. App-level 状态目录与 bootstrap locator
 
@@ -29,7 +29,7 @@ Home 外新增 `~/Library/Application Support/skill-man-state/`(与默认 Home �
 
 选择独立文件而非 UserDefaults plist:locator 需要显式 fsync 提交协议与可审计性,cfprefsd 语义不透明。
 
-**身份三方证明**:首次初始化生成 UUID v4 `home_id`,同时写入 bootstrap locator、Home marker 与 SQLite `catalog_meta`;卷身份 = `statfs` f_fsid + APFS volume UUID(外置卷卸载/重挂不变,卷被替换或克隆则变)。启动时三方一致才处于 Bound;locator 缺失或矛盾按 §5 AppStateUnavailable fail-closed,不自动补写或猜测。
+**身份三方证明**:首次初始化生成 UUID v4 `home_id`,同时写入 bootstrap locator、Home marker 与 SQLite `catalog_meta`;卷的持久身份是 APFS volume UUID。`statfs` f_fsid 仍记录作挂载期 diagnostic,但 macOS 重启后可改变,不参与跨启动的绑定相等判断。启动时三方的 `home_id` 和 volume UUID 与当前卷一致才处于 Bound;UUID 不同的换卷/克隆仍 fail-closed。locator 缺失或矛盾按 §5 AppStateUnavailable fail-closed,不自动补写或猜测。
 
 ## 3. 首次绑定状态机:Unconfigured → Home Candidate → Bound Home
 

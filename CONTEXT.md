@@ -19,6 +19,32 @@
 | Safety Snapshot | Safety Snapshot | 安全快照 |
 | Fixture Recovery Lock | Fixture Recovery Lock | 测试数据恢复锁定 |
 | Unconfigured | Unconfigured | 未配置 |
+| Recovery Profile | Recovery Profile | 恢复配置特征 |
+| Existing Home Recovery Plan | Existing Home Recovery Plan | 既有主目录恢复计划 |
+| Default Home Recovery Offer | Default Home Recovery Offer | 默认主目录恢复提示 |
+| Default Home Recovery Blocked | Default Home Recovery Blocked | 默认主目录恢复受阻 |
+| Git Repository Source | Git Repository Source | Git 仓库来源 |
+| Source Release | Source Release | 来源版本 |
+| Source Member | Source Member | 来源成员 |
+| Source Transition | Source Transition | 来源切换 |
+| Repository Ownership Split | Repository Ownership Split | 仓库所有权分裂 |
+| Source Transition Journal | Source Transition Journal | 来源切换日志 |
+| Source Ownership Commit Point | Source Ownership Commit Point | 来源所有权提交点 |
+| Source Undo | Source Undo | 来源撤销 |
+| Source Transition Preflight | Source Transition Preflight | 来源切换预检 |
+| Source Group Preview | Source Group Preview | 来源组预览 |
+| External Ownership Claim | External Ownership Claim | 外部所有权线索 |
+| Modified Member Resolution | Modified Member Resolution | 已修改成员处置 |
+| Explicit Member Mapping | Explicit Member Mapping | 显式成员映射 |
+| Source Group Draft | Source Group Draft | 来源组草案 |
+| Source Group Confirmation | Source Group Confirmation | 来源组确认 |
+| Member Diff Summary | Member Diff Summary | 成员差异摘要 |
+| Legacy Per-Skill Git State | Legacy Per-Skill Git State | 旧逐成员 Git 状态 |
+| Source Promotion | Source Promotion | 来源提升 |
+| Source Capability Scan | Source Capability Scan | 来源能力扫描 |
+| Upstream Member Removed | Upstream Member Removed | 上游成员已移除 |
+| Repository Ref Conflict | Repository Ref Conflict | 仓库 ref 冲突 |
+| Fetch Latest and Manage | Fetch Latest and Manage | 获取最新并纳管 |
 | Home Candidate | Home candidate | 候选主目录 |
 | Bound Home | Bound Home | 已绑定主目录 |
 | Reconnect Same Home | Reconnect Same Home | 重新连接同一主目录 |
@@ -87,8 +113,24 @@ _Avoid_: Migration backup, Undo backup
 _Avoid_: ReadOnly, RecoveryRequired
 
 **Unconfigured**:
-首次绑定前的顶层状态:没有 Home Binding,App 只提供绑定向导与 App-level 状态;取消或未完成绑定不产生任何 Home 内容。
+有效且结构完整的 App-level state 中没有 current Home Binding、abandoned history 或 active recovery ledger 的顶层状态。它可以是首次绑定前,也可以是 App-level state 丢失后重新形成的空状态;它本身不证明从未存在 Home。App 只提供显式绑定/恢复入口与 App-level 状态;取消或未完成操作不产生任何 Home 内容。
 _Avoid_: First Run, 首次运行
+
+**Recovery Profile**:
+用于 Recover Existing Home 的只读结构证明:以 Home marker 与 Catalog 的逻辑 home_id、一致的创建时间、Catalog 完整性/外键检查，以及当前产品所需的真实目录、表、列和约束为准，而非以可编辑的 schema_version 或 Home 所在卷的 UUID 为准。SQLite WAL/SHM 的存在本身不构成失败;但未完成的 operation journal 或未归属 staging 内容必须转入操作恢复，不能直接恢复既有 Home。缺少任何必需能力时拒绝恢复并保持零写入。
+_Avoid_: schema version gate, volume identity proof
+
+**Existing Home Recovery Plan**:
+由 Recovery Profile 形成、供用户直接确认的一次性既有 Home 恢复计划。它在 App-level state 或已证明的 Home 事实变化时失效；确认前取消或失效不产生任何写入，确认后则产生不可撤回的 Home Binding。不同于会创建或迁移内容的 Home Candidate，也不产生待清理的 Home 产物。
+_Avoid_: Home Candidate, durable recovery operation
+
+**Default Home Recovery Offer**:
+在有效 Unconfigured App-level state 下，默认路径中完整既有 Home 已通过 Recovery Profile 时提供的显式恢复入口。它只是对已发现 Home 的提示，不是 Home Binding，也不会自动写入或恢复内容；确认仍使用 Existing Home Recovery Plan。该入口只允许恢复此 Home；取消后仍返回此提示，若要新建 Home 必须先恢复并执行 Abandon Home and Start New。
+_Avoid_: AppStateUnavailable, automatic rebind
+
+**Default Home Recovery Blocked**:
+在有效 App-level state 下，默认路径具有既有 Home 痕迹但未通过 Recovery Profile，或必须先处理未完成 operation 时的 closed state。它提供诊断与重试，但不提供恢复、首次绑定或改选路径入口。
+_Avoid_: AppStateUnavailable, Unconfigured
 
 **Home Candidate**:
 首次绑定流程中已通过只读校验、等待用户显式确认并原子提交的候选路径;确认前不创建任何 Home 内容。
@@ -106,6 +148,10 @@ _Avoid_: Retry mount, 重新挂载
 同一 home_id 下,对内容验证失败的 Bound Home 执行 Fixture Recovery 状态机、以 Safety Snapshot 可逆恢复内容的动作;不属于 Relocate。
 _Avoid_: Reset, 重置主目录
 
+**Recover Existing Home**:
+在 Unconfigured 下,用户显式选择一个满足 Recovery Profile 的完整既有 Home,审阅其不可变恢复事实后直接确认，由 marker 与 Catalog 证明同一 home_id 并重建丢失的 bootstrap locator 以恢复该 home_id 的动作。它不改写 Home 内容;候选被拒绝或用户取消时保持 Unconfigured,不写 locator、Home、recovery ledger 或 Catalog。locator 提交后不回滚；随后无法访问、身份不匹配或 Catalog 打开失败按既有已绑定状态收敛并关闭写操作。AppStateUnavailable、Legacy/Fixture Recovery Lock、Home Candidate Pending 和任何可读的 Abandoned history 都不能进入此流程。若历史随 App-level state 一同丢失,确认必须明确提示该恢复可能重新激活曾被 Abandon 的 Home。
+_Avoid_: Reconnect Same Home, Restore Bound Home, Relocate
+
 **Abandon Home and Start New**:
 产生新 Home Identity 的唯一高摩擦逃生口:输入确认、不删除旧 Home、不清理旧 Activation,旧 home_id 永久记入 locator 历史。
 _Avoid_: Delete Home, 删除主目录
@@ -119,7 +165,7 @@ _Avoid_: Missing, Offline
 _Avoid_: Wrong Home, 换了目录
 
 **AppStateUnavailable**:
-App-level 状态目录或 bootstrap locator 不可读、损坏或自相矛盾时的顶层状态:既不当作 Unconfigured 也不当作 Bound,禁止产品写与新建绑定。
+App-level 状态目录或 bootstrap locator 不可读、损坏或自相矛盾时的顶层状态:既不当作 Unconfigured 也不当作 Bound,禁止产品写与新建绑定。有效状态中 locator 缺失本身不构成 AppStateUnavailable。
 _Avoid_: Corrupted state, 状态损坏
 
 **Home Identity (home_id)**:
@@ -179,19 +225,111 @@ _Avoid_: Wild, 野生, External
 _Avoid_: Import(收编存量用 Adopt;Import 只用于新增入库), 收编(叙述可用,命名用 Adopt)
 
 **Verified Remote Source**:
-由外部 lock 线索、最终实体、规范化 remote、requested ref、resolved commit、仓库内 Skill 路径与本地/远端 tree 共同形成可复核闭环的来源。外部 lock 只是 provenance hint;只有闭环成立,Adopt 才能把当前内容认领为 Remote Install。
+由外部 lock 线索、最终实体、规范化 remote 与内容证据形成可复核闭环的来源判定。对受支持 Git provider,它至多说明旧逐成员证据，不构成当前 Git Repository Source 或 Source Release；当前来源只能由 Fetch Latest and Manage 的完整远端发现建立。
 _Avoid_: Trusted lock, Lock-managed Skill
 
 **Remote Source Parent**:
-Library 中代表一个 remote repository 的稳定来源聚合;内部 remote_id 不随 URL 重命名、requested ref 或 resolved commit 改变。它只承载 durable provenance 与所属 Skill 清单;requested ref、resolved commit、skillPath 和内容 baseline 属于各 Skill,Git mirror 属于可重建 cache,Skill 实体只存在于 `skills/`。
-_Avoid_: Git checkout, Worktree, Mirror
+ADR-0013 的历史逐 Skill 来源聚合，内部 `remote_id` 不随 URL 重命名改变。对受支持 Git provider，已有 Remote Source Parent 只属于 Legacy Per-Skill Git State；新的 Git Repository Source 另行记录 durable identity、唯一 tracking ref 与当前 Source Release。非 Git sourceType 保持 ADR-0013 的既有语义；Git mirror 属于可重建 cache，Skill 实体只存在于 `skills/`。
+_Avoid_: Git Repository Source, Git checkout, Worktree, Mirror
 
 **Remote Binding**:
-一个 Remote Install 对其 Remote Source Parent 的独立版本关系,记录 requested ref、Verification Anchor、skillPath 与 remote/content baseline。Remote Source Parent 没有单一当前 commit;同一 remote 的多个 Skill 可位于不同 commit,fetch 可共享,Preview 与提交按 Skill 独立。
-_Avoid_: Parent version, Repository checkout
+ADR-0013 的历史逐 Skill 绑定，保存 requested ref、Verification Anchor、skillPath 与内容 baseline。对受支持 Git provider，它只属于 Legacy Per-Skill Git State，不能作为 Git Repository Source 的成员或 Source Release 事实；非 Git sourceType 保持 ADR-0013 的既有语义。
+_Avoid_: Git Repository Source member, Source Release fact, Repository checkout
+
+**Git Repository Source**:
+以受支持 Git provider 和规范化 Git repository identity 定义的来源单元。它有唯一 tracking ref；该 ref 在每个 Source Release 中解析为一个 commit，仓库内的所有成员随该 release 一起更新。
+_Avoid_: Per-Skill Git source, Git checkout
+
+**GitHub Repository Source**:
+以 `github` provider 定义的 Git Repository Source。它遵循全部 Git 仓库级成员、release 与更新语义，不形成 GitHub 专有的逐成员例外。
+_Avoid_: GitHub-specific source model, per-Skill GitHub source
+
+**Source Release**:
+Git Repository Source 在某一 resolved commit 的完整、可发现成员清单与共同版本。来源级版本事实属于它，不是单个 Skill 的版本，也不从旧 lock 的本地内容推断。
+_Avoid_: Remote Binding version, install commit
+
+**Source Transition**:
+Git Repository Source 对一个完整 Source Release 的整体交接或更新。它的成员、来源版本与所有权状态只能共同进入目标 release 或共同保持原状；一旦外部所有权已释放，恢复只能收敛到完整目标 release，不能留下部分成员处于该 release。
+_Avoid_: Per-Skill update, partial source release
+
+**Repository Ownership Split**:
+同一 Git Repository Source 的旧外部声明跨越多个 installer lock 文件的状态。它不是多个 Git 来源；但由于无法以单一外部所有权变更完成整体交接，Fetch Latest and Manage 必须拒绝并保持零写入，直到用户显式收敛到一个稳定 external installer root。
+_Avoid_: Multiple Git sources, sequential multi-lock handoff
+
+**Source Transition Journal**:
+固定一个 Source Transition 的原来源与目标 Source Release、完整成员动作和恢复事实的持久记录。它在外部所有权提交点前支持回到原状；该点之后只允许把整个来源收敛至 journal 中固定的目标 release，且不重新解释远端的“最新”。
+_Avoid_: Per-Skill journal, recover to current tip
+
+**Source Ownership Commit Point**:
+Source Transition 中将单一 external installer lock 文件的全部适用旧声明作为整体释放的不可逆边界。此前失败可以保持原状；此后只能按 Source Transition Journal 完成整个来源，普通写入保持关闭。
+_Avoid_: Per-entry commit point, rollback after external release
+
+**Source Undo**:
+结果窗口内对一个已完成 Source Transition 的条件性整体逆转。只有全部成员、来源状态和旧外部声明都仍可安全恢复时才恢复先前完整 release；任一 guard 失败即整体拒绝并保持现状。普通 Remove 不构成 Source Undo，也不恢复 external owner。
+_Avoid_: Per-Skill undo, ordinary Remove
+
+**Source Transition Preflight**:
+在 Source Transition 确认时及 Source Ownership Commit Point 前，对固定目标 release、成员、来源状态、外部所有权与安全内容事实进行的完整重验。任一事实变化即令计划失效并保持提交点前的零写入；提交点之后由固定 Source Transition Journal 收敛。
+_Avoid_: Trust stale preview, volume UUID gate
+
+**Source Group Preview**:
+对一个 Git Repository Source 的只读 Source Transition 审阅，父节点展示来源与 release 事实，完整 Source Member 集在其下按动作和状态呈现。成员资格不可通过逐项选择裁剪；只有全部阻塞项已处理后才能进行来源级确认。
+_Avoid_: Per-Skill Include preview, partial source selection
+
+**External Ownership Claim**:
+旧 installer lock 对外部实体所有权的显示线索，说明交接将影响的 lock 文件与声明；它不证明旧本地内容、成员路径或远端 provenance 已被验证。
+_Avoid_: Verified Remote Source, remote baseline
+
+**Modified Member Resolution**:
+对目标 Source Release 仍包含、但当前内容已修改的 Source Member 的显式选择：保留当前内容并标为 Modified，或以目标 release 内容替换。两者都保持该成员属于同一 Source Transition，不能借此转为 Local Link 或跳过成员。
+_Avoid_: Per-member opt-out, silent overwrite
+
+**Explicit Member Mapping**:
+用户把 Upstream Member Removed 映射到一个指定、未被占用的目标 skillPath 的动作。它不基于名称、hash 或相似度推断，映射后如内容有修改仍须进行 Modified Member Resolution。
+_Avoid_: Inferred rename, automatic path migration
+
+**Source Group Draft**:
+Source Group Preview 中对成员动作和冲突处置的可修改集合。它不是 Source Transition，也不产生来源、Home、Catalog、stage、journal 或 lock 的持久变化；取消后不留下产物。
+_Avoid_: Per-member apply, pending operation
+
+**Source Group Confirmation**:
+在所有来源级阻塞和成员冲突已处置后，对完整 Source Group Draft 的一次显式确认。它同时确认全部成员动作和外部所有权影响，随后才可开始 Source Transition。
+_Avoid_: Per-Skill confirm, implicit approval
+
+**Member Diff Summary**:
+Source Group Preview 中供审阅 Source Member 状态和动作的最小事实：当前/目标路径、目标内容摘要与本地修改状态。它可展开为安全的受管内容差异，但不把旧外部内容作为远端基线或验证证据。
+_Avoid_: External content proof, remote baseline
+
+**Legacy Per-Skill Git State**:
+既有 Remote Source Parent/Binding 仅拥有逐成员 ref、commit 与 baseline、但不具备 Git Repository Source 的共同 release 与成员集事实的状态。它以实际 Catalog 与 manifest 能力识别，不以 schema version 识别；保持安全读取和维护能力，但只能经用户显式的来源组升级进入新模型。
+_Avoid_: Current Source Release, automatic source migration
+
+**Source Promotion**:
+用户显式发起、将无歧义的 Legacy Per-Skill Git State 提升为 Git Repository Source 的 Source Transition。它保留已有 remote_id，确认后才可执行必要的结构准备与数据转换，并必须通过新的完整 Source Release 发现建立共同成员事实；旧逐成员证据只是历史 baseline 与冲突输入，不能充当当前 release。
+_Avoid_: Startup migration, inferred source release
+
+**Source Capability Scan**:
+对 Catalog 实际表、列、约束与来源 manifest 所做的只读能力检查，用于判定 Git 来源能否进入 Source Promotion。它不依赖 schema version，不写入、不推断 Source Release，也不把缺失或部分能力自动修复为可提升状态。
+_Avoid_: Schema version gate, automatic source repair
+
+**Source Member**:
+Git Repository Source 中的一个 Managed Skill 成员，具有持久成员记录、当前 repository-relative skillPath 和内容 baseline，并从所属 Source Release 取得成员资格；它不拥有独立的 ref 或 commit。路径变动只有经过显式映射才延续同一成员。
+_Avoid_: Independent Git source, per-Skill release
+
+**Upstream Member Removed**:
+目标 Source Release 不再发现某个 Source Member 原有 skillPath 的状态。它保留现有 Home 内容，须由用户显式选择移除、Link 或映射；系统不会自动删除或推断为重命名。
+_Avoid_: Auto removal, inferred rename
+
+**Repository Ref Conflict**:
+同一规范化 Git repository 的旧 lock 声明提出多个 ref 时的 fail-closed 状态。它不拆分来源，也不验证旧内容；用户必须显式选择一个 ref，以该 ref 当前的 Source Release 建立新来源。
+_Avoid_: multiple Git sources, inferred ref
+
+**Fetch Latest and Manage**:
+将旧 Git lock 线索交接为新的 Git Repository Source 的显式操作。用户选择 ref 后，系统从该 ref 当前的 Source Release 发现完整成员；旧 lock 和旧 Home 内容不提供成员路径、内容 baseline 或“已验证”的结论。远端不能完成获取和发现时，交接不成立。
+_Avoid_: Revalidate old lock, trust old bytes
 
 **Verification Anchor**:
-Adopt 验证时在 requested ref 可达历史中确定、且其 skillPath tree 与外部 lock hash 和本地内容形成闭环的 Git commit。它是后续 materialize/update 的确定锚点,不冒充外部 installer 未记录的原始安装 commit;若多个 commits 的 Skill tree 相同,使用最新匹配 commit并明确标记原安装 commit 未知。新 Remote Install 仍直接记录实际 resolved commit。
+旧逐成员 Git 验证时在 requested ref 可达历史中确定、且其 skillPath tree 与外部 lock hash 和本地内容形成闭环的 Git commit。它只保留为 Legacy Per-Skill Git State 的历史证据或冲突输入，不能充当 Git Repository Source 的当前 Source Release，也不能驱动来源组 Update。
 _Avoid_: Original install commit, Guessed commit
 
 **Provenance Conflict**:
@@ -207,7 +345,7 @@ _Avoid_: Provenance Conflict, Offline Skill
 _Avoid_: Unverified Remote, File Install
 
 **Ownership Handoff**:
-Verified Remote Source 从外部 installer 转交给 Skill Man 的显式 Adopt 边界。每个 Skill 独立提交:保持当前字节、使 Home 内实体与 Catalog/Activation 生效,并以 compare-and-swap 退出对应外部 lock 所有权;任何一步失败都回滚该 Skill,外部状态并发变化则停止剩余未提交项。
+外部 installer 向 Skill Man 转交所有权的显式边界。对 Git Repository Source，它只能作为完整 Source Transition 提交：全部适用 external claim 以一次 compare-and-swap 共同释放，之前整体回滚，之后整体收敛到固定 Source Release；非 Git sourceType 保持其既有逐项语义。
 _Avoid_: Import, Sync
 
 **Ownership Conflict**:
@@ -215,7 +353,7 @@ Ownership Handoff 后外部 installer 又为同一 Skill 身份创建 lock 条�
 _Avoid_: Update available, Activation Conflict
 
 **Remote Source Identity Conflict**:
-Remote Source Parent 的 `source.json` 与 Catalog parent row 缺失或不一致,无法证明同一 remote_id 与 canonical URL 的状态。影响范围限于该 parent:子 Skill 可读并可 Disable/Remove,但 Update、新 Remote Binding 与 alias 变更 fail closed,直到通过 remote 与全部子 binding 重新验证。
+Remote Source Parent 的 `source.json` 与 Catalog 来源记录缺失或不一致，无法证明同一 remote_id 与规范化 repository identity 的状态。影响范围限于该 parent：子 Skill 可读并可 Disable/Remove，但 Git Repository Source 的 Update、Source Promotion、成员变更与 alias 变更 fail closed，直到通过完整 Source Release 重新发现和验证。
 _Avoid_: HomeIdentityMismatch, Catalog ReadOnly
 
 **Agent**:
