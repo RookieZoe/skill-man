@@ -147,6 +147,76 @@ fn complete_repository_release_and_member_facts_enable_source_writes() {
 }
 
 #[test]
+fn missing_or_unreadable_manifest_keeps_an_otherwise_complete_source_legacy() {
+    for manifest in [
+        GitSourceManifestFact::Missing,
+        GitSourceManifestFact::Unreadable,
+    ] {
+        let mut source = repository_source_fact("parent-1");
+        source.manifest = manifest;
+        let report = GitSourceCapabilityScan::new(Arc::new(StaticReader {
+            facts: GitSourceCapabilityFacts {
+                catalog_structure: supported_structure(),
+                sources: vec![source],
+            },
+        }))
+        .scan()
+        .expect("a partial source remains readable");
+
+        assert_eq!(
+            report.sources[0].kind,
+            GitSourceCapabilityKind::LegacyPerSkillGitState
+        );
+    }
+}
+
+#[test]
+fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
+    for manifest in [
+        GitSourceManifestFact::Present {
+            remote_id: "parent-1".into(),
+            canonical_url: "https://github.com/acme/parent-1".into(),
+            aliases: vec![],
+            provider: None,
+            tracking_ref: Some("main".into()),
+            current_release_id: Some("release-parent-1".into()),
+        },
+        GitSourceManifestFact::Present {
+            remote_id: "parent-1".into(),
+            canonical_url: "https://github.com/acme/parent-1".into(),
+            aliases: vec![],
+            provider: Some("github".into()),
+            tracking_ref: None,
+            current_release_id: Some("release-parent-1".into()),
+        },
+        GitSourceManifestFact::Present {
+            remote_id: "parent-1".into(),
+            canonical_url: "https://github.com/acme/parent-1".into(),
+            aliases: vec![],
+            provider: Some("github".into()),
+            tracking_ref: Some("main".into()),
+            current_release_id: None,
+        },
+    ] {
+        let mut source = repository_source_fact("parent-1");
+        source.manifest = manifest;
+        let report = GitSourceCapabilityScan::new(Arc::new(StaticReader {
+            facts: GitSourceCapabilityFacts {
+                catalog_structure: supported_structure(),
+                sources: vec![source],
+            },
+        }))
+        .scan()
+        .expect("a partial source remains readable");
+
+        assert_eq!(
+            report.sources[0].kind,
+            GitSourceCapabilityKind::LegacyPerSkillGitState
+        );
+    }
+}
+
+#[test]
 fn manifest_conflict_closes_only_the_affected_source() {
     let mut conflicted = repository_source_fact("parent-conflicted");
     conflicted.catalog_aliases = vec!["https://github.com/acme/previous-name".into()];
@@ -324,6 +394,88 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
         conflict_report.sources[0].kind,
         GitSourceCapabilityKind::RemoteSourceIdentityConflict
     );
+    home.filesystem
+        .write_remote_parent_manifest(
+            &home.library_root.join("remotes"),
+            &RemoteParentManifest {
+                schema_version: 1,
+                remote_id: "parent-1".into(),
+                canonical_url: "https://github.com/acme/skills".into(),
+                provider: Some("github".into()),
+                tracking_ref: Some("main".into()),
+                current_release_id: Some("release-1".into()),
+                aliases: vec![],
+                created_at: "2026-08-01T00:00:00Z".into(),
+            },
+        )
+        .expect("restore matching source manifest");
+
+    home.with_sql("remove required alias structure", |connection| {
+        connection
+            .execute("DROP TABLE remote_source_aliases", [])
+            .expect("remove alias table");
+    });
+    let partial_structure_report =
+        GitSourceCapabilityScan::new(Arc::new(SqliteGitSourceCapabilityReader::new(
+            home.write_gate.clone(),
+            CATALOG_FILE_NAME,
+            home.filesystem.clone(),
+        )))
+        .scan()
+        .expect("scan incomplete source shape");
+    assert_eq!(
+        partial_structure_report.sources[0].kind,
+        GitSourceCapabilityKind::LegacyPerSkillGitState,
+        "a missing parent/alias capability must not be inferred from empty aliases"
+    );
+
+    home.with_sql(
+        "restore alias structure and introduce a foreign key violation",
+        |connection| {
+            connection
+                .execute_batch(
+                    "CREATE TABLE remote_source_aliases (
+                    remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id),
+                    alias_url TEXT NOT NULL UNIQUE,
+                    confirmed_at TEXT NOT NULL,
+                    PRIMARY KEY(remote_id, alias_url)
+                 );
+                 PRAGMA foreign_keys = OFF;
+                 UPDATE git_source_members SET skill_id = 'missing-skill'
+                 WHERE skill_id = 'networking';
+                 PRAGMA foreign_keys = ON;",
+                )
+                .expect("create malformed source state");
+        },
+    );
+    home.filesystem
+        .write_remote_parent_manifest(
+            &home.library_root.join("remotes"),
+            &RemoteParentManifest {
+                schema_version: 1,
+                remote_id: "parent-1".into(),
+                canonical_url: "https://github.com/acme/skills".into(),
+                provider: Some("github".into()),
+                tracking_ref: Some("main".into()),
+                current_release_id: Some("release-1".into()),
+                aliases: vec![],
+                created_at: "2026-08-01T00:00:00Z".into(),
+            },
+        )
+        .expect("restore matching source manifest");
+    let failed_integrity_report =
+        GitSourceCapabilityScan::new(Arc::new(SqliteGitSourceCapabilityReader::new(
+            home.write_gate.clone(),
+            CATALOG_FILE_NAME,
+            home.filesystem.clone(),
+        )))
+        .scan()
+        .expect("scan source with failed foreign key check");
+    assert_eq!(
+        failed_integrity_report.sources[0].kind,
+        GitSourceCapabilityKind::LegacyPerSkillGitState,
+        "foreign-key failure must close a partial source as Legacy"
+    );
 }
 
 fn supported_structure() -> GitSourceCatalogStructure {
@@ -335,6 +487,8 @@ fn supported_structure() -> GitSourceCatalogStructure {
         has_required_columns: true,
         has_required_foreign_keys: true,
         has_required_unique_constraints: true,
+        has_clean_foreign_key_check: true,
+        has_clean_integrity_check: true,
     }
 }
 

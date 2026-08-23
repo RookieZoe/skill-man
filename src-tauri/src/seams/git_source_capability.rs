@@ -14,6 +14,8 @@ pub struct GitSourceCatalogStructure {
     pub has_required_columns: bool,
     pub has_required_foreign_keys: bool,
     pub has_required_unique_constraints: bool,
+    pub has_clean_foreign_key_check: bool,
+    pub has_clean_integrity_check: bool,
 }
 
 impl GitSourceCatalogStructure {
@@ -26,6 +28,8 @@ impl GitSourceCatalogStructure {
             has_required_columns: false,
             has_required_foreign_keys: false,
             has_required_unique_constraints: false,
+            has_clean_foreign_key_check: false,
+            has_clean_integrity_check: false,
         }
     }
 
@@ -37,6 +41,8 @@ impl GitSourceCatalogStructure {
             && self.has_required_columns
             && self.has_required_foreign_keys
             && self.has_required_unique_constraints
+            && self.has_clean_foreign_key_check
+            && self.has_clean_integrity_check
     }
 }
 

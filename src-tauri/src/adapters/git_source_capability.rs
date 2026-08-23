@@ -79,16 +79,38 @@ fn catalog_structure(
     connection: &Connection,
     tables: &HashSet<String>,
 ) -> Result<GitSourceCatalogStructure, String> {
+    let has_parents_table = tables.contains("remote_source_parents");
+    let has_aliases_table = tables.contains("remote_source_aliases");
     let has_repository_sources_table = tables.contains("git_repository_sources");
     let has_releases_table = tables.contains("git_source_releases");
     let has_release_members_table = tables.contains("git_source_release_members");
     let has_members_table = tables.contains("git_source_members");
-    let target_tables_present = has_repository_sources_table
+    let target_tables_present = has_parents_table
+        && has_aliases_table
+        && has_repository_sources_table
         && has_releases_table
         && has_release_members_table
         && has_members_table;
 
     let has_required_columns = target_tables_present
+        && table_has_columns(
+            connection,
+            "remote_source_parents",
+            &[
+                ("remote_id", true),
+                ("canonical_url", true),
+                ("created_at", true),
+            ],
+        )?
+        && table_has_columns(
+            connection,
+            "remote_source_aliases",
+            &[
+                ("remote_id", true),
+                ("alias_url", true),
+                ("confirmed_at", true),
+            ],
+        )?
         && table_has_columns(
             connection,
             "git_repository_sources",
@@ -141,6 +163,13 @@ fn catalog_structure(
     let has_required_foreign_keys = target_tables_present
         && has_foreign_key(
             connection,
+            "remote_source_aliases",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+        )?
+        && has_foreign_key(
+            connection,
             "git_repository_sources",
             "remote_id",
             "remote_source_parents",
@@ -177,6 +206,14 @@ fn catalog_structure(
         )?;
 
     let has_required_unique_constraints = target_tables_present
+        && has_unique_columns(connection, "remote_source_parents", &["remote_id"])?
+        && has_unique_columns(connection, "remote_source_parents", &["canonical_url"])?
+        && has_unique_columns(
+            connection,
+            "remote_source_aliases",
+            &["remote_id", "alias_url"],
+        )?
+        && has_unique_columns(connection, "remote_source_aliases", &["alias_url"])?
         && has_unique_columns(connection, "git_repository_sources", &["remote_id"])?
         && has_unique_columns(
             connection,
@@ -204,7 +241,28 @@ fn catalog_structure(
         has_required_columns,
         has_required_foreign_keys,
         has_required_unique_constraints,
+        has_clean_foreign_key_check: foreign_key_check_is_clean(connection)?,
+        has_clean_integrity_check: integrity_check_is_clean(connection)?,
     })
+}
+
+fn foreign_key_check_is_clean(connection: &Connection) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+    Ok(rows.next().map_err(|error| error.to_string())?.is_none())
+}
+
+fn integrity_check_is_clean(connection: &Connection) -> Result<bool, String> {
+    let checks = connection
+        .prepare("PRAGMA integrity_check")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(checks.as_slice() == ["ok"])
 }
 
 fn table_has_columns(
@@ -341,6 +399,8 @@ fn read_sources(
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| error.to_string())?
             } else {
+                // The structure fact fails closed, so this value cannot make
+                // an incomplete Catalog eligible for repository-source use.
                 Vec::new()
             };
             let repository = structure

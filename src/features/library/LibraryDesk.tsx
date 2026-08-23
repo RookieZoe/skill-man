@@ -5,7 +5,6 @@ import type {
   ImportKind,
   RelocatePanelState,
   RemovePanelState,
-  UpdatePanelState,
 } from "../../app/App";
 import type {
   ActivationConflictDetails,
@@ -47,7 +46,10 @@ import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
-import { GitSourceCapabilityNotice } from "./GitSourceCapabilityNotice";
+import {
+  GitSourceCapabilityNotice,
+  type GitSourceCapabilityFailure,
+} from "./GitSourceCapabilityNotice";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
@@ -78,6 +80,7 @@ interface LibraryDeskProps {
   agents: AgentActivation[];
   error: string | null;
   gitSourceCapability: GitSourceCapabilityReport | null;
+  gitSourceCapabilityFailure: GitSourceCapabilityFailure | null;
   activationError: string | null;
   activationConflict: ActivationConflictDetails | null;
   activationConflictMessage: string | null;
@@ -106,8 +109,6 @@ interface LibraryDeskProps {
   gitImportResult: GitImportSelectionResult | null;
   gitImportError: string | null;
   gitImportActivity: "idle" | "discovering" | "planning" | "applying";
-  updatePanel: UpdatePanelState;
-  reselectPath: string;
   relocatePanel: RelocatePanelState;
   onOpenRelocate: () => void;
   onCloseRelocate: () => void;
@@ -153,11 +154,6 @@ interface LibraryDeskProps {
   onPlanGitImport: () => void;
   onApplyGitImport: () => void;
   onOpenImportedGitSkill: (skillId: string) => void;
-  onCheckSkillUpdates: () => void;
-  onPlanSkillUpdate: (newSkillPath: string | null) => void;
-  onApplySkillUpdate: (abandonChanges: boolean) => void;
-  onPinSkillUpdate: () => void;
-  onReselectPathChange: (path: string) => void;
   onOpenAdopt: () => void;
   onRescanAdopt: () => void;
   onToggleAdoptCandidate: (canonicalEntity: string, checked: boolean) => void;
@@ -203,6 +199,7 @@ export function LibraryDesk({
   agents,
   error,
   gitSourceCapability,
+  gitSourceCapabilityFailure,
   activationError,
   activationConflict,
   activationConflictMessage,
@@ -231,8 +228,6 @@ export function LibraryDesk({
   gitImportResult,
   gitImportError,
   gitImportActivity,
-  updatePanel,
-  reselectPath,
   relocatePanel,
   onOpenRelocate,
   onCloseRelocate,
@@ -269,11 +264,6 @@ export function LibraryDesk({
   onPlanGitImport,
   onApplyGitImport,
   onOpenImportedGitSkill,
-  onCheckSkillUpdates,
-  onPlanSkillUpdate,
-  onApplySkillUpdate,
-  onPinSkillUpdate,
-  onReselectPathChange,
   isAdoptOpen,
   adoptReport,
   adoptSelections,
@@ -496,7 +486,10 @@ export function LibraryDesk({
             </button>
           </div>
         ) : null}
-        <GitSourceCapabilityNotice report={gitSourceCapability} />
+        <GitSourceCapabilityNotice
+          report={gitSourceCapability}
+          failure={gitSourceCapabilityFailure}
+        />
       </div>
       <div className="app-background" inert={hasOverlay ? true : undefined}>
         <div className="library-desk">
@@ -536,14 +529,7 @@ export function LibraryDesk({
             detail={detail}
             error={error}
             libraryEmpty={libraryEmpty}
-            updatePanel={updatePanel}
-            reselectPath={reselectPath}
             relocatePanel={relocatePanel}
-            onCheckUpdates={onCheckSkillUpdates}
-            onPlanUpdate={onPlanSkillUpdate}
-            onApplyUpdate={onApplySkillUpdate}
-            onPinUpdate={onPinSkillUpdate}
-            onReselectPathChange={onReselectPathChange}
             onOpenRelocate={onOpenRelocate}
             removePanel={removePanel}
             onOpenRemove={onOpenRemove}
@@ -864,14 +850,7 @@ function SkillDetailPanel({
   detail,
   error,
   libraryEmpty,
-  updatePanel,
-  reselectPath,
   relocatePanel,
-  onCheckUpdates,
-  onPlanUpdate,
-  onApplyUpdate,
-  onPinUpdate,
-  onReselectPathChange,
   onOpenRelocate,
   removePanel,
   onOpenRemove,
@@ -879,14 +858,7 @@ function SkillDetailPanel({
   detail: SkillDetail | null;
   error: string | null;
   libraryEmpty: boolean;
-  updatePanel: UpdatePanelState;
-  reselectPath: string;
   relocatePanel: RelocatePanelState;
-  onCheckUpdates: () => void;
-  onPlanUpdate: (newSkillPath: string | null) => void;
-  onApplyUpdate: (abandonChanges: boolean) => void;
-  onPinUpdate: () => void;
-  onReselectPathChange: (path: string) => void;
   onOpenRelocate: () => void;
   removePanel: RemovePanelState;
   onOpenRemove: () => void;
@@ -954,18 +926,6 @@ function SkillDetailPanel({
               <code>{detail.frontmatterName}</code>
             </p>
           ) : null}
-          {detail.sourceKind === "remote_install" ? (
-            <UpdateSection
-              skill={detail}
-              updatePanel={updatePanel}
-              reselectPath={reselectPath}
-              onCheckUpdates={onCheckUpdates}
-              onPlanUpdate={onPlanUpdate}
-              onApplyUpdate={onApplyUpdate}
-              onPinUpdate={onPinUpdate}
-              onReselectPathChange={onReselectPathChange}
-            />
-          ) : null}
           <section className="document-preview" aria-labelledby="preview-title">
             <div className="document-toolbar">
               <div>
@@ -991,193 +951,6 @@ function SkillDetailPanel({
         <LoadingPanel label={t("library.detail.loading")} />
       )}
     </main>
-  );
-}
-
-function UpdateSection({
-  skill,
-  updatePanel,
-  reselectPath,
-  onCheckUpdates,
-  onPlanUpdate,
-  onApplyUpdate,
-  onPinUpdate,
-  onReselectPathChange,
-}: {
-  skill: SkillDetail;
-  updatePanel: UpdatePanelState;
-  reselectPath: string;
-  onCheckUpdates: () => void;
-  onPlanUpdate: (newSkillPath: string | null) => void;
-  onApplyUpdate: (abandonChanges: boolean) => void;
-  onPinUpdate: () => void;
-  onReselectPathChange: (path: string) => void;
-}) {
-  const { t } = useLocale();
-  const isBusy = updatePanel.activity !== "idle";
-  const item = updatePanel.report?.groups
-    .flatMap((group) => group.items)
-    .find((candidate) => candidate.skillId === skill.id);
-  const planItem = updatePanel.plan?.items.find(
-    (candidate) => candidate.skillId === skill.id,
-  );
-  const resultItem = updatePanel.result?.items.find(
-    (candidate) => candidate.skillId === skill.id,
-  );
-  const hasChecked = updatePanel.report !== null;
-
-  return (
-    <section className="update-section" aria-labelledby="update-title">
-      <div className="update-toolbar">
-        <h3 id="update-title">{t("library.update.title")}</h3>
-        {!hasChecked ? (
-          <button type="button" disabled={isBusy} onClick={onCheckUpdates}>
-            {updatePanel.activity === "checking"
-              ? t("library.update.checking")
-              : t("library.update.check")}
-          </button>
-        ) : null}
-      </div>
-      {updatePanel.error ? (
-        <div className="activation-error" role="alert">
-          <strong>{t("library.update.failed")}</strong>
-          <span>{updatePanel.error}</span>
-        </div>
-      ) : null}
-      {!hasChecked ? null : item ? (
-        <div className="update-status">
-          {item.hasUpdate ? (
-            <p className="update-available" role="status">
-              {t("library.update.available")}{" "}
-              <code>{shortCommit(item.currentCommit)}</code> →{" "}
-              <code>{shortCommit(item.resolvedCommit)}</code>
-            </p>
-          ) : (
-            <p role="status">{t("library.update.up_to_date")}</p>
-          )}
-          {item.upstreamPathGone ? (
-            <div className="update-path-gone" role="alert">
-              <strong>{t("library.update.path_gone")}</strong>
-              <span>{t("library.update.path_gone_body")}</span>
-              <div className="reselect-row">
-                <input
-                  type="text"
-                  value={reselectPath}
-                  placeholder="packages/skills/new-name"
-                  aria-label={t("library.update.path_label")}
-                  onChange={(event) =>
-                    onReselectPathChange(event.currentTarget.value)
-                  }
-                />
-                <button
-                  type="button"
-                  disabled={isBusy || !reselectPath.trim()}
-                  onClick={() => onPlanUpdate(reselectPath.trim())}
-                >
-                  {updatePanel.activity === "planning"
-                    ? t("library.update.planning")
-                    : t("library.update.reselect")}
-                </button>
-                <button type="button" disabled={isBusy} onClick={onPinUpdate}>
-                  {updatePanel.activity === "pinning"
-                    ? t("library.update.pinning")
-                    : t("library.update.keep")}
-                </button>
-              </div>
-            </div>
-          ) : null}
-          {!item.hasUpdate || item.upstreamPathGone ? null : planItem ? (
-            <div className="update-plan">
-              {planItem.error ? (
-                <p className="update-plan-error" role="alert">
-                  {planItem.error}
-                </p>
-              ) : (
-                <>
-                  {planItem.modified ? (
-                    <p className="update-modified" role="alert">
-                      <strong>{t("library.update.modified_heading")}</strong>
-                      <span>{t("library.update.modified_body")}</span>
-                    </p>
-                  ) : null}
-                  <div className="reselect-row">
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => onApplyUpdate(planItem.modified)}
-                    >
-                      {updatePanel.activity === "applying"
-                        ? t("library.update.updating")
-                        : planItem.modified
-                          ? t("library.update.abandon")
-                          : t("library.update.update")}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => onPlanUpdate(null)}
-                    >
-                      {t("library.update.cancel")}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          ) : item.hasUpdate && !item.upstreamPathGone ? (
-            <div className="reselect-row">
-              <button
-                type="button"
-                disabled={isBusy}
-                onClick={() => onPlanUpdate(null)}
-              >
-                {updatePanel.activity === "planning"
-                  ? t("library.update.planning")
-                  : t("library.update.update")}
-              </button>
-              {item.modified ? null : (
-                <button type="button" disabled={isBusy} onClick={onPinUpdate}>
-                  {updatePanel.activity === "pinning"
-                    ? t("library.update.pinning")
-                    : t("library.update.keep")}
-                </button>
-              )}
-            </div>
-          ) : null}
-          {resultItem ? (
-            <p
-              className={
-                resultItem.updated ? "update-result-ok" : "update-result-fail"
-              }
-              role="status"
-            >
-              {resultItem.updated
-                ? t("library.update.applied")
-                : t("library.update.failed_with", {
-                    detail:
-                      resultItem.error ?? t("library.update.failed_unknown"),
-                  })}
-            </p>
-          ) : null}
-        </div>
-      ) : updatePanel.report &&
-        (updatePanel.report.errors.length > 0 ||
-          updatePanel.report.parentConflicts.length > 0) ? (
-        <div className="activation-error" role="alert">
-          <strong>{t("library.update.failed")}</strong>
-          {updatePanel.report.parentConflicts.map((conflict) => (
-            <span key={conflict.remoteId}>
-              {t("library.update.parent_conflict")}{" "}
-              <code>{conflict.canonicalUrl}</code>
-            </span>
-          ))}
-          {updatePanel.report.errors.map((message) => (
-            <span key={message}>{message}</span>
-          ))}
-        </div>
-      ) : (
-        <p role="status">{t("library.update.not_tracked")}</p>
-      )}
-    </section>
   );
 }
 

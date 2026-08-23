@@ -79,6 +79,13 @@ fn classify(
     structure: &GitSourceCatalogStructure,
     source: &GitSourceFact,
 ) -> GitSourceCapabilityKind {
+    // A missing, unreadable, or partial manifest is incomplete capability
+    // evidence, not evidence that the Catalog and manifest disagree. Keep
+    // the source in the safe, readable Legacy state until a later explicit
+    // Source Transition. A Conflict requires two complete facts that differ.
+    if !manifest_is_complete(&source.manifest) {
+        return GitSourceCapabilityKind::LegacyPerSkillGitState;
+    }
     let repository_is_complete = source
         .repository
         .as_ref()
@@ -96,6 +103,31 @@ fn classify(
         // shape; scan never writes a "repair" or promotes it automatically.
         GitSourceCapabilityKind::LegacyPerSkillGitState
     }
+}
+
+fn manifest_is_complete(manifest: &GitSourceManifestFact) -> bool {
+    let GitSourceManifestFact::Present {
+        remote_id,
+        canonical_url,
+        aliases,
+        provider,
+        tracking_ref,
+        current_release_id,
+    } = manifest
+    else {
+        return false;
+    };
+    !remote_id.is_empty()
+        && !canonical_url.is_empty()
+        && provider.as_deref().is_some_and(|value| !value.is_empty())
+        && tracking_ref
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        && current_release_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        && aliases.iter().all(|alias| !alias.is_empty())
+        && has_unique_values(aliases)
 }
 
 fn repository_is_complete(
@@ -164,15 +196,20 @@ fn same_unique_string_set(left: &[String], right: &[String]) -> bool {
     {
         return false;
     }
-    let left_len = left.len();
-    let right_len = right.len();
-    let mut left = left.to_vec();
-    let mut right = right.to_vec();
-    left.sort();
-    right.sort();
-    left.dedup();
-    right.dedup();
-    left.len() == left_len && right.len() == right_len && left == right
+    has_unique_values(left) && has_unique_values(right) && {
+        let mut left = left.to_vec();
+        let mut right = right.to_vec();
+        left.sort();
+        right.sort();
+        left == right
+    }
+}
+
+fn has_unique_values(values: &[String]) -> bool {
+    let mut deduplicated = values.to_vec();
+    deduplicated.sort();
+    deduplicated.dedup();
+    deduplicated.len() == values.len()
 }
 
 fn same_non_empty_member_set(left: &[String], right: &[String]) -> bool {

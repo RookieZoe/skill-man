@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::git_source::SystemGitSource;
+use skill_man_lib::adapters::git_source_capability::SqliteGitSourceCapabilityReader;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
@@ -17,13 +18,81 @@ use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SourceKind};
+use skill_man_lib::core::git_source_capability::{
+    GitRepositorySourceFact, GitSourceCapabilityFacts, GitSourceCapabilityReader,
+    GitSourceCapabilityScan, GitSourceCatalogStructure, GitSourceFact, GitSourceManifestFact,
+    GitSourceReleaseFact,
+};
 use skill_man_lib::core::import::{ImportError, ImportService};
-use skill_man_lib::core::update::{UpdateApplyRequest, UpdateSelection, UpdateService};
+use skill_man_lib::core::update::{
+    UpdateApplyRequest, UpdateError, UpdateSelection, UpdateService,
+};
 use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::import_store::ImportStore;
 
 mod common;
-use common::BoundTestHome;
+use common::{BoundTestHome, CATALOG_FILE_NAME};
+
+#[derive(Clone)]
+struct StaticGitSourceCapabilityReader {
+    facts: GitSourceCapabilityFacts,
+}
+
+impl GitSourceCapabilityReader for StaticGitSourceCapabilityReader {
+    fn read(&self) -> Result<GitSourceCapabilityFacts, String> {
+        Ok(self.facts.clone())
+    }
+}
+
+fn complete_repository_source_scan(
+    remote_id: &str,
+    canonical_url: &str,
+) -> Arc<GitSourceCapabilityScan> {
+    Arc::new(GitSourceCapabilityScan::new(Arc::new(
+        StaticGitSourceCapabilityReader {
+            facts: GitSourceCapabilityFacts {
+                catalog_structure: GitSourceCatalogStructure {
+                    has_repository_sources_table: true,
+                    has_releases_table: true,
+                    has_release_members_table: true,
+                    has_members_table: true,
+                    has_required_columns: true,
+                    has_required_foreign_keys: true,
+                    has_required_unique_constraints: true,
+                    has_clean_foreign_key_check: true,
+                    has_clean_integrity_check: true,
+                },
+                sources: vec![GitSourceFact {
+                    remote_id: remote_id.into(),
+                    canonical_url: canonical_url.into(),
+                    catalog_aliases: vec![],
+                    repository: Some(GitRepositorySourceFact {
+                        provider: Some("generic".into()),
+                        canonical_url: canonical_url.into(),
+                        tracking_ref: Some("main".into()),
+                        current_release_id: Some("release-1".into()),
+                        current_release: Some(GitSourceReleaseFact {
+                            release_id: "release-1".into(),
+                            remote_id: remote_id.into(),
+                            tracking_ref: "main".into(),
+                            resolved_commit: "abc123".into(),
+                            member_paths: vec!["skills/alpha".into()],
+                        }),
+                        current_member_paths: vec!["skills/alpha".into()],
+                    }),
+                    manifest: GitSourceManifestFact::Present {
+                        remote_id: remote_id.into(),
+                        canonical_url: canonical_url.into(),
+                        aliases: vec![],
+                        provider: Some("generic".into()),
+                        tracking_ref: Some("main".into()),
+                        current_release_id: Some("release-1".into()),
+                    },
+                }],
+            },
+        },
+    )))
+}
 
 fn git(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -125,6 +194,17 @@ impl Harness {
         )
     }
 
+    fn update_with_source_capability_scan(&self) -> UpdateService {
+        self.update()
+            .with_git_source_capability_scan(Arc::new(GitSourceCapabilityScan::new(Arc::new(
+                SqliteGitSourceCapabilityReader::new(
+                    self.home.write_gate.clone(),
+                    CATALOG_FILE_NAME,
+                    self.filesystem.clone(),
+                ),
+            ))))
+    }
+
     fn catalog(&self) -> CatalogService {
         CatalogService::new(self.runtime.clone())
     }
@@ -223,6 +303,177 @@ fn git_import_installs_multi_skill_repo_and_records_remote_source() {
             .count()
             >= 1,
         "the mirror cache persists for update checks"
+    );
+}
+
+#[test]
+fn legacy_per_skill_git_state_cannot_fetch_plan_apply_or_pin_an_old_update() {
+    let harness = Harness::new();
+    let repo = init_repo(
+        harness.home.path(),
+        "legacy-update-repo",
+        &[("skills/alpha/SKILL.md", "# Alpha v1\n")],
+    );
+    let source = file_url(&repo);
+    let import = harness.import();
+    let preview = import
+        .plan_git_selection(&source, false, &["alpha".into()])
+        .expect("plan the v6-style remote Install");
+    let installed = import
+        .apply_git_selection(&preview.plan_token)
+        .expect("create the v6-style remote Install");
+    let skill_id = installed.items[0].skill_id.clone();
+    let before = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read legacy record")[0]
+        .clone();
+
+    write_files(&repo, &[("skills/alpha/SKILL.md", "# Alpha v2\n")]);
+    commit(&repo, "upstream moves while legacy remains closed");
+
+    let update = harness.update_with_source_capability_scan();
+    let report = update
+        .check_updates(true)
+        .expect("scan closes before fetch");
+    assert!(
+        report.groups.is_empty(),
+        "legacy does not enter Update checks"
+    );
+    let after_check = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read after closed check")[0]
+        .clone();
+    assert_eq!(after_check.last_checked_at, before.last_checked_at);
+
+    let plan = update
+        .plan_updates(&[UpdateSelection {
+            skill_id: skill_id.clone(),
+            new_skill_path: None,
+        }])
+        .expect("closed plan is an item result");
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(
+        plan.items[0].error.as_deref(),
+        Some(
+            "Per-Skill Update is closed; Git Repository Source Update is not available in this release"
+        )
+    );
+
+    let applied = update
+        .apply_updates(
+            &[UpdateApplyRequest {
+                plan_token: "unexpected-plan".into(),
+                skill_id: skill_id.clone(),
+                directory_name: "alpha".into(),
+            }],
+            false,
+        )
+        .expect("closed apply returns an item failure");
+    assert!(!applied.items[0].updated);
+    assert_eq!(applied.items[0].error, plan.items[0].error);
+    assert!(matches!(
+        update.pin_updates(std::slice::from_ref(&skill_id)),
+        Err(UpdateError::SourceCapabilityClosed)
+    ));
+    let after = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read after closed actions")[0]
+        .clone();
+    assert_eq!(after.requested_ref, before.requested_ref);
+    assert_eq!(
+        after.verification_anchor_commit,
+        before.verification_anchor_commit
+    );
+}
+
+#[test]
+fn complete_repository_source_cannot_use_old_per_skill_update_commands() {
+    let harness = Harness::new();
+    let repo = init_repo(
+        harness.home.path(),
+        "complete-source-update-repo",
+        &[("skills/alpha/SKILL.md", "# Alpha v1\n")],
+    );
+    let source = file_url(&repo);
+    let import = harness.import();
+    let preview = import
+        .plan_git_selection(&source, false, &["alpha".into()])
+        .expect("plan the historical remote Install");
+    let installed = import
+        .apply_git_selection(&preview.plan_token)
+        .expect("create the historical remote Install");
+    let skill_id = installed.items[0].skill_id.clone();
+    let before = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read historical record")[0]
+        .clone();
+
+    write_files(&repo, &[("skills/alpha/SKILL.md", "# Alpha v2\n")]);
+    commit(&repo, "upstream moves while source Update is unavailable");
+
+    let update = harness
+        .update()
+        .with_git_source_capability_scan(complete_repository_source_scan(
+            &before.remote_id,
+            &before.source_url,
+        ));
+    let report = update
+        .check_updates(true)
+        .expect("old Update API closes before fetch");
+    assert!(
+        report.groups.is_empty(),
+        "a complete source still cannot enter the retired per-Skill Update API"
+    );
+    let after_check = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read after closed check")[0]
+        .clone();
+    assert_eq!(after_check.last_checked_at, before.last_checked_at);
+
+    let plan = update
+        .plan_updates(&[UpdateSelection {
+            skill_id: skill_id.clone(),
+            new_skill_path: None,
+        }])
+        .expect("closed plan is an item result");
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(
+        plan.items[0].error.as_deref(),
+        Some(
+            "Per-Skill Update is closed; Git Repository Source Update is not available in this release"
+        )
+    );
+
+    let applied = update
+        .apply_updates(
+            &[UpdateApplyRequest {
+                plan_token: "unexpected-plan".into(),
+                skill_id: skill_id.clone(),
+                directory_name: "alpha".into(),
+            }],
+            false,
+        )
+        .expect("closed apply returns an item failure");
+    assert!(!applied.items[0].updated);
+    assert_eq!(applied.items[0].error, plan.items[0].error);
+    assert!(matches!(
+        update.pin_updates(std::slice::from_ref(&skill_id)),
+        Err(UpdateError::SourceCapabilityClosed)
+    ));
+    let after = harness
+        .runtime
+        .load_remote_installs()
+        .expect("read after closed actions")[0]
+        .clone();
+    assert_eq!(after.requested_ref, before.requested_ref);
+    assert_eq!(
+        after.verification_anchor_commit,
+        before.verification_anchor_commit
     );
 }
 

@@ -947,7 +947,7 @@ test("switches the Import sheet to Git and reports a source rejection", async ()
   ).not.toBeInTheDocument();
 });
 
-test("checks Skill updates for a remote Install from the detail panel", async () => {
+test("does not surface legacy per-Skill Update controls for a remote Install", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
@@ -956,12 +956,12 @@ test("checks Skill updates for a remote Install from the detail panel", async ()
   expect(
     await screen.findByRole("heading", { name: "media-xray" }),
   ).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "Updates" })).toBeInTheDocument();
-
-  await user.click(screen.getByRole("button", { name: "Check for updates" }));
-  expect(await screen.findByRole("status")).toHaveTextContent(
-    "This Skill is not tracked for updates.",
-  );
+  expect(
+    screen.queryByRole("heading", { name: "Updates" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Check for updates" }),
+  ).not.toBeInTheDocument();
 });
 
 test("opens the Adopt sheet and reports a fixture rejection", async () => {
@@ -1919,87 +1919,6 @@ test("Broken Link detail offers Relocate and restores health after preview confi
   ).not.toBeInTheDocument();
 });
 
-test("Modified Install update offers only abandon-and-update or cancel", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  client.checkSkillUpdates = async () => ({
-    groups: [
-      {
-        repoUrl: "RookieZoe/media-xray",
-        items: [
-          {
-            skillId: "media-xray",
-            directoryName: "media-xray",
-            sourceUrl: "RookieZoe/media-xray",
-            requestedRef: "HEAD",
-            currentCommit: "1111111111",
-            resolvedCommit: "2222222222",
-            hasUpdate: true,
-            modified: true,
-            upstreamPathGone: false,
-            lastCheckedAt: null,
-          },
-        ],
-      },
-    ],
-    errors: [],
-    parentConflicts: [],
-  });
-  client.planSkillUpdates = async () => ({
-    items: [
-      {
-        skillId: "media-xray",
-        directoryName: "media-xray",
-        planToken: "fixture-update-plan-1",
-        currentCommit: "1111111111",
-        newCommit: "2222222222",
-        modified: true,
-        pathChanged: false,
-        error: null,
-      },
-    ],
-  });
-  let abandoned = false;
-  client.applySkillUpdates = async (requests, abandonChanges) => {
-    abandoned = abandonChanges;
-    return {
-      items: [
-        {
-          skillId: "media-xray",
-          directoryName: "media-xray",
-          updated: true,
-          error: null,
-        },
-      ],
-    };
-  };
-  render(<App client={client} />);
-
-  await user.click(await screen.findByRole("button", { name: "media-xray" }));
-  await user.click(screen.getByRole("button", { name: "Check for updates" }));
-
-  expect(await screen.findByRole("status")).toHaveTextContent(
-    "Update available",
-  );
-  expect(
-    screen.queryByRole("button", { name: "Keep current version" }),
-  ).not.toBeInTheDocument();
-
-  await user.click(screen.getByRole("button", { name: "Update" }));
-  expect(
-    await screen.findByRole("button", { name: "Abandon changes and update" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Keep current version" }),
-  ).not.toBeInTheDocument();
-
-  await user.click(
-    screen.getByRole("button", { name: "Abandon changes and update" }),
-  );
-  expect(await screen.findByText("Update applied.")).toBeInTheDocument();
-  expect(abandoned).toBe(true);
-});
-
 test("removes a Managed Skill after preview confirmation", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
@@ -2075,4 +1994,33 @@ test("loads Git source capability states when the Catalog opens", async () => {
   expect(
     await screen.findByRole("region", { name: "Git source status" }),
   ).toHaveTextContent("Legacy Per-Skill Git State");
+});
+
+test("keeps a failed Git source scan visible without closing the Library", async () => {
+  const client = createFixtureCatalogClient();
+  client.getGitSourceCapability = async () => {
+    throw {
+      error: { code: "state_unavailable" },
+      diagnostic: {
+        code: "git_source_capability_scan_failed",
+        message: "read-only Catalog could not be opened",
+      },
+    };
+  };
+
+  render(<App client={client} />);
+
+  expect(
+    await screen.findByRole("alert", { name: "Git source status" }),
+  ).toHaveTextContent("Git source status unavailable");
+  expect(
+    screen
+      .getByText(
+        "git_source_capability_scan_failed: read-only Catalog could not be opened",
+      )
+      .closest("details"),
+  ).not.toHaveAttribute("open");
+  expect(
+    screen.getByRole("navigation", { name: "Library" }),
+  ).toBeInTheDocument();
 });

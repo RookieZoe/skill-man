@@ -48,9 +48,6 @@ import type {
   SkillDetail,
   SkillSummary,
   StartupAgent,
-  UpdateCheckReport,
-  UpdatePlan,
-  UpdateResult,
 } from "./catalog-client";
 
 export interface AppProps {
@@ -58,14 +55,6 @@ export interface AppProps {
 }
 
 export type ImportKind = "link" | "git";
-
-export interface UpdatePanelState {
-  activity: "idle" | "checking" | "planning" | "applying" | "pinning";
-  error: string | null;
-  report: UpdateCheckReport | null;
-  plan: UpdatePlan | null;
-  result: UpdateResult | null;
-}
 
 export interface RelocatePanelState {
   isOpen: boolean;
@@ -148,25 +137,6 @@ const GIT_IMPORT_OPERATION_COPIES = {
   },
 } as const satisfies Record<string, OperationCopy>;
 
-const UPDATE_OPERATION_COPIES = {
-  checking: {
-    title: "library.update.checking",
-    detail: "operation.detail.update.check",
-  },
-  planning: {
-    title: "library.adopt.planning",
-    detail: "operation.detail.update.plan",
-  },
-  applying: {
-    title: "library.update.updating",
-    detail: "operation.detail.update.apply",
-  },
-  pinning: {
-    title: "library.update.pinning",
-    detail: "operation.detail.update.pin",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
 const RELOCATE_OPERATION_COPIES = {
   previewing: {
     title: "library.relocate.checking",
@@ -234,6 +204,9 @@ export function App({ client }: AppProps) {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [gitSourceCapability, setGitSourceCapability] =
     useState<GitSourceCapabilityReport | null>(null);
+  const [gitSourceCapabilityFailure, setGitSourceCapabilityFailure] = useState<{
+    diagnostic: string | null;
+  } | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
@@ -309,13 +282,6 @@ export function App({ client }: AppProps) {
     "idle" | "discovering" | "planning" | "applying"
   >("idle");
   const gitImportRunId = useRef(0);
-  const [updatePanel, setUpdatePanel] = useState<UpdatePanelState>({
-    activity: "idle",
-    error: null,
-    report: null,
-    plan: null,
-    result: null,
-  });
   const [relocatePanel, setRelocatePanel] = useState<RelocatePanelState>({
     isOpen: false,
     activity: "idle",
@@ -332,7 +298,6 @@ export function App({ client }: AppProps) {
     error: null,
   });
   const [lockNotice, setLockNotice] = useState<string | null>(null);
-  const [reselectPath, setReselectPath] = useState("");
   const [isAdoptOpen, setIsAdoptOpen] = useState(false);
   const [adoptReport, setAdoptReport] = useState<AdoptEvidenceReport | null>(
     null,
@@ -457,26 +422,6 @@ export function App({ client }: AppProps) {
   }, [client, preferences?.checkAppUpdates]);
 
   useEffect(() => {
-    // Spec §10.1 + §10.2: the background Skill update check runs at startup
-    // only when the preference is on (the cooldown lives in the backend).
-    // Failing silently is fine; the per-Skill button always forces a check.
-    if (preferences === null) return;
-    if (!preferences.checkSkillUpdates) return;
-    let current = true;
-    client
-      .checkSkillUpdates(false)
-      .then((report) => {
-        if (current) {
-          setUpdatePanel((state) => ({ ...state, report }));
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [client, preferences]);
-
-  useEffect(() => {
     let current = true;
     client
       .listSkills(filter)
@@ -511,12 +456,18 @@ export function App({ client }: AppProps) {
     client
       .getGitSourceCapability()
       .then((report) => {
-        if (current) setGitSourceCapability(report);
+        if (!current) return;
+        setGitSourceCapability(report);
+        setGitSourceCapabilityFailure(null);
       })
-      .catch(() => {
-        // The Catalog remains usable when a separate capability scan cannot
-        // finish. The native DTO carries its diagnostic for support work.
-        if (current) setGitSourceCapability(null);
+      .catch((reason: unknown) => {
+        // A Source Capability Scan failure never closes normal browsing, but
+        // it must remain visible with its diagnostic collapsed by default.
+        if (!current) return;
+        setGitSourceCapability(null);
+        setGitSourceCapabilityFailure({
+          diagnostic: readDiagnostic(reason, tRef.current),
+        });
       });
     return () => {
       current = false;
@@ -564,17 +515,6 @@ export function App({ client }: AppProps) {
       current = false;
     };
   }, [client, selectedId, startupHealthComplete]);
-
-  useEffect(() => {
-    setUpdatePanel({
-      activity: "idle",
-      error: null,
-      report: null,
-      plan: null,
-      result: null,
-    });
-    setReselectPath("");
-  }, [selectedId]);
 
   async function requestActivation(agentId: string, enabled: boolean) {
     if (!selectedId) return;
@@ -981,120 +921,6 @@ export function App({ client }: AppProps) {
     setIsLinkImportOpen(false);
     setGitImportResult(null);
     setGitImportError(null);
-  }
-
-  async function checkSkillUpdates() {
-    if (!selectedId) return;
-    setUpdatePanel((state) => ({
-      ...state,
-      activity: "checking",
-      error: null,
-      report: null,
-      plan: null,
-      result: null,
-    }));
-    try {
-      const report = await client.checkSkillUpdates(true);
-      setUpdatePanel((state) => ({ ...state, activity: "idle", report }));
-    } catch (reason) {
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        error: readError(reason, t),
-      }));
-    }
-  }
-
-  async function planSkillUpdate(newSkillPath: string | null) {
-    if (!selectedId) return;
-    setUpdatePanel((state) => ({
-      ...state,
-      activity: "planning",
-      error: null,
-      plan: null,
-      result: null,
-    }));
-    try {
-      const plan = await client.planSkillUpdates([
-        { skillId: selectedId, newSkillPath },
-      ]);
-      setUpdatePanel((state) => ({ ...state, activity: "idle", plan }));
-    } catch (reason) {
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        error: readError(reason, t),
-      }));
-    }
-  }
-
-  async function applySkillUpdate(abandonChanges: boolean) {
-    if (!selectedId || !updatePanel.plan) return;
-    const item = updatePanel.plan.items[0];
-    if (!item?.planToken) return;
-    setUpdatePanel((state) => ({
-      ...state,
-      activity: "applying",
-      error: null,
-    }));
-    try {
-      const result = await client.applySkillUpdates(
-        [
-          {
-            planToken: item.planToken,
-            skillId: item.skillId,
-            directoryName: item.directoryName,
-          },
-        ],
-        abandonChanges,
-      );
-      const [snapshot, nextDetail, nextAgents] = await Promise.all([
-        client.listSkills(filter),
-        client.inspectSkill(selectedId),
-        client.listAgents(selectedId),
-      ]);
-      setSkills(snapshot.items);
-      setDetail(nextDetail);
-      setAgents(nextAgents);
-      setAgentsReadyForSkillId(selectedId);
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        plan: null,
-        result,
-      }));
-    } catch (reason) {
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        error: readError(reason, t),
-      }));
-    }
-  }
-
-  async function pinSkillUpdate() {
-    if (!selectedId) return;
-    setUpdatePanel((state) => ({
-      ...state,
-      activity: "pinning",
-      error: null,
-    }));
-    try {
-      await client.pinSkillUpdates([selectedId]);
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        report: null,
-        plan: null,
-        result: null,
-      }));
-    } catch (reason) {
-      setUpdatePanel((state) => ({
-        ...state,
-        activity: "idle",
-        error: readError(reason, t),
-      }));
-    }
   }
 
   function openRelocate() {
@@ -1693,12 +1519,6 @@ export function App({ client }: AppProps) {
       GIT_IMPORT_OPERATION_COPIES,
       t,
     ),
-    operationFromActivity(
-      "skill-update",
-      updatePanel.activity,
-      UPDATE_OPERATION_COPIES,
-      t,
-    ),
     isPreferencesOpen
       ? operationFromActivity(
           "app-update",
@@ -1757,6 +1577,7 @@ export function App({ client }: AppProps) {
         agents={agents}
         error={error}
         gitSourceCapability={gitSourceCapability}
+        gitSourceCapabilityFailure={gitSourceCapabilityFailure}
         activationError={activationError}
         activationConflict={activationConflict}
         activationConflictMessage={activationConflictMessage}
@@ -1787,8 +1608,6 @@ export function App({ client }: AppProps) {
         gitImportResult={gitImportResult}
         gitImportError={gitImportError}
         gitImportActivity={gitImportActivity}
-        updatePanel={updatePanel}
-        reselectPath={reselectPath}
         onFilter={setFilter}
         onSelect={setSelectedId}
         onRequestActivation={requestActivation}
@@ -1813,11 +1632,6 @@ export function App({ client }: AppProps) {
         onPlanGitImport={planGitImport}
         onApplyGitImport={applyGitImport}
         onOpenImportedGitSkill={openImportedGitSkill}
-        onCheckSkillUpdates={checkSkillUpdates}
-        onPlanSkillUpdate={planSkillUpdate}
-        onApplySkillUpdate={applySkillUpdate}
-        onPinSkillUpdate={pinSkillUpdate}
-        onReselectPathChange={setReselectPath}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}
@@ -1923,6 +1737,28 @@ function readError(reason: unknown, t: LocaleContextValue["t"]) {
     return t(errorMessageKey(reason.code as string));
   }
   return t("app.error.read_failed");
+}
+
+function readDiagnostic(
+  reason: unknown,
+  t: LocaleContextValue["t"],
+): string | null {
+  if (typeof reason !== "object" || reason === null) return null;
+  const diagnostic = "diagnostic" in reason ? reason.diagnostic : null;
+  if (
+    typeof diagnostic !== "object" ||
+    diagnostic === null ||
+    !("code" in diagnostic) ||
+    !("message" in diagnostic) ||
+    typeof diagnostic.code !== "string" ||
+    typeof diagnostic.message !== "string"
+  ) {
+    return null;
+  }
+  return t("library.source_capability.diagnostic_value", {
+    code: diagnostic.code,
+    message: diagnostic.message,
+  });
 }
 
 function readCommandError(reason: unknown, t: LocaleContextValue["t"]) {

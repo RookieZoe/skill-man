@@ -98,6 +98,8 @@ fn command_error(error: UpdateError) -> CommandFailureDto {
             ..
         }) => PublicErrorDto::RecoveryRequired,
         UpdateError::FileSystem(_) => PublicErrorDto::StateUnavailable,
+        UpdateError::SourceCapability(_) => PublicErrorDto::StateUnavailable,
+        UpdateError::SourceCapabilityClosed => PublicErrorDto::Validation,
         UpdateError::Internal(_) => PublicErrorDto::Internal,
     };
     CommandFailureDto {

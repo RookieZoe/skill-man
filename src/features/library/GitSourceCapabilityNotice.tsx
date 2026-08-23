@@ -1,12 +1,36 @@
 import type { GitSourceCapabilityReport } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
 
+export interface GitSourceCapabilityFailure {
+  diagnostic: string | null;
+}
+
 export function GitSourceCapabilityNotice({
   report,
+  failure,
 }: {
   report: GitSourceCapabilityReport | null;
+  failure: GitSourceCapabilityFailure | null;
 }) {
   const { t } = useLocale();
+  if (failure) {
+    return (
+      <section
+        className="git-source-capability git-source-capability--unavailable"
+        aria-label={t("library.source_capability.label")}
+        role="alert"
+      >
+        <h2>{t("library.source_capability.unavailable")}</h2>
+        <p>{t("library.source_capability.unavailable_body")}</p>
+        {failure.diagnostic ? (
+          <details>
+            <summary>{t("library.source_capability.diagnostic")}</summary>
+            <pre>{failure.diagnostic}</pre>
+          </details>
+        ) : null}
+      </section>
+    );
+  }
   if (!report || report.sources.length === 0) return null;
 
   return (
@@ -17,7 +41,6 @@ export function GitSourceCapabilityNotice({
       <h2>{t("library.source_capability.heading")}</h2>
       <ul>
         {report.sources.map((source) => {
-          const closed = source.kind !== "git_repository_source";
           return (
             <li
               key={source.remoteId}
@@ -25,11 +48,7 @@ export function GitSourceCapabilityNotice({
             >
               <h3>{t(`library.source_capability.${source.kind}`)}</h3>
               <p className="git-source-capability-url">{source.canonicalUrl}</p>
-              <p>
-                {closed
-                  ? t("library.source_capability.source_actions_closed")
-                  : t("library.source_capability.source_actions_available")}
-              </p>
+              <p>{t(`library.source_capability.${source.kind}_detail`)}</p>
             </li>
           );
         })}

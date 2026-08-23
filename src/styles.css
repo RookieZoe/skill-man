@@ -318,6 +318,25 @@ button:active:not(:disabled) {
   color: oklch(51% 0.12 36);
 }
 
+.git-source-capability--unavailable details {
+  margin-top: var(--space-2);
+}
+
+.git-source-capability--unavailable summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.git-source-capability--unavailable pre {
+  max-width: 100%;
+  max-height: 12rem;
+  margin: var(--space-2) 0 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 759px) {
   .git-source-capability li {
     grid-template-columns: 1fr;
@@ -2156,118 +2175,6 @@ button:active:not(:disabled) {
   background: var(--accent-soft);
 }
 
-/* -- Skill Update section -- */
-.update-section {
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px;
-  margin: 16px 0;
-  background: var(--surface-muted);
-}
-.update-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.update-toolbar h3 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.update-toolbar button {
-  font: inherit;
-  font-size: 13px;
-  padding: 6px 12px;
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.update-toolbar button:disabled,
-.reselect-row button:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-.update-status {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  font-size: 13px;
-}
-.update-status p {
-  margin: 0;
-}
-.update-available {
-  color: var(--accent-strong);
-}
-.update-path-gone {
-  border: 1px solid var(--modified);
-  background: oklch(96% 0.03 90);
-  border-radius: var(--radius-md);
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.update-path-gone strong {
-  font-size: 13px;
-}
-.update-path-gone span {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.reselect-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: 4px;
-}
-.reselect-row input {
-  flex: 1;
-  min-width: 180px;
-  padding: 7px 10px;
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  font: inherit;
-  font-size: 13px;
-}
-.reselect-row button {
-  font: inherit;
-  font-size: 13px;
-  padding: 7px 12px;
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.update-modified {
-  border: 1px solid var(--modified);
-  border-radius: var(--radius-md);
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.update-modified strong {
-  color: var(--modified);
-  font-size: 13px;
-}
-.update-modified span {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.update-plan-error {
-  color: var(--broken);
-}
 .update-result-ok {
   color: var(--healthy);
 }

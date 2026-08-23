@@ -6,7 +6,7 @@
 //! module's stable replacement machinery. Modified entities are never
 //! silently replaced: Apply requires the user to abandon local changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use crate::core::domain::{Health, SkillId};
 use crate::core::git_source::{
     DEFAULT_BRANCH_REF, git_mirror_path, is_trackable_ref, skill_document_path,
 };
+use crate::core::git_source_capability::{GitSourceCapabilityError, GitSourceCapabilityScan};
 use crate::core::import::{ImportError, ImportService};
 use crate::core::write_gate::WriteGate;
 use crate::seams::clock::Clock;
@@ -120,6 +121,12 @@ pub enum UpdateError {
     FileSystem(#[from] crate::seams::filesystem::FileSystemError),
     #[error(transparent)]
     Import(#[from] ImportError),
+    #[error(transparent)]
+    SourceCapability(#[from] GitSourceCapabilityError),
+    #[error(
+        "Per-Skill Update is closed; Git Repository Source Update is not available in this release"
+    )]
+    SourceCapabilityClosed,
     #[error("internal Update error: {0}")]
     Internal(String),
 }
@@ -133,6 +140,7 @@ pub struct UpdateService {
     configured_git_cache_root: PathBuf,
     configured_remotes_root: PathBuf,
     home_context: Option<Arc<WriteGate>>,
+    source_capability_scan: Option<Arc<GitSourceCapabilityScan>>,
     import: ImportService,
 }
 
@@ -165,6 +173,7 @@ impl UpdateService {
             configured_git_cache_root: git_cache_root,
             configured_remotes_root: library_root.join("remotes"),
             home_context: None,
+            source_capability_scan: None,
             import,
         }
     }
@@ -174,6 +183,18 @@ impl UpdateService {
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
         self.import = self.import.with_home_context(home_context.clone());
         self.home_context = Some(home_context);
+        self
+    }
+
+    /// Production composition supplies the same read-only Source Capability
+    /// Production composition supplies this scan to close the historical
+    /// per-Skill Update API. Git Repository Source Update is a later,
+    /// source-level transition and cannot reuse these per-Skill commands.
+    pub fn with_git_source_capability_scan(
+        mut self,
+        source_capability_scan: Arc<GitSourceCapabilityScan>,
+    ) -> Self {
+        self.source_capability_scan = Some(source_capability_scan);
         self
     }
 
@@ -206,9 +227,16 @@ impl UpdateService {
     /// report errors without disturbing other repositories.
     pub fn check_updates(&self, force: bool) -> Result<UpdateCheckReport, UpdateError> {
         let records = self.store.load_remote_installs()?;
+        let updateable_remote_ids = self.updateable_remote_ids()?;
         let trackable = records
             .iter()
-            .filter(|record| is_trackable_ref(&record.requested_ref))
+            .filter(|record| {
+                is_trackable_ref(&record.requested_ref)
+                    && self.source_updates_are_allowed(
+                        updateable_remote_ids.as_ref(),
+                        &record.remote_id,
+                    )
+            })
             .collect::<Vec<_>>();
         let mut by_repo: HashMap<&str, Vec<&RemoteInstallRecord>> = HashMap::new();
         for record in &trackable {
@@ -327,6 +355,7 @@ impl UpdateService {
     /// on the item so the UI can present them next to the Skill.
     pub fn plan_updates(&self, selections: &[UpdateSelection]) -> Result<UpdatePlan, UpdateError> {
         let records = self.store.load_remote_installs()?;
+        let updateable_remote_ids = self.updateable_remote_ids()?;
         let mut items = Vec::new();
         let mut by_repo: HashMap<String, Vec<(&UpdateSelection, &RemoteInstallRecord)>> =
             HashMap::new();
@@ -347,6 +376,14 @@ impl UpdateService {
                 });
                 continue;
             };
+            if !self.source_updates_are_allowed(updateable_remote_ids.as_ref(), &record.remote_id) {
+                items.push(update_item_error(
+                    selection,
+                    record,
+                    UpdateError::SourceCapabilityClosed.to_string(),
+                ));
+                continue;
+            }
             by_repo
                 .entry(record.source_url.clone())
                 .or_default()
@@ -473,9 +510,29 @@ impl UpdateService {
         requests: &[UpdateApplyRequest],
         abandon_changes: bool,
     ) -> Result<UpdateResult, UpdateError> {
+        let records = self.store.load_remote_installs()?;
+        let updateable_remote_ids = self.updateable_remote_ids()?;
         let remotes_root = self.active_remotes_root()?;
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
+            let source_updates_allowed = records
+                .iter()
+                .find(|record| record.skill_id == request.skill_id)
+                .is_some_and(|record| {
+                    self.source_updates_are_allowed(
+                        updateable_remote_ids.as_ref(),
+                        &record.remote_id,
+                    )
+                });
+            if !source_updates_allowed {
+                results.push(UpdateItemResult {
+                    skill_id: request.skill_id.clone(),
+                    directory_name: request.directory_name.clone(),
+                    updated: false,
+                    error: Some(UpdateError::SourceCapabilityClosed.to_string()),
+                });
+                continue;
+            }
             match self
                 .import
                 .apply_git_reinstall(&request.plan_token, abandon_changes)
@@ -532,6 +589,7 @@ impl UpdateService {
     /// ref becomes the resolved commit, so no further update checks apply.
     pub fn pin_updates(&self, skill_ids: &[SkillId]) -> Result<(), UpdateError> {
         let records = self.store.load_remote_installs()?;
+        let updateable_remote_ids = self.updateable_remote_ids()?;
         for skill_id in skill_ids {
             let record = records
                 .iter()
@@ -539,6 +597,9 @@ impl UpdateService {
                 .ok_or_else(|| {
                     UpdateError::Validation("the Skill is not a remote Install".into())
                 })?;
+            if !self.source_updates_are_allowed(updateable_remote_ids.as_ref(), &record.remote_id) {
+                return Err(UpdateError::SourceCapabilityClosed);
+            }
             self.store
                 .set_remote_requested_ref(skill_id, &record.verification_anchor_commit)?;
         }
@@ -576,6 +637,25 @@ impl UpdateService {
         self.filesystem
             .tree_hash(&record.final_entity_path)
             .is_ok_and(|hash| hash != record.recorded_content_hash)
+    }
+
+    fn updateable_remote_ids(&self) -> Result<Option<HashSet<String>>, UpdateError> {
+        let Some(scan) = &self.source_capability_scan else {
+            // Existing focused Update tests exercise pre-vNext mechanics
+            // without product composition.  The app always supplies the
+            // scan above; its absence must never be used there as a bypass.
+            return Ok(None);
+        };
+        let _capability_report = scan.scan()?;
+        Ok(Some(HashSet::new()))
+    }
+
+    fn source_updates_are_allowed(
+        &self,
+        updateable_remote_ids: Option<&HashSet<String>>,
+        remote_id: &str,
+    ) -> bool {
+        updateable_remote_ids.is_none_or(|remote_ids| remote_ids.contains(remote_id))
     }
 
     /// Parent integrity gate (ADR-0013 §4.3): the manifest must agree with

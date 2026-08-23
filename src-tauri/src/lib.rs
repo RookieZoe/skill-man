@@ -353,13 +353,14 @@ pub fn run() {
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
             app.manage(CatalogApi::new(CatalogService::new(catalog_store.clone())));
-            app.manage(GitSourceCapabilityApi::new(Arc::new(
-                GitSourceCapabilityScan::new(Arc::new(SqliteGitSourceCapabilityReader::new(
+            let git_source_capability_scan = Arc::new(GitSourceCapabilityScan::new(Arc::new(
+                SqliteGitSourceCapabilityReader::new(
                     write_gate.clone(),
                     catalog_file_name.clone(),
                     filesystem.clone(),
-                ))),
+                ),
             )));
+            app.manage(GitSourceCapabilityApi::new(git_source_capability_scan.clone()));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
                     .with_library_root(resolved_library_root.clone())
@@ -377,7 +378,8 @@ pub fn run() {
                 git_cache_root,
                 write_gate.clone(),
             )
-            .with_home_context(write_gate.clone())));
+            .with_home_context(write_gate.clone())
+            .with_git_source_capability_scan(git_source_capability_scan)));
             app.manage(AdoptApi::new(
                 AdoptService::new(
                     adopt_store.clone(),
