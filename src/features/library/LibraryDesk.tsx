@@ -26,6 +26,7 @@ import type {
   GitImportDiscovery,
   GitImportSelectionPreview,
   GitImportSelectionResult,
+  GitSourceCapabilityReport,
   Health,
   LinkImportPreview,
   LinkImportResult,
@@ -46,6 +47,7 @@ import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
+import { GitSourceCapabilityNotice } from "./GitSourceCapabilityNotice";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
@@ -75,6 +77,7 @@ interface LibraryDeskProps {
   detail: SkillDetail | null;
   agents: AgentActivation[];
   error: string | null;
+  gitSourceCapability: GitSourceCapabilityReport | null;
   activationError: string | null;
   activationConflict: ActivationConflictDetails | null;
   activationConflictMessage: string | null;
@@ -199,6 +202,7 @@ export function LibraryDesk({
   detail,
   agents,
   error,
+  gitSourceCapability,
   activationError,
   activationConflict,
   activationConflictMessage,
@@ -492,6 +496,7 @@ export function LibraryDesk({
             </button>
           </div>
         ) : null}
+        <GitSourceCapabilityNotice report={gitSourceCapability} />
       </div>
       <div className="app-background" inert={hasOverlay ? true : undefined}>
         <div className="library-desk">

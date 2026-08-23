@@ -14,6 +14,7 @@ pub fn run() {
     use crate::adapters::app_state_store::AppStateStoreFileSystem;
     use crate::adapters::catalog_probe::SqliteCatalogProbe;
     use crate::adapters::git_source::SystemGitSource;
+    use crate::adapters::git_source_capability::SqliteGitSourceCapabilityReader;
     use crate::adapters::local_file_source::LocalFileSource;
     use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
@@ -36,6 +37,7 @@ pub fn run() {
     };
     use crate::core::catalog::CatalogService;
     use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
+    use crate::core::git_source_capability::GitSourceCapabilityScan;
     use crate::core::home_binding::{HomeBindingConfig, HomeBindingService};
     use crate::core::home_lifecycle::HomeLifecycleService;
     use crate::core::import::ImportService;
@@ -68,11 +70,11 @@ pub fn run() {
         confirm_fixture_recovery_result, confirm_home, continue_candidate, create_agent_directory,
         discover_file_import, discover_file_import_collection, discover_git_import,
         discover_link_import, download_app_update, finalize_activation_replace, finalize_adopt,
-        get_bootstrap_snapshot, get_fixture_recovery_preview, get_locale_snapshot, inspect_skill,
-        install_app_update, list_agents, list_safety_snapshots, list_skills, load_preferences,
-        pin_skill_updates, plan_abandon, plan_activation, plan_activation_repair,
-        plan_activation_replace, plan_adopt, plan_delete_safety_snapshot, plan_file_import,
-        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
+        get_bootstrap_snapshot, get_fixture_recovery_preview, get_git_source_capability,
+        get_locale_snapshot, inspect_skill, install_app_update, list_agents, list_safety_snapshots,
+        list_skills, load_preferences, pin_skill_updates, plan_abandon, plan_activation,
+        plan_activation_repair, plan_activation_replace, plan_adopt, plan_delete_safety_snapshot,
+        plan_file_import, plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
         plan_git_import_selection, plan_link_import, plan_remove_skill, plan_restore,
         plan_skill_updates, prepare_home, reconnect_same_home, refresh_system_languages,
         relocate_link, restore_eligibility, run_activation_health_check, scan_adopt,
@@ -80,6 +82,7 @@ pub fn run() {
         update_preferences,
     };
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
+    use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
     use crate::tauri_adapter::health_api::HealthApi;
     use crate::tauri_adapter::home_binding_api::HomeBindingApi;
     use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
@@ -350,6 +353,13 @@ pub fn run() {
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
             app.manage(CatalogApi::new(CatalogService::new(catalog_store.clone())));
+            app.manage(GitSourceCapabilityApi::new(Arc::new(
+                GitSourceCapabilityScan::new(Arc::new(SqliteGitSourceCapabilityReader::new(
+                    write_gate.clone(),
+                    catalog_file_name.clone(),
+                    filesystem.clone(),
+                ))),
+            )));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
                     .with_library_root(resolved_library_root.clone())
@@ -479,6 +489,7 @@ pub fn run() {
             plan_abandon,
             apply_abandon,
             get_bootstrap_snapshot,
+            get_git_source_capability,
             get_locale_snapshot,
             set_locale_selection,
             refresh_system_languages,

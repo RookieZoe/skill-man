@@ -262,6 +262,69 @@ button:active:not(:disabled) {
   font-size: 12px;
 }
 
+.git-source-capability {
+  padding: var(--space-3) var(--space-4);
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--divider);
+  font-size: 12px;
+}
+
+.git-source-capability h2,
+.git-source-capability h3,
+.git-source-capability p {
+  margin: 0;
+}
+
+.git-source-capability h2 {
+  margin-bottom: var(--space-2);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.git-source-capability ul {
+  display: grid;
+  gap: var(--space-2);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.git-source-capability li {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) minmax(230px, 1fr) minmax(
+      260px,
+      1.4fr
+    );
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.git-source-capability h3 {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.git-source-capability-url {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-source-capability--legacy_per_skill_git_state h3,
+.git-source-capability--remote_source_identity_conflict h3 {
+  color: oklch(51% 0.12 36);
+}
+
+@media (max-width: 759px) {
+  .git-source-capability li {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
 .library-desk {
   min-height: 0;
   display: grid;

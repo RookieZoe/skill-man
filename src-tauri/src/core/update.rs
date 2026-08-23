@@ -658,6 +658,9 @@ fn ensure_parent_manifest(
             schema_version: 1,
             remote_id: record.remote_id.clone(),
             canonical_url: record.source_url.clone(),
+            provider: None,
+            tracking_ref: None,
+            current_release_id: None,
             aliases,
             created_at: existing_created_at
                 .unwrap_or_else(|| crate::seams::clock::iso_timestamp(now_nanos)),

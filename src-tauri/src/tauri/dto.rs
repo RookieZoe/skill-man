@@ -11,6 +11,9 @@ use crate::core::domain::{
     ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
     SkillDetail, SkillSummary, SourceKind,
 };
+use crate::core::git_source_capability::{
+    GitSourceCapabilityKind, GitSourceCapabilityReport, GitSourceCapabilitySource,
+};
 use crate::core::import::{
     FileImportCandidate, FileImportDiscovery, FileImportPreview, FileImportResult,
     FileImportSelectionPreview, FileImportSelectionResult, GitImportCandidate, GitImportDiscovery,
@@ -26,6 +29,60 @@ use crate::core::update::{
     UpdatePlanItem, UpdateResult,
 };
 use crate::seams::preferences_store::{AppPreferences, PreferenceUpdates};
+
+// -- Git Repository Source capability scan (ADR-0014, spec §8.3) --
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSourceCapabilityKindDto {
+    GitRepositorySource,
+    LegacyPerSkillGitState,
+    RemoteSourceIdentityConflict,
+}
+
+impl From<GitSourceCapabilityKind> for GitSourceCapabilityKindDto {
+    fn from(value: GitSourceCapabilityKind) -> Self {
+        match value {
+            GitSourceCapabilityKind::GitRepositorySource => Self::GitRepositorySource,
+            GitSourceCapabilityKind::LegacyPerSkillGitState => Self::LegacyPerSkillGitState,
+            GitSourceCapabilityKind::RemoteSourceIdentityConflict => {
+                Self::RemoteSourceIdentityConflict
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSourceCapabilitySourceDto {
+    pub remote_id: String,
+    pub canonical_url: String,
+    pub kind: GitSourceCapabilityKindDto,
+}
+
+impl From<GitSourceCapabilitySource> for GitSourceCapabilitySourceDto {
+    fn from(value: GitSourceCapabilitySource) -> Self {
+        Self {
+            remote_id: value.remote_id,
+            canonical_url: value.canonical_url,
+            kind: value.kind.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSourceCapabilityReportDto {
+    pub sources: Vec<GitSourceCapabilitySourceDto>,
+}
+
+impl From<GitSourceCapabilityReport> for GitSourceCapabilityReportDto {
+    fn from(value: GitSourceCapabilityReport) -> Self {
+        Self {
+            sources: value.sources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 // -- Skill Man application Update (ADR-0006) --
 

@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod domain;
 pub mod fixture_recovery;
 pub mod git_source;
+pub mod git_source_capability;
 pub mod home;
 pub mod home_binding;
 pub mod home_lifecycle;

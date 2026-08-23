@@ -3,6 +3,7 @@ pub mod app_state_store;
 pub mod catalog_probe;
 pub mod fixture_catalog;
 pub mod git_source;
+pub mod git_source_capability;
 pub mod local_file_source;
 pub mod locale_store;
 pub mod macos_fs;

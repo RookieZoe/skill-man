@@ -385,6 +385,14 @@ pub struct RemoteParentManifest {
     pub schema_version: u32,
     pub remote_id: String,
     pub canonical_url: String,
+    /// Present only for a Git Repository Source.  An absent field is the
+    /// historical v6 parent manifest and must remain Legacy during scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_release_id: Option<String>,
     pub aliases: Vec<String>,
     pub created_at: String,
 }

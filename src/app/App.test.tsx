@@ -2057,3 +2057,22 @@ test("shows the recovery-required lock notice with retry", async () => {
     ).not.toBeInTheDocument();
   });
 });
+
+test("loads Git source capability states when the Catalog opens", async () => {
+  const client = createFixtureCatalogClient();
+  client.getGitSourceCapability = async () => ({
+    sources: [
+      {
+        remoteId: "legacy-source",
+        canonicalUrl: "https://github.com/acme/legacy",
+        kind: "legacy_per_skill_git_state",
+      },
+    ],
+  });
+
+  render(<App client={client} />);
+
+  expect(
+    await screen.findByRole("region", { name: "Git source status" }),
+  ).toHaveTextContent("Legacy Per-Skill Git State");
+});

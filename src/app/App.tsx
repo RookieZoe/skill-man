@@ -36,6 +36,7 @@ import type {
   GitImportDiscovery,
   GitImportSelectionPreview,
   GitImportSelectionResult,
+  GitSourceCapabilityReport,
   LinkImportPreview,
   LinkImportResult,
   PreferenceUpdates,
@@ -231,6 +232,8 @@ export function App({ client }: AppProps) {
   tRef.current = t;
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [gitSourceCapability, setGitSourceCapability] =
+    useState<GitSourceCapabilityReport | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
@@ -502,6 +505,23 @@ export function App({ client }: AppProps) {
       current = false;
     };
   }, [client, filter]);
+
+  useEffect(() => {
+    let current = true;
+    client
+      .getGitSourceCapability()
+      .then((report) => {
+        if (current) setGitSourceCapability(report);
+      })
+      .catch(() => {
+        // The Catalog remains usable when a separate capability scan cannot
+        // finish. The native DTO carries its diagnostic for support work.
+        if (current) setGitSourceCapability(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [client]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1736,6 +1756,7 @@ export function App({ client }: AppProps) {
         detail={detail}
         agents={agents}
         error={error}
+        gitSourceCapability={gitSourceCapability}
         activationError={activationError}
         activationConflict={activationConflict}
         activationConflictMessage={activationConflictMessage}

@@ -6,6 +6,7 @@ pub mod catalog_api;
 pub mod commands;
 pub mod dto;
 pub mod fixture_recovery_api;
+pub mod git_source_capability_api;
 pub mod health_api;
 pub mod home_binding_api;
 pub mod home_lifecycle_api;

@@ -3,6 +3,20 @@ import { listen } from "@tauri-apps/api/event";
 
 export type CatalogFilter = "all" | "broken" | "modified" | "link" | "install";
 export type SourceKind = "link" | "remote_install" | "file_install";
+export type GitSourceCapabilityKind =
+  | "git_repository_source"
+  | "legacy_per_skill_git_state"
+  | "remote_source_identity_conflict";
+
+export interface GitSourceCapabilitySource {
+  remoteId: string;
+  canonicalUrl: string;
+  kind: GitSourceCapabilityKind;
+}
+
+export interface GitSourceCapabilityReport {
+  sources: GitSourceCapabilitySource[];
+}
 export type Health = "healthy" | "broken" | "modified";
 export type AgentKind = "claude_preset" | "codex_preset" | "custom";
 export type Compatibility = "verified" | "unknown";
@@ -855,6 +869,8 @@ export interface CatalogClient {
     callback: (payload: LocaleSnapshot) => void,
   ): Promise<() => void>;
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
+  /** Read-only Source Capability Scan (ADR-0014, spec §8.3). */
+  getGitSourceCapability(): Promise<GitSourceCapabilityReport>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
   listAgents(skillId: string): Promise<AgentActivation[]>;
   planActivation(
@@ -1007,6 +1023,9 @@ const tauriCatalogClient: CatalogClient = {
   },
   listSkills(filter) {
     return invoke<CatalogList>("list_skills", { request: { filter } });
+  },
+  getGitSourceCapability() {
+    return invoke<GitSourceCapabilityReport>("get_git_source_capability");
   },
   relocateLink(skillId, sourcePath) {
     return invoke<RelocateLinkPreview>("relocate_link", {

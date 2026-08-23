@@ -7,6 +7,7 @@ pub mod catalog_probe;
 pub mod catalog_store;
 pub mod clock;
 pub mod filesystem;
+pub mod git_source_capability;
 pub mod import_store;
 pub mod installer_lock_store;
 pub mod legacy_migration;

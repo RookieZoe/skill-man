@@ -247,6 +247,9 @@ export function createFixtureCatalogClient(): CatalogClient {
           .map(toSummary),
       };
     },
+    async getGitSourceCapability() {
+      return { sources: [] };
+    },
     async inspectSkill(skillId) {
       const skill = skills.find(({ id }) => id === skillId);
       if (!skill) throw new Error(`Managed Skill '${skillId}' was not found`);

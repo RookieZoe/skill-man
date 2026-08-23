@@ -27,20 +27,21 @@ use crate::tauri_adapter::dto::{
     FileImportResultDto, FileImportSelectionPreviewDto, FileImportSelectionResultDto,
     FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
     FixtureRecoveryPreviewDto, GitImportDiscoveryDto, GitImportSelectionPreviewDto,
-    GitImportSelectionResultDto, HomeCandidateDto, InstallAppUpdateRequestDto,
-    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
-    LocaleSnapshotDto, PinSkillUpdatesRequestDto, PlanActivationRepairRequestDto,
-    PlanActivationReplaceRequestDto, PlanActivationRequestDto, PlanAdoptRequestDto,
-    PlanFileImportRequestDto, PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
-    PlanFixtureRecoveryRequestDto, PlanGitImportSelectionRequestDto, PlanLinkImportRequestDto,
-    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
-    PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
-    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
-    RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
-    StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto,
-    UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    GitImportSelectionResultDto, GitSourceCapabilityReportDto, HomeCandidateDto,
+    InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto,
+    ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
+    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
+    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
+    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanGitImportSelectionRequestDto,
+    PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
+    PreferenceUpdatesDto, PreferencesWarningDto, PrepareHomeRequestDto, RecoveryResultDto,
+    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
+    RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
+    SkillDetailDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
+use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
 use crate::tauri_adapter::health_api::HealthApi;
 use crate::tauri_adapter::home_binding_api::HomeBindingApi;
 use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
@@ -109,6 +110,13 @@ pub fn get_bootstrap_snapshot(
     state: State<'_, BootstrapApi>,
 ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
     state.get_bootstrap_snapshot()
+}
+
+#[tauri::command]
+pub fn get_git_source_capability(
+    state: State<'_, GitSourceCapabilityApi>,
+) -> Result<GitSourceCapabilityReportDto, CommandFailureDto> {
+    state.get_git_source_capability()
 }
 
 #[tauri::command]
