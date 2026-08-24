@@ -3240,7 +3240,7 @@ pub struct PrepareHomeRequestDto {
     pub path: String,
 }
 
-// -- Existing Home Recovery (issue #66) --
+// -- Existing Home Recovery (issues #66–#67) --
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3251,6 +3251,15 @@ pub struct PrepareExistingHomeRecoveryRequestDto {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelExistingHomeRecoveryRequestDto {
+    pub plan_token: String,
+}
+
+/// Confirming Existing Home Recovery deliberately consumes only the opaque
+/// plan token. The verified Home identity is a reviewed fact, never text the
+/// user must retype.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmExistingHomeRecoveryRequestDto {
     pub plan_token: String,
 }
 

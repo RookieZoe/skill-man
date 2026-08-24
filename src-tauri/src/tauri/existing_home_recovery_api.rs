@@ -1,23 +1,39 @@
-//! Tauri translation for Existing Home Recovery Profile. The API exposes only
-//! read-only preparation and in-memory cancellation; #67 owns confirmation
-//! and the locator CAS.
+//! Tauri translation for Existing Home Recovery: read-only preparation,
+//! cancellation and direct confirmation through the locator CAS.
 
 use std::sync::Arc;
 
+use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
+use crate::core::bootstrap::BootstrapService;
 use crate::core::existing_home_recovery::{ExistingHomeRecoveryError, ExistingHomeRecoveryService};
+use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::dto::{
-    CancelExistingHomeRecoveryRequestDto, CommandFailureDto, DiagnosticDto,
-    ExistingHomeRecoveryPlanDto, PrepareExistingHomeRecoveryRequestDto, PublicErrorDto,
-    RecoveryEligibilityRejectionDto, RecoveryProfileRejectionDto,
+    BootstrapSnapshotDto, CancelExistingHomeRecoveryRequestDto, CommandFailureDto,
+    ConfirmExistingHomeRecoveryRequestDto, DiagnosticDto, ExistingHomeRecoveryPlanDto,
+    PrepareExistingHomeRecoveryRequestDto, PublicErrorDto, RecoveryEligibilityRejectionDto,
+    RecoveryProfileRejectionDto,
 };
 
 pub struct ExistingHomeRecoveryApi {
     service: Arc<ExistingHomeRecoveryService>,
+    bootstrap_service: Arc<BootstrapService>,
+    store_switch: Arc<RuntimeStoreSwitch>,
+    bootstrap: Arc<BootstrapApi>,
 }
 
 impl ExistingHomeRecoveryApi {
-    pub fn new(service: Arc<ExistingHomeRecoveryService>) -> Self {
-        Self { service }
+    pub fn new(
+        service: Arc<ExistingHomeRecoveryService>,
+        bootstrap_service: Arc<BootstrapService>,
+        store_switch: Arc<RuntimeStoreSwitch>,
+        bootstrap: Arc<BootstrapApi>,
+    ) -> Self {
+        Self {
+            service,
+            bootstrap_service,
+            store_switch,
+            bootstrap,
+        }
     }
 
     pub fn prepare(
@@ -37,6 +53,29 @@ impl ExistingHomeRecoveryApi {
         self.service
             .cancel(&request.plan_token)
             .map_err(|error| failure(&error))
+    }
+
+    /// A direct user confirmation: it revalidates the prepared facts, CASes
+    /// only the locator, then reconciles the normal bootstrap/runtime state.
+    /// There is deliberately no typed Home ID confirmation field.
+    pub fn confirm(
+        &self,
+        request: ConfirmExistingHomeRecoveryRequestDto,
+    ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+        let snapshot = self
+            .service
+            .confirm(&request.plan_token)
+            .map_err(|error| failure(&error))?;
+        self.store_switch
+            .reconcile_after_existing_home_recovery(&self.bootstrap_service, &snapshot)
+            .map_err(|error| CommandFailureDto {
+                error: PublicErrorDto::CatalogUnavailable,
+                diagnostic: Some(DiagnosticDto {
+                    code: "catalog_reconcile_failed".into(),
+                    message: error,
+                }),
+            })?;
+        self.bootstrap.get_bootstrap_snapshot()
     }
 }
 
@@ -116,6 +155,17 @@ mod tests {
         assert_eq!(
             failure.diagnostic.expect("diagnostic").message,
             "plan_stale"
+        );
+    }
+
+    #[test]
+    fn confirmation_dto_carries_only_the_opaque_reviewed_plan_token() {
+        let request = ConfirmExistingHomeRecoveryRequestDto {
+            plan_token: "ehr-opaque".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize confirmation request"),
+            serde_json::json!({ "planToken": "ehr-opaque" })
         );
     }
 }

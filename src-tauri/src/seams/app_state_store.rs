@@ -245,6 +245,20 @@ pub trait AppStateStore: Send + Sync {
         self.write_locator(next)
     }
 
+    /// CAS for rebuilding a lost locator during Existing Home Recovery. This
+    /// is intentionally stricter than `cas_locator(None, ...)`: the state
+    /// must still be the complete `Unconfigured` state — no current binding,
+    /// no abandoned history and no active recovery ledger. Implementations
+    /// must test the whole predicate and persist `next` under one serialized
+    /// critical section; a concurrent history or operation must never be
+    /// overwritten merely because `current` is absent.
+    fn cas_unconfigured_locator(&self, next: &HomeBindingFile) -> Result<(), AppStateStoreError> {
+        let _ = next;
+        Err(AppStateStoreError::WriteFailed(
+            "AppStateStore must provide an atomic complete-Unconfigured locator CAS".into(),
+        ))
+    }
+
     /// Atomically persists the recovery ledger (same protocol as the
     /// locator). Every durable cursor of a recovery operation goes through
     /// here — the ledger is the single commit point for the state machine.
@@ -379,6 +393,43 @@ mod tests {
             }
             other => panic!("expected LocatorCasConflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unconfigured_locator_cas_refuses_abandoned_history_without_overwriting_it() {
+        use crate::core::home::HomeId;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::adapters::app_state_store::AppStateStoreFileSystem::new(
+            dir.path().join("state"),
+        );
+        let abandoned = HomeBindingFile {
+            schema_version: 1,
+            current: None,
+            abandoned: vec![AbandonedHomeRecord {
+                home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+                path: std::path::PathBuf::from("/tmp/skill-man-home"),
+                volume_fsid: "fsid-1".into(),
+                volume_uuid: "uuid-1".into(),
+                abandoned_at: "2026-08-13T10:00:00Z".into(),
+            }],
+        };
+        store.write_locator(&abandoned).expect("seed history");
+
+        match store.cas_unconfigured_locator(&HomeBindingFile::empty()) {
+            Err(AppStateStoreError::LocatorCasConflict { expected, found }) => {
+                assert_eq!(expected, None);
+                assert_eq!(found, None);
+            }
+            other => panic!("expected complete-Unconfigured CAS conflict, got {other:?}"),
+        }
+        assert_eq!(
+            store.load().expect("history remains"),
+            AppStateFiles {
+                binding: abandoned,
+                recovery_ledger: RecoveryLedgerFile::empty(),
+            }
+        );
     }
 
     #[test]

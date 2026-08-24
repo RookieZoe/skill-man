@@ -181,6 +181,22 @@ export function HomeBindingView({
     [client, fail],
   );
 
+  const confirmRecovery = useCallback(
+    async (planToken: string) => {
+      setBusy(true);
+      setStep({ kind: "busy", action: "confirm_recovery" });
+      try {
+        onSnapshot(await client.confirmExistingHomeRecovery(planToken));
+        setStep({ kind: "idle" });
+      } catch (error) {
+        fail(error as CommandFailure, "confirm_recovery");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, fail, onSnapshot],
+  );
+
   const dismissError = useCallback(() => {
     setStep({ kind: "idle" });
   }, []);
@@ -299,13 +315,23 @@ export function HomeBindingView({
           ))}
         </ul>
         <p>{t("bootstrap.recovery.confirmation_next")}</p>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void cancelRecovery(plan.planToken)}
-        >
-          {t("bootstrap.home.back")}
-        </button>
+        <p>{t("bootstrap.recovery.history_warning")}</p>
+        <div className="bootstrap-actions">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void confirmRecovery(plan.planToken)}
+          >
+            {t("bootstrap.recovery.confirm")}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void cancelRecovery(plan.planToken)}
+          >
+            {t("bootstrap.home.back")}
+          </button>
+        </div>
         <LanguageControl />
       </main>
     );

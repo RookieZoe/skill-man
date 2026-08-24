@@ -1,6 +1,7 @@
-//! Existing Home Recovery Profile (issue #66): a narrow, read-only boundary
-//! for inspecting an explicitly chosen complete Home after its bootstrap
-//! locator was lost. It never creates, migrates, cleans or binds content.
+//! Existing Home Recovery (issues #66–#67): an explicitly chosen complete
+//! Home can first be inspected read-only, then directly confirmed to rebuild
+//! only its lost bootstrap locator. It never creates, migrates, cleans or
+//! rewrites Home content.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,11 +11,15 @@ use thiserror::Error;
 
 use crate::core::bootstrap::{BootstrapService, BootstrapSnapshot};
 use crate::core::fixture_recovery::{FixtureClassifier, FixtureShapeMode};
-use crate::core::home::{HomeId, HomeMarker};
+use crate::core::home::{HomeId, HomeMarker, VolumeIdentity};
 use crate::core::home_binding::STANDARD_LAYOUT_DIRS;
-use crate::seams::app_state_store::{AppStateStore, AppStateStoreError};
+use crate::seams::app_state_store::{
+    AppStateFiles, AppStateStore, AppStateStoreError, HOME_BINDING_SCHEMA_VERSION, HomeBindingFile,
+    HomeBindingRecord,
+};
 use crate::seams::catalog_probe::{CatalogProbe, CatalogProbeError};
 use crate::seams::filesystem::FileSystem;
+use crate::seams::volume_identity::VolumeIdentitySource;
 
 #[derive(Clone, Debug)]
 pub struct ExistingHomeRecoveryConfig {
@@ -32,8 +37,8 @@ pub struct RecoveryProfileFacts {
     pub catalog_capabilities: bool,
 }
 
-/// One-use preview data. #67 consumes the opaque token for revalidation and
-/// locator CAS; this ticket only prepares and cancels the read-only plan.
+/// One-use preview data. Confirmation consumes the opaque token only after
+/// revalidation and the locator CAS succeed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExistingHomeRecoveryPlan {
     pub path: PathBuf,
@@ -94,6 +99,7 @@ impl From<AppStateStoreError> for ExistingHomeRecoveryError {
 pub struct ExistingHomeRecoveryService {
     app_state: Arc<dyn AppStateStore>,
     bootstrap: Arc<BootstrapService>,
+    volume: Arc<dyn VolumeIdentitySource>,
     probe: Arc<dyn CatalogProbe>,
     filesystem: Arc<dyn FileSystem>,
     classifier: Arc<dyn FixtureClassifier>,
@@ -105,6 +111,7 @@ impl ExistingHomeRecoveryService {
     pub fn new(
         app_state: Arc<dyn AppStateStore>,
         bootstrap: Arc<BootstrapService>,
+        volume: Arc<dyn VolumeIdentitySource>,
         probe: Arc<dyn CatalogProbe>,
         filesystem: Arc<dyn FileSystem>,
         classifier: Arc<dyn FixtureClassifier>,
@@ -113,6 +120,7 @@ impl ExistingHomeRecoveryService {
         Self {
             app_state,
             bootstrap,
+            volume,
             probe,
             filesystem,
             classifier,
@@ -129,6 +137,127 @@ impl ExistingHomeRecoveryService {
         selected_path: &Path,
     ) -> Result<ExistingHomeRecoveryPlan, ExistingHomeRecoveryError> {
         self.ensure_unconfigured()?;
+        let profile = self.inspect_profile(selected_path)?;
+
+        let plan = ExistingHomeRecoveryPlan {
+            path: profile.path,
+            home_id: profile.marker.home_id,
+            created_at: profile.marker.created_at,
+            plan_token: format!("ehr-{:x}", token_nanos()),
+            facts: RecoveryProfileFacts {
+                marker_catalog_identity: true,
+                standard_layout: true,
+                catalog_integrity: true,
+                catalog_foreign_keys: true,
+                catalog_capabilities: true,
+            },
+        };
+        self.plans
+            .write()
+            .map_err(|_| ExistingHomeRecoveryError::StateStore("plan table poisoned".into()))?
+            .insert(plan.plan_token.clone(), plan.clone());
+        Ok(plan)
+    }
+
+    /// Confirming a plan re-runs the complete read-only Recovery Profile,
+    /// then atomically recreates only the lost bootstrap locator. Home
+    /// content, the recovery ledger and all Catalog data stay untouched.
+    /// Once the locator CAS commits, there is no rollback: a later access or
+    /// identity failure is resolved by the ordinary Bound/closed bootstrap
+    /// state machine.
+    pub fn confirm(
+        &self,
+        plan_token: &str,
+    ) -> Result<BootstrapSnapshot, ExistingHomeRecoveryError> {
+        let plan = self
+            .plans
+            .read()
+            .map_err(|_| ExistingHomeRecoveryError::StateStore("plan table poisoned".into()))?
+            .get(plan_token)
+            .cloned()
+            .ok_or(ExistingHomeRecoveryError::PlanStale)?;
+
+        let result = self.confirm_plan(&plan);
+        if result.is_ok() || matches!(result, Err(ExistingHomeRecoveryError::PlanStale)) {
+            self.remove_plan(plan_token)?;
+        }
+        result
+    }
+
+    fn confirm_plan(
+        &self,
+        plan: &ExistingHomeRecoveryPlan,
+    ) -> Result<BootstrapSnapshot, ExistingHomeRecoveryError> {
+        let files = self.app_state.load()?;
+        self.ensure_complete_unconfigured(&files)
+            .map_err(|_| ExistingHomeRecoveryError::PlanStale)?;
+
+        // Every fact that made the preview safe is re-probed immediately
+        // before CAS. Any replaced path, changed marker/Catalog identity,
+        // active WAL writer or newly unfinished operation invalidates the
+        // opaque preview rather than creating a partial recovery state.
+        let revalidated = self
+            .inspect_profile(&plan.path)
+            .map_err(|_| ExistingHomeRecoveryError::PlanStale)?;
+        if revalidated.path != plan.path
+            || revalidated.marker.home_id != plan.home_id
+            || revalidated.marker.created_at != plan.created_at
+        {
+            return Err(ExistingHomeRecoveryError::PlanStale);
+        }
+        let volume = self.current_volume(&plan.path)?;
+        let next = self.recovered_binding(plan, &volume);
+
+        match self.app_state.cas_unconfigured_locator(&next) {
+            Ok(()) => Ok(self.bootstrap.inspect()),
+            Err(AppStateStoreError::LocatorCasConflict { .. }) => {
+                Err(ExistingHomeRecoveryError::PlanStale)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn remove_plan(&self, plan_token: &str) -> Result<(), ExistingHomeRecoveryError> {
+        self.plans
+            .write()
+            .map_err(|_| ExistingHomeRecoveryError::StateStore("plan table poisoned".into()))?
+            .remove(plan_token);
+        Ok(())
+    }
+
+    fn current_volume(&self, path: &Path) -> Result<VolumeIdentity, ExistingHomeRecoveryError> {
+        self.volume
+            .volume_identity(path)
+            .ok()
+            .flatten()
+            .ok_or(ExistingHomeRecoveryError::PlanStale)
+    }
+
+    fn recovered_binding(
+        &self,
+        plan: &ExistingHomeRecoveryPlan,
+        volume: &VolumeIdentity,
+    ) -> HomeBindingFile {
+        HomeBindingFile {
+            schema_version: HOME_BINDING_SCHEMA_VERSION,
+            current: Some(HomeBindingRecord {
+                home_id: plan.home_id.clone(),
+                path: plan.path.clone(),
+                volume_fsid: volume.fsid.clone(),
+                volume_uuid: volume.uuid.clone(),
+                // Recover Existing Home reconstructs the missing locator;
+                // it preserves the marker/Catalog creation fact rather than
+                // fabricating a new Home initialization time.
+                bound_at: plan.created_at.clone(),
+            }),
+            abandoned: Vec::new(),
+        }
+    }
+
+    fn inspect_profile(
+        &self,
+        selected_path: &Path,
+    ) -> Result<VerifiedRecoveryProfile, ExistingHomeRecoveryError> {
         let path = self
             .filesystem
             .canonical_directory(selected_path)
@@ -200,25 +329,7 @@ impl ExistingHomeRecoveryService {
                 reason: RecoveryProfileRejection::FixtureContamination,
             });
         }
-
-        let plan = ExistingHomeRecoveryPlan {
-            path,
-            home_id: marker.home_id,
-            created_at: marker.created_at,
-            plan_token: format!("ehr-{:x}", token_nanos()),
-            facts: RecoveryProfileFacts {
-                marker_catalog_identity: true,
-                standard_layout: true,
-                catalog_integrity: true,
-                catalog_foreign_keys: true,
-                catalog_capabilities: true,
-            },
-        };
-        self.plans
-            .write()
-            .map_err(|_| ExistingHomeRecoveryError::StateStore("plan table poisoned".into()))?
-            .insert(plan.plan_token.clone(), plan.clone());
-        Ok(plan)
+        Ok(VerifiedRecoveryProfile { path, marker })
     }
 
     /// Dropping a preview removes only in-memory opaque state. There is no
@@ -236,6 +347,13 @@ impl ExistingHomeRecoveryService {
 
     fn ensure_unconfigured(&self) -> Result<(), ExistingHomeRecoveryError> {
         let files = self.app_state.load()?;
+        self.ensure_complete_unconfigured(&files)
+    }
+
+    fn ensure_complete_unconfigured(
+        &self,
+        files: &AppStateFiles,
+    ) -> Result<(), ExistingHomeRecoveryError> {
         if files.binding.current.is_some() {
             return Err(ExistingHomeRecoveryError::Ineligible {
                 reason: RecoveryEligibilityRejection::CurrentBinding,
@@ -321,6 +439,11 @@ impl ExistingHomeRecoveryService {
                 .unwrap_or(false)
         })
     }
+}
+
+struct VerifiedRecoveryProfile {
+    path: PathBuf,
+    marker: HomeMarker,
 }
 
 fn profile_probe_error(error: CatalogProbeError) -> ExistingHomeRecoveryError {

@@ -18,9 +18,9 @@ use crate::tauri_adapter::dto::{
     CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto,
     CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
     CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
-    CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmFixtureRecoveryRequestDto,
-    ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto, CreateAgentDirectoryRequestDto,
-    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmExistingHomeRecoveryRequestDto,
+    ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto,
+    CreateAgentDirectoryRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
     ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto, FileImportCandidateDto,
@@ -81,6 +81,14 @@ pub fn cancel_existing_home_recovery(
     request: CancelExistingHomeRecoveryRequestDto,
 ) -> Result<(), CommandFailureDto> {
     state.cancel(request)
+}
+
+#[tauri::command]
+pub fn confirm_existing_home_recovery(
+    state: State<'_, ExistingHomeRecoveryApi>,
+    request: ConfirmExistingHomeRecoveryRequestDto,
+) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
+    state.confirm(request)
 }
 
 #[tauri::command]

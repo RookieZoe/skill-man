@@ -49,7 +49,7 @@ export type RecoveryProfileFact =
   | "catalog_foreign_keys"
   | "catalog_capabilities";
 
-/** A prepared Existing Home Recovery Plan; #67 owns confirmation. */
+/** A prepared Existing Home Recovery Plan; confirmation uses this opaque token. */
 export interface ExistingHomeRecoveryPlan {
   path: string;
   homeId: string;
@@ -1034,6 +1034,7 @@ export interface CatalogClient {
   prepareHome(path: string): Promise<HomeCandidate>;
   prepareExistingHomeRecovery(path: string): Promise<ExistingHomeRecoveryPlan>;
   cancelExistingHomeRecovery(planToken: string): Promise<void>;
+  confirmExistingHomeRecovery(planToken: string): Promise<BootstrapSnapshot>;
   confirmHome(candidateToken: string): Promise<BootstrapSnapshot>;
   continueCandidate(operationId: string): Promise<BootstrapSnapshot>;
   cancelCandidate(operationId: string): Promise<BootstrapSnapshot>;
@@ -1169,6 +1170,11 @@ const tauriCatalogClient: CatalogClient = {
   },
   cancelExistingHomeRecovery(planToken) {
     return invoke<void>("cancel_existing_home_recovery", {
+      request: { planToken },
+    });
+  },
+  confirmExistingHomeRecovery(planToken) {
+    return invoke<BootstrapSnapshot>("confirm_existing_home_recovery", {
       request: { planToken },
     });
   },

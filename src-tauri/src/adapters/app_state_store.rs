@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::seams::app_state_store::{
     AppStateFiles, AppStateStore, AppStateStoreError, HOME_BINDING_FILE_NAME, HomeBindingFile,
@@ -15,11 +16,21 @@ use crate::seams::app_state_store::{
 
 pub struct AppStateStoreFileSystem {
     state_dir: PathBuf,
+    state_guard: Mutex<()>,
 }
 
 impl AppStateStoreFileSystem {
     pub fn new(state_dir: PathBuf) -> Self {
-        Self { state_dir }
+        Self {
+            state_dir,
+            state_guard: Mutex::new(()),
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, ()>, AppStateStoreError> {
+        self.state_guard
+            .lock()
+            .map_err(|_| AppStateStoreError::WriteFailed("app-state lock poisoned".into()))
     }
 
     fn read_or_empty<T>(
@@ -42,6 +53,52 @@ impl AppStateStoreFileSystem {
 
     fn write_atomic(&self, file_name: &str, json: String) -> Result<(), AppStateStoreError> {
         write_atomic(&self.state_dir, file_name, json)
+    }
+
+    fn load_unlocked(&self) -> Result<AppStateFiles, AppStateStoreError> {
+        if !self.state_dir.exists() {
+            return Ok(AppStateFiles {
+                binding: HomeBindingFile::empty(),
+                recovery_ledger: RecoveryLedgerFile::empty(),
+            });
+        }
+        if !self.state_dir.is_dir() {
+            return Err(AppStateStoreError::StateDirUnreadable(format!(
+                "{} is not a directory",
+                self.state_dir.display()
+            )));
+        }
+        let binding = self.read_or_empty(
+            HOME_BINDING_FILE_NAME,
+            HomeBindingFile::parse,
+            HomeBindingFile::empty(),
+            AppStateStoreError::LocatorInvalid,
+        )?;
+        let recovery_ledger = self.read_or_empty(
+            RECOVERY_LEDGER_FILE_NAME,
+            RecoveryLedgerFile::parse,
+            RecoveryLedgerFile::empty(),
+            AppStateStoreError::LedgerInvalid,
+        )?;
+        Ok(AppStateFiles {
+            binding,
+            recovery_ledger,
+        })
+    }
+
+    fn write_locator_unlocked(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError> {
+        let json = serde_json::to_string_pretty(binding)
+            .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
+        self.write_atomic(HOME_BINDING_FILE_NAME, json)
+    }
+
+    fn write_recovery_ledger_unlocked(
+        &self,
+        ledger: &RecoveryLedgerFile,
+    ) -> Result<(), AppStateStoreError> {
+        let json = serde_json::to_string_pretty(ledger)
+            .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
+        self.write_atomic(RECOVERY_LEDGER_FILE_NAME, json)
     }
 }
 
@@ -84,46 +141,54 @@ pub(crate) fn write_atomic(
 
 impl AppStateStore for AppStateStoreFileSystem {
     fn load(&self) -> Result<AppStateFiles, AppStateStoreError> {
-        if !self.state_dir.exists() {
-            return Ok(AppStateFiles {
-                binding: HomeBindingFile::empty(),
-                recovery_ledger: RecoveryLedgerFile::empty(),
-            });
-        }
-        if !self.state_dir.is_dir() {
-            return Err(AppStateStoreError::StateDirUnreadable(format!(
-                "{} is not a directory",
-                self.state_dir.display()
-            )));
-        }
-        let binding = self.read_or_empty(
-            HOME_BINDING_FILE_NAME,
-            HomeBindingFile::parse,
-            HomeBindingFile::empty(),
-            AppStateStoreError::LocatorInvalid,
-        )?;
-        let recovery_ledger = self.read_or_empty(
-            RECOVERY_LEDGER_FILE_NAME,
-            RecoveryLedgerFile::parse,
-            RecoveryLedgerFile::empty(),
-            AppStateStoreError::LedgerInvalid,
-        )?;
-        Ok(AppStateFiles {
-            binding,
-            recovery_ledger,
-        })
+        let _guard = self.lock()?;
+        self.load_unlocked()
     }
 
     fn write_locator(&self, binding: &HomeBindingFile) -> Result<(), AppStateStoreError> {
-        let json = serde_json::to_string_pretty(binding)
-            .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
-        self.write_atomic(HOME_BINDING_FILE_NAME, json)
+        let _guard = self.lock()?;
+        self.write_locator_unlocked(binding)
+    }
+
+    fn cas_locator(
+        &self,
+        expected_current: Option<&crate::core::home::HomeId>,
+        next: &HomeBindingFile,
+    ) -> Result<(), AppStateStoreError> {
+        let _guard = self.lock()?;
+        let files = self.load_unlocked()?;
+        let matches = match (expected_current, &files.binding.current) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => &current.home_id == expected,
+            _ => false,
+        };
+        if !matches {
+            return Err(AppStateStoreError::LocatorCasConflict {
+                expected: expected_current.map(|id| id.0.clone()),
+                found: files.binding.current.map(|current| current.home_id.0),
+            });
+        }
+        self.write_locator_unlocked(next)
+    }
+
+    fn cas_unconfigured_locator(&self, next: &HomeBindingFile) -> Result<(), AppStateStoreError> {
+        let _guard = self.lock()?;
+        let files = self.load_unlocked()?;
+        if files.binding.current.is_some()
+            || !files.binding.abandoned.is_empty()
+            || files.recovery_ledger.active.is_some()
+        {
+            return Err(AppStateStoreError::LocatorCasConflict {
+                expected: None,
+                found: files.binding.current.map(|current| current.home_id.0),
+            });
+        }
+        self.write_locator_unlocked(next)
     }
 
     fn write_recovery_ledger(&self, ledger: &RecoveryLedgerFile) -> Result<(), AppStateStoreError> {
-        let json = serde_json::to_string_pretty(ledger)
-            .map_err(|error| AppStateStoreError::WriteFailed(error.to_string()))?;
-        self.write_atomic(RECOVERY_LEDGER_FILE_NAME, json)
+        let _guard = self.lock()?;
+        self.write_recovery_ledger_unlocked(ledger)
     }
 }
 
@@ -133,9 +198,10 @@ impl AppStateStore for AppStateStoreFileSystem {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Arc, mpsc};
 
     use crate::core::home::HomeId;
-    use crate::seams::app_state_store::HomeBindingRecord;
+    use crate::seams::app_state_store::{AbandonedHomeRecord, HomeBindingRecord};
 
     use super::*;
 
@@ -150,6 +216,20 @@ mod tests {
                 bound_at: "2026-08-01T00:00:00Z".into(),
             }),
             abandoned: vec![],
+        }
+    }
+
+    fn abandoned_binding() -> HomeBindingFile {
+        HomeBindingFile {
+            schema_version: 1,
+            current: None,
+            abandoned: vec![AbandonedHomeRecord {
+                home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),
+                path: PathBuf::from("/tmp/skill-man-home"),
+                volume_fsid: "fsid-1".into(),
+                volume_uuid: "uuid-1".into(),
+                abandoned_at: "2026-08-01T00:00:00Z".into(),
+            }],
         }
     }
 
@@ -172,6 +252,41 @@ mod tests {
         // The tmp file is gone; only the committed name exists.
         assert!(!dir.path().join("state/home-binding.json.tmp").exists());
         assert!(dir.path().join("state/home-binding.json").is_file());
+    }
+
+    #[test]
+    fn unconfigured_cas_cannot_overwrite_history_written_by_a_waiting_contender() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Arc::new(AppStateStoreFileSystem::new(dir.path().join("state")));
+        let next = binding();
+
+        // Keep the CAS's serialized critical section unavailable while the
+        // contender begins. The history write then occurs before the CAS can
+        // inspect state; it must see the completed transition and refuse it.
+        let guard = store.lock().expect("hold app-state critical section");
+        let (started_tx, started_rx) = mpsc::channel();
+        let contender = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                started_tx.send(()).expect("announce contender");
+                store.cas_unconfigured_locator(&next)
+            })
+        };
+        started_rx.recv().expect("contender started");
+        let history = abandoned_binding();
+        store
+            .write_locator_unlocked(&history)
+            .expect("commit concurrent history while lock is held");
+        drop(guard);
+
+        assert!(matches!(
+            contender.join().expect("join contender"),
+            Err(AppStateStoreError::LocatorCasConflict {
+                expected: None,
+                found: None,
+            })
+        ));
+        assert_eq!(store.load().expect("history remains").binding, history);
     }
 
     #[test]

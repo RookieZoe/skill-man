@@ -599,6 +599,8 @@
   "bootstrap.recovery.home_id": "Home ID",
   "bootstrap.recovery.created_at": "创建时间",
   "bootstrap.recovery.confirmation_next": "确认与重新绑定属于下一步；此预览仅执行只读操作。",
+  "bootstrap.recovery.history_warning": "如果之前的应用状态历史已丢失，这可能会重新激活曾被放弃的 Home。",
+  "bootstrap.recovery.confirm": "恢复此 Home",
   "bootstrap.recovery.fact.marker_catalog_identity": "主目录标记与技能库身份一致。",
   "bootstrap.recovery.fact.standard_layout": "完整的标准主目录布局已存在。",
   "bootstrap.recovery.fact.catalog_integrity": "技能库完整性检查已通过。",

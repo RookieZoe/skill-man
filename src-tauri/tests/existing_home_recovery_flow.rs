@@ -1,6 +1,6 @@
 //! Existing Home Recovery integration seam: a lost bootstrap locator may be
 //! inspected read-only, while the complete existing Home stays byte-for-byte
-//! untouched until the later confirmation ticket owns the locator CAS.
+//! untouched until direct confirmation owns the locator CAS.
 
 use std::sync::Arc;
 
@@ -88,6 +88,7 @@ fn lost_locator_can_preview_a_complete_custom_existing_home_without_writes() {
     let service = ExistingHomeRecoveryService::new(
         app_state.clone(),
         bootstrap.clone(),
+        Arc::new(MacOsVolumeIdentitySource::new()),
         probe,
         filesystem,
         classifier,
@@ -155,8 +156,31 @@ fn lost_locator_can_preview_a_complete_custom_existing_home_without_writes() {
         state_before
     );
     std::fs::create_dir(home_path.join("cache")).expect("restore required cache root");
+    let confirmation_plan = service
+        .prepare(&home_path)
+        .expect("complete Home can be prepared again for confirmation");
     std::fs::create_dir_all(home_path.join("staging/orphaned-operation"))
         .expect("write unfinished staging test fixture");
+    assert!(matches!(
+        service.confirm(&confirmation_plan.plan_token),
+        Err(skill_man_lib::core::existing_home_recovery::ExistingHomeRecoveryError::PlanStale)
+    ));
+    assert_eq!(
+        std::fs::read(home_path.join(HomeMarker::FILE_NAME))
+            .expect("marker stays unchanged after stale confirmation"),
+        marker_before
+    );
+    assert_eq!(
+        std::fs::read(home_path.join(CATALOG_FILE_NAME))
+            .expect("Catalog stays unchanged after stale confirmation"),
+        catalog_before
+    );
+    assert_eq!(
+        app_state
+            .load()
+            .expect("stale confirmation leaves locator absent"),
+        state_before
+    );
     assert!(matches!(
         service.prepare(&home_path),
         Err(skill_man_lib::core::existing_home_recovery::ExistingHomeRecoveryError::ProfileRejected {

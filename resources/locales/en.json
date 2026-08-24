@@ -600,6 +600,8 @@
   "bootstrap.recovery.home_id": "Home ID",
   "bootstrap.recovery.created_at": "Created",
   "bootstrap.recovery.confirmation_next": "Confirmation and rebinding are the next step; this preview is read-only.",
+  "bootstrap.recovery.history_warning": "If previous app history was lost, this can reactivate a Home that was previously abandoned.",
+  "bootstrap.recovery.confirm": "Recover this Home",
   "bootstrap.recovery.fact.marker_catalog_identity": "Home marker and Catalog identity agree.",
   "bootstrap.recovery.fact.standard_layout": "The complete standard Home layout is present.",
   "bootstrap.recovery.fact.catalog_integrity": "Catalog integrity check passed.",

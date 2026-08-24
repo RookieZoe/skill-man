@@ -108,12 +108,37 @@ impl RuntimeStoreSwitch {
         bootstrap: &BootstrapService,
         snapshot: &BootstrapSnapshot,
     ) -> Result<(), String> {
+        self.reconcile_after(bootstrap, snapshot, false)
+    }
+
+    /// Reconcile after Existing Home Recovery. The durable transition has
+    /// only recreated its app-level locator, so the first runtime open must
+    /// never choose a journal mode or migrate the recovered Catalog.
+    pub fn reconcile_after_existing_home_recovery(
+        &self,
+        bootstrap: &BootstrapService,
+        snapshot: &BootstrapSnapshot,
+    ) -> Result<(), String> {
+        self.reconcile_after(bootstrap, snapshot, true)
+    }
+
+    fn reconcile_after(
+        &self,
+        bootstrap: &BootstrapService,
+        snapshot: &BootstrapSnapshot,
+        preserve_recovered_catalog: bool,
+    ) -> Result<(), String> {
         if let BootstrapSnapshot::Bound { .. } = snapshot {
             bootstrap.clear_catalog_open_failure();
         }
         let fresh = bootstrap.inspect();
         let bound_home = bootstrap.verified_bound_home();
-        if let Err(error) = self.reconcile(&fresh, bound_home.as_ref()) {
+        let reconciled = if preserve_recovered_catalog {
+            self.reconcile_recovered_existing_home(&fresh, bound_home.as_ref())
+        } else {
+            self.reconcile(&fresh, bound_home.as_ref())
+        };
+        if let Err(error) = reconciled {
             // Never retain a facade from a previous Home after its successor
             // was durably bound. The bootstrap snapshot records the failure
             // so BootstrapApi can publish the new Bound, read-only route.
@@ -130,6 +155,26 @@ impl RuntimeStoreSwitch {
             }
         }
         Ok(())
+    }
+
+    fn reconcile_recovered_existing_home(
+        &self,
+        snapshot: &BootstrapSnapshot,
+        bound_home: Option<&BoundHome>,
+    ) -> Result<(), String> {
+        match (snapshot, bound_home) {
+            (
+                BootstrapSnapshot::Bound {
+                    catalog_access: CatalogAccess::ReadWrite,
+                    ..
+                },
+                Some(home),
+            ) => self.store.reopen_bound_without_catalog_mutation(
+                home,
+                &home.path.join(&self.catalog_file_name),
+            ),
+            _ => self.reconcile(snapshot, bound_home),
+        }
     }
 }
 
@@ -171,6 +216,20 @@ impl RuntimeCatalogStore {
         catalog_path: &std::path::Path,
     ) -> Result<(), String> {
         let sqlite = SqliteCatalogStore::open_bound(home, catalog_path)
+            .map_err(|error| error.to_string())?;
+        self.replace_store(Some(Arc::new(sqlite)));
+        Ok(())
+    }
+
+    /// Reopen only a current-schema verified Catalog without persisting
+    /// SQLite configuration or migrations. This is exclusive to Existing
+    /// Home Recovery, whose commit contract permits no Home content writes.
+    pub fn reopen_bound_without_catalog_mutation(
+        &self,
+        home: &BoundHome,
+        catalog_path: &std::path::Path,
+    ) -> Result<(), String> {
+        let sqlite = SqliteCatalogStore::open_bound_without_catalog_mutation(home, catalog_path)
             .map_err(|error| error.to_string())?;
         self.replace_store(Some(Arc::new(sqlite)));
         Ok(())

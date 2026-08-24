@@ -397,6 +397,48 @@ impl SqliteCatalogStore {
         })
     }
 
+    /// Reopen an Existing Home Recovery Catalog without changing its durable
+    /// SQLite state. Unlike `open_bound`, this deliberately neither selects a
+    /// journal mode nor migrates: recovery owns only the missing app-level
+    /// locator, never the recovered Home's Catalog. A non-current schema is
+    /// rejected so the bootstrap/runtime boundary converges closed instead of
+    /// silently upgrading user data.
+    pub fn open_bound_without_catalog_mutation(
+        bound: &BoundHome,
+        path: &Path,
+    ) -> Result<Self, BoundCatalogOpenError> {
+        if !has_content(path) {
+            return Err(BoundCatalogOpenError::Missing);
+        }
+        let schema = detect_schema_version(path);
+        if schema != CURRENT_SCHEMA_VERSION {
+            return Err(BoundCatalogOpenError::SchemaNotBound { found: schema });
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(BoundCatalogOpenError::Open)?;
+        configure_connection_without_catalog_mutation(&connection)
+            .map_err(BoundCatalogOpenError::Configure)?;
+        let stored =
+            read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
+        if stored.home_id != bound.home_id
+            || stored.volume_fsid != bound.volume_fsid
+            || stored.volume_uuid != bound.volume_uuid
+        {
+            return Err(BoundCatalogOpenError::IdentityMismatch);
+        }
+        Ok(Self {
+            connection: Mutex::new(connection),
+            startup_status: StartupStatus {
+                access: StartupAccess::ReadWrite,
+                schema_version: CURRENT_SCHEMA_VERSION,
+                diagnostic: None,
+            },
+        })
+    }
+
     /// Create a fresh current Catalog carrying `bound`'s identity. The primitive
     /// behind the Home Binding flow (ticket #45) and the test Home helper;
     /// refuses an existing file so it can never overwrite real data.
@@ -5057,6 +5099,20 @@ fn configure_connection(connection: &Connection) -> Result<(), CatalogStoreOpenE
         .map_err(CatalogStoreOpenError::Configure)
 }
 
+/// Per-connection settings for a recovered existing Home. `foreign_keys` and
+/// the busy timeout are connection-local; unlike `journal_mode`, they do not
+/// write the Catalog or create/update WAL sidecars.
+fn configure_connection_without_catalog_mutation(
+    connection: &Connection,
+) -> Result<(), CatalogStoreOpenError> {
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(CatalogStoreOpenError::Configure)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(CatalogStoreOpenError::Configure)
+}
+
 fn open_read_only(path: &Path) -> Result<Connection, CatalogStoreOpenError> {
     let connection = Connection::open_with_flags(
         path,
@@ -5535,6 +5591,14 @@ mod tests {
             "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
             PathBuf::from("/tmp/skill-man-home"),
         )
+    }
+
+    fn catalog_artifacts(path: &std::path::Path) -> [Option<Vec<u8>>; 3] {
+        [
+            std::fs::read(path).ok(),
+            std::fs::read(format!("{}-wal", path.display())).ok(),
+            std::fs::read(format!("{}-shm", path.display())).ok(),
+        ]
     }
 
     #[test]
@@ -6212,6 +6276,53 @@ mod tests {
         assert_eq!(identity.home_id, bound.home_id);
         assert_eq!(identity.volume_fsid, bound.volume_fsid);
         assert_eq!(identity.volume_uuid, bound.volume_uuid);
+    }
+
+    #[test]
+    fn recovery_open_preserves_catalog_and_wal_artifacts_byte_for_byte() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let bound = bound_home();
+        SqliteCatalogStore::create_bound(&bound, &path).expect("create bound Catalog");
+        let before = catalog_artifacts(&path);
+
+        let reopened = SqliteCatalogStore::open_bound_without_catalog_mutation(&bound, &path)
+            .expect("recovery-safe open");
+        assert_eq!(reopened.startup_status().access, StartupAccess::ReadWrite);
+        drop(reopened);
+
+        assert_eq!(catalog_artifacts(&path), before);
+    }
+
+    #[test]
+    fn recovery_open_refuses_old_schema_without_migrating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("skill-man.sqlite3");
+        let bound = bound_home();
+        {
+            seed_v5_catalog(&path);
+            let connection = Connection::open(&path).expect("seed connection");
+            connection
+                .execute(
+                    "UPDATE catalog_meta
+                     SET home_id = ?1, volume_fsid = ?2, volume_uuid = ?3, home_bound_at = ?4
+                     WHERE singleton = 1",
+                    params![
+                        bound.home_id.0,
+                        bound.volume_fsid,
+                        bound.volume_uuid,
+                        bound.bound_at,
+                    ],
+                )
+                .expect("record identity");
+        }
+        let before = catalog_artifacts(&path);
+
+        assert!(matches!(
+            SqliteCatalogStore::open_bound_without_catalog_mutation(&bound, &path),
+            Err(BoundCatalogOpenError::SchemaNotBound { found: 5 })
+        ));
+        assert_eq!(catalog_artifacts(&path), before);
     }
 
     #[test]

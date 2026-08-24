@@ -175,6 +175,11 @@ export function createFixtureCatalogClient(): CatalogClient {
         "Existing Home Recovery is not available in the preview fixture",
       );
     },
+    async confirmExistingHomeRecovery() {
+      return fixtureUnsupported(
+        "Existing Home Recovery is not available in the preview fixture",
+      );
+    },
     async confirmHome() {
       return fixtureUnsupported(
         "Home Binding is not available in the preview fixture",

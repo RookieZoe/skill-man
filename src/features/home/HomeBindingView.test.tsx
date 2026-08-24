@@ -110,7 +110,7 @@ test("Choose… uses the injected directory picker", async () => {
   );
 });
 
-test("Recover Existing Home previews only the selected directory without starting Home Binding", async () => {
+test("Recover Existing Home confirms the reviewed plan without asking for a Home ID", async () => {
   const prepareRecovery = vi.fn(
     async (path: string): Promise<ExistingHomeRecoveryPlan> => {
       expect(path).toBe("/Users/test/Recovered Home");
@@ -124,12 +124,20 @@ test("Recover Existing Home previews only the selected directory without startin
     },
   );
   const cancelRecovery = vi.fn(async () => undefined);
+  const confirmRecovery = vi.fn(async () => ({
+    state: "bound" as const,
+    homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+    catalogAccess: "read_write" as const,
+    catalogReadonlyReason: null,
+    snapshotVersion: 1,
+  }));
   const pickDirectory = vi.fn(async () => "/Users/test/Recovered Home");
-  renderView(
+  const { onSnapshot } = renderView(
     { state: "unconfigured" },
     {
       prepareExistingHomeRecovery: prepareRecovery,
       cancelExistingHomeRecovery: cancelRecovery,
+      confirmExistingHomeRecovery: confirmRecovery,
     },
     pickDirectory,
   );
@@ -148,12 +156,24 @@ test("Recover Existing Home previews only the selected directory without startin
   expect(
     screen.getByText("Home marker and Catalog identity agree."),
   ).toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Bind Home" }),
-  ).not.toBeInTheDocument();
+    screen.getByText(
+      "If previous app history was lost, this can reactivate a Home that was previously abandoned.",
+    ),
+  ).toBeInTheDocument();
 
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  await waitFor(() => expect(cancelRecovery).toHaveBeenCalledWith("ehr-1"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Recover this Home" }),
+  );
+  await waitFor(() => expect(confirmRecovery).toHaveBeenCalledWith("ehr-1"));
+  await waitFor(() =>
+    expect(onSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "bound" }),
+    ),
+  );
+
+  expect(cancelRecovery).not.toHaveBeenCalled();
   expect(prepareRecovery).toHaveBeenCalledTimes(1);
 });
 
