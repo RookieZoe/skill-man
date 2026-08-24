@@ -3047,6 +3047,12 @@ pub enum PublicErrorDto {
     BindingStateAmbiguous,
     BindingNotCancellable,
     BindingMigrationFailed,
+    ExistingHomeRecoveryIneligible {
+        reason: RecoveryEligibilityRejectionDto,
+    },
+    ExistingHomeRecoveryProfileRejected {
+        reason: RecoveryProfileRejectionDto,
+    },
     LocaleStoreUnavailable,
     Internal,
 }
@@ -3232,6 +3238,176 @@ pub enum CandidateModeDto {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareHomeRequestDto {
     pub path: String,
+}
+
+// -- Existing Home Recovery (issue #66) --
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareExistingHomeRecoveryRequestDto {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelExistingHomeRecoveryRequestDto {
+    pub plan_token: String,
+}
+
+/// Closed recovery eligibility reasons. This is deliberately separate from
+/// Bootstrap's broader state union: #66 exposes only the four conditions
+/// that can close a recovery preview.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryEligibilityRejectionDto {
+    CurrentBinding,
+    AbandonedHistory,
+    ActiveRecoveryLedger,
+    BootstrapState,
+}
+
+impl From<crate::core::existing_home_recovery::RecoveryEligibilityRejection>
+    for RecoveryEligibilityRejectionDto
+{
+    fn from(value: crate::core::existing_home_recovery::RecoveryEligibilityRejection) -> Self {
+        use crate::core::existing_home_recovery::RecoveryEligibilityRejection;
+
+        match value {
+            RecoveryEligibilityRejection::CurrentBinding => Self::CurrentBinding,
+            RecoveryEligibilityRejection::AbandonedHistory => Self::AbandonedHistory,
+            RecoveryEligibilityRejection::ActiveRecoveryLedger => Self::ActiveRecoveryLedger,
+            RecoveryEligibilityRejection::BootstrapState => Self::BootstrapState,
+        }
+    }
+}
+
+impl RecoveryEligibilityRejectionDto {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::CurrentBinding => "current_binding",
+            Self::AbandonedHistory => "abandoned_history",
+            Self::ActiveRecoveryLedger => "active_recovery_ledger",
+            Self::BootstrapState => "bootstrap_state",
+        }
+    }
+}
+
+/// Closed Recovery Profile rejections. The wire contract permits no raw path,
+/// Catalog content or token facts in a user-visible failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryProfileRejectionDto {
+    NotDirectory,
+    MarkerMissingOrInvalid,
+    LayoutCapabilities,
+    CatalogMissing,
+    CatalogUnreadable,
+    CatalogIdentityMissing,
+    HomeIdentityMismatch,
+    CreationTimeMismatch,
+    CatalogIntegrity,
+    CatalogForeignKeys,
+    CatalogCapabilities,
+    ActiveWriter,
+    OperationRecoveryRequired,
+    FixtureContamination,
+}
+
+impl From<crate::core::existing_home_recovery::RecoveryProfileRejection>
+    for RecoveryProfileRejectionDto
+{
+    fn from(value: crate::core::existing_home_recovery::RecoveryProfileRejection) -> Self {
+        use crate::core::existing_home_recovery::RecoveryProfileRejection;
+
+        match value {
+            RecoveryProfileRejection::NotDirectory => Self::NotDirectory,
+            RecoveryProfileRejection::MarkerMissingOrInvalid => Self::MarkerMissingOrInvalid,
+            RecoveryProfileRejection::LayoutCapabilities => Self::LayoutCapabilities,
+            RecoveryProfileRejection::CatalogMissing => Self::CatalogMissing,
+            RecoveryProfileRejection::CatalogUnreadable => Self::CatalogUnreadable,
+            RecoveryProfileRejection::CatalogIdentityMissing => Self::CatalogIdentityMissing,
+            RecoveryProfileRejection::HomeIdentityMismatch => Self::HomeIdentityMismatch,
+            RecoveryProfileRejection::CreationTimeMismatch => Self::CreationTimeMismatch,
+            RecoveryProfileRejection::CatalogIntegrity => Self::CatalogIntegrity,
+            RecoveryProfileRejection::CatalogForeignKeys => Self::CatalogForeignKeys,
+            RecoveryProfileRejection::CatalogCapabilities => Self::CatalogCapabilities,
+            RecoveryProfileRejection::ActiveWriter => Self::ActiveWriter,
+            RecoveryProfileRejection::OperationRecoveryRequired => Self::OperationRecoveryRequired,
+            RecoveryProfileRejection::FixtureContamination => Self::FixtureContamination,
+        }
+    }
+}
+
+impl RecoveryProfileRejectionDto {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::NotDirectory => "not_directory",
+            Self::MarkerMissingOrInvalid => "marker_missing_or_invalid",
+            Self::LayoutCapabilities => "layout_capabilities",
+            Self::CatalogMissing => "catalog_missing",
+            Self::CatalogUnreadable => "catalog_unreadable",
+            Self::CatalogIdentityMissing => "catalog_identity_missing",
+            Self::HomeIdentityMismatch => "home_identity_mismatch",
+            Self::CreationTimeMismatch => "creation_time_mismatch",
+            Self::CatalogIntegrity => "catalog_integrity",
+            Self::CatalogForeignKeys => "catalog_foreign_keys",
+            Self::CatalogCapabilities => "catalog_capabilities",
+            Self::ActiveWriter => "active_writer",
+            Self::OperationRecoveryRequired => "operation_recovery_required",
+            Self::FixtureContamination => "fixture_contamination",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryProfileFactDto {
+    MarkerCatalogIdentity,
+    StandardLayout,
+    CatalogIntegrity,
+    CatalogForeignKeys,
+    CatalogCapabilities,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingHomeRecoveryPlanDto {
+    pub path: String,
+    pub home_id: String,
+    pub created_at: String,
+    pub plan_token: String,
+    pub facts: Vec<RecoveryProfileFactDto>,
+}
+
+impl From<crate::core::existing_home_recovery::ExistingHomeRecoveryPlan>
+    for ExistingHomeRecoveryPlanDto
+{
+    fn from(value: crate::core::existing_home_recovery::ExistingHomeRecoveryPlan) -> Self {
+        let facts = value.facts;
+        let mut fact_dtos = Vec::new();
+        if facts.marker_catalog_identity {
+            fact_dtos.push(RecoveryProfileFactDto::MarkerCatalogIdentity);
+        }
+        if facts.standard_layout {
+            fact_dtos.push(RecoveryProfileFactDto::StandardLayout);
+        }
+        if facts.catalog_integrity {
+            fact_dtos.push(RecoveryProfileFactDto::CatalogIntegrity);
+        }
+        if facts.catalog_foreign_keys {
+            fact_dtos.push(RecoveryProfileFactDto::CatalogForeignKeys);
+        }
+        if facts.catalog_capabilities {
+            fact_dtos.push(RecoveryProfileFactDto::CatalogCapabilities);
+        }
+        Self {
+            path: value.path.to_string_lossy().into_owned(),
+            home_id: value.home_id.0,
+            created_at: value.created_at,
+            plan_token: value.plan_token,
+            facts: fact_dtos,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

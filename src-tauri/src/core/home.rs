@@ -104,6 +104,18 @@ impl HomeMarker {
         Some(marker)
     }
 
+    /// Recovery Profile parsing validates the durable logical facts only.
+    /// Volume fields remain parsed but are intentionally not used as recovery
+    /// eligibility: mount identity is neither a locator nor proof of a Home.
+    pub fn parse_recovery_profile(json: &str) -> Option<Self> {
+        let marker: HomeMarker = serde_json::from_str(json).ok()?;
+        if marker.schema_version != Self::SCHEMA_VERSION || marker.created_at.is_empty() {
+            return None;
+        }
+        HomeId::parse(&marker.home_id.0)?;
+        Some(marker)
+    }
+
     pub fn matches_persistent_volume(&self, volume: &VolumeIdentity) -> bool {
         volume.matches_persisted_uuid(&self.volume_uuid)
     }

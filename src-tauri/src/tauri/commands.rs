@@ -15,33 +15,35 @@ use crate::tauri_adapter::dto::{
     ApplyFixtureRecoveryRequestDto, ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto,
     ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto, BootstrapSnapshotDto,
     CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
-    CancelAppUpdateRequestDto, CancelFileImportRequestDto, CancelLinkImportRequestDto,
-    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelledAppUpdateDto,
-    CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
+    CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto,
+    CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
+    CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
     CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmFixtureRecoveryRequestDto,
     ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto, CreateAgentDirectoryRequestDto,
     DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
-    FetchLatestAndManageRequestDto, FileImportCandidateDto, FileImportDiscoveryDto,
-    FileImportPreviewDto, FileImportResultDto, FileImportSelectionPreviewDto,
-    FileImportSelectionResultDto, FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto,
-    FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto,
-    HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto,
-    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
+    ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto, FileImportCandidateDto,
+    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto,
+    FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
+    FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto, HomeCandidateDto,
+    InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto,
+    ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
     PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanLinkImportRequestDto,
     PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
-    PreferencesWarningDto, PrepareHomeRequestDto, PreviewSourcePromotionRequestDto,
-    RecoveryResultDto, RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto,
-    RemoveSkillPreviewDto, RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto,
-    SetLocaleSelectionRequestDto, SkillDetailDto, SourceGroupPreviewOutcomeDto,
-    SourcePromotionDraftDto, SourcePromotionResultDto, SourcePromotionUndoResultDto,
-    SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
-    StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto, UpdateCheckReportDto,
-    UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto, PrepareHomeRequestDto,
+    PreviewSourcePromotionRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
+    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
+    RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
+    SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto, SourcePromotionResultDto,
+    SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
+    SourceUndoResultDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
+use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
 use crate::tauri_adapter::health_api::HealthApi;
@@ -63,6 +65,22 @@ pub fn prepare_home(
     request: PrepareHomeRequestDto,
 ) -> Result<HomeCandidateDto, CommandFailureDto> {
     state.prepare_home(request)
+}
+
+#[tauri::command]
+pub fn prepare_existing_home_recovery(
+    state: State<'_, ExistingHomeRecoveryApi>,
+    request: PrepareExistingHomeRecoveryRequestDto,
+) -> Result<ExistingHomeRecoveryPlanDto, CommandFailureDto> {
+    state.prepare(request)
+}
+
+#[tauri::command]
+pub fn cancel_existing_home_recovery(
+    state: State<'_, ExistingHomeRecoveryApi>,
+    request: CancelExistingHomeRecoveryRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.cancel(request)
 }
 
 #[tauri::command]

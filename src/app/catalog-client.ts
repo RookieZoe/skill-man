@@ -41,6 +41,23 @@ export interface HomeCandidate {
   legacySource: string | null;
 }
 
+/** Immutable, read-only evidence for an Existing Home Recovery Plan. */
+export type RecoveryProfileFact =
+  | "marker_catalog_identity"
+  | "standard_layout"
+  | "catalog_integrity"
+  | "catalog_foreign_keys"
+  | "catalog_capabilities";
+
+/** A prepared Existing Home Recovery Plan; #67 owns confirmation. */
+export interface ExistingHomeRecoveryPlan {
+  path: string;
+  homeId: string;
+  createdAt: string;
+  planToken: string;
+  facts: RecoveryProfileFact[];
+}
+
 export interface BootstrapDiagnostic {
   code: string;
   message: string;
@@ -235,6 +252,30 @@ export type CandidateInvalidReason =
   | "not_legacy_home"
   | "legacy_contaminated";
 
+/** Closed reasons that make an Existing Home Recovery preview ineligible. */
+export type ExistingHomeRecoveryEligibilityRejection =
+  | "current_binding"
+  | "abandoned_history"
+  | "active_recovery_ledger"
+  | "bootstrap_state";
+
+/** Closed reasons an existing Home fails the Recovery Profile. */
+export type ExistingHomeRecoveryProfileRejection =
+  | "not_directory"
+  | "marker_missing_or_invalid"
+  | "layout_capabilities"
+  | "catalog_missing"
+  | "catalog_unreadable"
+  | "catalog_identity_missing"
+  | "home_identity_mismatch"
+  | "creation_time_mismatch"
+  | "catalog_integrity"
+  | "catalog_foreign_keys"
+  | "catalog_capabilities"
+  | "active_writer"
+  | "operation_recovery_required"
+  | "fixture_contamination";
+
 /** The closed public error union (spec §4.7): presentation maps `code` to a
  * message key; typed fields carry Source Content only. */
 export type PublicError =
@@ -276,6 +317,14 @@ export type PublicError =
   | { code: "binding_state_ambiguous" }
   | { code: "binding_not_cancellable" }
   | { code: "binding_migration_failed" }
+  | {
+      code: "existing_home_recovery_ineligible";
+      reason: ExistingHomeRecoveryEligibilityRejection;
+    }
+  | {
+      code: "existing_home_recovery_profile_rejected";
+      reason: ExistingHomeRecoveryProfileRejection;
+    }
   | { code: "locale_store_unavailable" }
   | { code: "internal" };
 
@@ -983,6 +1032,8 @@ export interface AdoptUndoResult {
 export interface CatalogClient {
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   prepareHome(path: string): Promise<HomeCandidate>;
+  prepareExistingHomeRecovery(path: string): Promise<ExistingHomeRecoveryPlan>;
+  cancelExistingHomeRecovery(planToken: string): Promise<void>;
   confirmHome(candidateToken: string): Promise<BootstrapSnapshot>;
   continueCandidate(operationId: string): Promise<BootstrapSnapshot>;
   cancelCandidate(operationId: string): Promise<BootstrapSnapshot>;
@@ -1110,6 +1161,16 @@ const tauriCatalogClient: CatalogClient = {
   },
   prepareHome(path) {
     return invoke<HomeCandidate>("prepare_home", { request: { path } });
+  },
+  prepareExistingHomeRecovery(path) {
+    return invoke<ExistingHomeRecoveryPlan>("prepare_existing_home_recovery", {
+      request: { path },
+    });
+  },
+  cancelExistingHomeRecovery(planToken) {
+    return invoke<void>("cancel_existing_home_recovery", {
+      request: { planToken },
+    });
   },
   confirmHome(candidateToken) {
     return invoke<BootstrapSnapshot>("confirm_home", {

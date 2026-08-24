@@ -10,8 +10,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::core::home::HomeId;
 use crate::seams::catalog_probe::{
     CatalogHomeIdentity, CatalogProbe, CatalogProbeError, CatalogProbeReport,
-    FixtureAgentRowEvidence, FixtureCatalogEvidence, FixtureCatalogMetaEvidence,
-    FixturePreferencesEvidence, FixtureSkillRowEvidence,
+    CatalogRecoveryIdentity, CatalogRecoveryProfile, FixtureAgentRowEvidence,
+    FixtureCatalogEvidence, FixtureCatalogMetaEvidence, FixturePreferencesEvidence,
+    FixtureSkillRowEvidence,
 };
 
 pub struct SqliteCatalogProbe;
@@ -98,6 +99,58 @@ impl CatalogProbe for SqliteCatalogProbe {
             foreign_keys_ok,
             home_identity,
             snapshot_version,
+        })
+    }
+
+    fn probe_recovery_profile(
+        &self,
+        path: &Path,
+    ) -> Result<CatalogRecoveryProfile, CatalogProbeError> {
+        if !path.exists() {
+            return Ok(CatalogRecoveryProfile::absent());
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| map_open_error(error, path))?;
+
+        let integrity_ok = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .ok()
+            .as_deref()
+            == Some("ok");
+        let foreign_keys_ok = connection
+            .prepare("PRAGMA foreign_key_check")
+            .map(|mut statement| {
+                statement
+                    .query_map([], |_| Ok(()))
+                    .map(|rows| rows.count() == 0)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        let identity = connection
+            .query_row(
+                "SELECT home_id, home_bound_at FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|(home_id, created_at)| {
+                Some(CatalogRecoveryIdentity {
+                    home_id: HomeId::parse(&home_id)?,
+                    created_at: (!created_at.is_empty()).then_some(created_at)?,
+                })
+            });
+
+        Ok(CatalogRecoveryProfile {
+            exists: true,
+            integrity_ok,
+            foreign_keys_ok,
+            identity,
+            required_capabilities: has_recovery_capabilities(&connection),
         })
     }
 
@@ -241,6 +294,349 @@ impl CatalogProbe for SqliteCatalogProbe {
             remote_source_count: count("remote_sources")?,
         })
     }
+}
+
+fn has_recovery_capabilities(connection: &Connection) -> bool {
+    // These are actual runtime capabilities, not the Catalog's declared
+    // schema_version. Extra/future tables are accepted when this complete
+    // product surface remains present. Keep the required layout explicit:
+    // `foreign_key_check` proves existing rows, but an empty, partially
+    // recreated Catalog can pass it after an FK, PK or UNIQUE constraint was
+    // removed.
+    const TABLES: &[(&str, &[&str])] = &[
+        (
+            "catalog_meta",
+            &[
+                "singleton",
+                "schema_version",
+                "snapshot_version",
+                "first_run_completed_at",
+                "last_startup_check_at",
+                "home_id",
+                "volume_fsid",
+                "volume_uuid",
+                "home_bound_at",
+            ],
+        ),
+        (
+            "skills",
+            &[
+                "id",
+                "directory_name",
+                "identity_key",
+                "display_name",
+                "description",
+                "source_kind",
+                "library_entry_path",
+                "final_entity_path",
+                "recorded_content_hash",
+                "health",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "agents",
+            &[
+                "id",
+                "name",
+                "kind",
+                "skills_path",
+                "path_identity_key",
+                "detected",
+                "compatibility",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "activations",
+            &[
+                "skill_id",
+                "agent_id",
+                "desired_enabled",
+                "expected_entry_path",
+                "expected_target_path",
+                "observed_state",
+                "last_enabled_at",
+                "last_checked_at",
+            ],
+        ),
+        (
+            "file_sources",
+            &[
+                "skill_id",
+                "original_path",
+                "original_filename",
+                "installed_at",
+            ],
+        ),
+        (
+            "remote_source_parents",
+            &["remote_id", "canonical_url", "created_at"],
+        ),
+        (
+            "remote_source_aliases",
+            &["remote_id", "alias_url", "confirmed_at"],
+        ),
+        (
+            "remote_bindings",
+            &[
+                "skill_id",
+                "remote_id",
+                "requested_ref",
+                "verification_anchor_commit",
+                "original_commit_known",
+                "skill_path",
+                "provider_hash",
+                "remote_baseline_hash",
+                "current_baseline_hash",
+                "last_checked_at",
+                "last_updated_at",
+            ],
+        ),
+        (
+            "git_repository_sources",
+            &[
+                "remote_id",
+                "provider",
+                "canonical_url",
+                "tracking_ref",
+                "current_release_id",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "git_source_releases",
+            &[
+                "release_id",
+                "remote_id",
+                "tracking_ref",
+                "resolved_commit",
+                "discovered_at",
+            ],
+        ),
+        (
+            "git_source_release_members",
+            &[
+                "release_id",
+                "skill_path",
+                "skill_name",
+                "tree_hash",
+                "provider_hash",
+            ],
+        ),
+        (
+            "git_source_members",
+            &[
+                "skill_id",
+                "remote_id",
+                "current_skill_path",
+                "remote_baseline_hash",
+                "current_baseline_hash",
+                "last_checked_at",
+                "last_updated_at",
+            ],
+        ),
+        (
+            "preferences",
+            &[
+                "singleton",
+                "launch_at_login",
+                "show_in_dock",
+                "check_app_updates",
+                "check_skill_updates",
+                "last_app_update_check_at",
+                "last_skill_update_check_at",
+            ],
+        ),
+    ];
+    const PRIMARY_KEYS: &[(&str, &[&str])] = &[
+        ("catalog_meta", &["singleton"]),
+        ("skills", &["id"]),
+        ("agents", &["id"]),
+        ("activations", &["skill_id", "agent_id"]),
+        ("file_sources", &["skill_id"]),
+        ("remote_source_parents", &["remote_id"]),
+        ("remote_source_aliases", &["remote_id", "alias_url"]),
+        ("remote_bindings", &["skill_id"]),
+        ("git_repository_sources", &["remote_id"]),
+        ("git_source_releases", &["release_id"]),
+        ("git_source_release_members", &["release_id", "skill_path"]),
+        ("git_source_members", &["skill_id"]),
+        ("preferences", &["singleton"]),
+    ];
+    const UNIQUE_INDEXES: &[(&str, &[&str])] = &[
+        ("skills", &["identity_key"]),
+        ("agents", &["name"]),
+        ("agents", &["path_identity_key"]),
+        ("activations", &["expected_entry_path"]),
+        ("remote_source_parents", &["canonical_url"]),
+        ("remote_source_aliases", &["alias_url"]),
+        ("git_repository_sources", &["provider", "canonical_url"]),
+        ("git_source_releases", &["remote_id", "resolved_commit"]),
+    ];
+    const FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
+        ("activations", "skill_id", "skills", "id", "CASCADE"),
+        ("activations", "agent_id", "agents", "id", "CASCADE"),
+        ("file_sources", "skill_id", "skills", "id", "CASCADE"),
+        (
+            "remote_source_aliases",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+            "CASCADE",
+        ),
+        ("remote_bindings", "skill_id", "skills", "id", "CASCADE"),
+        (
+            "remote_bindings",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+            "CASCADE",
+        ),
+        (
+            "git_repository_sources",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+            "CASCADE",
+        ),
+        (
+            "git_repository_sources",
+            "current_release_id",
+            "git_source_releases",
+            "release_id",
+            "NO ACTION",
+        ),
+        (
+            "git_source_releases",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+            "CASCADE",
+        ),
+        (
+            "git_source_release_members",
+            "release_id",
+            "git_source_releases",
+            "release_id",
+            "CASCADE",
+        ),
+        ("git_source_members", "skill_id", "skills", "id", "CASCADE"),
+        (
+            "git_source_members",
+            "remote_id",
+            "remote_source_parents",
+            "remote_id",
+            "CASCADE",
+        ),
+    ];
+
+    TABLES.iter().all(|(table, columns)| {
+        let Ok(mut statement) = connection.prepare("SELECT name FROM pragma_table_info(?1)") else {
+            return false;
+        };
+        let Ok(rows) = statement.query_map([*table], |row| row.get::<_, String>(0)) else {
+            return false;
+        };
+        let names = rows.collect::<Result<std::collections::BTreeSet<_>, _>>();
+        let Ok(names) = names else {
+            return false;
+        };
+        columns.iter().all(|column| names.contains(*column))
+    }) && PRIMARY_KEYS
+        .iter()
+        .all(|(table, columns)| has_primary_key(connection, table, columns))
+        && UNIQUE_INDEXES
+            .iter()
+            .all(|(table, columns)| has_unique_index(connection, table, columns))
+        && FOREIGN_KEYS
+            .iter()
+            .all(|(table, from, referenced_table, to, on_delete)| {
+                has_foreign_key(connection, table, from, referenced_table, to, on_delete)
+            })
+}
+
+fn has_primary_key(connection: &Connection, table: &str, expected: &[&str]) -> bool {
+    let keys = connection
+        .prepare("SELECT name, pk FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")
+        .and_then(|mut statement| {
+            statement
+                .query_map([table], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        });
+    keys.map(|keys| keys.iter().map(String::as_str).eq(expected.iter().copied()))
+        .unwrap_or(false)
+}
+
+fn has_unique_index(connection: &Connection, table: &str, expected: &[&str]) -> bool {
+    let Ok(mut indexes) =
+        connection.prepare("SELECT name FROM pragma_index_list(?1) WHERE \"unique\" = 1")
+    else {
+        return false;
+    };
+    let Ok(indexes) = indexes
+        .query_map([table], |row| row.get::<_, String>(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    else {
+        return false;
+    };
+    indexes.into_iter().any(|index| {
+        connection
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([index], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map(|columns| {
+                columns
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied())
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn has_foreign_key(
+    connection: &Connection,
+    table: &str,
+    from: &str,
+    referenced_table: &str,
+    to: &str,
+    on_delete: &str,
+) -> bool {
+    connection
+        .prepare(
+            "SELECT \"table\", \"from\", \"to\", on_delete
+             FROM pragma_foreign_key_list(?1)",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([table], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map(|references| {
+            references
+                .iter()
+                .any(|(actual_table, actual_from, actual_to, actual_on_delete)| {
+                    actual_table == referenced_table
+                        && actual_from == from
+                        && actual_to == to
+                        && actual_on_delete == on_delete
+                })
+        })
+        .unwrap_or(false)
 }
 
 /// The open step fails for two distinct reasons: a file that is not a

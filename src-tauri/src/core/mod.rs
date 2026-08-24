@@ -4,6 +4,7 @@ pub mod app_update;
 pub mod bootstrap;
 pub mod catalog;
 pub mod domain;
+pub mod existing_home_recovery;
 pub mod fixture_recovery;
 pub mod git_source;
 pub mod git_source_capability;

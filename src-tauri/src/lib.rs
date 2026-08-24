@@ -36,6 +36,9 @@ pub fn run() {
         BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
     };
     use crate::core::catalog::CatalogService;
+    use crate::core::existing_home_recovery::{
+        ExistingHomeRecoveryConfig, ExistingHomeRecoveryService,
+    };
     use crate::core::fixture_recovery::{FixtureRecoveryService, SystemFixtureClassifier};
     use crate::core::git_source_capability::GitSourceCapabilityScan;
     use crate::core::home_binding::{HomeBindingConfig, HomeBindingService};
@@ -68,9 +71,9 @@ pub fn run() {
         apply_adopt, apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
         apply_fixture_recovery, apply_link_import, apply_relocate_link, apply_remove_skill,
         apply_skill_updates, cancel_activation, cancel_activation_replace, cancel_adopt,
-        cancel_app_update, cancel_candidate, cancel_file_import, cancel_link_import,
-        cancel_relocate_link, cancel_remove_skill, check_app_update, check_skill_updates,
-        complete_onboarding, confirm_fixture_recovery_result, confirm_home,
+        cancel_app_update, cancel_candidate, cancel_existing_home_recovery, cancel_file_import,
+        cancel_link_import, cancel_relocate_link, cancel_remove_skill, check_app_update,
+        check_skill_updates, complete_onboarding, confirm_fixture_recovery_result, confirm_home,
         confirm_source_promotion, confirm_source_transition, confirm_source_update,
         continue_candidate, create_agent_directory, discover_file_import,
         discover_file_import_collection, discover_link_import, download_app_update,
@@ -81,12 +84,14 @@ pub fn run() {
         list_skills, load_preferences, pin_skill_updates, plan_abandon, plan_activation,
         plan_activation_repair, plan_activation_replace, plan_adopt, plan_delete_safety_snapshot,
         plan_file_import, plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery,
-        plan_link_import, plan_remove_skill, plan_restore, plan_skill_updates, prepare_home,
-        preview_source_promotion, preview_source_update, reconnect_same_home,
-        refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        scan_adopt, set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
-        undo_source_promotion, undo_source_transition, update_preferences,
+        plan_link_import, plan_remove_skill, plan_restore, plan_skill_updates,
+        prepare_existing_home_recovery, prepare_home, preview_source_promotion,
+        preview_source_update, reconnect_same_home, refresh_system_languages, relocate_link,
+        restore_eligibility, run_activation_health_check, scan_adopt, set_locale_selection,
+        startup_info, undo_activation_replace, undo_adopt, undo_source_promotion,
+        undo_source_transition, update_preferences,
     };
+    use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
     use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
     use crate::tauri_adapter::health_api::HealthApi;
@@ -142,7 +147,7 @@ pub fn run() {
                 volume_identity,
                 catalog_probe.clone(),
                 filesystem.clone(),
-                classifier,
+                classifier.clone(),
                 BootstrapConfig {
                     state_dir: state_dir.clone(),
                     default_home_path: default_home_path.clone(),
@@ -185,6 +190,16 @@ pub fn run() {
                         home_directory.join(".codex/skills"),
                         home_directory.join("Library/Application Support/workbench/skills"),
                     ],
+                },
+            ));
+            let existing_home_recovery_service = Arc::new(ExistingHomeRecoveryService::new(
+                app_state.clone(),
+                bootstrap.clone(),
+                catalog_probe.clone(),
+                filesystem.clone(),
+                classifier,
+                ExistingHomeRecoveryConfig {
+                    catalog_file_name: catalog_file_name.clone(),
                 },
             ));
 
@@ -322,6 +337,7 @@ pub fn run() {
                     Arc::new(TauriBootstrapChangedEmitter::new(app.handle().clone())),
                 )),
             ));
+            app.manage(ExistingHomeRecoveryApi::new(existing_home_recovery_service));
             app.manage(HomeLifecycleApi::new(
                 Arc::new(HomeLifecycleService::new(
                     app_state.clone(),
@@ -548,6 +564,8 @@ pub fn run() {
         })
         .invoke_handler(::tauri::generate_handler![
             prepare_home,
+            prepare_existing_home_recovery,
+            cancel_existing_home_recovery,
             confirm_home,
             continue_candidate,
             cancel_candidate,

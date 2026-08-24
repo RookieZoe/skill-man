@@ -197,6 +197,10 @@ export function errorMessageKey(error: PublicError | string): MessageKey {
       return "error.binding_not_cancellable";
     case "binding_migration_failed":
       return "error.binding_migration_failed";
+    case "existing_home_recovery_ineligible":
+      return "error.existing_home_recovery_ineligible";
+    case "existing_home_recovery_profile_rejected":
+      return "error.existing_home_recovery_profile_rejected";
     default:
       return "error.internal";
   }

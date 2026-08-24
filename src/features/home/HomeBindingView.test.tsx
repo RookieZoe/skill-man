@@ -6,6 +6,7 @@ import type {
   BootstrapSnapshot,
   CatalogClient,
   CommandFailure,
+  ExistingHomeRecoveryPlan,
 } from "../../app/catalog-client";
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import { LocaleProvider } from "../locale/LocaleProvider";
@@ -107,6 +108,53 @@ test("Choose… uses the injected directory picker", async () => {
   await waitFor(() =>
     expect(prepare).toHaveBeenCalledWith("/Users/test/My Home"),
   );
+});
+
+test("Recover Existing Home previews only the selected directory without starting Home Binding", async () => {
+  const prepareRecovery = vi.fn(
+    async (path: string): Promise<ExistingHomeRecoveryPlan> => {
+      expect(path).toBe("/Users/test/Recovered Home");
+      return {
+        path,
+        homeId: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+        createdAt: "2026-08-01T00:00:00Z",
+        planToken: "ehr-1",
+        facts: ["marker_catalog_identity", "catalog_integrity"],
+      };
+    },
+  );
+  const cancelRecovery = vi.fn(async () => undefined);
+  const pickDirectory = vi.fn(async () => "/Users/test/Recovered Home");
+  renderView(
+    { state: "unconfigured" },
+    {
+      prepareExistingHomeRecovery: prepareRecovery,
+      cancelExistingHomeRecovery: cancelRecovery,
+    },
+    pickDirectory,
+  );
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Recover Existing Home…" }),
+  );
+
+  expect(
+    await screen.findByRole("heading", { name: "Recover Existing Home" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("/Users/test/Recovered Home")).toBeInTheDocument();
+  expect(
+    screen.getByText("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("Home marker and Catalog identity agree."),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Bind Home" }),
+  ).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => expect(cancelRecovery).toHaveBeenCalledWith("ehr-1"));
+  expect(prepareRecovery).toHaveBeenCalledTimes(1);
 });
 
 test("candidate rejection renders a reason-specific message with diagnostics", async () => {

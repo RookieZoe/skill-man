@@ -23,6 +23,39 @@ pub struct CatalogHomeIdentity {
     pub home_bound_at: String,
 }
 
+/// The identity facts a Recovery Profile may use. Unlike a Bound Home check,
+/// this deliberately excludes volume fields: a lost locator cannot be
+/// recovered by treating mount-scoped identity as durable proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogRecoveryIdentity {
+    pub home_id: HomeId,
+    pub created_at: String,
+}
+
+/// Read-only capability evidence for Existing Home Recovery. The adapter
+/// verifies concrete tables, columns and constraints rather than trusting a
+/// mutable schema/version declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogRecoveryProfile {
+    pub exists: bool,
+    pub integrity_ok: bool,
+    pub foreign_keys_ok: bool,
+    pub identity: Option<CatalogRecoveryIdentity>,
+    pub required_capabilities: bool,
+}
+
+impl CatalogRecoveryProfile {
+    pub fn absent() -> Self {
+        Self {
+            exists: false,
+            integrity_ok: false,
+            foreign_keys_ok: false,
+            identity: None,
+            required_capabilities: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogProbeReport {
     /// The SQLite file exists at the expected path.
@@ -155,6 +188,19 @@ pub enum CatalogProbeError {
 /// adapter opens with SQLITE_OPEN_READ_ONLY and never migrates or seeds.
 pub trait CatalogProbe: Send + Sync {
     fn probe(&self, path: &Path) -> Result<CatalogProbeReport, CatalogProbeError>;
+
+    /// Recovery-specific capability scan. It is intentionally separate from
+    /// `probe`: ordinary bootstrap still applies its Bound Home schema and
+    /// volume rules, while recovery must prove usable structure directly.
+    fn probe_recovery_profile(
+        &self,
+        path: &Path,
+    ) -> Result<CatalogRecoveryProfile, CatalogProbeError> {
+        let _ = path;
+        Err(CatalogProbeError::Unreadable(
+            "recovery capability probe is not implemented by this adapter".into(),
+        ))
+    }
 
     /// Read-only fixture evidence (spec §3.5). The default fails closed so a
     /// probe that cannot produce evidence classifies the Home as unknown and

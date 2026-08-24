@@ -4,7 +4,9 @@ import type {
   BootstrapSnapshot,
   CatalogClient,
   CommandFailure,
+  ExistingHomeRecoveryPlan,
   HomeCandidate,
+  RecoveryProfileFact,
 } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
 import { errorMessageKey, errorMessageParams } from "../locale/messages";
@@ -42,7 +44,23 @@ type Step =
   | { kind: "idle" }
   | { kind: "busy"; action: string }
   | { kind: "confirm"; candidate: HomeCandidate }
+  | { kind: "recovery_preview"; plan: ExistingHomeRecoveryPlan }
   | { kind: "error"; error: CommandFailure; action: string };
+
+const recoveryFactMessageKeys: Record<
+  RecoveryProfileFact,
+  | "bootstrap.recovery.fact.marker_catalog_identity"
+  | "bootstrap.recovery.fact.standard_layout"
+  | "bootstrap.recovery.fact.catalog_integrity"
+  | "bootstrap.recovery.fact.catalog_foreign_keys"
+  | "bootstrap.recovery.fact.catalog_capabilities"
+> = {
+  marker_catalog_identity: "bootstrap.recovery.fact.marker_catalog_identity",
+  standard_layout: "bootstrap.recovery.fact.standard_layout",
+  catalog_integrity: "bootstrap.recovery.fact.catalog_integrity",
+  catalog_foreign_keys: "bootstrap.recovery.fact.catalog_foreign_keys",
+  catalog_capabilities: "bootstrap.recovery.fact.catalog_capabilities",
+};
 
 /**
  * The Home Binding wizard (spec §5.3–§5.4): explicit Use Default / Choose…
@@ -127,6 +145,41 @@ export function HomeBindingView({
     }
     await prepare(path, "choose");
   }, [pickDirectory, prepare]);
+
+  const recoverExisting = useCallback(async () => {
+    const path = await pickDirectory();
+    if (!path) {
+      setStep({ kind: "idle" });
+      return;
+    }
+    setBusy(true);
+    setStep({ kind: "busy", action: "recover" });
+    try {
+      setStep({
+        kind: "recovery_preview",
+        plan: await client.prepareExistingHomeRecovery(path),
+      });
+    } catch (error) {
+      fail(error as CommandFailure, "recover");
+    } finally {
+      setBusy(false);
+    }
+  }, [client, fail, pickDirectory]);
+
+  const cancelRecovery = useCallback(
+    async (planToken: string) => {
+      setBusy(true);
+      try {
+        await client.cancelExistingHomeRecovery(planToken);
+        setStep({ kind: "idle" });
+      } catch (error) {
+        fail(error as CommandFailure, "cancel_recovery");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, fail],
+  );
 
   const dismissError = useCallback(() => {
     setStep({ kind: "idle" });
@@ -221,6 +274,43 @@ export function HomeBindingView({
     );
   }
 
+  if (step.kind === "recovery_preview") {
+    const plan = step.plan;
+    return (
+      <main
+        role="status"
+        aria-live="polite"
+        className="bootstrap-route"
+        data-bootstrap-route
+      >
+        <h1>{t("bootstrap.recovery.preview_title")}</h1>
+        <p>{t("bootstrap.recovery.preview_summary")}</p>
+        <dl className="bootstrap-home-facts">
+          <dt>{t("bootstrap.recovery.path")}</dt>
+          <dd>{plan.path}</dd>
+          <dt>{t("bootstrap.recovery.home_id")}</dt>
+          <dd>{plan.homeId}</dd>
+          <dt>{t("bootstrap.recovery.created_at")}</dt>
+          <dd>{plan.createdAt}</dd>
+        </dl>
+        <ul className="bootstrap-home-facts">
+          {plan.facts.map((fact) => (
+            <li key={fact}>{t(recoveryFactMessageKeys[fact])}</li>
+          ))}
+        </ul>
+        <p>{t("bootstrap.recovery.confirmation_next")}</p>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void cancelRecovery(plan.planToken)}
+        >
+          {t("bootstrap.home.back")}
+        </button>
+        <LanguageControl />
+      </main>
+    );
+  }
+
   if (isPending) {
     return (
       <main
@@ -291,6 +381,15 @@ export function HomeBindingView({
         <button type="button" disabled={busy} onClick={choose}>
           {t("bootstrap.home.choose")}
         </button>
+        {!isLegacy && !isAbandoned ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void recoverExisting()}
+          >
+            {t("bootstrap.recovery.choose")}
+          </button>
+        ) : null}
       </div>
       <LanguageControl />
     </main>
