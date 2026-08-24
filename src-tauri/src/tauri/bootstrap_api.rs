@@ -9,11 +9,12 @@ use tauri::{AppHandle, Emitter};
 
 use crate::core::bootstrap::{
     BootstrapDiagnostic, BootstrapService, BootstrapSnapshot, CatalogAccess,
+    DefaultHomeRecoveryBlockedReason,
 };
 use crate::core::write_gate::{WriteGate, WriteGateState};
 use crate::tauri_adapter::dto::{
     BootstrapChangedPayloadDto, BootstrapSnapshotDto, CatalogAccessDto, CatalogReadOnlyReasonDto,
-    CommandFailureDto, DiagnosticDto, PublicErrorDto,
+    CommandFailureDto, DefaultHomeRecoveryBlockedReasonDto, DiagnosticDto, PublicErrorDto,
 };
 
 pub const BOOTSTRAP_CHANGED_EVENT: &str = "bootstrap://changed";
@@ -110,6 +111,17 @@ impl From<&BootstrapSnapshot> for BootstrapSnapshotDto {
                 }
             }
             BootstrapSnapshot::Unconfigured => BootstrapSnapshotDto::Unconfigured,
+            BootstrapSnapshot::DefaultHomeRecoveryOffer { path } => {
+                BootstrapSnapshotDto::DefaultHomeRecoveryOffer {
+                    path: path.to_string_lossy().into_owned(),
+                }
+            }
+            BootstrapSnapshot::DefaultHomeRecoveryBlocked { path, reason } => {
+                BootstrapSnapshotDto::DefaultHomeRecoveryBlocked {
+                    path: path.to_string_lossy().into_owned(),
+                    reason: reason.into(),
+                }
+            }
             BootstrapSnapshot::Abandoned { home_id, path } => BootstrapSnapshotDto::Abandoned {
                 home_id: home_id.0.clone(),
                 path: path.to_string_lossy().into_owned(),
@@ -172,6 +184,35 @@ impl From<&BootstrapSnapshot> for BootstrapSnapshotDto {
     }
 }
 
+impl From<&DefaultHomeRecoveryBlockedReason> for DefaultHomeRecoveryBlockedReasonDto {
+    fn from(reason: &DefaultHomeRecoveryBlockedReason) -> Self {
+        match reason {
+            DefaultHomeRecoveryBlockedReason::NotDirectory => Self::NotDirectory,
+            DefaultHomeRecoveryBlockedReason::MarkerMissingOrInvalid => {
+                Self::MarkerMissingOrInvalid
+            }
+            DefaultHomeRecoveryBlockedReason::LayoutCapabilities => Self::LayoutCapabilities,
+            DefaultHomeRecoveryBlockedReason::CatalogMissing => Self::CatalogMissing,
+            DefaultHomeRecoveryBlockedReason::CatalogUnreadable => Self::CatalogUnreadable,
+            DefaultHomeRecoveryBlockedReason::CatalogIdentityMissing => {
+                Self::CatalogIdentityMissing
+            }
+            DefaultHomeRecoveryBlockedReason::HomeIdentityMismatch => Self::HomeIdentityMismatch,
+            DefaultHomeRecoveryBlockedReason::CreationTimeMismatch => Self::CreationTimeMismatch,
+            DefaultHomeRecoveryBlockedReason::CatalogIntegrity => Self::CatalogIntegrity,
+            DefaultHomeRecoveryBlockedReason::CatalogForeignKeys => Self::CatalogForeignKeys,
+            DefaultHomeRecoveryBlockedReason::CatalogCapabilities => Self::CatalogCapabilities,
+            DefaultHomeRecoveryBlockedReason::ActiveWriter => Self::ActiveWriter,
+            DefaultHomeRecoveryBlockedReason::OperationRecoveryRequired => {
+                Self::OperationRecoveryRequired
+            }
+            DefaultHomeRecoveryBlockedReason::FixtureContamination => Self::FixtureContamination,
+            DefaultHomeRecoveryBlockedReason::Unreadable => Self::Unreadable,
+            DefaultHomeRecoveryBlockedReason::RecoveryIneligible => Self::RecoveryIneligible,
+        }
+    }
+}
+
 impl From<&BootstrapDiagnostic> for DiagnosticDto {
     fn from(diagnostic: &BootstrapDiagnostic) -> Self {
         Self {
@@ -202,7 +243,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use crate::core::bootstrap::{BootstrapConfig, BootstrapDiagnostic};
+    use crate::core::bootstrap::{
+        BootstrapConfig, BootstrapDiagnostic, DefaultHomeRecoveryBlockedReason,
+    };
     use crate::core::home::{BoundHome, HomeId};
     use crate::core::write_gate::{ReadOnlyReason, WriteGateState};
     use crate::seams::app_state_store::{AppStateFiles, HomeBindingFile, HomeBindingRecord};
@@ -306,6 +349,23 @@ mod tests {
         let unconfigured = BootstrapSnapshot::Unconfigured;
         let json = serde_json::to_string(&BootstrapSnapshotDto::from(&unconfigured)).expect("json");
         assert!(json.contains("\"state\":\"unconfigured\""));
+
+        let offer = BootstrapSnapshot::DefaultHomeRecoveryOffer {
+            path: std::path::PathBuf::from("/tmp/skill-man"),
+        };
+        let json = serde_json::to_string(&BootstrapSnapshotDto::from(&offer)).expect("json");
+        assert!(json.contains("\"state\":\"default_home_recovery_offer\""));
+        assert!(json.contains("\"path\":\"/tmp/skill-man\""));
+        assert!(!json.contains("token"));
+
+        let blocked = BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+            path: std::path::PathBuf::from("/tmp/skill-man"),
+            reason: DefaultHomeRecoveryBlockedReason::OperationRecoveryRequired,
+        };
+        let json = serde_json::to_string(&BootstrapSnapshotDto::from(&blocked)).expect("json");
+        assert!(json.contains("\"state\":\"default_home_recovery_blocked\""));
+        assert!(json.contains("\"reason\":\"operation_recovery_required\""));
+        assert!(!json.contains("token"));
 
         let abandoned = BootstrapSnapshot::Abandoned {
             home_id: HomeId("b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into()),

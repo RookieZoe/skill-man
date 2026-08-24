@@ -13,6 +13,7 @@ import {
   type HomePicker,
 } from "../features/home/HomeBindingView";
 import { LifecycleRoute } from "../features/home/LifecycleRoute";
+import { DefaultHomeRecoveryView } from "../features/home/DefaultHomeRecoveryView";
 import { LocaleProvider } from "../features/locale/LocaleProvider";
 import { LanguageControl } from "../features/locale/LanguageControl";
 import { useLocale } from "../features/locale/LocaleProvider";
@@ -127,6 +128,28 @@ function BootstrapRoutes({
           snapshot={snapshot}
           onSnapshot={onSnapshot}
           pickDirectory={pickDirectory}
+        />
+      );
+    case "default_home_recovery_offer":
+      return (
+        <DefaultHomeRecoveryView
+          client={client}
+          snapshot={snapshot}
+          onSnapshot={onSnapshot}
+        />
+      );
+    case "default_home_recovery_blocked":
+      return (
+        <BootstrapRoute
+          title={t("bootstrap.default_recovery.blocked_title")}
+          summary={t("bootstrap.default_recovery.blocked_summary", {
+            path: snapshot.path,
+          })}
+          onRetry={onRetry}
+          diagnostic={{
+            code: "default_home_recovery_blocked",
+            message: snapshot.reason,
+          }}
         />
       );
     case "legacy_detected":

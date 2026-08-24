@@ -10,14 +10,17 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 use crate::core::bootstrap::{BootstrapService, BootstrapSnapshot};
-use crate::core::fixture_recovery::{FixtureClassifier, FixtureShapeMode};
-use crate::core::home::{HomeId, HomeMarker, VolumeIdentity};
-use crate::core::home_binding::STANDARD_LAYOUT_DIRS;
+pub use crate::core::existing_home_profile::RecoveryProfileRejection;
+use crate::core::existing_home_profile::{
+    ExistingHomeRecoveryProfile, RecoveryProfileInspectionError, VerifiedRecoveryProfile,
+};
+use crate::core::fixture_recovery::FixtureClassifier;
+use crate::core::home::{HomeId, VolumeIdentity};
 use crate::seams::app_state_store::{
     AppStateFiles, AppStateStore, AppStateStoreError, HOME_BINDING_SCHEMA_VERSION, HomeBindingFile,
     HomeBindingRecord,
 };
-use crate::seams::catalog_probe::{CatalogProbe, CatalogProbeError};
+use crate::seams::catalog_probe::CatalogProbe;
 use crate::seams::filesystem::FileSystem;
 use crate::seams::volume_identity::VolumeIdentitySource;
 
@@ -54,24 +57,6 @@ pub enum RecoveryEligibilityRejection {
     AbandonedHistory,
     ActiveRecoveryLedger,
     BootstrapState,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryProfileRejection {
-    NotDirectory,
-    MarkerMissingOrInvalid,
-    LayoutCapabilities,
-    CatalogMissing,
-    CatalogUnreadable,
-    CatalogIdentityMissing,
-    HomeIdentityMismatch,
-    CreationTimeMismatch,
-    CatalogIntegrity,
-    CatalogForeignKeys,
-    CatalogCapabilities,
-    ActiveWriter,
-    OperationRecoveryRequired,
-    FixtureContamination,
 }
 
 #[derive(Debug, Error)]
@@ -136,13 +121,13 @@ impl ExistingHomeRecoveryService {
         &self,
         selected_path: &Path,
     ) -> Result<ExistingHomeRecoveryPlan, ExistingHomeRecoveryError> {
-        self.ensure_unconfigured()?;
         let profile = self.inspect_profile(selected_path)?;
+        self.ensure_preparable_path(&profile.path)?;
 
         let plan = ExistingHomeRecoveryPlan {
             path: profile.path,
-            home_id: profile.marker.home_id,
-            created_at: profile.marker.created_at,
+            home_id: profile.marker_home_id,
+            created_at: profile.marker_created_at,
             plan_token: format!("ehr-{:x}", token_nanos()),
             facts: RecoveryProfileFacts {
                 marker_catalog_identity: true,
@@ -200,11 +185,18 @@ impl ExistingHomeRecoveryService {
             .inspect_profile(&plan.path)
             .map_err(|_| ExistingHomeRecoveryError::PlanStale)?;
         if revalidated.path != plan.path
-            || revalidated.marker.home_id != plan.home_id
-            || revalidated.marker.created_at != plan.created_at
+            || revalidated.marker_home_id != plan.home_id
+            || revalidated.marker_created_at != plan.created_at
         {
             return Err(ExistingHomeRecoveryError::PlanStale);
         }
+        // A plan prepared while the default path was empty must not tunnel
+        // through a Default Home Recovery Offer that appeared meanwhile.
+        // Re-check the current route against the plan's canonical path just
+        // before the locator CAS; state drift is a stale plan, never a
+        // permission to recover another selected Home.
+        self.ensure_snapshot_allows_path(&plan.path)
+            .map_err(|_| ExistingHomeRecoveryError::PlanStale)?;
         let volume = self.current_volume(&plan.path)?;
         let next = self.recovered_binding(plan, &volume);
 
@@ -258,78 +250,21 @@ impl ExistingHomeRecoveryService {
         &self,
         selected_path: &Path,
     ) -> Result<VerifiedRecoveryProfile, ExistingHomeRecoveryError> {
-        let path = self
-            .filesystem
-            .canonical_directory(selected_path)
-            .map_err(|_| ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::NotDirectory,
-            })?;
-        let marker = self.read_marker(&path)?;
-        if !self.has_standard_layout(&path) {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::LayoutCapabilities,
-            });
-        }
-        let catalog_path = path.join(&self.config.catalog_file_name);
-        let profile = self
-            .probe
-            .probe_recovery_profile(&catalog_path)
-            .map_err(profile_probe_error)?;
-        if !profile.exists {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogMissing,
-            });
-        }
-        let Some(identity) = profile.identity else {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogIdentityMissing,
-            });
-        };
-        if marker.home_id != identity.home_id {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::HomeIdentityMismatch,
-            });
-        }
-        if marker.created_at != identity.created_at {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CreationTimeMismatch,
-            });
-        }
-        if !profile.integrity_ok {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogIntegrity,
-            });
-        }
-        if !profile.foreign_keys_ok {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogForeignKeys,
-            });
-        }
-        if !profile.required_capabilities {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogCapabilities,
-            });
-        }
-        if self.writer_is_active(&catalog_path) {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::ActiveWriter,
-            });
-        }
-        if self.operation_recovery_required(&path) {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::OperationRecoveryRequired,
-            });
-        }
-        if self
-            .classifier
-            .classify(&path, FixtureShapeMode::Bound)
-            .is_contaminated()
-        {
-            return Err(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::FixtureContamination,
-            });
-        }
-        Ok(VerifiedRecoveryProfile { path, marker })
+        ExistingHomeRecoveryProfile::new(
+            self.probe.clone(),
+            self.filesystem.clone(),
+            self.classifier.clone(),
+            self.config.catalog_file_name.clone(),
+        )
+        .inspect(selected_path)
+        .map_err(|error| match error {
+            RecoveryProfileInspectionError::Rejected { reason } => {
+                ExistingHomeRecoveryError::ProfileRejected { reason }
+            }
+            RecoveryProfileInspectionError::FileSystem(message) => {
+                ExistingHomeRecoveryError::FileSystem(message)
+            }
+        })
     }
 
     /// Dropping a preview removes only in-memory opaque state. There is no
@@ -345,9 +280,26 @@ impl ExistingHomeRecoveryService {
             .ok_or(ExistingHomeRecoveryError::PlanStale)
     }
 
-    fn ensure_unconfigured(&self) -> Result<(), ExistingHomeRecoveryError> {
+    fn ensure_preparable_path(
+        &self,
+        selected_path: &Path,
+    ) -> Result<(), ExistingHomeRecoveryError> {
         let files = self.app_state.load()?;
-        self.ensure_complete_unconfigured(&files)
+        self.ensure_complete_unconfigured(&files)?;
+        self.ensure_snapshot_allows_path(selected_path)
+    }
+
+    fn ensure_snapshot_allows_path(
+        &self,
+        selected_path: &Path,
+    ) -> Result<(), ExistingHomeRecoveryError> {
+        match self.bootstrap.inspect() {
+            BootstrapSnapshot::Unconfigured => Ok(()),
+            BootstrapSnapshot::DefaultHomeRecoveryOffer { path } if path == selected_path => Ok(()),
+            _ => Err(ExistingHomeRecoveryError::Ineligible {
+                reason: RecoveryEligibilityRejection::BootstrapState,
+            }),
+        }
     }
 
     fn ensure_complete_unconfigured(
@@ -369,90 +321,16 @@ impl ExistingHomeRecoveryService {
                 reason: RecoveryEligibilityRejection::ActiveRecoveryLedger,
             });
         }
-        if self.bootstrap.inspect() != BootstrapSnapshot::Unconfigured {
-            return Err(ExistingHomeRecoveryError::Ineligible {
-                reason: RecoveryEligibilityRejection::BootstrapState,
-            });
+        match self.bootstrap.inspect() {
+            BootstrapSnapshot::Unconfigured => {}
+            BootstrapSnapshot::DefaultHomeRecoveryOffer { .. } => {}
+            _ => {
+                return Err(ExistingHomeRecoveryError::Ineligible {
+                    reason: RecoveryEligibilityRejection::BootstrapState,
+                });
+            }
         }
         Ok(())
-    }
-
-    fn read_marker(&self, path: &Path) -> Result<HomeMarker, ExistingHomeRecoveryError> {
-        let content = self
-            .filesystem
-            .read_utf8_file(&path.join(HomeMarker::FILE_NAME))
-            .map_err(|error| ExistingHomeRecoveryError::FileSystem(error.to_string()))?;
-        content
-            .as_deref()
-            .and_then(HomeMarker::parse_recovery_profile)
-            .ok_or(ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::MarkerMissingOrInvalid,
-            })
-    }
-
-    /// WAL and SHM sidecars are normal SQLite artifacts. Only a busy or
-    /// unprobeable WAL-index lock closes recovery; an acquired lock is
-    /// immediately released by the filesystem adapter and leaves no Home
-    /// content change behind.
-    fn writer_is_active(&self, catalog_path: &Path) -> bool {
-        let Some(file_name) = catalog_path.file_name() else {
-            return true;
-        };
-        let mut shm_name = file_name.to_os_string();
-        shm_name.push("-shm");
-        let shm_path = catalog_path.with_file_name(shm_name);
-        match self.filesystem.path_is_occupied(&shm_path) {
-            Ok(false) => false,
-            Ok(true) => !self
-                .filesystem
-                .try_lock_wal_index_exclusive(&shm_path)
-                .unwrap_or(false),
-            Err(_) => true,
-        }
-    }
-
-    /// A complete Home may retain empty operation roots. Any entry beneath the
-    /// owned `staging` or `operations` roots is unfinished evidence and must
-    /// continue through the operation-recovery route, never direct recovery.
-    fn operation_recovery_required(&self, home_path: &Path) -> bool {
-        ["staging", "operations"].iter().any(|name| {
-            let root = home_path.join(name);
-            match self.filesystem.path_is_directory(&root) {
-                Ok(false) => false,
-                Ok(true) => self
-                    .filesystem
-                    .list_directory(&root)
-                    .map(|entries| !entries.is_empty())
-                    .unwrap_or(true),
-                Err(_) => true,
-            }
-        })
-    }
-
-    /// The recovery profile accepts only the exact Home layout produced by
-    /// Home Binding. A missing or unreadable root is a closed, zero-write
-    /// rejection; empty `operations` and `staging` roots are handled below.
-    fn has_standard_layout(&self, home_path: &Path) -> bool {
-        STANDARD_LAYOUT_DIRS.iter().all(|directory| {
-            self.filesystem
-                .path_is_directory(&home_path.join(directory))
-                .unwrap_or(false)
-        })
-    }
-}
-
-struct VerifiedRecoveryProfile {
-    path: PathBuf,
-    marker: HomeMarker,
-}
-
-fn profile_probe_error(error: CatalogProbeError) -> ExistingHomeRecoveryError {
-    match error {
-        CatalogProbeError::Unreadable(_) | CatalogProbeError::Invalid(_) => {
-            ExistingHomeRecoveryError::ProfileRejected {
-                reason: RecoveryProfileRejection::CatalogUnreadable,
-            }
-        }
     }
 }
 

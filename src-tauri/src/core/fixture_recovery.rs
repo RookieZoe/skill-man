@@ -913,6 +913,8 @@ impl FixtureRecoveryService {
                 })
             }
             BootstrapSnapshot::Unconfigured
+            | BootstrapSnapshot::DefaultHomeRecoveryOffer { .. }
+            | BootstrapSnapshot::DefaultHomeRecoveryBlocked { .. }
             | BootstrapSnapshot::Abandoned { .. }
             | BootstrapSnapshot::HomeCandidatePending { .. } => {
                 Ok(RestoreEligibility::NotApplicable {

@@ -883,7 +883,7 @@ fn continue_after_postcommit_crash_only_rolls_forward() {
     assert!(ledger(&composition).active.is_none());
 }
 
-// -- Legacy in-place --------------------------------------------------------
+// -- Default legacy evidence ------------------------------------------------
 
 #[test]
 fn legacy_default_binds_in_place_with_zero_moves() {
@@ -1089,10 +1089,9 @@ fn legacy_copy_cancel_deletes_destination_but_never_the_source() {
 }
 
 #[test]
-fn prepared_recovery_home_binds_in_place() {
-    // A fixture-recovery prepared Home is a v5 Catalog without identity:
-    // inspect classifies it as a Legacy-shaped unbound Home and the in-place
-    // transition records identity without a migration.
+fn prepared_recovery_home_is_blocked_without_a_binding_bypass() {
+    // A fixture-recovery prepared Home is a v5 Catalog without identity;
+    // it is default-path evidence, not a fresh or Legacy binding candidate.
     let composition = compose(Some(volume()));
     std::fs::create_dir_all(&composition.default_home).expect("prepared Home");
     for directory in ["skills", "remotes", "operations", "cache", "staging"] {
@@ -1119,21 +1118,14 @@ fn prepared_recovery_home_binds_in_place() {
         .expect("seed recovered row");
     drop(connection);
 
-    match composition.bootstrap.inspect() {
-        BootstrapSnapshot::LegacyDetected { .. } => {}
-        other => panic!("expected LegacyDetected for the prepared Home, got {other:?}"),
-    }
-    let candidate = composition
-        .binding
-        .prepare_home(&composition.default_home)
-        .expect("prepare");
-    assert_eq!(candidate.mode, CandidateMode::LegacyInPlace);
-    let snapshot = composition
-        .binding
-        .confirm_home(&candidate.token)
-        .expect("confirm");
-    assert!(is_bound(&snapshot), "expected Bound, got {snapshot:?}");
-    assert_bound_home(&composition, &composition.default_home);
+    assert!(matches!(
+        composition.bootstrap.inspect(),
+        BootstrapSnapshot::DefaultHomeRecoveryBlocked { .. }
+    ));
+    assert!(matches!(
+        composition.binding.prepare_home(&composition.default_home),
+        Err(HomeBindingError::InvalidState(_))
+    ));
 }
 
 #[test]

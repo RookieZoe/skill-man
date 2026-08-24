@@ -2881,6 +2881,13 @@ pub enum BootstrapSnapshotDto {
         diagnostic: Option<DiagnosticDto>,
     },
     Unconfigured,
+    DefaultHomeRecoveryOffer {
+        path: String,
+    },
+    DefaultHomeRecoveryBlocked {
+        path: String,
+        reason: DefaultHomeRecoveryBlockedReasonDto,
+    },
     Abandoned {
         home_id: String,
         path: String,
@@ -2912,6 +2919,30 @@ pub enum BootstrapSnapshotDto {
         path: String,
         diagnostic: Option<DiagnosticDto>,
     },
+}
+
+/// Closed diagnostic reason for a default-path Existing Home Recovery block.
+/// It is intentionally a code-only contract: no Home content, plan tokens or
+/// credentials cross the Tauri boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultHomeRecoveryBlockedReasonDto {
+    NotDirectory,
+    MarkerMissingOrInvalid,
+    LayoutCapabilities,
+    CatalogMissing,
+    CatalogUnreadable,
+    CatalogIdentityMissing,
+    HomeIdentityMismatch,
+    CreationTimeMismatch,
+    CatalogIntegrity,
+    CatalogForeignKeys,
+    CatalogCapabilities,
+    ActiveWriter,
+    OperationRecoveryRequired,
+    FixtureContamination,
+    Unreadable,
+    RecoveryIneligible,
 }
 
 /// `bootstrap://changed` payload: isomorphic to the query snapshot plus the

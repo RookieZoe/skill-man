@@ -273,7 +273,7 @@ fn future_schema_with_matching_identity_is_bound_read_only() {
 }
 
 #[test]
-fn legacy_path_without_binding_is_legacy_detected_read_only() {
+fn empty_default_path_without_home_evidence_is_unconfigured() {
     let dir = tempfile::tempdir().expect("temporary home");
     let legacy_home = dir.path().join("Library/Application Support/skill-man");
     std::fs::create_dir_all(&legacy_home).expect("legacy Home exists");
@@ -294,13 +294,10 @@ fn legacy_path_without_binding_is_legacy_detected_read_only() {
             catalog_file_name: "skill-man.sqlite3".into(),
         },
     );
-    match service.inspect() {
-        BootstrapSnapshot::LegacyDetected { path } => assert_eq!(path, legacy_home),
-        other => panic!("expected LegacyDetected, got {other:?}"),
-    }
+    assert_eq!(service.inspect(), BootstrapSnapshot::Unconfigured);
     assert!(
         service.verified_bound_home().is_none(),
-        "Legacy is never treated as Bound"
+        "an empty default directory is never treated as Bound"
     );
 }
 

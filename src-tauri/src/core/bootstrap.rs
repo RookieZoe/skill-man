@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::core::fixture_recovery::{FixtureClassifier, FixtureShapeMode};
+use crate::core::existing_home_profile::{
+    ExistingHomeRecoveryProfile, RecoveryProfileInspectionError, RecoveryProfileRejection,
+};
+use crate::core::fixture_recovery::{FixtureClassification, FixtureClassifier, FixtureShapeMode};
 use crate::core::home::{BoundHome, HomeId, HomeMarker};
 use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGateState};
 use crate::seams::app_state_store::{AbandonedHomeRecord, AppStateStore};
@@ -53,6 +56,17 @@ pub enum BootstrapSnapshot {
     /// No binding, no Legacy Home: the binding wizard entry point. Zero Home
     /// or SQLite artifacts exist.
     Unconfigured,
+    /// The default path contains a complete, unbound existing Home. It may
+    /// only continue through an explicit Existing Home Recovery Plan; this
+    /// snapshot never creates a locator or writes Home content.
+    DefaultHomeRecoveryOffer { path: PathBuf },
+    /// The default path has Home evidence but does not pass the complete
+    /// Recovery Profile. The typed reason is diagnostic-only: no ordinary
+    /// binding or alternate recovery route may bypass it.
+    DefaultHomeRecoveryBlocked {
+        path: PathBuf,
+        reason: DefaultHomeRecoveryBlockedReason,
+    },
     /// No current binding and the site at the default path is a previously
     /// abandoned Home (its identity is in the locator history): the wizard
     /// is available for a brand-new binding, but the abandoned site is never
@@ -91,6 +105,50 @@ pub enum BootstrapSnapshot {
     },
 }
 
+/// Closed, non-secret diagnostic facts for a default-path recovery block.
+/// Presentation maps these values to localized copy; raw Home content and
+/// credentials never enter the Bootstrap snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultHomeRecoveryBlockedReason {
+    NotDirectory,
+    MarkerMissingOrInvalid,
+    LayoutCapabilities,
+    CatalogMissing,
+    CatalogUnreadable,
+    CatalogIdentityMissing,
+    HomeIdentityMismatch,
+    CreationTimeMismatch,
+    CatalogIntegrity,
+    CatalogForeignKeys,
+    CatalogCapabilities,
+    ActiveWriter,
+    OperationRecoveryRequired,
+    FixtureContamination,
+    Unreadable,
+    RecoveryIneligible,
+}
+
+impl From<RecoveryProfileRejection> for DefaultHomeRecoveryBlockedReason {
+    fn from(value: RecoveryProfileRejection) -> Self {
+        match value {
+            RecoveryProfileRejection::NotDirectory => Self::NotDirectory,
+            RecoveryProfileRejection::MarkerMissingOrInvalid => Self::MarkerMissingOrInvalid,
+            RecoveryProfileRejection::LayoutCapabilities => Self::LayoutCapabilities,
+            RecoveryProfileRejection::CatalogMissing => Self::CatalogMissing,
+            RecoveryProfileRejection::CatalogUnreadable => Self::CatalogUnreadable,
+            RecoveryProfileRejection::CatalogIdentityMissing => Self::CatalogIdentityMissing,
+            RecoveryProfileRejection::HomeIdentityMismatch => Self::HomeIdentityMismatch,
+            RecoveryProfileRejection::CreationTimeMismatch => Self::CreationTimeMismatch,
+            RecoveryProfileRejection::CatalogIntegrity => Self::CatalogIntegrity,
+            RecoveryProfileRejection::CatalogForeignKeys => Self::CatalogForeignKeys,
+            RecoveryProfileRejection::CatalogCapabilities => Self::CatalogCapabilities,
+            RecoveryProfileRejection::ActiveWriter => Self::ActiveWriter,
+            RecoveryProfileRejection::OperationRecoveryRequired => Self::OperationRecoveryRequired,
+            RecoveryProfileRejection::FixtureContamination => Self::FixtureContamination,
+        }
+    }
+}
+
 impl BootstrapSnapshot {
     pub fn is_bound(&self) -> bool {
         matches!(self, BootstrapSnapshot::Bound { .. })
@@ -118,6 +176,12 @@ impl BootstrapSnapshot {
             },
             BootstrapSnapshot::Unconfigured => WriteGateState::Closed {
                 reason: ClosedReason::Unconfigured,
+            },
+            BootstrapSnapshot::DefaultHomeRecoveryOffer { .. } => WriteGateState::Closed {
+                reason: ClosedReason::DefaultHomeRecoveryOffer,
+            },
+            BootstrapSnapshot::DefaultHomeRecoveryBlocked { .. } => WriteGateState::Closed {
+                reason: ClosedReason::DefaultHomeRecoveryBlocked,
             },
             BootstrapSnapshot::Abandoned { .. } => WriteGateState::Closed {
                 reason: ClosedReason::Abandoned,
@@ -159,6 +223,7 @@ pub struct BootstrapService {
     probe: Arc<dyn CatalogProbe>,
     filesystem: Arc<dyn FileSystem>,
     classifier: Arc<dyn FixtureClassifier>,
+    recovery_profile: ExistingHomeRecoveryProfile,
     config: BootstrapConfig,
     /// The most recently verified Bound Home; populated only when `inspect`
     /// resolves to `Bound` and used by composition to open the writable
@@ -178,11 +243,18 @@ impl BootstrapService {
         classifier: Arc<dyn FixtureClassifier>,
         config: BootstrapConfig,
     ) -> Self {
+        let recovery_profile = ExistingHomeRecoveryProfile::new(
+            probe.clone(),
+            filesystem.clone(),
+            classifier.clone(),
+            config.catalog_file_name.clone(),
+        );
         Self {
             app_state,
             volume,
             probe,
             filesystem,
+            recovery_profile,
             classifier,
             config,
             verified: RwLock::new(None),
@@ -293,14 +365,17 @@ impl BootstrapService {
 
         // §5.1 step 4: no binding.
         let Some(current) = files.binding.current else {
-            let legacy_exists = self
+            return match self
                 .filesystem
                 .path_is_directory(&self.config.default_home_path)
-                .unwrap_or(false);
-            if legacy_exists {
-                return self.classify_default_home(&files.binding.abandoned);
-            }
-            return BootstrapSnapshot::Unconfigured;
+            {
+                Ok(true) => self.classify_default_home(&files.binding.abandoned),
+                Ok(false) => BootstrapSnapshot::Unconfigured,
+                Err(_) => BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+                    path: self.config.default_home_path.clone(),
+                    reason: DefaultHomeRecoveryBlockedReason::Unreadable,
+                },
+            };
         };
 
         let home_id = current.home_id.clone();
@@ -536,15 +611,26 @@ impl BootstrapService {
         Ok(HomeMarker::parse(&content))
     }
 
-    /// §5.4 read-only shape classification of the default path when no
-    /// binding exists: an unbound candidate (schema v5 with marker), a
-    /// Legacy Home (pre-identity schema, behind the fixture gate), a
-    /// fixture-recovery prepared Home (v5 without identity, waiting for the
-    /// one-time binding) or nothing. Candidate artifacts without an active
-    /// ledger operation are a contradiction and fail closed — never guessed
-    /// or rebuilt (spec §3.3).
+    /// The default path is special: a non-empty site is never silently
+    /// treated as a fresh candidate. Existing Fixture Recovery and the
+    /// complete Recovery Profile as an explicit Offer or remains Blocked.
+    /// Only the independently verified, exact Fixture Recovery footprint and
+    /// a readable pre-identity Legacy Catalog retain their established closed
+    /// recovery routes. Ambiguous fixture or Legacy-like evidence never
+    /// reopens a first-binding or alternate-recovery route. The only route
+    /// retaining first-binding choices is a truly empty default folder.
     fn classify_default_home(&self, abandoned: &[AbandonedHomeRecord]) -> BootstrapSnapshot {
         let default = &self.config.default_home_path;
+        match self.filesystem.list_directory(default) {
+            Ok(entries) if entries.is_empty() => return BootstrapSnapshot::Unconfigured,
+            Ok(_) => {}
+            Err(_) => {
+                return BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+                    path: default.clone(),
+                    reason: DefaultHomeRecoveryBlockedReason::Unreadable,
+                };
+            }
+        }
         let catalog_path = default.join(&self.config.catalog_file_name);
         let report = self.probe.probe(&catalog_path).ok();
         let marker = self
@@ -571,60 +657,54 @@ impl BootstrapService {
                 };
             }
         }
-        match report.as_ref().and_then(|report| report.schema_version) {
-            Some(version) if version >= CATALOG_SCHEMA_WITH_HOME_IDENTITY => {
-                if marker.is_some() {
-                    BootstrapSnapshot::AppStateUnavailable {
-                        diagnostic: BootstrapDiagnostic::new(
-                            "orphaned_candidate",
-                            "candidate artifacts exist without a binding operation".into(),
-                        ),
-                    }
-                } else if report
-                    .as_ref()
-                    .is_some_and(|report| report.home_identity.is_some())
-                {
-                    BootstrapSnapshot::AppStateUnavailable {
-                        diagnostic: BootstrapDiagnostic::new(
-                            "orphaned_candidate",
-                            "an identified Catalog exists without a binding".into(),
-                        ),
-                    }
-                } else {
-                    // A fixture-recovery prepared Home: current schema
-                    // without identity, waiting for the binding transition.
-                    self.legacy_or_locked(default)
-                }
-            }
-            Some(_) => self.legacy_or_locked(default),
-            None => {
-                if marker.is_some() {
-                    BootstrapSnapshot::AppStateUnavailable {
-                        diagnostic: BootstrapDiagnostic::new(
-                            "orphaned_candidate",
-                            "a Home marker exists without a Catalog or binding operation".into(),
-                        ),
-                    }
-                } else {
-                    self.legacy_or_locked(default)
-                }
-            }
-        }
-    }
 
-    /// §5.1 step 7 / §5.4: read-only fixture classification precedes any
-    /// Legacy transition; any footprint keeps the recovery lock and the
-    /// binding wizard never offers path selection around it.
-    fn legacy_or_locked(&self, path: &std::path::Path) -> BootstrapSnapshot {
-        let classification = self.classifier.classify(path, FixtureShapeMode::Legacy);
-        if classification.is_contaminated() {
+        // Fixture Recovery is a separate, already confirmed recovery state
+        // machine. Retain its route only for the immutable, exact footprint;
+        // a mixed or unreadable fixture-like tree must continue to the
+        // Recovery Profile and become DefaultHomeRecoveryBlocked.
+        let fixture_classification = self.classifier.classify(default, FixtureShapeMode::Legacy);
+        if matches!(fixture_classification, FixtureClassification::Pure) {
             return BootstrapSnapshot::FixtureRecoveryLocked {
                 home_id: None,
-                path: Some(path.to_path_buf()),
+                path: Some(default.clone()),
             };
         }
-        BootstrapSnapshot::LegacyDetected {
-            path: path.to_path_buf(),
+
+        // The historical one-time Legacy transition remains available only
+        // for a readable Catalog that positively proves the pre-identity
+        // schema. A missing, corrupt, or otherwise merely legacy-like
+        // Catalog is blocked by the Recovery Profile below.
+        if matches!(fixture_classification, FixtureClassification::Clean)
+            && report
+                .as_ref()
+                .and_then(|report| report.schema_version)
+                .is_some_and(|version| version < CATALOG_SCHEMA_WITH_HOME_IDENTITY)
+        {
+            return BootstrapSnapshot::LegacyDetected {
+                path: default.clone(),
+            };
+        }
+
+        if !abandoned.is_empty() {
+            return BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+                path: default.clone(),
+                reason: DefaultHomeRecoveryBlockedReason::RecoveryIneligible,
+            };
+        }
+        match self.recovery_profile.inspect(default) {
+            Ok(profile) => BootstrapSnapshot::DefaultHomeRecoveryOffer { path: profile.path },
+            Err(RecoveryProfileInspectionError::Rejected { reason }) => {
+                BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+                    path: default.clone(),
+                    reason: reason.into(),
+                }
+            }
+            Err(RecoveryProfileInspectionError::FileSystem(_)) => {
+                BootstrapSnapshot::DefaultHomeRecoveryBlocked {
+                    path: default.clone(),
+                    reason: DefaultHomeRecoveryBlockedReason::Unreadable,
+                }
+            }
         }
     }
 
@@ -927,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn no_binding_with_legacy_path_is_legacy_detected() {
+    fn empty_default_path_keeps_the_first_binding_route() {
         let files = AppStateFiles {
             binding: HomeBindingFile::empty(),
             recovery_ledger: RecoveryLedgerFile::empty(),
@@ -936,7 +1016,7 @@ mod tests {
         let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
         filesystem
             .create_directory(&dir.path().join("default-home"))
-            .expect("legacy dir");
+            .expect("empty default dir");
         let service = service(
             MemoryAppStateStore::new(files),
             FixedVolumeIdentitySource {
@@ -947,12 +1027,7 @@ mod tests {
             None,
             dir.path(),
         );
-        match service.inspect() {
-            BootstrapSnapshot::LegacyDetected { path } => {
-                assert_eq!(path, dir.path().join("default-home"));
-            }
-            other => panic!("expected LegacyDetected, got {other:?}"),
-        }
+        assert_eq!(service.inspect(), BootstrapSnapshot::Unconfigured);
     }
 
     #[test]
@@ -1015,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn contaminated_legacy_path_is_fixture_recovery_locked() {
+    fn default_home_evidence_that_cannot_pass_a_profile_is_blocked() {
         let files = AppStateFiles {
             binding: HomeBindingFile::empty(),
             recovery_ledger: RecoveryLedgerFile::empty(),
@@ -1024,7 +1099,10 @@ mod tests {
         let filesystem = MacOsFileSystem::new(dir.path().to_path_buf());
         filesystem
             .create_directory(&dir.path().join("default-home"))
-            .expect("legacy dir");
+            .expect("default dir");
+        filesystem
+            .write_utf8_file(&dir.path().join("default-home/legacy.sqlite3"), "legacy")
+            .expect("legacy evidence");
         let service = BootstrapService::new(
             Arc::new(MemoryAppStateStore::new(files)),
             Arc::new(FixedVolumeIdentitySource {
@@ -1033,9 +1111,7 @@ mod tests {
             }),
             Arc::new(MemoryCatalogProbe::new(CatalogProbeReport::absent())),
             Arc::new(filesystem),
-            Arc::new(FixedClassifier(FixtureClassification::Mixed {
-                reasons: vec!["fixture_entities_missing".into()],
-            })),
+            Arc::new(FixedClassifier(FixtureClassification::Clean)),
             BootstrapConfig {
                 state_dir: dir.path().join("state"),
                 default_home_path: dir.path().join("default-home"),
@@ -1043,11 +1119,14 @@ mod tests {
             },
         );
         match service.inspect() {
-            BootstrapSnapshot::FixtureRecoveryLocked { home_id, path } => {
-                assert!(home_id.is_none(), "Legacy lock carries no Home identity");
-                assert_eq!(path, Some(dir.path().join("default-home")));
+            BootstrapSnapshot::DefaultHomeRecoveryBlocked { path, reason } => {
+                assert_eq!(path, dir.path().join("default-home"));
+                assert_eq!(
+                    reason,
+                    DefaultHomeRecoveryBlockedReason::MarkerMissingOrInvalid
+                );
             }
-            other => panic!("expected FixtureRecoveryLocked, got {other:?}"),
+            other => panic!("expected DefaultHomeRecoveryBlocked, got {other:?}"),
         }
     }
 

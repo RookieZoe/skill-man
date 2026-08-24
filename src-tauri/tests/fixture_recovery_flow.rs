@@ -195,13 +195,14 @@ fn legacy_flow_recovers_to_a_clean_unbound_home() {
     let active = preview.active_operation.expect("active operation");
     assert_eq!(active.cursor.as_deref(), Some("verified"));
 
-    // Commit: the Home is clean, unbound, and the snapshot remains.
+    // Commit: the Home is clean and unbound, but its v5 Catalog has no
+    // identity and therefore remains Default Home Recovery Blocked.
     let snapshot = recovery.confirm_result(&plan.plan_token).expect("confirm");
     match snapshot {
-        BootstrapSnapshot::LegacyDetected { path } => {
+        BootstrapSnapshot::DefaultHomeRecoveryBlocked { path, .. } => {
             assert_eq!(path, home.library_root);
         }
-        other => panic!("expected clean LegacyDetected, got {other:?}"),
+        other => panic!("expected DefaultHomeRecoveryBlocked, got {other:?}"),
     }
     let filesystem = MacOsFileSystem::new(home.dir.path().to_path_buf());
     assert_eq!(
@@ -247,7 +248,7 @@ fn legacy_flow_recovers_to_a_clean_unbound_home() {
 }
 
 #[test]
-fn mixed_home_refuses_plan_and_never_previews() {
+fn mixed_default_fixture_evidence_is_blocked_not_a_fixture_recovery_bypass() {
     let home = FixtureHome::new();
     home.with_sql("modify fixture row", |connection| {
         connection
@@ -258,15 +259,13 @@ fn mixed_home_refuses_plan_and_never_previews() {
             .expect("modify row");
     });
     let recovery = recovery_service(home.state_dir.clone(), home.library_root.clone(), None);
-    let preview = recovery.inspect().expect("preview");
     assert!(matches!(
-        preview.classification,
-        FixtureClassification::Mixed { .. }
+        recovery.inspect(),
+        Err(FixtureRecoveryError::NotLocked)
     ));
-    assert!(!preview.can_preview);
     match recovery.plan(&FixtureRecoverySelection {}) {
-        Err(FixtureRecoveryError::NotPure) => {}
-        other => panic!("expected NotPure, got {other:?}"),
+        Err(FixtureRecoveryError::NotLocked) => {}
+        other => panic!("expected NotLocked, got {other:?}"),
     }
     let ledger = AppStateStoreFileSystem::new(home.state_dir.clone())
         .load()

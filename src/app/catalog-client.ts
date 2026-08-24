@@ -63,6 +63,25 @@ export interface BootstrapDiagnostic {
   message: string;
 }
 
+/** Code-only reason that keeps an unsafe default Home route closed. */
+export type DefaultHomeRecoveryBlockedReason =
+  | "not_directory"
+  | "marker_missing_or_invalid"
+  | "layout_capabilities"
+  | "catalog_missing"
+  | "catalog_unreadable"
+  | "catalog_identity_missing"
+  | "home_identity_mismatch"
+  | "creation_time_mismatch"
+  | "catalog_integrity"
+  | "catalog_foreign_keys"
+  | "catalog_capabilities"
+  | "active_writer"
+  | "operation_recovery_required"
+  | "fixture_contamination"
+  | "unreadable"
+  | "recovery_ineligible";
+
 /**
  * The closed top-level bootstrap route union (spec §4.2). React renders
  * exactly one route per `state`; no variant is composed from booleans.
@@ -70,6 +89,12 @@ export interface BootstrapDiagnostic {
 export type BootstrapSnapshot =
   | { state: "app_state_unavailable"; diagnostic: BootstrapDiagnostic | null }
   | { state: "unconfigured" }
+  | { state: "default_home_recovery_offer"; path: string }
+  | {
+      state: "default_home_recovery_blocked";
+      path: string;
+      reason: DefaultHomeRecoveryBlockedReason;
+    }
   | {
       state: "abandoned";
       homeId: string;
