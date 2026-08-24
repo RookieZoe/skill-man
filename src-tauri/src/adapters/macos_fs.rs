@@ -1562,17 +1562,16 @@ impl FileSystem for MacOsFileSystem {
     ) -> Result<(), FileSystemError> {
         let library_root = self.normalize_configured_path(library_root)?;
         let operations_root = library_root.join("operations");
-        if !replacement.backup_path.starts_with(&operations_root) {
-            return Err(FileSystemError::InvalidConfiguredPath {
-                path: replacement.backup_path.clone(),
-            });
+        let backup_path = self.normalize_configured_path(&replacement.backup_path)?;
+        if !backup_path.starts_with(&operations_root) {
+            return Err(FileSystemError::InvalidConfiguredPath { path: backup_path });
         }
         remove_owned_directory_if_present(
-            &replacement.backup_path,
+            &backup_path,
             Some(&replacement.backup_fingerprint),
             "discard committed file reinstall backup",
         )?;
-        remove_empty_backup_directory(&replacement.backup_path, &operations_root)
+        remove_empty_backup_directory(&backup_path, &operations_root)
     }
 
     fn rollback_replaced_skill(
@@ -1583,52 +1582,50 @@ impl FileSystem for MacOsFileSystem {
         let library_root = self.normalize_configured_path(library_root)?;
         let skills_root = library_root.join("skills");
         let operations_root = library_root.join("operations");
-        if replacement.final_entity_path.parent() != Some(skills_root.as_path())
-            || !replacement.backup_path.starts_with(&operations_root)
+        let final_entity_path = self.normalize_configured_path(&replacement.final_entity_path)?;
+        let backup_path = self.normalize_configured_path(&replacement.backup_path)?;
+        if final_entity_path.parent() != Some(skills_root.as_path())
+            || !backup_path.starts_with(&operations_root)
         {
             return Err(FileSystemError::InvalidConfiguredPath {
-                path: replacement.final_entity_path.clone(),
+                path: final_entity_path,
             });
         }
-        if !real_directory_exists(&replacement.backup_path)? {
-            if real_directory_exists(&replacement.final_entity_path)?
-                && staged_tree_snapshot_at(&replacement.final_entity_path)?
+        if !real_directory_exists(&backup_path)? {
+            if real_directory_exists(&final_entity_path)?
+                && staged_tree_snapshot_at(&final_entity_path)?
                     == replacement.original_tree_snapshot
             {
-                return remove_empty_backup_directory(&replacement.backup_path, &operations_root);
+                return remove_empty_backup_directory(&backup_path, &operations_root);
             }
             return Err(FileSystemError::RecoveryRequired {
                 operation: "roll back file reinstall",
-                path: replacement.backup_path.clone(),
+                path: backup_path,
                 message: "the owned backup is missing and the original entity is not restored"
                     .into(),
             });
         }
-        let backup_tree = staged_tree_snapshot_at(&replacement.backup_path)?;
+        let backup_tree = staged_tree_snapshot_at(&backup_path)?;
         ensure_moved_tree_matches(
             &backup_tree,
             &replacement.original_tree_snapshot,
-            &replacement.backup_path,
+            &backup_path,
         )?;
         remove_owned_directory_if_present(
-            &replacement.final_entity_path,
+            &final_entity_path,
             Some(&replacement.installed_fingerprint),
             "remove failed file reinstall replacement",
         )?;
-        ensure_directory_fingerprint(&replacement.backup_path, &replacement.backup_fingerprint)?;
-        fs::rename(&replacement.backup_path, &replacement.final_entity_path).map_err(|source| {
-            FileSystemError::Io {
-                operation: "restore file reinstall backup",
-                path: replacement.final_entity_path.clone(),
-                source,
-            }
+        ensure_directory_fingerprint(&backup_path, &replacement.backup_fingerprint)?;
+        fs::rename(&backup_path, &final_entity_path).map_err(|source| FileSystemError::Io {
+            operation: "restore file reinstall backup",
+            path: final_entity_path.clone(),
+            source,
         })?;
-        if staged_tree_snapshot_at(&replacement.final_entity_path)?
-            != replacement.original_tree_snapshot
-        {
-            return Err(stale_tree_entry(&replacement.final_entity_path));
+        if staged_tree_snapshot_at(&final_entity_path)? != replacement.original_tree_snapshot {
+            return Err(stale_tree_entry(&final_entity_path));
         }
-        remove_empty_backup_directory(&replacement.backup_path, &operations_root)
+        remove_empty_backup_directory(&backup_path, &operations_root)
     }
 
     fn write_file_import_journal(
@@ -4429,7 +4426,9 @@ impl FileSystem for MacOsFileSystem {
             let Some(operation_id) = operation_name.to_str() else {
                 continue;
             };
-            if !operation_id.starts_with("source-promotion-") {
+            if !operation_id.starts_with("source-promotion-")
+                && !operation_id.starts_with("source-update-")
+            {
                 continue;
             }
             validate_source_promotion_operation_id(operation_id)?;
@@ -4694,7 +4693,8 @@ fn validate_source_transition_operation_id(operation_id: &str) -> Result<(), Fil
 
 fn validate_source_promotion_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;
-    if !operation_id.starts_with("source-promotion-") {
+    if !operation_id.starts_with("source-promotion-") && !operation_id.starts_with("source-update-")
+    {
         return Err(FileSystemError::InvalidConfiguredPath {
             path: PathBuf::from(operation_id),
         });
@@ -7627,7 +7627,14 @@ fn remove_empty_backup_directory(
     }
     match fs::remove_dir(backup_root) {
         Ok(()) => Ok(()),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
         Err(source) => Err(FileSystemError::Io {
             operation: "remove empty file reinstall backup directory",
             path: backup_root.to_path_buf(),
@@ -7666,7 +7673,9 @@ fn validate_staging_operation_id(operation_id: &str) -> Result<(), FileSystemErr
     validate_operation_id(operation_id)?;
     if !(operation_id.starts_with("adopt-")
         || operation_id.starts_with("handoff-")
-        || operation_id.starts_with("source-transition-"))
+        || operation_id.starts_with("source-transition-")
+        || operation_id.starts_with("source-promotion-")
+        || operation_id.starts_with("source-update-"))
     {
         return Err(FileSystemError::InvalidConfiguredPath {
             path: PathBuf::from(operation_id),

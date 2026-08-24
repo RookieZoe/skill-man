@@ -19,4 +19,5 @@ pub mod remote_provider;
 pub mod source;
 pub mod source_promotion_store;
 pub mod source_transition_store;
+pub mod source_update_store;
 pub mod volume_identity;

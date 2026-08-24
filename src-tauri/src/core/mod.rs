@@ -17,6 +17,7 @@ pub mod preferences;
 pub mod source_group_preview;
 pub mod source_promotion;
 pub mod source_transition;
+pub mod source_update;
 pub mod startup;
 pub mod update;
 pub mod write_gate;

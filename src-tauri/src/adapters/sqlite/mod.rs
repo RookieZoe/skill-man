@@ -42,6 +42,9 @@ use crate::seams::source_promotion_store::{
 use crate::seams::source_transition_store::{
     SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
+use crate::seams::source_update_store::{
+    SourceUpdateCurrentSource, SourceUpdateMember, SourceUpdateStore, SourceUpdateStoreError,
+};
 
 mod prepared;
 pub use prepared::SqlitePreparedCatalogFactory;
@@ -1352,6 +1355,452 @@ pub struct PersistedSkillDetail {
     pub file_source_original_path: Option<String>,
 }
 
+impl SourceUpdateStore for SqliteCatalogStore {
+    fn read_source_update(
+        &self,
+        remote_id: &str,
+    ) -> Result<SourceUpdateCurrentSource, SourceUpdateStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let (provider, canonical_url, tracking_ref, current_release_id, created_at): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                "SELECT source.provider, source.canonical_url, source.tracking_ref,
+                        source.current_release_id, parent.created_at
+                   FROM git_repository_sources source
+                   JOIN remote_source_parents parent ON parent.remote_id = source.remote_id
+                  WHERE source.remote_id = ?1",
+                [remote_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                SourceUpdateStoreError::Conflict(
+                    "the selected Git Repository Source is no longer complete".into(),
+                )
+            })?;
+        let current_resolved_commit: String = connection
+            .query_row(
+                "SELECT resolved_commit FROM git_source_releases
+                  WHERE release_id = ?1 AND remote_id = ?2 AND tracking_ref = ?3",
+                params![current_release_id, remote_id, tracking_ref],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                SourceUpdateStoreError::Conflict(
+                    "the current Git Repository Source release is missing".into(),
+                )
+            })?;
+        let aliases = connection
+            .prepare(
+                "SELECT alias_url FROM remote_source_aliases
+                  WHERE remote_id = ?1 ORDER BY alias_url",
+            )
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .query_map([remote_id], |row| row.get::<_, String>(0))
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                        skills.display_name, skills.description, skills.library_entry_path,
+                        skills.final_entity_path, skills.recorded_content_hash, skills.health,
+                        members.current_skill_path, members.current_baseline_hash,
+                        members.remote_baseline_hash
+                   FROM git_source_members members
+                   JOIN skills ON skills.id = members.skill_id
+                  WHERE members.remote_id = ?1
+                  ORDER BY members.current_skill_path, skills.id",
+            )
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        let mut members = statement
+            .query_map([remote_id], |row| {
+                Ok(SourceUpdateMember {
+                    skill_id: SkillId(row.get(0)?),
+                    directory_name: row.get(1)?,
+                    identity_key: row.get(2)?,
+                    display_name: row.get(3)?,
+                    description: row.get(4)?,
+                    library_entry_path: PathBuf::from(row.get::<_, String>(5)?),
+                    final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
+                    recorded_content_hash: row.get(7)?,
+                    health: parse_health(&row.get::<_, String>(8)?)?,
+                    skill_path: row.get(9)?,
+                    current_baseline_hash: row.get(10)?,
+                    remote_baseline_hash: row.get(11)?,
+                    activations: Vec::new(),
+                })
+            })
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        drop(statement);
+        for member in &mut members {
+            member.activations = connection
+                .prepare(
+                    "SELECT agent_id, expected_entry_path, expected_target_path,
+                            desired_enabled, observed_state, last_enabled_at, last_checked_at
+                       FROM activations WHERE skill_id = ?1 ORDER BY agent_id",
+                )
+                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+                .query_map([&member.skill_id.0], |row| {
+                    Ok(SourcePromotionActivationRecord {
+                        agent_id: AgentId(row.get(0)?),
+                        entry_path: PathBuf::from(row.get::<_, String>(1)?),
+                        target_path: PathBuf::from(row.get::<_, String>(2)?),
+                        desired_enabled: row.get(3)?,
+                        observed_state: parse_observed_state(&row.get::<_, String>(4)?)?,
+                        last_enabled_at: row.get(5)?,
+                        last_checked_at: row.get(6)?,
+                    })
+                })
+                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        }
+        let release_member_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = ?1",
+                [&current_release_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        let release_members = connection
+            .prepare(
+                "SELECT skill_path, tree_hash FROM git_source_release_members
+                  WHERE release_id = ?1 ORDER BY skill_path",
+            )
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .query_map([&current_release_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
+        let member_paths = members
+            .iter()
+            .map(|member| member.skill_path.as_str())
+            .collect::<BTreeSet<_>>();
+        let member_ids = members
+            .iter()
+            .map(|member| member.skill_id.0.as_str())
+            .collect::<BTreeSet<_>>();
+        let release_paths = release_members
+            .iter()
+            .map(|(skill_path, _)| skill_path.as_str())
+            .collect::<BTreeSet<_>>();
+        if members.is_empty()
+            || release_member_count != members.len() as i64
+            || release_members.len() != members.len()
+            || member_paths.len() != members.len()
+            || member_ids.len() != members.len()
+            || release_paths.len() != members.len()
+            || members.iter().any(|member| {
+                member.skill_path.is_empty()
+                    || member.current_baseline_hash.is_empty()
+                    || member.remote_baseline_hash.is_empty()
+                    || !release_members.iter().any(|(skill_path, tree_hash)| {
+                        skill_path == &member.skill_path
+                            && tree_hash == &member.remote_baseline_hash
+                    })
+            })
+        {
+            return Err(SourceUpdateStoreError::Conflict(
+                "the Git Repository Source does not have one complete current member set".into(),
+            ));
+        }
+        let forbidden_local_link_roots = connection
+            .prepare("SELECT skills_path FROM agents ORDER BY id")
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        Ok(SourceUpdateCurrentSource {
+            remote_id: remote_id.into(),
+            provider,
+            canonical_url,
+            tracking_ref,
+            current_release_id,
+            current_resolved_commit,
+            aliases,
+            created_at,
+            members,
+            forbidden_local_link_roots,
+        })
+    }
+
+    fn validate_source_update(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<(), SourceUpdateStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        validate_source_update_record(&connection, record)
+    }
+
+    fn commit_source_update(
+        &self,
+        record: SourcePromotionRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(source_update_sql_error)?;
+        if source_update_target_matches(&transaction, &record)? {
+            let snapshot_version: i64 = transaction
+                .query_row(
+                    "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(source_update_sql_error)?;
+            transaction.commit().map_err(source_update_sql_error)?;
+            return u64::try_from(snapshot_version).map_err(|_| {
+                SourceUpdateStoreError::Unavailable("negative SQLite snapshot version".into())
+            });
+        }
+        validate_source_update_record(&transaction, &record)?;
+        transaction
+            .execute(
+                "INSERT INTO git_source_releases (
+                    release_id, remote_id, tracking_ref, resolved_commit, discovered_at
+                 ) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    record.release_id,
+                    record.remote_id,
+                    record.tracking_ref,
+                    record.resolved_commit,
+                ],
+            )
+            .map_err(source_update_sql_error)?;
+        for member in &record.members {
+            transaction
+                .execute(
+                    "INSERT INTO git_source_release_members (
+                        release_id, skill_path, skill_name, tree_hash, provider_hash
+                     ) VALUES (?1, ?2, ?3, ?4, NULL)",
+                    params![
+                        record.release_id,
+                        member.skill_path,
+                        member.directory_name,
+                        member.remote_baseline_hash,
+                    ],
+                )
+                .map_err(source_update_sql_error)?;
+            match member.origin {
+                SourcePromotionMemberOrigin::Legacy => {
+                    let updated = transaction
+                        .execute(
+                            "UPDATE skills
+                                SET display_name = ?1,
+                                    description = ?2,
+                                    source_kind = 'remote_install',
+                                    library_entry_path = ?3,
+                                    final_entity_path = ?3,
+                                    recorded_content_hash = ?4,
+                                    health = ?5,
+                                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                              WHERE id = ?6",
+                            params![
+                                member.display_name,
+                                member.description,
+                                member.final_entity_path.to_string_lossy(),
+                                member.current_baseline_hash,
+                                health_value(member.health),
+                                member.skill_id.0,
+                            ],
+                        )
+                        .map_err(source_update_sql_error)?;
+                    if updated != 1 {
+                        return Err(SourceUpdateStoreError::Conflict(format!(
+                            "Source Member '{}' changed before Source Update",
+                            member.directory_name
+                        )));
+                    }
+                    let updated = transaction
+                        .execute(
+                            "UPDATE git_source_members
+                                SET current_skill_path = ?1,
+                                    remote_baseline_hash = ?2,
+                                    current_baseline_hash = ?3,
+                                    last_checked_at = unixepoch('now'),
+                                    last_updated_at = unixepoch('now')
+                              WHERE skill_id = ?4 AND remote_id = ?5",
+                            params![
+                                member.skill_path,
+                                member.remote_baseline_hash,
+                                member.current_baseline_hash,
+                                member.skill_id.0,
+                                record.remote_id,
+                            ],
+                        )
+                        .map_err(source_update_sql_error)?;
+                    if updated != 1 {
+                        return Err(SourceUpdateStoreError::Conflict(format!(
+                            "Source Member '{}' left the current source before Source Update",
+                            member.directory_name
+                        )));
+                    }
+                }
+                SourcePromotionMemberOrigin::New => {
+                    transaction
+                        .execute(
+                            "INSERT INTO skills (
+                                id, directory_name, identity_key, display_name, description,
+                                source_kind, library_entry_path, final_entity_path,
+                                recorded_content_hash, health, created_at, updated_at
+                             ) VALUES (
+                                ?1, ?2, ?3, ?4, ?5,
+                                'remote_install', ?6, ?6, ?7, ?8,
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                            params![
+                                member.skill_id.0,
+                                member.directory_name,
+                                member.identity_key,
+                                member.display_name,
+                                member.description,
+                                member.final_entity_path.to_string_lossy(),
+                                member.current_baseline_hash,
+                                health_value(member.health),
+                            ],
+                        )
+                        .map_err(source_update_sql_error)?;
+                    transaction
+                        .execute(
+                            "INSERT INTO git_source_members (
+                                skill_id, remote_id, current_skill_path, remote_baseline_hash,
+                                current_baseline_hash, last_checked_at, last_updated_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch('now'), unixepoch('now'))",
+                            params![
+                                member.skill_id.0,
+                                record.remote_id,
+                                member.skill_path,
+                                member.remote_baseline_hash,
+                                member.current_baseline_hash,
+                            ],
+                        )
+                        .map_err(source_update_sql_error)?;
+                }
+            }
+        }
+        for removed in &record.removed_members {
+            match removed {
+                SourcePromotionRemovedMemberRecord::Remove { skill_id } => {
+                    let deleted = transaction
+                        .execute("DELETE FROM skills WHERE id = ?1", [&skill_id.0])
+                        .map_err(source_update_sql_error)?;
+                    if deleted != 1 {
+                        return Err(SourceUpdateStoreError::Conflict(format!(
+                            "removed Source Member '{}' changed before Source Update",
+                            skill_id.0
+                        )));
+                    }
+                }
+                SourcePromotionRemovedMemberRecord::LocalLink {
+                    skill_id,
+                    final_entity_path,
+                } => {
+                    let updated = transaction
+                        .execute(
+                            "UPDATE skills
+                                SET source_kind = 'link', library_entry_path = NULL,
+                                    final_entity_path = ?1, recorded_content_hash = NULL,
+                                    health = 'healthy',
+                                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                              WHERE id = ?2",
+                            params![final_entity_path.to_string_lossy(), skill_id.0],
+                        )
+                        .map_err(source_update_sql_error)?;
+                    if updated != 1 {
+                        return Err(SourceUpdateStoreError::Conflict(format!(
+                            "Local Link Source Member '{}' changed before Source Update",
+                            skill_id.0
+                        )));
+                    }
+                    transaction
+                        .execute(
+                            "DELETE FROM git_source_members WHERE skill_id = ?1",
+                            [&skill_id.0],
+                        )
+                        .map_err(source_update_sql_error)?;
+                }
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE git_repository_sources
+                    SET current_release_id = ?2,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                  WHERE remote_id = ?1 AND provider = ?3 AND canonical_url = ?4 AND tracking_ref = ?5",
+                params![
+                    record.remote_id,
+                    record.release_id,
+                    record.provider,
+                    record.canonical_url,
+                    record.tracking_ref,
+                ],
+            )
+            .map_err(source_update_sql_error)?;
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(source_update_sql_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(source_update_sql_error)?;
+        transaction.commit().map_err(source_update_sql_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            SourceUpdateStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn source_update_is_committed(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<bool, SourceUpdateStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        source_update_target_matches(&connection, record)
+    }
+}
+
 impl SourcePromotionStore for SqliteCatalogStore {
     fn read_legacy_source_promotion(
         &self,
@@ -1546,6 +1995,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
             aliases,
             created_at,
             tracking_ref,
+            current_release_id: None,
             members,
             forbidden_local_link_roots,
         })
@@ -2693,6 +3143,377 @@ fn validate_new_source_transition(
         }
     }
     Ok(())
+}
+
+fn source_update_sql_error(error: rusqlite::Error) -> SourceUpdateStoreError {
+    SourceUpdateStoreError::Unavailable(error.to_string())
+}
+
+fn validate_source_update_record(
+    connection: &Connection,
+    record: &SourcePromotionRecord,
+) -> Result<(), SourceUpdateStoreError> {
+    if record.members.is_empty() {
+        return Err(SourceUpdateStoreError::Conflict(
+            "a Source Update requires a non-empty complete Source Release".into(),
+        ));
+    }
+    if record.legacy.members.is_empty() {
+        return Err(SourceUpdateStoreError::Conflict(
+            "the Source Update is missing its frozen current Source Release".into(),
+        ));
+    }
+    if record.remote_id != record.legacy.remote_id
+        || record.canonical_url != record.legacy.canonical_url
+        || record.tracking_ref != record.legacy.tracking_ref
+        || record.release_id.is_empty()
+        || record.resolved_commit.is_empty()
+        || record.legacy.current_release_id.is_none()
+        || record.resolved_commit == record.legacy.members[0].verification_anchor_commit
+    {
+        return Err(SourceUpdateStoreError::Conflict(
+            "the Source Update record does not describe a newer release of its frozen source"
+                .into(),
+        ));
+    }
+    let legacy_ids = record
+        .legacy
+        .members
+        .iter()
+        .map(|member| member.skill_id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    let frozen_ids = record
+        .legacy_member_ids
+        .iter()
+        .map(|id| id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    if legacy_ids.is_empty()
+        || legacy_ids.len() != record.legacy.members.len()
+        || frozen_ids != legacy_ids
+        || record.legacy.members.iter().any(|member| {
+            member.requested_ref != record.tracking_ref
+                || member.verification_anchor_commit.is_empty()
+                || member.current_baseline_hash.is_empty()
+                || member.remote_baseline_hash.is_empty()
+        })
+    {
+        return Err(SourceUpdateStoreError::Conflict(
+            "the Source Update is missing a complete frozen current member set".into(),
+        ));
+    }
+    if !source_update_frozen_matches(connection, record)? {
+        return Err(SourceUpdateStoreError::Conflict(
+            "the current Git Repository Source changed after its Source Group Draft".into(),
+        ));
+    }
+    let target_ids = record
+        .members
+        .iter()
+        .map(|member| member.skill_id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    let target_paths = record
+        .members
+        .iter()
+        .map(|member| member.skill_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if target_ids.len() != record.members.len()
+        || target_paths.len() != record.members.len()
+        || record.members.iter().any(|member| {
+            member.directory_name.is_empty()
+                || member.identity_key.is_empty()
+                || member.skill_path.is_empty()
+                || member.remote_baseline_hash.is_empty()
+                || member.current_baseline_hash.is_empty()
+        })
+    {
+        return Err(SourceUpdateStoreError::Conflict(
+            "the target Source Release has duplicate or incomplete members".into(),
+        ));
+    }
+    for member in &record.members {
+        match member.origin {
+            SourcePromotionMemberOrigin::Legacy
+                if !legacy_ids.contains(member.skill_id.0.as_str()) =>
+            {
+                return Err(SourceUpdateStoreError::Conflict(
+                    "a target Source Member is not part of the frozen source".into(),
+                ));
+            }
+            SourcePromotionMemberOrigin::New => {
+                let existing: Option<String> = connection
+                    .query_row(
+                        "SELECT directory_name FROM skills
+                          WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3 LIMIT 1",
+                        params![
+                            member.skill_id.0,
+                            member.directory_name,
+                            member.identity_key
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(source_update_sql_error)?;
+                if existing.is_some() {
+                    return Err(SourceUpdateStoreError::Conflict(format!(
+                        "new Source Member '{}' conflicts with the current Library",
+                        member.directory_name
+                    )));
+                }
+            }
+            SourcePromotionMemberOrigin::Legacy => {}
+        }
+    }
+    Ok(())
+}
+
+type SourceUpdateFrozenMemberState = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+type SourceUpdateTargetMemberState = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+fn source_update_frozen_matches(
+    connection: &Connection,
+    record: &SourcePromotionRecord,
+) -> Result<bool, SourceUpdateStoreError> {
+    let source: Option<(String, String, String, Option<String>, String)> = connection
+        .query_row(
+            "SELECT source.provider, source.canonical_url, source.tracking_ref,
+                    source.current_release_id, release.resolved_commit
+               FROM git_repository_sources source
+               JOIN git_source_releases release ON release.release_id = source.current_release_id
+              WHERE source.remote_id = ?1",
+            [&record.remote_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(source_update_sql_error)?;
+    let Some((provider, canonical_url, tracking_ref, current_release_id, resolved_commit)) = source
+    else {
+        return Ok(false);
+    };
+    let Some(current_release_id) = current_release_id else {
+        return Ok(false);
+    };
+    if provider != record.provider
+        || canonical_url != record.canonical_url
+        || tracking_ref != record.tracking_ref
+        || record.legacy.current_release_id.as_deref() != Some(current_release_id.as_str())
+        || record
+            .legacy
+            .members
+            .iter()
+            .any(|member| member.verification_anchor_commit != resolved_commit)
+    {
+        return Ok(false);
+    }
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_members WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| row.get(0),
+        )
+        .map_err(source_update_sql_error)?;
+    if count != record.legacy.members.len() as i64 {
+        return Ok(false);
+    }
+    for member in &record.legacy.members {
+        let actual: Option<SourceUpdateFrozenMemberState> = connection
+            .query_row(
+                "SELECT skills.directory_name, skills.identity_key, skills.display_name,
+                        skills.description, skills.library_entry_path, skills.final_entity_path,
+                        skills.recorded_content_hash, skills.health,
+                        members.current_skill_path, members.remote_baseline_hash,
+                        members.current_baseline_hash, release_members.tree_hash
+                   FROM skills JOIN git_source_members members ON members.skill_id = skills.id
+                   JOIN git_source_release_members release_members
+                     ON release_members.release_id = ?3
+                    AND release_members.skill_path = members.current_skill_path
+                  WHERE skills.id = ?1 AND members.remote_id = ?2",
+                params![member.skill_id.0, record.remote_id, &current_release_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(source_update_sql_error)?;
+        let expected = (
+            member.directory_name.clone(),
+            member.identity_key.clone(),
+            member.display_name.clone(),
+            member.description.clone(),
+            member.library_entry_path.to_string_lossy().into_owned(),
+            member.final_entity_path.to_string_lossy().into_owned(),
+            member.recorded_content_hash.clone(),
+            health_value(member.health).into(),
+            member.skill_path.clone(),
+            member.remote_baseline_hash.clone(),
+            member.current_baseline_hash.clone(),
+            member.remote_baseline_hash.clone(),
+        );
+        if actual != Some(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn source_update_target_matches(
+    connection: &Connection,
+    record: &SourcePromotionRecord,
+) -> Result<bool, SourceUpdateStoreError> {
+    let source: Option<(String, String, String, Option<String>)> = connection
+        .query_row(
+            "SELECT provider, canonical_url, tracking_ref, current_release_id
+               FROM git_repository_sources WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(source_update_sql_error)?;
+    if source
+        != Some((
+            record.provider.clone(),
+            record.canonical_url.clone(),
+            record.tracking_ref.clone(),
+            Some(record.release_id.clone()),
+        ))
+    {
+        return Ok(false);
+    }
+    let release: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT remote_id, tracking_ref, resolved_commit FROM git_source_releases
+              WHERE release_id = ?1",
+            [&record.release_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(source_update_sql_error)?;
+    if release
+        != Some((
+            record.remote_id.clone(),
+            record.tracking_ref.clone(),
+            record.resolved_commit.clone(),
+        ))
+    {
+        return Ok(false);
+    }
+    let release_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = ?1",
+            [&record.release_id],
+            |row| row.get(0),
+        )
+        .map_err(source_update_sql_error)?;
+    let current_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM git_source_members WHERE remote_id = ?1",
+            [&record.remote_id],
+            |row| row.get(0),
+        )
+        .map_err(source_update_sql_error)?;
+    if release_count != record.members.len() as i64 || current_count != record.members.len() as i64
+    {
+        return Ok(false);
+    }
+    for member in &record.members {
+        let actual: Option<SourceUpdateTargetMemberState> = connection
+            .query_row(
+                "SELECT skills.directory_name, skills.identity_key, skills.display_name,
+                        skills.description, skills.library_entry_path, skills.final_entity_path,
+                        skills.recorded_content_hash, skills.health, members.current_skill_path,
+                        members.remote_baseline_hash, members.current_baseline_hash,
+                        release_members.tree_hash
+                   FROM skills JOIN git_source_members members ON members.skill_id = skills.id
+                   JOIN git_source_release_members release_members
+                     ON release_members.release_id = ?3
+                    AND release_members.skill_path = members.current_skill_path
+                  WHERE skills.id = ?1 AND members.remote_id = ?2",
+                params![member.skill_id.0, record.remote_id, &record.release_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(source_update_sql_error)?;
+        let expected = (
+            member.directory_name.clone(),
+            member.identity_key.clone(),
+            member.display_name.clone(),
+            member.description.clone(),
+            member.final_entity_path.to_string_lossy().into_owned(),
+            member.final_entity_path.to_string_lossy().into_owned(),
+            member.current_baseline_hash.clone(),
+            health_value(member.health).into(),
+            member.skill_path.clone(),
+            member.remote_baseline_hash.clone(),
+            member.current_baseline_hash.clone(),
+            member.remote_baseline_hash.clone(),
+        );
+        if actual != Some(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Exact, source-level state check shared by idempotent post-CAS recovery and

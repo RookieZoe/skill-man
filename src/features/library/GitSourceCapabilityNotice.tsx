@@ -9,10 +9,12 @@ export function GitSourceCapabilityNotice({
   report,
   failure,
   onPromote,
+  onUpdate,
 }: {
   report: GitSourceCapabilityReport | null;
   failure: GitSourceCapabilityFailure | null;
   onPromote?: (remoteId: string, trigger: HTMLButtonElement) => void;
+  onUpdate?: (remoteId: string, trigger: HTMLButtonElement) => void;
 }) {
   const { t } = useLocale();
   if (failure) {
@@ -60,6 +62,17 @@ export function GitSourceCapabilityNotice({
                   }
                 >
                   {t("library.source_capability.promote")}
+                </button>
+              ) : null}
+              {source.kind === "git_repository_source" && onUpdate ? (
+                <button
+                  type="button"
+                  className="repair-button"
+                  onClick={(event) =>
+                    onUpdate(source.remoteId, event.currentTarget)
+                  }
+                >
+                  {t("library.source_capability.update")}
                 </button>
               ) : null}
             </li>

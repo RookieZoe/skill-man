@@ -112,6 +112,7 @@ interface LibraryDeskProps {
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
   sourceTransitionResult: SourceTransitionResult | null;
   sourcePromotionActive: boolean;
+  sourceUpdateActive: boolean;
   sourcePromotionDraft: SourcePromotionDraft | null;
   sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
@@ -160,6 +161,7 @@ interface LibraryDeskProps {
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
   onPreviewSourcePromotion: (remoteId: string) => void;
+  onPreviewSourceUpdate: (remoteId: string) => void;
   onConfirmSourcePromotion: (resolutions: SourcePromotionResolution[]) => void;
   onUndoSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
@@ -235,6 +237,7 @@ export function LibraryDesk({
   sourceGroupOutcome,
   sourceTransitionResult,
   sourcePromotionActive,
+  sourceUpdateActive,
   sourcePromotionDraft,
   sourcePromotionResult,
   sourceGroupError,
@@ -274,6 +277,7 @@ export function LibraryDesk({
   onConfirmSourceTransition,
   onUndoSourceTransition,
   onPreviewSourcePromotion,
+  onPreviewSourceUpdate,
   onConfirmSourcePromotion,
   onUndoSourcePromotion,
   onFetchLatestAndManage,
@@ -512,6 +516,10 @@ export function LibraryDesk({
             promotionTrigger.current = trigger;
             onPreviewSourcePromotion(remoteId);
           }}
+          onUpdate={(remoteId, trigger) => {
+            promotionTrigger.current = trigger;
+            onPreviewSourceUpdate(remoteId);
+          }}
         />
       </div>
       <div className="app-background" inert={hasOverlay ? true : undefined}>
@@ -660,6 +668,7 @@ export function LibraryDesk({
           sourceGroupOutcome={sourceGroupOutcome}
           sourceTransitionResult={sourceTransitionResult}
           sourcePromotionActive={sourcePromotionActive}
+          sourceUpdateActive={sourceUpdateActive}
           sourcePromotionDraft={sourcePromotionDraft}
           sourcePromotionResult={sourcePromotionResult}
           sourceGroupError={sourceGroupError}
@@ -1130,6 +1139,7 @@ function LinkImportSheet({
   sourceGroupOutcome,
   sourceTransitionResult,
   sourcePromotionActive,
+  sourceUpdateActive,
   sourcePromotionDraft,
   sourcePromotionResult,
   sourceGroupError,
@@ -1159,6 +1169,7 @@ function LinkImportSheet({
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
   sourceTransitionResult: SourceTransitionResult | null;
   sourcePromotionActive: boolean;
+  sourceUpdateActive: boolean;
   sourcePromotionDraft: SourcePromotionDraft | null;
   sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
@@ -1285,6 +1296,7 @@ function LinkImportSheet({
                 onUndo={onUndoSourcePromotion}
                 onClose={onClose}
                 initialFocusRef={primaryButton}
+                mode={sourceUpdateActive ? "update" : "promotion"}
               />
             ) : (
               <>

@@ -286,6 +286,7 @@ export function App({ client }: AppProps) {
     useState<SourcePromotionDraft | null>(null);
   const [sourcePromotionResult, setSourcePromotionResult] =
     useState<SourcePromotionResult | null>(null);
+  const [sourceUpdateActive, setSourceUpdateActive] = useState(false);
   const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
   const [sourceGroupActivity, setSourceGroupActivity] = useState<
     "idle" | "fetching" | "confirming" | "undoing"
@@ -822,6 +823,7 @@ export function App({ client }: AppProps) {
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
+    setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
@@ -871,7 +873,13 @@ export function App({ client }: AppProps) {
     }
     if (sourcePromotionResult) {
       try {
-        await client.finalizeSourcePromotion(sourcePromotionResult.operationId);
+        if (sourceUpdateActive) {
+          await client.finalizeSourceUpdate(sourcePromotionResult.operationId);
+        } else {
+          await client.finalizeSourcePromotion(
+            sourcePromotionResult.operationId,
+          );
+        }
       } catch (reason) {
         setSourceGroupError(readError(reason, t));
         return;
@@ -934,6 +942,7 @@ export function App({ client }: AppProps) {
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(remoteId);
+    setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
@@ -951,6 +960,33 @@ export function App({ client }: AppProps) {
     }
   }
 
+  async function previewSourceUpdate(remoteId: string) {
+    const runId = ++sourceGroupRunId.current;
+    linkImportRunId.current += 1;
+    setLinkImportPreview(null);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+    setImportKind("git");
+    setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(remoteId);
+    setSourceUpdateActive(true);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
+    setSourceGroupError(null);
+    setSourceGroupActivity("fetching");
+    setIsLinkImportOpen(true);
+    try {
+      const draft = await client.previewSourceUpdate(remoteId);
+      if (runId === sourceGroupRunId.current) setSourcePromotionDraft(draft);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current)
+        setSourceGroupError(readError(reason, t));
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
   async function confirmSourcePromotion(
     resolutions: SourcePromotionResolution[],
   ) {
@@ -959,15 +995,21 @@ export function App({ client }: AppProps) {
     setSourceGroupActivity("confirming");
     setSourceGroupError(null);
     try {
-      const result = await client.confirmSourcePromotion({
+      const request = {
         remoteId: sourcePromotionDraft.remoteId,
         expectedResolvedCommit: sourcePromotionDraft.resolvedCommit,
         resolutions,
-      });
+      };
+      const result = sourceUpdateActive
+        ? await client.confirmSourceUpdate(request)
+        : await client.confirmSourcePromotion(request);
       const snapshot = await client.listSkills(filter);
       if (runId !== sourceGroupRunId.current) return;
       setSkills(snapshot.items);
-      setSourcePromotionResult(result);
+      setSourcePromotionResult({
+        ...result,
+        undoAvailable: !sourceUpdateActive,
+      });
       void client
         .getGitSourceCapability()
         .then((report) => {
@@ -1716,6 +1758,7 @@ export function App({ client }: AppProps) {
         sourceGroupOutcome={sourceGroupOutcome}
         sourceTransitionResult={sourceTransitionResult}
         sourcePromotionActive={sourcePromotionRemoteId !== null}
+        sourceUpdateActive={sourceUpdateActive}
         sourcePromotionDraft={sourcePromotionDraft}
         sourcePromotionResult={sourcePromotionResult}
         sourceGroupError={sourceGroupError}
@@ -1755,6 +1798,7 @@ export function App({ client }: AppProps) {
         onConfirmSourceTransition={confirmSourceTransition}
         onUndoSourceTransition={undoSourceTransition}
         onPreviewSourcePromotion={previewSourcePromotion}
+        onPreviewSourceUpdate={previewSourceUpdate}
         onConfirmSourcePromotion={confirmSourcePromotion}
         onUndoSourcePromotion={undoSourcePromotion}
         relocatePanel={relocatePanel}

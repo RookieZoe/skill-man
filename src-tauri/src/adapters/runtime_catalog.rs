@@ -35,6 +35,9 @@ use crate::seams::source_promotion_store::{
 use crate::seams::source_transition_store::{
     SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
+use crate::seams::source_update_store::{
+    SourceUpdateCurrentSource, SourceUpdateStore, SourceUpdateStoreError,
+};
 
 pub struct RuntimeCatalogStore {
     /// The current SQLite store; `None` means the catalog is closed for
@@ -337,6 +340,56 @@ impl SourcePromotionStore for RuntimeCatalogStore {
             ));
         }
         self.require().undo_source_promotion(record, legacy)
+    }
+}
+
+impl SourceUpdateStore for RuntimeCatalogStore {
+    fn read_source_update(
+        &self,
+        remote_id: &str,
+    ) -> Result<SourceUpdateCurrentSource, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().read_source_update(remote_id)
+    }
+
+    fn validate_source_update(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<(), SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().validate_source_update(record)
+    }
+
+    fn commit_source_update(
+        &self,
+        record: SourcePromotionRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().commit_source_update(record)
+    }
+
+    fn source_update_is_committed(
+        &self,
+        record: &SourcePromotionRecord,
+    ) -> Result<bool, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().source_update_is_committed(record)
     }
 }
 

@@ -19,6 +19,10 @@ pub struct LegacySourcePromotionRecord {
     pub aliases: Vec<String>,
     pub created_at: String,
     pub tracking_ref: String,
+    /// Present only when the record represents a managed Source Update. A
+    /// Legacy Source Promotion has no current Source Release to freeze.
+    #[serde(default)]
+    pub current_release_id: Option<String>,
     pub members: Vec<LegacySourcePromotionMemberRecord>,
     /// Home, configured Agent/shared skills roots, and installer-managed
     /// roots are never stable Local Link destinations.

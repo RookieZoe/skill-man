@@ -527,6 +527,11 @@ pub struct SourceTransitionJournal {
     pub canonical_url: String,
     pub tracking_ref: String,
     pub resolved_commit: String,
+    /// The exact managed-source manifest is frozen before the ownership CAS.
+    /// Older journals predate Source Releases and recover through the
+    /// transition service's compatibility path.
+    #[serde(default)]
+    pub target_manifest: Option<RemoteParentManifest>,
     pub lock_path: PathBuf,
     pub lock_fingerprint: String,
     pub lock_entries: Vec<crate::seams::installer_lock_store::LockEntry>,

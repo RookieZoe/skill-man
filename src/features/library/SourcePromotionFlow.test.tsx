@@ -107,3 +107,27 @@ test("requires explicit, limited resolutions before confirming the whole Source 
     },
   ]);
 });
+
+test("uses Source Update terminology when advancing a managed source", () => {
+  render(
+    <SourcePromotionFlow
+      draft={draft}
+      result={null}
+      error={null}
+      activity="idle"
+      onConfirm={vi.fn()}
+      onUndo={vi.fn()}
+      onClose={vi.fn()}
+      initialFocusRef={null}
+      mode="update"
+    />,
+  );
+
+  expect(
+    screen.getByRole("heading", { name: "Review Source Update" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Confirm Source Update" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Legacy Source Promotion")).not.toBeInTheDocument();
+});

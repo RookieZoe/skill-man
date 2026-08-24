@@ -27,7 +27,9 @@ use crate::seams::filesystem::{
     ActivationEntrySnapshot, DirectoryFingerprint, FileReplacement, FileSystem, FileSystemError,
     RemoteParentManifest, StagedTreeSnapshot,
 };
-use crate::seams::installer_lock_store::{EmptyInstallerLockStore, InstallerLockStore};
+use crate::seams::installer_lock_store::{
+    EmptyInstallerLockStore, InstallerLockStore, LockFileReport,
+};
 use crate::seams::source::{GitSource, SourceError};
 use crate::seams::source_promotion_store::{
     LegacySourcePromotionRecord, SourcePromotionMemberOrigin, SourcePromotionMemberRecord,
@@ -199,6 +201,8 @@ pub enum SourcePromotionError {
     Draft(#[from] SourcePromotionDraftError),
     #[error("Source Promotion recovery is required: {0}")]
     RecoveryRequired(String),
+    #[error("Ownership Conflict: an external installer claims this Git Repository Source")]
+    OwnershipConflict,
 }
 
 const SOURCE_PROMOTION_JOURNAL_VERSION: u32 = 1;
@@ -235,6 +239,12 @@ enum SourcePromotionPhase {
     Undoing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourcePromotionMode {
+    LegacyPromotion,
+    SourceUpdate,
+}
+
 /// The public Core seam for an explicit Source Promotion preview.  It reads
 /// one durable Legacy parent, discovers a fresh complete release through the
 /// same Source Group Preview service as a clean transition, then classifies
@@ -249,6 +259,8 @@ pub struct SourcePromotionService {
     home_context: Option<Arc<WriteGate>>,
     write_gate: Arc<WriteGate>,
     lock_store: Arc<dyn InstallerLockStore>,
+    external_owner_roots: Vec<PathBuf>,
+    mode: SourcePromotionMode,
     next_id: AtomicU64,
 }
 
@@ -271,8 +283,24 @@ impl SourcePromotionService {
             home_context: None,
             write_gate: Arc::new(WriteGate::open_for_tests()),
             lock_store: Arc::new(EmptyInstallerLockStore),
+            external_owner_roots: Vec::new(),
+            mode: SourcePromotionMode::LegacyPromotion,
             next_id: AtomicU64::new(1),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_source_update(
+        preview: Arc<SourceGroupPreviewService>,
+        git_source: Arc<dyn GitSource>,
+        store: Arc<dyn SourcePromotionStore>,
+        filesystem: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+        library_root: PathBuf,
+    ) -> Self {
+        let mut service = Self::new(preview, git_source, store, filesystem, clock, library_root);
+        service.mode = SourcePromotionMode::SourceUpdate;
+        service
     }
 
     pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
@@ -287,6 +315,11 @@ impl SourcePromotionService {
 
     pub fn with_lock_store(mut self, lock_store: Arc<dyn InstallerLockStore>) -> Self {
         self.lock_store = lock_store;
+        self
+    }
+
+    pub fn with_external_owner_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.external_owner_roots = roots;
         self
     }
 
@@ -310,34 +343,54 @@ impl SourcePromotionService {
             ));
         }
         let record = self.store.read_legacy_source_promotion(remote_id)?;
-        let manifest = self
-            .filesystem
-            .read_remote_parent_manifest(
-                &self.active_library_root()?.join("remotes"),
-                &record.remote_id,
-            )?
-            .ok_or_else(|| {
-                SourcePromotionError::Validation(
+        let manifest = self.filesystem.read_remote_parent_manifest(
+            &self.active_library_root()?.join("remotes"),
+            &record.remote_id,
+        )?;
+        match (self.mode, manifest) {
+            (SourcePromotionMode::LegacyPromotion, None) => {
+                return Err(SourcePromotionError::Validation(
                     "the selected Legacy Source Promotion is missing its source capability manifest"
                         .into(),
-                )
-            })?;
-        let mut catalog_aliases = record.aliases.clone();
-        let mut manifest_aliases = manifest.aliases;
-        catalog_aliases.sort();
-        manifest_aliases.sort();
-        let still_legacy = manifest.provider.is_none()
-            && manifest.tracking_ref.is_none()
-            && manifest.current_release_id.is_none();
-        if manifest.remote_id != record.remote_id
-            || manifest.canonical_url != record.canonical_url
-            || manifest_aliases != catalog_aliases
-            || !still_legacy
-        {
-            return Err(SourcePromotionError::Validation(
-                "the selected Legacy Source Promotion has incomplete or conflicting source capability facts"
-                    .into(),
-            ));
+                ));
+            }
+            (SourcePromotionMode::SourceUpdate, None) => {
+                // #63 sources predate the managed-source manifest. Their
+                // SQLite current-release facts remain authoritative for this
+                // zero-write Preview; confirmation journals and publishes
+                // the new manifest with the source-level release.
+            }
+            (_, Some(manifest)) => {
+                let mut catalog_aliases = record.aliases.clone();
+                let mut manifest_aliases = manifest.aliases;
+                catalog_aliases.sort();
+                manifest_aliases.sort();
+                let still_legacy = manifest.provider.is_none()
+                    && manifest.tracking_ref.is_none()
+                    && manifest.current_release_id.is_none();
+                let manifest_matches_mode = match self.mode {
+                    SourcePromotionMode::LegacyPromotion => still_legacy,
+                    SourcePromotionMode::SourceUpdate => {
+                        manifest
+                            .provider
+                            .as_deref()
+                            .is_some_and(|value| !value.is_empty())
+                            && manifest.tracking_ref.as_deref()
+                                == Some(record.tracking_ref.as_str())
+                            && manifest.current_release_id == record.current_release_id
+                    }
+                };
+                if manifest.remote_id != record.remote_id
+                    || manifest.canonical_url != record.canonical_url
+                    || manifest_aliases != catalog_aliases
+                    || !manifest_matches_mode
+                {
+                    return Err(SourcePromotionError::Validation(
+                        "the selected Legacy Source Promotion has incomplete or conflicting source capability facts"
+                            .into(),
+                    ));
+                }
+            }
         }
         let members = record
             .members
@@ -349,7 +402,15 @@ impl SourcePromotionService {
                     skill_id: member.skill_id,
                     directory_name: member.directory_name,
                     skill_path: member.skill_path,
-                    current_baseline_hash: member.current_baseline_hash,
+                    // A managed Source Update compares local bytes with the
+                    // last remote baseline, not with a prior KeepModified
+                    // snapshot. The latter is frozen in `record` for CAS,
+                    // but must never make a later Update silently overwrite
+                    // those local edits.
+                    current_baseline_hash: match self.mode {
+                        SourcePromotionMode::LegacyPromotion => member.current_baseline_hash,
+                        SourcePromotionMode::SourceUpdate => member.remote_baseline_hash,
+                    },
                     current_tree_hash,
                 })
             })
@@ -374,9 +435,24 @@ impl SourcePromotionService {
             ));
         };
         if !preview.external_ownership_claims.is_empty() {
-            return Err(SourcePromotionError::Validation(
-                "a Legacy Source Promotion cannot merge external ownership claims".into(),
-            ));
+            return Err(match self.mode {
+                SourcePromotionMode::LegacyPromotion => SourcePromotionError::Validation(
+                    "a Legacy Source Promotion cannot merge external ownership claims".into(),
+                ),
+                SourcePromotionMode::SourceUpdate => SourcePromotionError::OwnershipConflict,
+            });
+        }
+        if self.mode == SourcePromotionMode::SourceUpdate
+            && self.source_update_external_reappeared(
+                &record,
+                &self
+                    .lock_store
+                    .discover()
+                    .map_err(|error| SourcePromotionError::Validation(error.to_string()))?,
+                &[],
+            )?
+        {
+            return Err(SourcePromotionError::OwnershipConflict);
         }
         Ok((record, SourcePromotionDraft::build(legacy, preview)?))
     }
@@ -498,6 +574,54 @@ impl SourcePromotionService {
             SourcePromotionPhase::MembersStaged,
             "record Source Promotion staged members",
         )?;
+
+        // `stage_skill` and every other Draft preparation step are
+        // intentionally outside the mutation boundary. Recheck immediately
+        // before publishing any Source Update bytes so an external installer
+        // cannot reappear between the earlier prepare guard and commit.
+        if self.mode == SourcePromotionMode::SourceUpdate {
+            let reappeared = (|| -> Result<bool, SourcePromotionError> {
+                let target_directory_names = draft
+                    .target_members
+                    .iter()
+                    .map(|member| member.member.directory_name.clone())
+                    .collect::<Vec<_>>();
+                let lock_reports = self
+                    .lock_store
+                    .discover()
+                    .map_err(|error| SourcePromotionError::Validation(error.to_string()))?;
+                self.source_update_external_reappeared(
+                    &legacy_record,
+                    &lock_reports,
+                    &target_directory_names,
+                )
+            })();
+            let reappeared = match reappeared {
+                Ok(reappeared) => reappeared,
+                Err(error) => {
+                    let _ = self.filesystem.discard_staging(
+                        &journal.staging_operation_root,
+                        &library_root,
+                        Some(&staging_fingerprint),
+                    );
+                    let _ = self
+                        .filesystem
+                        .finish_source_promotion_journal(&library_root, &operation_id);
+                    return Err(error);
+                }
+            };
+            if reappeared {
+                let _ = self.filesystem.discard_staging(
+                    &journal.staging_operation_root,
+                    &library_root,
+                    Some(&staging_fingerprint),
+                );
+                let _ = self
+                    .filesystem
+                    .finish_source_promotion_journal(&library_root, &operation_id);
+                return Err(SourcePromotionError::OwnershipConflict);
+            }
+        }
 
         journal.phase = SourcePromotionPhase::FilesystemApplying;
         self.write_journal(&library_root, &journal)?;
@@ -642,6 +766,9 @@ impl SourcePromotionService {
             .filesystem
             .list_source_promotion_journals(library_root)?
         {
+            if !self.accepts_operation_id(&operation_id) {
+                continue;
+            }
             let mut journal = self.decode_journal(&operation_id, &bytes)?;
             match journal.phase {
                 SourcePromotionPhase::Planned | SourcePromotionPhase::MembersStaged => {
@@ -692,8 +819,16 @@ impl SourcePromotionService {
                         ));
                     }
                     self.verify_final_source(library_root, &journal)?;
-                    journal.phase = SourcePromotionPhase::Finalized;
-                    self.write_journal(library_root, &journal)?;
+                    if self.mode == SourcePromotionMode::SourceUpdate {
+                        // Source Updates have no Undo window. A restart has
+                        // no result dialog that can finalize this operation,
+                        // so reclaim the frozen staging and backups once the
+                        // fixed release is proved current.
+                        self.complete_finalization(library_root, &journal)?;
+                    } else {
+                        journal.phase = SourcePromotionPhase::Finalized;
+                        self.write_journal(library_root, &journal)?;
+                    }
                 }
                 SourcePromotionPhase::Finalizing => {
                     self.complete_finalization(library_root, &journal)?;
@@ -894,13 +1029,20 @@ impl SourcePromotionService {
         })?;
         if journal.version != SOURCE_PROMOTION_JOURNAL_VERSION
             || journal.operation_id != operation_id
-            || !operation_id.starts_with("source-promotion-")
+            || !self.accepts_operation_id(operation_id)
         {
             return Err(SourcePromotionError::RecoveryRequired(format!(
                 "Source Promotion journal '{operation_id}' has an unsupported identity or version"
             )));
         }
         Ok(journal)
+    }
+
+    fn accepts_operation_id(&self, operation_id: &str) -> bool {
+        match self.mode {
+            SourcePromotionMode::LegacyPromotion => operation_id.starts_with("source-promotion-"),
+            SourcePromotionMode::SourceUpdate => operation_id.starts_with("source-update-"),
+        }
     }
 
     fn journal_for(
@@ -1037,10 +1179,25 @@ impl SourcePromotionService {
         legacy_record: &LegacySourcePromotionRecord,
     ) -> Result<PreparedPromotion, SourcePromotionError> {
         let draft = &confirmed.draft;
-        let installer_roots = self
+        let lock_reports = self
             .lock_store
             .discover()
-            .map_err(|error| SourcePromotionError::Validation(error.to_string()))?
+            .map_err(|error| SourcePromotionError::Validation(error.to_string()))?;
+        let target_directory_names = draft
+            .target_members
+            .iter()
+            .map(|member| member.member.directory_name.clone())
+            .collect::<Vec<_>>();
+        if self.mode == SourcePromotionMode::SourceUpdate
+            && self.source_update_external_reappeared(
+                legacy_record,
+                &lock_reports,
+                &target_directory_names,
+            )?
+        {
+            return Err(SourcePromotionError::OwnershipConflict);
+        }
+        let installer_roots = lock_reports
             .into_iter()
             .filter_map(|report| report.path.parent().map(Path::to_path_buf))
             .collect::<Vec<_>>();
@@ -1310,21 +1467,26 @@ impl SourcePromotionService {
             let Some(existing_snapshot) = &member.replace_existing else {
                 continue;
             };
+            let normalized_library_root =
+                self.filesystem.normalize_configured_path(library_root)?;
+            let normalized_final_entity_path = self
+                .filesystem
+                .normalize_configured_path(&member.record.final_entity_path)?;
             let directory_name = member.record.final_entity_path.file_name().ok_or_else(|| {
                 SourcePromotionError::Validation(
                     "a Source Promotion member has no directory name".into(),
                 )
             })?;
-            let backup_path = library_root
+            let backup_path = normalized_library_root
                 .join("operations")
                 .join(operation_id)
                 .join("backup")
                 .join(directory_name);
             let planned = FileReplacement {
-                final_entity_path: member.record.final_entity_path.clone(),
+                final_entity_path: normalized_final_entity_path.clone(),
                 installed_fingerprint: moved_fingerprint(
                     &member.staged_snapshot.root,
-                    &member.record.final_entity_path,
+                    &normalized_final_entity_path,
                 ),
                 backup_path: backup_path.clone(),
                 backup_fingerprint: moved_fingerprint(&existing_snapshot.root, &backup_path),
@@ -1340,7 +1502,7 @@ impl SourcePromotionService {
                 &member.staged_snapshot,
                 existing_snapshot,
             )?;
-            if replacement != planned {
+            if !same_replacement(&replacement, &planned) {
                 return Err(SourcePromotionError::RecoveryRequired(
                     "the replacement result no longer matches its frozen Source Promotion action"
                         .into(),
@@ -1440,7 +1602,7 @@ impl SourcePromotionService {
                     &planned.backup_path,
                     library_root,
                 )?;
-                if fingerprint != planned.fingerprint {
+                if !same_directory_identity(&fingerprint, &planned.fingerprint) {
                     return Err(SourcePromotionError::RecoveryRequired(
                         "the removed member backup no longer matches its frozen Source Promotion action"
                             .into(),
@@ -1474,7 +1636,7 @@ impl SourcePromotionService {
                 operation_id,
                 &member.staged_snapshot,
             )?;
-            if fingerprint != planned_fingerprint {
+            if !same_directory_identity(&fingerprint, &planned_fingerprint) {
                 return Err(SourcePromotionError::RecoveryRequired(
                     "the new member install no longer matches its frozen Source Promotion action"
                         .into(),
@@ -1606,10 +1768,74 @@ impl SourcePromotionService {
 
     fn next_operation_id(&self) -> String {
         let number = self.next_id.fetch_add(1, Ordering::Relaxed);
-        format!(
-            "source-promotion-{}-{number}",
-            self.clock.unix_epoch_nanos()
-        )
+        let prefix = match self.mode {
+            SourcePromotionMode::LegacyPromotion => "source-promotion",
+            SourcePromotionMode::SourceUpdate => "source-update",
+        };
+        format!("{prefix}-{}-{number}", self.clock.unix_epoch_nanos())
+    }
+
+    /// A managed source has no external owner. Reappearance is therefore a
+    /// conflict, whether an installer re-declares its source in a lock or
+    /// recreates one of its entity paths without a lock. We repeat this
+    /// check immediately before staging so a preview cannot race it.
+    fn source_update_external_reappeared(
+        &self,
+        record: &LegacySourcePromotionRecord,
+        lock_reports: &[LockFileReport],
+        target_directory_names: &[String],
+    ) -> Result<bool, SourcePromotionError> {
+        let source_url = parse_git_source_input(&record.canonical_url)
+            .map_err(|error| SourcePromotionError::Validation(error.to_string()))?
+            .url;
+        let member_names = record
+            .members
+            .iter()
+            .map(|member| member.directory_name.as_str())
+            .chain(target_directory_names.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        for report in lock_reports {
+            if report.fault.is_some() {
+                return Ok(true);
+            }
+            if report
+                .entry_faults
+                .iter()
+                .any(|fault| member_names.contains(fault.name.as_str()))
+            {
+                return Ok(true);
+            }
+            for entry in &report.entries {
+                let declares_member = member_names.contains(entry.name.as_str());
+                let declares_source = parse_git_source_input(&entry.source_url)
+                    .ok()
+                    .is_some_and(|entry_source| entry_source.url == source_url);
+                if declares_member || declares_source {
+                    return Ok(true);
+                }
+            }
+        }
+
+        let mut roots = self
+            .external_owner_roots
+            .iter()
+            .chain(record.forbidden_local_link_roots.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for report in lock_reports {
+            if let Some(parent) = report.path.parent() {
+                roots.insert(parent.to_path_buf());
+                roots.insert(parent.join("skills"));
+            }
+        }
+        for root in roots {
+            for member_name in &member_names {
+                if self.filesystem.path_is_occupied(&root.join(member_name))? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn next_uuid(&self) -> String {
@@ -1693,6 +1919,16 @@ fn moved_fingerprint(
 
 fn same_directory_identity(left: &DirectoryFingerprint, right: &DirectoryFingerprint) -> bool {
     left.device == right.device && left.inode == right.inode
+}
+
+fn same_replacement(left: &FileReplacement, right: &FileReplacement) -> bool {
+    same_directory_identity(&left.installed_fingerprint, &right.installed_fingerprint)
+        && same_directory_identity(&left.backup_fingerprint, &right.backup_fingerprint)
+        && same_directory_identity(
+            &left.original_tree_snapshot.root,
+            &right.original_tree_snapshot.root,
+        )
+        && left.original_tree_snapshot.content_hash == right.original_tree_snapshot.content_hash
 }
 
 fn legacy_final_path(

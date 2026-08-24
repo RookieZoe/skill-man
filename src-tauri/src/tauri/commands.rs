@@ -52,6 +52,7 @@ use crate::tauri_adapter::locale_api::LocaleApi;
 use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
 use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
 use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
+use crate::tauri_adapter::source_update_api::SourceUpdateApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
 use crate::tauri_adapter::{lifecycle, tray};
@@ -159,6 +160,30 @@ pub fn undo_source_promotion(
 #[tauri::command]
 pub fn finalize_source_promotion(
     state: State<'_, SourcePromotionApi>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.finalize(request)
+}
+
+#[tauri::command]
+pub fn preview_source_update(
+    state: State<'_, SourceUpdateApi>,
+    request: PreviewSourcePromotionRequestDto,
+) -> Result<SourcePromotionDraftDto, CommandFailureDto> {
+    state.preview(request)
+}
+
+#[tauri::command]
+pub fn confirm_source_update(
+    state: State<'_, SourceUpdateApi>,
+    request: ConfirmSourcePromotionRequestDto,
+) -> Result<SourcePromotionResultDto, CommandFailureDto> {
+    state.confirm(request)
+}
+
+#[tauri::command]
+pub fn finalize_source_update(
+    state: State<'_, SourceUpdateApi>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
     state.finalize(request)

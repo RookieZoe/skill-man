@@ -12,6 +12,7 @@ use crate::core::domain::{
 };
 use crate::core::source_promotion::SourcePromotionService;
 use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
+use crate::core::source_update::SourceUpdateService;
 use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
 use crate::seams::filesystem::ActivationRecoveryBaseline;
@@ -154,6 +155,7 @@ pub struct MaintenanceService {
     plan_ttl: Duration,
     source_transition_recovery: Option<Arc<SourceTransitionService>>,
     source_promotion_recovery: Option<Arc<SourcePromotionService>>,
+    source_update_recovery: Option<Arc<SourceUpdateService>>,
 }
 
 impl Clone for MaintenanceService {
@@ -170,6 +172,7 @@ impl Clone for MaintenanceService {
             plan_ttl: self.plan_ttl,
             source_transition_recovery: self.source_transition_recovery.clone(),
             source_promotion_recovery: self.source_promotion_recovery.clone(),
+            source_update_recovery: self.source_update_recovery.clone(),
         }
     }
 }
@@ -188,6 +191,7 @@ impl MaintenanceService {
             plan_ttl: DEFAULT_PLAN_TTL,
             source_transition_recovery: None,
             source_promotion_recovery: None,
+            source_update_recovery: None,
         }
     }
 
@@ -243,6 +247,13 @@ impl MaintenanceService {
         source_promotion: Arc<SourcePromotionService>,
     ) -> Self {
         self.source_promotion_recovery = Some(source_promotion);
+        self
+    }
+
+    /// Source Update reuses the transition journal format, but only an update
+    /// service may validate and settle `source-update-*` operations.
+    pub fn with_source_update_recovery(mut self, source_update: Arc<SourceUpdateService>) -> Self {
+        self.source_update_recovery = Some(source_update);
         self
     }
 
@@ -325,6 +336,11 @@ impl MaintenanceService {
             }
             if let Some(source_promotion) = &self.source_promotion_recovery {
                 source_promotion
+                    .recover_pending(&library_root)
+                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
+            }
+            if let Some(source_update) = &self.source_update_recovery {
+                source_update
                     .recover_pending(&library_root)
                     .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
             }

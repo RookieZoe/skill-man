@@ -41,7 +41,7 @@ test("renders every typed source state without opening source actions by default
   ).toBeInTheDocument();
   expect(
     screen.getAllByText(
-      "A complete Source Release is recognized. Source actions are not available in this release.",
+      "A complete Source Release is recognized. Fetch a fresh complete release before updating this source.",
     ),
   ).toHaveLength(1);
   expect(
@@ -51,14 +51,16 @@ test("renders every typed source state without opening source actions by default
   ).toBeInTheDocument();
 });
 
-test("offers Promotion only for a Legacy Per-Skill Git State", async () => {
+test("offers source-scoped actions only for the matching typed source state", async () => {
   const onPromote = vi.fn();
+  const onUpdate = vi.fn();
   const user = userEvent.setup();
   render(
     <GitSourceCapabilityNotice
       report={report}
       failure={null}
       onPromote={onPromote}
+      onUpdate={onUpdate}
     />,
   );
 
@@ -70,7 +72,12 @@ test("offers Promotion only for a Legacy Per-Skill Git State", async () => {
     "legacy-source",
     expect.any(HTMLButtonElement),
   );
-  expect(screen.getAllByRole("button")).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Update Source" }));
+  expect(onUpdate).toHaveBeenCalledWith(
+    "current-source",
+    expect.any(HTMLButtonElement),
+  );
+  expect(screen.getAllByRole("button")).toHaveLength(2);
 });
 
 test("surfaces a localized scan failure and keeps its raw diagnostic collapsed", () => {

@@ -58,9 +58,9 @@ impl SourcePromotionApi {
 
 fn command_error(error: SourcePromotionError) -> CommandFailureDto {
     let public_error = match &error {
-        SourcePromotionError::Validation(_) | SourcePromotionError::Draft(_) => {
-            PublicErrorDto::Validation
-        }
+        SourcePromotionError::Validation(_)
+        | SourcePromotionError::Draft(_)
+        | SourcePromotionError::OwnershipConflict => PublicErrorDto::Validation,
         SourcePromotionError::Store(_) => PublicErrorDto::CatalogUnavailable,
         SourcePromotionError::Preview(_) | SourcePromotionError::Source(_) => {
             PublicErrorDto::SourceUnavailable

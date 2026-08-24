@@ -19,10 +19,10 @@ use crate::core::source_group_preview::{
     SourceGroupPreviewOutcome, SourceGroupPreviewService,
 };
 use crate::core::write_gate::WriteGate;
-use crate::seams::clock::{Clock, uuid_v4_shape};
+use crate::seams::clock::{Clock, iso_timestamp, uuid_v4_shape};
 use crate::seams::filesystem::{
-    FileSystem, FileSystemError, SourceTransitionJournal, SourceTransitionJournalMember,
-    SourceTransitionPhase,
+    FileSystem, FileSystemError, RemoteParentManifest, SourceTransitionJournal,
+    SourceTransitionJournalMember, SourceTransitionPhase,
 };
 use crate::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockReleaseError,
@@ -166,12 +166,22 @@ impl SourceTransitionService {
             phase: SourceTransitionPhase::Planned,
             staging_operation_root,
             staging_fingerprint: None,
-            remote_id,
+            remote_id: remote_id.clone(),
             release_id: release_id.clone(),
             provider: preview.provider.clone(),
             canonical_url: preview.source_url.clone(),
             tracking_ref: preview.tracking_ref.clone(),
             resolved_commit: preview.resolved_commit.clone(),
+            target_manifest: Some(RemoteParentManifest {
+                schema_version: 1,
+                remote_id: remote_id.clone(),
+                canonical_url: preview.source_url.clone(),
+                provider: Some(preview.provider.clone()),
+                tracking_ref: Some(preview.tracking_ref.clone()),
+                current_release_id: Some(release_id.clone()),
+                aliases: Vec::new(),
+                created_at: iso_timestamp(self.clock.unix_epoch_nanos()),
+            }),
             lock_path: claims.lock_path,
             lock_fingerprint: claims.lock_fingerprint,
             lock_entries: claims.lock_entries,
@@ -474,6 +484,7 @@ impl SourceTransitionService {
         journal.phase = SourceTransitionPhase::ManagedCommitted;
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
+        self.write_current_source_manifest(library_root, journal)?;
         self.verify_final_source(journal)?;
         journal.phase = SourceTransitionPhase::Finalized;
         self.filesystem
@@ -489,6 +500,8 @@ impl SourceTransitionService {
         self.publish_members(library_root, journal)?;
         let record = record_from_journal(journal)?;
         self.store.commit_source_transition(record)?;
+        self.freeze_target_manifest_for_recovery(library_root, journal)?;
+        self.write_current_source_manifest(library_root, journal)?;
         journal.phase = SourceTransitionPhase::Finalized;
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
@@ -630,6 +643,8 @@ impl SourceTransitionService {
         } else {
             0
         };
+        self.filesystem
+            .remove_remote_parent_manifest(&library_root.join("remotes"), &journal.remote_id)?;
         for member in &journal.members {
             if self
                 .filesystem
@@ -894,6 +909,20 @@ impl SourceTransitionService {
         &self,
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
+        let expected_manifest = journal.target_manifest.as_ref().ok_or_else(|| {
+            SourceTransitionError::RecoveryRequired(
+                "the Source Transition journal has no frozen source manifest".into(),
+            )
+        })?;
+        if self.filesystem.read_remote_parent_manifest(
+            &self.active_library_root()?.join("remotes"),
+            &journal.remote_id,
+        )? != Some(expected_manifest.clone())
+        {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "the Source Transition manifest does not match the fixed Source Release".into(),
+            ));
+        }
         for member in &journal.members {
             if self
                 .filesystem
@@ -913,6 +942,46 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn write_current_source_manifest(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        let manifest = journal.target_manifest.as_ref().ok_or_else(|| {
+            SourceTransitionError::RecoveryRequired(
+                "the Source Transition journal has no frozen source manifest".into(),
+            )
+        })?;
+        self.filesystem
+            .write_remote_parent_manifest(&library_root.join("remotes"), manifest)?;
+        Ok(())
+    }
+
+    /// Compatibility for an interrupted journal written before the manifest
+    /// became a frozen fact. Persist its one generated manifest before
+    /// publishing it, so a second restart checks the same bytes.
+    fn freeze_target_manifest_for_recovery(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        if journal.target_manifest.is_none() {
+            journal.target_manifest = Some(RemoteParentManifest {
+                schema_version: 1,
+                remote_id: journal.remote_id.clone(),
+                canonical_url: journal.canonical_url.clone(),
+                provider: Some(journal.provider.clone()),
+                tracking_ref: Some(journal.tracking_ref.clone()),
+                current_release_id: Some(journal.release_id.clone()),
+                aliases: Vec::new(),
+                created_at: iso_timestamp(self.clock.unix_epoch_nanos()),
+            });
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
         }
         Ok(())
     }

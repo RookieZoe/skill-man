@@ -8,6 +8,13 @@ import type {
   UpstreamMemberRemovedResolution,
 } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
+import type { MessageKey } from "../locale/messages";
+
+type SourceFlowMode = "promotion" | "update";
+
+function sourceCopyKey(mode: SourceFlowMode, key: string): MessageKey {
+  return `library.source_${mode}.${key}` as MessageKey;
+}
 
 type DraftResolution = {
   modified: ModifiedMemberResolution | null;
@@ -31,6 +38,7 @@ export function SourcePromotionFlow({
   onUndo,
   onClose,
   initialFocusRef,
+  mode = "promotion",
 }: {
   draft: SourcePromotionDraft | null;
   result: SourcePromotionResult | null;
@@ -40,6 +48,7 @@ export function SourcePromotionFlow({
   onUndo: () => void;
   onClose: () => void;
   initialFocusRef: Ref<HTMLButtonElement>;
+  mode?: SourceFlowMode;
 }) {
   const { t } = useLocale();
   const isBusy = activity !== "idle";
@@ -49,11 +58,11 @@ export function SourcePromotionFlow({
       <>
         <div className="activation-sheet-heading">
           <span className="eyebrow">
-            {t("library.source_promotion.complete_eyebrow")}
+            {t(sourceCopyKey(mode, "complete_eyebrow"))}
           </span>
-          <h2>{t("library.source_promotion.complete_title")}</h2>
+          <h2>{t(sourceCopyKey(mode, "complete_title"))}</h2>
           <p>
-            {t("library.source_promotion.complete_body", {
+            {t(sourceCopyKey(mode, "complete_body"), {
               count: result.memberCount,
             })}
           </p>
@@ -89,9 +98,9 @@ export function SourcePromotionFlow({
   if (!draft) {
     return (
       <div className="activation-sheet-heading">
-        <span className="eyebrow">{t("library.source_promotion.eyebrow")}</span>
-        <h2>{t("library.source_promotion.loading_title")}</h2>
-        <p>{t("library.source_promotion.loading_body")}</p>
+        <span className="eyebrow">{t(sourceCopyKey(mode, "eyebrow"))}</span>
+        <h2>{t(sourceCopyKey(mode, "loading_title"))}</h2>
+        <p>{t(sourceCopyKey(mode, "loading_body"))}</p>
         {error ? (
           <div className="activation-error" role="alert">
             {error}
@@ -115,6 +124,7 @@ export function SourcePromotionFlow({
       onConfirm={onConfirm}
       onClose={onClose}
       initialFocusRef={initialFocusRef}
+      mode={mode}
     />
   );
 }
@@ -126,6 +136,7 @@ function SourcePromotionDraftContent({
   onConfirm,
   onClose,
   initialFocusRef,
+  mode,
 }: {
   draft: SourcePromotionDraft;
   error: string | null;
@@ -133,6 +144,7 @@ function SourcePromotionDraftContent({
   onConfirm: (resolutions: SourcePromotionResolution[]) => void;
   onClose: () => void;
   initialFocusRef: Ref<HTMLButtonElement>;
+  mode: SourceFlowMode;
 }) {
   const { t } = useLocale();
   const [resolutions, setResolutions] = useState(() =>
@@ -187,9 +199,9 @@ function SourcePromotionDraftContent({
   return (
     <>
       <div className="activation-sheet-heading">
-        <span className="eyebrow">{t("library.source_promotion.eyebrow")}</span>
-        <h2>{t("library.source_promotion.title")}</h2>
-        <p>{t("library.source_promotion.body")}</p>
+        <span className="eyebrow">{t(sourceCopyKey(mode, "eyebrow"))}</span>
+        <h2>{t(sourceCopyKey(mode, "title"))}</h2>
+        <p>{t(sourceCopyKey(mode, "body"))}</p>
       </div>
       <dl className="activation-paths source-group-facts">
         <div>
@@ -213,9 +225,9 @@ function SourcePromotionDraftContent({
       </dl>
       <section
         className="source-group-members"
-        aria-label={t("library.source_promotion.members")}
+        aria-label={t(sourceCopyKey(mode, "members"))}
       >
-        <h3>{t("library.source_promotion.members")}</h3>
+        <h3>{t(sourceCopyKey(mode, "members"))}</h3>
         <ul className="git-import-candidates">
           {draft.existingMembers.map((member) => {
             const resolution = resolutions[member.skillId];
@@ -410,9 +422,9 @@ function SourcePromotionDraftContent({
       </section>
       <section
         className="source-group-members"
-        aria-label={t("library.source_promotion.target_members")}
+        aria-label={t(sourceCopyKey(mode, "target_members"))}
       >
-        <h3>{t("library.source_promotion.target_members")}</h3>
+        <h3>{t(sourceCopyKey(mode, "target_members"))}</h3>
         <ul className="git-import-candidates">
           {draft.targetMembers.map((target) => (
             <li key={target.member.skillPath || target.member.directoryName}>
@@ -458,8 +470,8 @@ function SourcePromotionDraftContent({
           onClick={submit}
         >
           {activity === "confirming"
-            ? t("library.source_promotion.confirming")
-            : t("library.source_promotion.confirm")}
+            ? t(sourceCopyKey(mode, "confirming"))
+            : t(sourceCopyKey(mode, "confirm"))}
         </button>
       </div>
     </>

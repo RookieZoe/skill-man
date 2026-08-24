@@ -707,6 +707,11 @@ export interface SourcePromotionResult {
   undoAvailable: boolean;
 }
 
+export type SourceUpdateDraft = SourcePromotionDraft;
+export type SourceUpdateResolution = SourcePromotionResolution;
+export type ConfirmSourceUpdateRequest = ConfirmSourcePromotionRequest;
+export type SourceUpdateResult = Omit<SourcePromotionResult, "undoAvailable">;
+
 export interface UpdateCheckItem {
   skillId: string;
   directoryName: string;
@@ -1062,6 +1067,11 @@ export interface CatalogClient {
   ): Promise<SourcePromotionResult>;
   undoSourcePromotion(operationId: string): Promise<SourceUndoResult>;
   finalizeSourcePromotion(operationId: string): Promise<void>;
+  previewSourceUpdate(remoteId: string): Promise<SourceUpdateDraft>;
+  confirmSourceUpdate(
+    request: ConfirmSourceUpdateRequest,
+  ): Promise<SourceUpdateResult>;
+  finalizeSourceUpdate(operationId: string): Promise<void>;
   confirmSourceTransition(
     request: ConfirmSourceTransitionRequest,
   ): Promise<SourceTransitionResult>;
@@ -1335,6 +1345,19 @@ const tauriCatalogClient: CatalogClient = {
   },
   finalizeSourcePromotion(operationId) {
     return invoke<void>("finalize_source_promotion", {
+      request: { operationId },
+    });
+  },
+  previewSourceUpdate(remoteId) {
+    return invoke<SourceUpdateDraft>("preview_source_update", {
+      request: { remoteId },
+    });
+  },
+  confirmSourceUpdate(request) {
+    return invoke<SourceUpdateResult>("confirm_source_update", { request });
+  },
+  finalizeSourceUpdate(operationId) {
+    return invoke<void>("finalize_source_update", {
       request: { operationId },
     });
   },

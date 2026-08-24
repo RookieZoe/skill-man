@@ -670,6 +670,21 @@ export function createFixtureCatalogClient(): CatalogClient {
         "Source Promotion is not available in the preview fixture",
       );
     },
+    async previewSourceUpdate() {
+      return fixtureUnsupported(
+        "Source Update is not available in the preview fixture",
+      );
+    },
+    async confirmSourceUpdate() {
+      return fixtureUnsupported(
+        "Source Update is not available in the preview fixture",
+      );
+    },
+    async finalizeSourceUpdate() {
+      return fixtureUnsupported(
+        "Source Update is not available in the preview fixture",
+      );
+    },
     async confirmSourceTransition() {
       return fixtureUnsupported(
         "Source Transition is not available in the preview fixture",
