@@ -662,7 +662,7 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async fetchLatestAndManage() {
       return fixtureUnsupported(
-        "Fetch Latest and Manage is not available in the preview fixture",
+        "Installing Git Skills is not available in the preview fixture",
       );
     },
     async previewSourcePromotion() {

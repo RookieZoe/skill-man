@@ -13,6 +13,7 @@ import type {
   ActivationReplaceUndoResult,
   ActivationResult,
   AdoptEvidenceReport,
+  AdoptGitSource,
   AdoptPlan,
   AdoptResult,
   AdoptSelection,
@@ -176,6 +177,7 @@ interface LibraryDeskProps {
   onApplyAdopt: () => void;
   onUndoAdopt: () => void;
   onCloseAdopt: () => void;
+  onManageAdoptGitSource: (source: AdoptGitSource) => void;
   isPreferencesOpen: boolean;
   preferences: AppPreferences | null;
   preferencesWarning: PreferencesWarning | null;
@@ -298,6 +300,7 @@ export function LibraryDesk({
   onApplyAdopt,
   onUndoAdopt,
   onCloseAdopt,
+  onManageAdoptGitSource,
   isPreferencesOpen,
   preferences,
   preferencesWarning,
@@ -653,6 +656,7 @@ export function LibraryDesk({
           onApply={onApplyAdopt}
           onUndo={onUndoAdopt}
           onClose={onCloseAdopt}
+          onManageGitSource={onManageAdoptGitSource}
         />
       ) : null}
       {isLinkImportOpen ? (
@@ -1212,6 +1216,12 @@ function LinkImportSheet({
         : isDiscovering
           ? "discover"
           : "source";
+  const showSourceKindSwitch =
+    !result &&
+    !preview &&
+    !sourcePromotionActive &&
+    (!isGit ||
+      (sourceGroupOutcome === null && sourceTransitionResult === null));
 
   useLayoutEffect(() => {
     if (
@@ -1284,6 +1294,9 @@ function LinkImportSheet({
             ),
           )}
         </ol>
+        {showSourceKindSwitch ? (
+          <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
+        ) : null}
         {isGit ? (
           <>
             {sourcePromotionActive ? (
@@ -1300,7 +1313,6 @@ function LinkImportSheet({
               />
             ) : (
               <>
-                <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
                 <SourceGroupPreviewFlow
                   sourceType={sourceGroupType}
                   sourceUrl={sourceGroupUrl}
@@ -1435,7 +1447,6 @@ function LinkImportSheet({
               <h2>{t("library.import.link_title")}</h2>
               <p>{t("library.import.link_body")}</p>
             </div>
-            <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
             <label className="import-source-field">
               <span>{t("library.import.local_path")}</span>
               <input

@@ -31,7 +31,12 @@ const preview: SourceGroupPreviewOutcome = {
     externalOwnershipClaims: [
       {
         lockPath: "/Users/example/.skill-lock.json",
-        entryName: "legacy-root",
+        entryName: "root",
+        requestedRef: "main",
+      },
+      {
+        lockPath: "/Users/example/.skill-lock.json",
+        entryName: "nested",
         requestedRef: "main",
       },
     ],
@@ -74,8 +79,72 @@ test("renders the complete source group without per-member Include controls", ()
     screen.queryByRole("button", { name: /include/i }),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Confirm complete Source Release" }),
-  ).toBeInTheDocument();
+    screen.getByRole("button", { name: "Use latest remote release" }),
+  ).toBeEnabled();
+});
+
+test("allows a new Git source that has no external ownership claims", () => {
+  const newSource: SourceGroupPreviewOutcome = {
+    ...preview,
+    preview: {
+      ...preview.preview,
+      externalOwnershipClaims: [],
+    },
+  };
+
+  renderFlow(newSource);
+
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Use latest remote release" }),
+  ).toBeEnabled();
+});
+
+test("blocks replacement before confirmation when a source member has no external claim", async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const incomplete: SourceGroupPreviewOutcome = {
+    ...preview,
+    preview: {
+      ...preview.preview,
+      externalOwnershipClaims: [
+        {
+          lockPath: "/Users/example/.skill-lock.json",
+          entryName: "root",
+          requestedRef: "main",
+        },
+      ],
+    },
+  };
+
+  render(
+    <SourceGroupPreviewFlow
+      sourceType="github"
+      sourceUrl="https://github.com/acme/repository"
+      trackingRef="main"
+      outcome={incomplete}
+      result={null}
+      error={null}
+      activity="idle"
+      onSourceTypeChange={vi.fn()}
+      onSourceUrlChange={vi.fn()}
+      onTrackingRefChange={vi.fn()}
+      onFetch={vi.fn()}
+      onConfirm={onConfirm}
+      onUndo={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "does not declare every Source Member",
+  );
+  const replacement = screen.getByRole("button", {
+    name: "Use latest remote release",
+  });
+  expect(replacement).toBeDisabled();
+  await user.click(replacement);
+  expect(onConfirm).not.toHaveBeenCalled();
 });
 
 test("offers only whole-source Undo in the completed result window", async () => {

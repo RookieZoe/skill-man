@@ -6,6 +6,7 @@ import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 import type {
   AdoptEvidenceCandidate,
   AdoptEvidenceReport,
+  SourceGroupPreviewOutcome,
 } from "./catalog-client";
 import { App } from "./App";
 
@@ -54,17 +55,27 @@ function evidenceReport(candidates: AdoptEvidenceCandidate[]): {
   truncated: boolean;
   lockFiles: never[];
   candidates: AdoptEvidenceCandidate[];
+  gitSources: never[];
 } {
-  return { generation: 1, truncated: false, lockFiles: [], candidates };
+  return {
+    generation: 1,
+    truncated: false,
+    lockFiles: [],
+    candidates,
+    gitSources: [],
+  };
 }
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
   return {
-    promise: new Promise<T>((next) => {
+    promise: new Promise<T>((next, fail) => {
       resolve = next;
+      reject = fail;
     }),
     resolve,
+    reject,
   };
 }
 
@@ -75,6 +86,7 @@ function createAdoptableFixtureCatalogClient() {
     generation: 1,
     truncated: false,
     lockFiles: [],
+    gitSources: [],
     candidates: [
       {
         canonicalEntity,
@@ -921,15 +933,15 @@ test("shows Library Conflict in Link preview and blocks Import", async () => {
   ).not.toBeInTheDocument();
 });
 
-test("switches the Import sheet to Fetch Latest and Manage and reports a source rejection", async () => {
+test("switches the Import sheet to Install Git Skills and reports a source rejection", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
 
   await user.click(screen.getByRole("button", { name: "Import" }));
-  await user.click(
-    screen.getByRole("button", { name: "Fetch Latest and Manage" }),
-  );
+  const importDialog = screen.getByRole("dialog", { name: "Import Link" });
+  expect(importDialog.children[1]).toHaveClass("import-kind-switch");
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
   expect(
     screen.getByRole("dialog", { name: "Import from Git" }),
   ).toBeInTheDocument();
@@ -949,6 +961,145 @@ test("switches the Import sheet to Fetch Latest and Manage and reports a source 
   expect(
     screen.queryByRole("dialog", { name: "Import from Git" }),
   ).not.toBeInTheDocument();
+});
+
+test("preloads an Adopt Git Repository Source and reuses it when management opens", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const remotePreview = deferred<SourceGroupPreviewOutcome>();
+  const requests: Array<{
+    sourceType: string;
+    sourceUrl: string;
+    trackingRef: string | null;
+  }> = [];
+  client.scanAdopt = async () => ({
+    ...evidenceReport([]),
+    gitSources: [
+      {
+        sourceType: "github",
+        sourceUrl: "https://github.com/acme/skills",
+        trackingRefs: ["main"],
+        externalOwnershipClaims: [
+          {
+            lockPath: "~/.agents/.skill-lock.json",
+            entryName: "alpha",
+            requestedRef: "main",
+          },
+        ],
+      },
+    ],
+  });
+  client.fetchLatestAndManage = async (request) => {
+    requests.push(request);
+    return remotePreview.promise;
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  await screen.findByRole("button", { name: "Install Git Skills" });
+  await waitFor(() => expect(requests).toHaveLength(1));
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
+
+  expect(
+    screen.getByRole("dialog", { name: "Import from Git" }),
+  ).toBeInTheDocument();
+  expect(requests).toEqual([
+    {
+      sourceType: "github",
+      sourceUrl: "https://github.com/acme/skills",
+      trackingRef: "main",
+    },
+  ]);
+
+  remotePreview.resolve({
+    kind: "preview",
+    preview: {
+      provider: "github",
+      sourceUrl: "https://github.com/acme/skills",
+      trackingRef: "main",
+      resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+      members: [
+        {
+          directoryName: "alpha",
+          displayName: "Alpha",
+          description: "The repository member",
+          skillPath: "alpha",
+          treeSummary: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      ],
+      externalOwnershipClaims: [
+        {
+          lockPath: "~/.agents/.skill-lock.json",
+          entryName: "alpha",
+          requestedRef: "main",
+        },
+      ],
+    },
+  });
+  expect(
+    await screen.findByText("Complete Source Release"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Link local folder" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Install Git Skills" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Use latest remote release" }),
+  ).toBeEnabled();
+});
+
+test("retries an Adopt Git Repository Source after its background preview fails", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const failedPreview = deferred<SourceGroupPreviewOutcome>();
+  const retryPreview = deferred<SourceGroupPreviewOutcome>();
+  const requests: Array<{
+    sourceType: string;
+    sourceUrl: string;
+    trackingRef: string | null;
+  }> = [];
+  client.scanAdopt = async () => ({
+    ...evidenceReport([]),
+    gitSources: [
+      {
+        sourceType: "github",
+        sourceUrl: "https://github.com/acme/skills",
+        trackingRefs: ["main"],
+        externalOwnershipClaims: [
+          {
+            lockPath: "~/.agents/.skill-lock.json",
+            entryName: "alpha",
+            requestedRef: "main",
+          },
+        ],
+      },
+    ],
+  });
+  client.fetchLatestAndManage = async (request) => {
+    requests.push(request);
+    return requests.length === 1 ? failedPreview.promise : retryPreview.promise;
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  await user.click(screen.getByRole("button", { name: "Adopt" }));
+  const manage = await screen.findByRole("button", {
+    name: "Install Git Skills",
+  });
+  await waitFor(() => expect(requests).toHaveLength(1));
+  await act(async () => {
+    failedPreview.reject(new Error("temporary remote failure"));
+    await Promise.resolve();
+  });
+
+  await user.click(manage);
+  await waitFor(() => expect(requests).toHaveLength(2));
+  expect(
+    screen.getByRole("dialog", { name: "Import from Git" }),
+  ).toBeInTheDocument();
 });
 
 test("does not surface legacy per-Skill Update controls for a remote Install", async () => {

@@ -91,6 +91,18 @@ export function SourceGroupPreviewFlow({
 
   if (outcome?.kind === "preview") {
     const { preview } = outcome;
+    const hasExternalOwnershipClaims =
+      preview.externalOwnershipClaims.length > 0;
+    const hasCompleteExternalClaims =
+      preview.members.length > 0 &&
+      preview.externalOwnershipClaims.length === preview.members.length &&
+      preview.members.every((member) =>
+        preview.externalOwnershipClaims.some(
+          (claim) => claim.entryName === member.directoryName,
+        ),
+      );
+    const replacementBlocked =
+      hasExternalOwnershipClaims && !hasCompleteExternalClaims;
     return (
       <>
         <div className="activation-sheet-heading">
@@ -128,7 +140,7 @@ export function SourceGroupPreviewFlow({
           <ul className="git-import-candidates">
             {preview.members.map((member) => (
               <li key={member.skillPath || member.directoryName}>
-                <div>
+                <div className="source-group-member-copy">
                   <strong>{member.displayName}</strong>
                   <span className="candidate-path">
                     {member.skillPath || t("library.import.repo_root")}
@@ -137,7 +149,7 @@ export function SourceGroupPreviewFlow({
                     <small>{member.description}</small>
                   ) : null}
                 </div>
-                <dl>
+                <dl className="source-group-member-tree">
                   <div>
                     <dt>{t("library.source_group.tree_summary")}</dt>
                     <dd>
@@ -150,6 +162,23 @@ export function SourceGroupPreviewFlow({
           </ul>
         </section>
         <ExternalClaims claims={preview.externalOwnershipClaims} />
+        {replacementBlocked ? (
+          <div className="activation-error" role="alert">
+            <strong>{t("library.source_group.incomplete_claims_title")}</strong>
+            <span>
+              {t("library.source_group.incomplete_claims_body", {
+                memberCount: preview.members.length,
+                claimCount: preview.externalOwnershipClaims.length,
+              })}
+            </span>
+          </div>
+        ) : null}
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>{t("library.import.source_unavailable")}</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
             {t("library.source_group.close")}
@@ -157,7 +186,7 @@ export function SourceGroupPreviewFlow({
           <button
             type="button"
             className="activation-confirm-button"
-            disabled={isBusy}
+            disabled={isBusy || replacementBlocked}
             onClick={onConfirm}
           >
             {activity === "confirming"

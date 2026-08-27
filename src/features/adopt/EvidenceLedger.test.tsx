@@ -61,10 +61,38 @@ function candidate(
 }
 
 function report(candidates: AdoptEvidenceCandidate[]): AdoptEvidenceReport {
-  return { generation: 3, truncated: false, lockFiles: [], candidates };
+  return {
+    generation: 3,
+    truncated: false,
+    lockFiles: [],
+    candidates,
+    gitSources: [],
+  };
 }
 
 function noop() {}
+
+function gitLock(entryName: string) {
+  return {
+    lockPath: "~/.agents/.skill-lock.json",
+    lockFingerprint: "lock-fingerprint",
+    entryName,
+    entry: {
+      name: entryName,
+      sourceType: "github",
+      source: "https://github.com/acme/skills",
+      sourceUrl: "https://github.com/acme/skills",
+      requestedRef: "main",
+      skillPath: `skills/${entryName}`,
+      skillFolderHash: "a".repeat(40),
+      installedAt: null,
+      updatedAt: null,
+      pluginName: null,
+    },
+    entryFault: null,
+    fileFault: null,
+  };
+}
 
 function renderLedger(
   reportValue: AdoptEvidenceReport,
@@ -452,6 +480,80 @@ test("ownership conflict reason renders as a closed conflict verdict", async () 
   expect(
     within(dialog).getByRole("checkbox", { name: /Include/ }),
   ).toBeDisabled();
+});
+
+test("groups supported Git candidates by repository and starts fresh source management", async () => {
+  const user = userEvent.setup();
+  const onManageGitSource = vi.fn();
+  const alphaLock = gitLock("alpha");
+  const gitReport: AdoptEvidenceReport = {
+    ...report([
+      candidate({
+        directoryName: "alpha",
+        directoryNames: ["alpha"],
+        lock: {
+          ...alphaLock,
+          entry: {
+            ...alphaLock.entry,
+            sourceUrl: "https://github.com/acme/skills.git",
+          },
+        },
+      }),
+    ]),
+    gitSources: [
+      {
+        sourceType: "github",
+        sourceUrl: "https://github.com/acme/skills",
+        trackingRefs: ["main"],
+        externalOwnershipClaims: [
+          {
+            lockPath: "~/.agents/.skill-lock.json",
+            entryName: "alpha",
+            requestedRef: "main",
+          },
+          {
+            lockPath: "~/.agents/.skill-lock.json",
+            entryName: "beta",
+            requestedRef: "main",
+          },
+        ],
+      },
+    ],
+  };
+  render(
+    <EvidenceLedger
+      report={gitReport}
+      selections={{}}
+      plan={null}
+      result={null}
+      undo={null}
+      error={null}
+      errorHeading="app.notice.scan_failed"
+      activity="idle"
+      onToggle={noop}
+      onSetBranch={noop}
+      onRescan={noop}
+      onPlan={noop}
+      onApply={noop}
+      onUndo={noop}
+      onClose={noop}
+      onManageGitSource={onManageGitSource}
+    />,
+  );
+
+  expect(
+    screen.getByRole("heading", {
+      name: "Git Repository Source https://github.com/acme/skills",
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("alpha")).toBeInTheDocument();
+  expect(screen.getByText("beta")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("checkbox", { name: "Include" }),
+  ).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
+  expect(onManageGitSource).toHaveBeenCalledWith(gitReport.gitSources[0]);
 });
 
 test("source content stays byte-identical in both locales", async () => {

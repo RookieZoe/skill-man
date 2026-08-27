@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
@@ -17,7 +18,7 @@ use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore;
 use skill_man_lib::core::adopt::{
     AdoptError, AdoptPlanIntent, AdoptPlanRequest, AdoptSelection, AdoptService, AdoptVerdict,
-    AdoptVerdictReason, ModifiedBranch,
+    AdoptVerdictReason,
 };
 use skill_man_lib::seams::filesystem::{ChainFault, FileSystem};
 use skill_man_lib::seams::installer_lock_store::{InstallerLockStore, LockEntry};
@@ -183,18 +184,30 @@ enum ScriptedOutcome {
 
 struct ScriptedRemoteProvider {
     behaviors: HashMap<String, ScriptedOutcome>,
+    verify_calls: AtomicUsize,
 }
 
 impl ScriptedRemoteProvider {
     fn new(behaviors: HashMap<String, ScriptedOutcome>) -> Self {
-        Self { behaviors }
+        Self {
+            behaviors,
+            verify_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn verify_calls(&self) -> usize {
+        self.verify_calls.load(Ordering::Relaxed)
     }
 }
 
 impl RemoteProvider for ScriptedRemoteProvider {
     fn parse_request(&self, entry: &LockEntry) -> Result<RemoteRequest, RemoteProviderError> {
         Ok(RemoteRequest {
-            kind: RemoteKind::GenericGit,
+            kind: match entry.source_type.as_str() {
+                "github" => RemoteKind::Github,
+                "gitlab" => RemoteKind::Gitlab,
+                _ => RemoteKind::GenericGit,
+            },
             canonical_url: entry.source_url.clone(),
             requested_ref: entry.requested_ref.as_deref().unwrap_or("HEAD").to_owned(),
             skill_path: entry.skill_path.clone(),
@@ -207,6 +220,7 @@ impl RemoteProvider for ScriptedRemoteProvider {
         request: &RemoteRequest,
         workspace: &Path,
     ) -> Result<RemoteTreeFacts, RemoteProviderError> {
+        self.verify_calls.fetch_add(1, Ordering::Relaxed);
         match self
             .behaviors
             .get(&request.canonical_url)
@@ -275,19 +289,6 @@ fn commit_all(repo: &Path, message: &str) {
         .output()
         .expect("git commit");
     assert!(output.status.success());
-}
-
-fn commit_file(repo: &Path, path: &str, contents: &str) -> String {
-    let file = repo.join(path);
-    std::fs::create_dir_all(file.parent().expect("parent")).expect("create parent");
-    std::fs::write(&file, contents).expect("write file");
-    commit_all(repo, "fixture update");
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo)
-        .output()
-        .expect("git rev-parse");
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn tag(repo: &Path, name: &str) {
@@ -725,21 +726,11 @@ fn entry_level_lock_fault_blocks_only_that_entry() {
         broken.reason,
         Some(AdoptVerdictReason::LockEntryFault { .. })
     ));
-    let fine = report
-        .candidates
-        .iter()
-        .find(|candidate| candidate.directory_name == "fine-entry")
-        .expect("fine candidate");
-    // The fine entry has no provider for example.com in the system adapter's
-    // URL validation (https allowed for generic): the fetch itself is what
-    // fails. With the system provider this is a Deferred (unreachable host).
-    // This test only asserts the entry-level fault isolation: fine-entry is
-    // NOT a Conflict from the lock; it reaches remote verification.
-    assert_ne!(fine.verdict, AdoptVerdict::Conflict);
-    assert!(matches!(
-        fine.verdict,
-        AdoptVerdict::Deferred | AdoptVerdict::Verified | AdoptVerdict::Modified
-    ));
+    assert_eq!(report.git_sources.len(), 1);
+    let source = &report.git_sources[0];
+    assert_eq!(source.source_url, "https://example.com/fine");
+    assert_eq!(source.tracking_refs, ["HEAD"]);
+    assert_eq!(source.external_ownership_claims[0].entry_name, "fine-entry");
 }
 
 #[test]
@@ -829,85 +820,75 @@ fn lock_declaration_with_entity_elsewhere_is_a_conflict() {
 }
 
 // =====================================================================
-// Remote closed loop with real Git fixtures (spec §8.2, ADR-0013 §2.2)
+// Git Repository Source hints (spec §8.1, ADR-0014)
 // =====================================================================
 
 #[test]
-fn verified_remote_loop_uses_the_real_git_anchor_and_trees() {
+fn supported_git_entries_group_by_repository_alongside_legacy_candidates() {
     let harness = Harness::new();
-    let root = tempfile::tempdir().expect("temp repo root");
-    let repo = fixture_repo(
-        root.path(),
-        &[("skills/networking/SKILL.md", "# Networking v1\n")],
-    );
-    let url = format!("file://{}", repo.display());
-    let hash = cli_hash_at(&repo, "HEAD", "skills/networking");
-    // The installed entity: the exact remote tree at the anchor.
-    write_skill(&harness.shared(), "networking", "# Networking v1\n");
+    write_skill(&harness.shared(), "alpha", "# Alpha\n");
+    write_skill(&harness.shared(), "beta", "# Beta\n");
     std::fs::write(
         harness.lock_path(),
-        lock_json(&[(
-            "networking",
-            "git",
-            url.clone(),
-            None,
-            "skills/networking".into(),
-            hash.clone(),
-        )]),
+        lock_json(&[
+            (
+                "alpha",
+                "github",
+                "https://github.com/acme/skills".into(),
+                Some("main"),
+                "skills/alpha".into(),
+                "a".repeat(40),
+            ),
+            (
+                "beta",
+                "github",
+                "https://github.com/acme/skills".into(),
+                Some("main"),
+                "skills/beta".into(),
+                "b".repeat(40),
+            ),
+        ]),
     )
     .expect("write lock");
 
-    let adopt = harness.adopt();
-    let report = adopt.scan().expect("scan");
-    let candidate = report
-        .candidates
-        .iter()
-        .find(|candidate| candidate.directory_name == "networking")
-        .expect("candidate");
-    assert_eq!(candidate.verdict, AdoptVerdict::Verified);
-    let remote = candidate.remote.as_ref().expect("remote evidence");
-    assert_eq!(remote.canonical_url, url);
-    assert_eq!(remote.requested_ref, "HEAD");
-    assert_eq!(
-        remote.ref_kind,
-        skill_man_lib::seams::remote_provider::RefDisposition::Head
-    );
-    assert!(remote.provider_hash_matched);
-    assert!(remote.trees_match);
-    assert_eq!(remote.remote_tree_hash, remote.local_tree_hash);
-    assert!(!remote.original_install_commit_known);
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&repo)
-        .output()
-        .expect("rev-parse");
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
-    assert_eq!(remote.anchor_commit, head);
-    let lock = candidate.lock.as_ref().expect("lock evidence");
-    assert_eq!(lock.entry_name, "networking");
-    assert_eq!(lock.lock_path, harness.lock_path());
-    assert_eq!(
-        lock.lock_fingerprint,
-        format!("{:x}", {
-            use sha2::Digest;
-            sha2::Sha256::digest(std::fs::read(harness.lock_path()).expect("lock bytes"))
-        })
-    );
-    let plan = adopt
-        .plan(&AdoptPlanRequest {
-            evidence_generation: report.generation,
-            selections: vec![select(&report.candidates, "networking")],
-        })
-        .expect("plan verified candidate");
-    assert_eq!(
-        plan.items[0].intent,
-        AdoptPlanIntent::RemoteInstallKeepCurrent
-    );
+    let provider = Arc::new(ScriptedRemoteProvider::new(HashMap::from([(
+        "https://github.com/acme/skills".into(),
+        ScriptedOutcome::Deferred("offline fixture".into()),
+    )])));
+    let report = harness
+        .adopt_with(
+            Arc::new(SystemInstallerLockStore::new(
+                harness.home.path().to_path_buf(),
+            )),
+            provider.clone(),
+        )
+        .scan()
+        .expect("scan");
+    assert_eq!(report.candidates.len(), 2);
     assert!(
-        plan.items[0].applyable,
-        "the Handoff applies the verified tree"
+        report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.verdict == AdoptVerdict::Deferred)
     );
-    assert!(plan.can_apply);
+    assert_eq!(report.git_sources.len(), 1);
+    let source = &report.git_sources[0];
+    assert_eq!(source.source_type, "github");
+    assert_eq!(source.source_url, "https://github.com/acme/skills");
+    assert_eq!(source.tracking_refs, ["main"]);
+    assert_eq!(
+        source
+            .external_ownership_claims
+            .iter()
+            .map(|claim| claim.entry_name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"],
+    );
+    assert_eq!(
+        provider.verify_calls(),
+        0,
+        "supported Git candidates defer legacy verification to one complete source preview"
+    );
 }
 
 #[test]
@@ -935,24 +916,20 @@ fn pinned_tag_anchor_is_exact_and_known() {
     )
     .expect("write lock");
 
-    let adopt = harness.adopt();
-    let report = adopt.scan().expect("scan");
+    let report = harness.adopt().scan().expect("scan");
     let candidate = report
         .candidates
         .iter()
         .find(|candidate| candidate.directory_name == "networking")
         .expect("candidate");
-    assert_eq!(candidate.verdict, AdoptVerdict::Verified);
     let remote = candidate.remote.as_ref().expect("remote evidence");
-    assert_eq!(
-        remote.ref_kind,
-        skill_man_lib::seams::remote_provider::RefDisposition::Tag
-    );
+    assert_eq!(remote.ref_kind, RefDisposition::Tag);
     assert!(remote.original_install_commit_known);
+    assert!(report.git_sources.is_empty());
 }
 
 #[test]
-fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
+fn modified_git_candidate_is_grouped_for_a_fresh_source_release() {
     let harness = Harness::new();
     let root = tempfile::tempdir().expect("temp repo root");
     let repo = fixture_repo(
@@ -962,12 +939,11 @@ fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
     let url = format!("file://{}", repo.display());
     let hash = cli_hash_at(&repo, "HEAD", "skills/networking");
     // The local entity diverged from the remote anchor.
-    let entity = write_skill(
+    write_skill(
         &harness.shared(),
         "networking",
         "# Networking v1\nlocal change\n",
     );
-    let canonical = entity.canonicalize().expect("canonical entity");
     std::fs::write(
         harness.lock_path(),
         lock_json(&[(
@@ -981,95 +957,27 @@ fn modified_candidate_shows_three_way_branches_and_never_auto_includes() {
     )
     .expect("write lock");
 
-    let adopt = harness.adopt();
-    let report = adopt.scan().expect("scan");
+    let report = harness.adopt().scan().expect("scan");
     let candidate = report
         .candidates
         .iter()
         .find(|candidate| candidate.directory_name == "networking")
         .expect("candidate");
     assert_eq!(candidate.verdict, AdoptVerdict::Modified);
-    let remote = candidate.remote.as_ref().expect("remote evidence");
-    assert!(remote.provider_hash_matched);
-    assert!(!remote.trees_match);
-    assert_ne!(remote.remote_tree_hash, remote.local_tree_hash);
-
-    // All three branches are explicitly selectable; no candidate is
-    // pre-included anywhere.
-    let plan = adopt
-        .plan(&AdoptPlanRequest {
-            evidence_generation: report.generation,
-            selections: vec![
-                AdoptSelection {
-                    canonical_entity: canonical.clone(),
-                    agent_ids: Vec::new(),
-                    modified_branch: Some(ModifiedBranch::KeepCurrent),
-                    target_directory: None,
-                },
-                AdoptSelection {
-                    canonical_entity: canonical.clone(),
-                    agent_ids: Vec::new(),
-                    modified_branch: Some(ModifiedBranch::DiscardToAnchor),
-                    target_directory: None,
-                },
-                AdoptSelection {
-                    canonical_entity: canonical.clone(),
-                    agent_ids: Vec::new(),
-                    modified_branch: Some(ModifiedBranch::ConvertToLocalLink),
-                    target_directory: None,
-                },
-            ],
-        })
-        .expect("plan all three branches");
-    assert_eq!(plan.items.len(), 3);
-    assert!(
-        plan.items
-            .iter()
-            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallKeepCurrent)
-    );
-    assert!(
-        plan.items
-            .iter()
-            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallDiscardModified)
-    );
-    assert!(
-        plan.items
-            .iter()
-            .any(|item| item.intent == AdoptPlanIntent::RemoteInstallConvertToLink)
-    );
-    assert!(!plan.can_apply);
-
-    let missing_branch = adopt
-        .plan(&AdoptPlanRequest {
-            evidence_generation: report.generation,
-            selections: vec![AdoptSelection {
-                canonical_entity: canonical,
-                agent_ids: Vec::new(),
-                modified_branch: None,
-                target_directory: None,
-            }],
-        })
-        .expect_err("Modified requires an explicit branch");
-    assert!(matches!(missing_branch, AdoptError::Validation(_)));
+    assert!(report.git_sources.is_empty());
 }
 
 #[test]
-fn moving_ref_contradiction_and_pinned_mismatch_are_conflicts() {
+fn stale_lock_hash_defers_to_the_complete_source_preview() {
     let harness = Harness::new();
-    let root = tempfile::tempdir().expect("temp repo root");
-    let repo = fixture_repo(
-        root.path(),
-        &[("skills/networking/SKILL.md", "# Networking v1\n")],
-    );
-    commit_file(&repo, "skills/networking/SKILL.md", "# Networking v2\n");
-    let url = format!("file://{}", repo.display());
-    let old_hash = cli_hash_at(&repo, "HEAD~1", "skills/networking");
+    let url = "https://github.com/acme/skills".to_owned();
+    let old_hash = "a".repeat(40);
     write_skill(&harness.shared(), "networking", "# Networking v2\n");
     std::fs::write(
         harness.lock_path(),
         lock_json(&[(
             "networking",
-            "git",
+            "github",
             url.clone(),
             None,
             "skills/networking".into(),
@@ -1078,21 +986,31 @@ fn moving_ref_contradiction_and_pinned_mismatch_are_conflicts() {
     )
     .expect("write lock");
 
-    let report = harness.adopt().scan().expect("scan");
+    let report = harness
+        .adopt_with(
+            Arc::new(SystemInstallerLockStore::new(
+                harness.home.path().to_path_buf(),
+            )),
+            Arc::new(ScriptedRemoteProvider::new(HashMap::from([(
+                url.clone(),
+                ScriptedOutcome::Conflict("lock hash does not match remote".into()),
+            )]))),
+        )
+        .scan()
+        .expect("scan");
     let candidate = report
         .candidates
         .iter()
         .find(|candidate| candidate.directory_name == "networking")
         .expect("candidate");
-    assert_eq!(
-        candidate.verdict,
-        AdoptVerdict::Conflict,
-        "a moved ref whose lock hash no longer matches any remote state cannot close the loop"
-    );
+    assert_eq!(candidate.verdict, AdoptVerdict::Deferred);
     assert!(matches!(
         candidate.reason,
-        Some(AdoptVerdictReason::RemoteConflict { .. })
+        Some(AdoptVerdictReason::RemoteUnavailable { .. })
     ));
+    assert_eq!(report.git_sources.len(), 1);
+    assert_eq!(report.git_sources[0].source_url, url);
+    assert_eq!(report.git_sources[0].tracking_refs, ["HEAD"]);
 }
 
 // =====================================================================
@@ -1153,23 +1071,20 @@ fn deferred_remote_group_does_not_block_other_groups() {
     )
     .expect("write lock");
 
-    let mut behaviors = HashMap::new();
-    behaviors.insert(
-        "https://group-a.example/alpha".to_owned(),
-        ScriptedOutcome::Deferred("DNS timeout".into()),
-    );
-    behaviors.insert(
-        "https://group-a.example/beta".to_owned(),
-        ScriptedOutcome::Deferred("TLS handshake failed".into()),
-    );
-    behaviors.insert(
-        "https://group-b.example/gamma".to_owned(),
-        ScriptedOutcome::Ok {
-            files: vec![("SKILL.md".into(), "# Gamma\n".into())],
-            anchor: "g".repeat(40),
-        },
-    );
-    let provider = Arc::new(ScriptedRemoteProvider::new(behaviors));
+    let provider = Arc::new(ScriptedRemoteProvider::new(HashMap::from([
+        (
+            "https://group-a.example/alpha".into(),
+            ScriptedOutcome::Deferred("group a offline".into()),
+        ),
+        (
+            "https://group-a.example/beta".into(),
+            ScriptedOutcome::Deferred("group a offline".into()),
+        ),
+        (
+            "https://group-b.example/gamma".into(),
+            ScriptedOutcome::Deferred("group b offline".into()),
+        ),
+    ])));
     let report = harness
         .adopt_with(
             Arc::new(SystemInstallerLockStore::new(
@@ -1180,28 +1095,19 @@ fn deferred_remote_group_does_not_block_other_groups() {
         .scan()
         .expect("scan");
 
-    for name in ["alpha", "beta"] {
-        let candidate = report
+    assert_eq!(report.candidates.len(), 3);
+    assert!(
+        report
             .candidates
             .iter()
-            .find(|candidate| candidate.directory_name == name)
-            .expect("group-a candidate");
-        assert_eq!(candidate.verdict, AdoptVerdict::Deferred, "{name}");
-        assert!(matches!(
-            candidate.reason,
-            Some(AdoptVerdictReason::RemoteUnavailable { .. })
-        ));
-        assert!(!candidate.selectable);
-    }
-    let gamma = report
-        .candidates
-        .iter()
-        .find(|candidate| candidate.directory_name == "gamma")
-        .expect("gamma candidate");
-    assert_eq!(
-        gamma.verdict,
-        AdoptVerdict::Verified,
-        "the healthy group continues while the unavailable group is Deferred"
+            .all(|candidate| candidate.verdict == AdoptVerdict::Deferred)
+    );
+    assert_eq!(report.git_sources.len(), 3);
+    assert!(
+        report
+            .git_sources
+            .iter()
+            .all(|source| source.tracking_refs == ["HEAD"])
     );
 }
 
@@ -1284,24 +1190,17 @@ fn plan_is_stale_after_rescan_lock_change_tree_change_or_appearance_change() {
     )
     .expect("write lock");
     let locked = adopt.scan().expect("locked scan");
-    let locked_candidate = locked
-        .candidates
-        .iter()
-        .find(|candidate| candidate.directory_name == "locked-skill")
-        .expect("locked candidate");
-    let error = adopt
-        .plan(&AdoptPlanRequest {
-            evidence_generation: locked.generation,
-            selections: vec![select(&locked.candidates, "locked-skill")],
-        })
-        .expect_err("the fake provider cannot verify; the entry-level evidence still binds");
-    // The lock declares the name but verification fails; the plan must not
-    // silently accept a Verification Deferred as selectable.
-    assert!(matches!(
-        error,
-        AdoptError::Validation(_) | AdoptError::PlanStale
-    ));
-    let _ = locked_candidate;
+    assert!(
+        locked
+            .candidates
+            .iter()
+            .any(|candidate| candidate.directory_name == "locked-skill")
+    );
+    assert_eq!(locked.git_sources.len(), 1);
+    assert_eq!(
+        locked.git_sources[0].external_ownership_claims[0].entry_name,
+        "locked-skill"
+    );
 }
 
 #[test]
@@ -1409,7 +1308,8 @@ fn local_link_apply_is_the_only_applyable_intent_and_stays_read_only_until_then(
 #[test]
 fn evidence_dto_serializes_closed_states_and_keeps_source_content_verbatim() {
     use skill_man_lib::tauri_adapter::dto::{
-        AdoptEvidenceCandidateDto, AdoptEvidenceReportDto, AdoptPlanIntentDto, AdoptVerdictDto,
+        AdoptEvidenceCandidateDto, AdoptEvidenceReportDto, AdoptGitSourceClaimDto,
+        AdoptGitSourceHintDto, AdoptPlanIntentDto, AdoptVerdictDto,
     };
     let verdict = serde_json::to_value(AdoptVerdictDto::Modified).expect("serialize verdict");
     assert_eq!(verdict, "modified");
@@ -1435,6 +1335,16 @@ fn evidence_dto_serializes_closed_states_and_keeps_source_content_verbatim() {
             conflict: None,
             suggested_agent_ids: vec![],
         }],
+        git_sources: vec![AdoptGitSourceHintDto {
+            source_type: "github".into(),
+            source_url: "https://github.com/acme/skills".into(),
+            tracking_refs: vec!["main".into()],
+            external_ownership_claims: vec![AdoptGitSourceClaimDto {
+                lock_path: "/Users/zoe/.agents/.skill-lock.json".into(),
+                entry_name: "α-skill".into(),
+                requested_ref: "main".into(),
+            }],
+        }],
         lock_files: vec![],
         truncated: false,
     };
@@ -1448,6 +1358,11 @@ fn evidence_dto_serializes_closed_states_and_keeps_source_content_verbatim() {
     assert_eq!(json["candidates"][0]["reason"]["kind"], "no_lock");
     assert_eq!(json["candidates"][0]["requiresRelocation"], false);
     assert_eq!(json["candidates"][0]["localTreeHash"], "tree-sha256-v1:abc");
+    assert_eq!(json["gitSources"][0]["sourceType"], "github");
+    assert_eq!(
+        json["gitSources"][0]["externalOwnershipClaims"][0]["entryName"],
+        "α-skill"
+    );
 
     // A tagged reason carries its raw facts verbatim (never App Copy).
     let reason = serde_json::to_value(
@@ -1543,21 +1458,17 @@ fn faulted_xdg_lock_does_not_block_default_installer_root_candidates() {
         )
         .scan()
         .expect("scan");
-    let candidate = report
-        .candidates
-        .iter()
-        .find(|candidate| candidate.directory_name == "default-root-skill")
-        .expect("candidate");
-    assert_eq!(
-        candidate.verdict,
-        AdoptVerdict::Deferred,
-        "the XDG lock fault must not block the default root candidate; \
-         only the default lock governs ~/.agents/skills"
+    assert!(
+        report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.directory_name == "default-root-skill")
     );
-    assert!(!matches!(
-        candidate.reason,
-        Some(AdoptVerdictReason::LockFileFault { .. })
-    ));
+    assert_eq!(report.git_sources.len(), 1);
+    assert_eq!(
+        report.git_sources[0].external_ownership_claims[0].entry_name,
+        "default-root-skill"
+    );
 }
 
 #[test]

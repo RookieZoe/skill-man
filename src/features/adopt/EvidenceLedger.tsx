@@ -3,6 +3,7 @@ import { useState } from "react";
 import type {
   AdoptEvidenceCandidate,
   AdoptEvidenceReport,
+  AdoptGitSource,
   AdoptPlan,
   AdoptResult,
   AdoptSelection,
@@ -18,12 +19,14 @@ import type { MessageKey, PluralKey } from "../locale/messages";
 
 /**
  * The Adopt Evidence Ledger (spec §8.1, issue #39 resolution): each
- * candidate keeps its identity and selection control in a compact summary,
+ * local candidate keeps its identity and selection control in a compact summary,
  * then reveals the full source chain with every hop, lock hit and
  * remote/ref/Verification Anchor/tree evidence on demand. Viewing is never
- * selecting: every summary carries an Include control, disabled when the
- * candidate cannot be selected, and Modified candidates show all three
- * branches at once.
+ * selecting: every local summary carries an Include control, disabled when
+ * the candidate cannot be selected, and Modified candidates show all three
+ * branches at once. Supported Git installer entries are rendered separately
+ * as repository-level Source hints; their legacy per-Skill candidates remain
+ * available to Core handoff compatibility but are not duplicated in the UI.
  * Paths, URLs, refs, hashes and lock fields are Source Content and render
  * verbatim in every locale (spec §6.3).
  */
@@ -111,6 +114,7 @@ export function EvidenceLedger({
   onApply,
   onUndo,
   onClose,
+  onManageGitSource = () => undefined,
 }: {
   report: AdoptEvidenceReport | null;
   selections: Record<string, AdoptSelection>;
@@ -127,6 +131,7 @@ export function EvidenceLedger({
   onApply: () => void;
   onUndo: () => void;
   onClose: () => void;
+  onManageGitSource?: (source: AdoptGitSource) => void;
 }) {
   const { t } = useLocale();
   const isBusy = activity !== "idle";
@@ -192,6 +197,7 @@ export function EvidenceLedger({
             onRescan={onRescan}
             onPlan={onPlan}
             onClose={onClose}
+            onManageGitSource={onManageGitSource}
           />
         )}
       </section>
@@ -212,6 +218,7 @@ function LedgerScan({
   onRescan,
   onPlan,
   onClose,
+  onManageGitSource,
 }: {
   report: AdoptEvidenceReport | null;
   selections: Record<string, AdoptSelection>;
@@ -225,8 +232,20 @@ function LedgerScan({
   onRescan: () => void;
   onPlan: () => void;
   onClose: () => void;
+  onManageGitSource: (source: AdoptGitSource) => void;
 }) {
   const { t } = useLocale();
+  const gitSources = report?.gitSources ?? [];
+  const visibleCandidates = candidates.filter(
+    (candidate) =>
+      !gitSources.some((source) =>
+        source.externalOwnershipClaims.some(
+          (claim) =>
+            claim.entryName === candidate.directoryName &&
+            claim.lockPath === candidate.lock?.lockPath,
+        ),
+      ),
+  );
   return (
     <>
       <div className="activation-sheet-heading adopt-ledger-heading">
@@ -241,22 +260,31 @@ function LedgerScan({
             label={t("library.adopt.rescanning")}
           />
         ) : null}
-        {candidates.length === 0 && !isBusy ? (
+        {visibleCandidates.length === 0 &&
+        gitSources.length === 0 &&
+        !isBusy ? (
           <p role="status">{t("library.adopt.none")}</p>
         ) : (
-          candidates.map((candidate) => (
-            <LedgerCandidate
-              key={candidate.canonicalEntity}
-              candidate={candidate}
-              selected={selections[candidate.canonicalEntity] !== undefined}
-              branch={
-                selections[candidate.canonicalEntity]?.modifiedBranch ?? null
-              }
+          <>
+            <GitSourceHints
+              sources={gitSources}
               isBusy={isBusy}
-              onToggle={onToggle}
-              onSetBranch={onSetBranch}
+              onManage={onManageGitSource}
             />
-          ))
+            {visibleCandidates.map((candidate) => (
+              <LedgerCandidate
+                key={candidate.canonicalEntity}
+                candidate={candidate}
+                selected={selections[candidate.canonicalEntity] !== undefined}
+                branch={
+                  selections[candidate.canonicalEntity]?.modifiedBranch ?? null
+                }
+                isBusy={isBusy}
+                onToggle={onToggle}
+                onSetBranch={onSetBranch}
+              />
+            ))}
+          </>
         )}
         {report?.truncated ? (
           <p className="candidate-conflict" role="status">
@@ -291,6 +319,69 @@ function LedgerScan({
         </button>
       </div>
     </>
+  );
+}
+
+function GitSourceHints({
+  sources,
+  isBusy,
+  onManage,
+}: {
+  sources: AdoptGitSource[];
+  isBusy: boolean;
+  onManage: (source: AdoptGitSource) => void;
+}) {
+  const { t } = useLocale();
+  if (sources.length === 0) return null;
+  return (
+    <section
+      className="adopt-git-sources"
+      aria-label={t("library.adopt.git_source.label")}
+    >
+      {sources.map((source) => (
+        <article
+          key={`${source.sourceType}:${source.sourceUrl}`}
+          className="adopt-git-source"
+        >
+          <h3>
+            {t("library.source_group.eyebrow")} {source.sourceUrl}
+          </h3>
+          <p>{t("library.adopt.git_source.body")}</p>
+          <dl className="adopt-fact-list">
+            <dt>{t("library.source_group.source_type")}</dt>
+            <dd>
+              {t(
+                `library.source_group.type_${source.sourceType}` as MessageKey,
+              )}
+            </dd>
+            <dt>{t("library.source_group.tracking_ref")}</dt>
+            <dd className="adopt-source-content">
+              {source.trackingRefs.join(", ")}
+            </dd>
+          </dl>
+          <ul
+            className="adopt-git-source-claims"
+            aria-label={t("library.source_group.external_claims")}
+          >
+            {source.externalOwnershipClaims.map((claim) => (
+              <li key={`${claim.lockPath}:${claim.entryName}`}>
+                <strong>{claim.entryName}</strong>
+                <span className="adopt-source-content">
+                  {claim.lockPath} · {claim.requestedRef}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() => onManage(source)}
+          >
+            {t("library.adopt.git_source.fetch")}
+          </button>
+        </article>
+      ))}
+    </section>
   );
 }
 

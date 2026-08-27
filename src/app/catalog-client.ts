@@ -982,9 +982,18 @@ export interface AdoptEvidenceCandidate {
   suggestedAgentIds: string[];
 }
 
+/** A supported Git repository discovered during an Adopt scan. */
+export interface AdoptGitSource {
+  sourceType: GitRepositorySourceType;
+  sourceUrl: string;
+  trackingRefs: string[];
+  externalOwnershipClaims: ExternalOwnershipClaim[];
+}
+
 export interface AdoptEvidenceReport {
   generation: number;
   candidates: AdoptEvidenceCandidate[];
+  gitSources: AdoptGitSource[];
   lockFiles: AdoptLockFile[];
   truncated: boolean;
 }

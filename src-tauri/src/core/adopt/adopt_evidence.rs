@@ -3,7 +3,10 @@
 //! chain (every Agent appearance, every hop, the final entity), the strict
 //! `.skill-lock.json` evidence, the remote/ref/Verification Anchor/tree
 //! closed loop and a closed verdict: Local, Verified, Modified, Conflict,
-//! Deferred, Blocked or Excluded.
+//! Deferred, Blocked or Excluded. Supported HTTPS Git entries take the
+//! source-level path: their current release is discovered by the complete
+//! Git Repository Source preview rather than one legacy verification per
+//! member during the Adopt scan.
 //!
 //! Fail-closed rules implemented here:
 //! - a chain fault stops at the exact hop and never yields a partial
@@ -14,7 +17,8 @@
 //! - a lock declaration for a name whose final entity is not the canonical
 //!   installer subdirectory is a Conflict;
 //! - remote availability failures are Verification Deferred per normalized
-//!   remote group; other groups continue;
+//!   remote group; other groups continue. A supported HTTPS Git source is
+//!   intentionally deferred to its complete source preview;
 //! - plans freeze the evidence generation, entity identity, tree hash, lock
 //!   fingerprint and appearance identities; any rescan or external change
 //!   makes the plan stale before any write.
@@ -28,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::seams::remote_provider::RemoteKind;
 
 /// Lock + remote classification result for one candidate (spec §8.2).
 type LockClassification = (
@@ -35,6 +40,7 @@ type LockClassification = (
     Option<AdoptVerdictReason>,
     Option<AdoptLockEvidence>,
     Option<AdoptRemoteEvidence>,
+    Option<AdoptGitSourceHintClaim>,
 );
 
 /// Closed evidence verdicts (spec §8.2). `selectable` candidates carry an
@@ -151,6 +157,10 @@ pub struct AdoptEvidenceCandidate {
     pub reason: Option<AdoptVerdictReason>,
     pub lock: Option<AdoptLockEvidence>,
     pub remote: Option<AdoptRemoteEvidence>,
+    /// Supported Git sources carry a repository-level source hint alongside
+    /// their legacy per-Skill evidence. This internal scan state is never
+    /// serialized as a candidate DTO.
+    pub git_source_hint: Option<AdoptGitSourceHintClaim>,
     /// `tree-sha256-v1` of the final entity; `None` when the chain is
     /// blocked or the entity is a fixture.
     pub local_tree_hash: Option<String>,
@@ -173,8 +183,36 @@ pub struct AdoptEvidenceCandidate {
 pub struct AdoptEvidenceReport {
     pub generation: u64,
     pub candidates: Vec<AdoptEvidenceCandidate>,
+    /// Supported Git installer entries, grouped by normalized repository.
+    /// The UI presents these as complete Source Releases while Core retains
+    /// the individual candidate evidence for legacy handoff compatibility.
+    pub git_sources: Vec<AdoptGitSourceHint>,
     pub lock_files: Vec<crate::seams::installer_lock_store::LockFileReport>,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptGitSourceHint {
+    pub source_type: String,
+    pub source_url: String,
+    pub tracking_refs: Vec<String>,
+    pub external_ownership_claims: Vec<AdoptGitSourceClaim>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct AdoptGitSourceClaim {
+    pub lock_path: PathBuf,
+    pub entry_name: String,
+    pub requested_ref: String,
+}
+
+/// One validated supported-Git lock entry, held only while the scan turns
+/// individual filesystem candidates into repository-level source hints.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptGitSourceHintClaim {
+    pub source_type: String,
+    pub source_url: String,
+    pub claim: AdoptGitSourceClaim,
 }
 
 /// The three explicit Modified branches (spec §8.2, ADR-0013 §3): all three
@@ -357,9 +395,9 @@ impl AdoptService {
             .map(|agent| agent.agent_id.clone())
             .collect::<Vec<_>>();
         let mut candidates = Vec::new();
+        let mut git_sources = BTreeMap::<(String, String), AdoptGitSourceHint>::new();
         // One temp workspace per normalized remote, shared by every
-        // candidate of that remote and discarded after the whole scan
-        // (ADR-0013 §2.3: 按 normalized remote 共享一次 fetch).
+        // candidate of that remote and discarded after the whole scan.
         let mut workspaces: HashMap<String, PathBuf> = HashMap::new();
         for (key, group) in grouped {
             if let Some(blocked) = group.blocked {
@@ -385,18 +423,39 @@ impl AdoptService {
                 &suggested,
                 &mut workspaces,
             )?;
+            if let Some(hint) = candidate.git_source_hint.take() {
+                let source = git_sources
+                    .entry((hint.source_type.clone(), hint.source_url.clone()))
+                    .or_insert_with(|| AdoptGitSourceHint {
+                        source_type: hint.source_type.clone(),
+                        source_url: hint.source_url.clone(),
+                        tracking_refs: Vec::new(),
+                        external_ownership_claims: Vec::new(),
+                    });
+                source.tracking_refs.push(hint.claim.requested_ref.clone());
+                source.external_ownership_claims.push(hint.claim);
+            }
             candidate.appearances.sort_by(|left, right| {
                 left.appearance.entry_path.cmp(&right.appearance.entry_path)
             });
             candidates.push(candidate);
         }
         candidates.sort_by(|left, right| left.directory_name.cmp(&right.directory_name));
-        let truncated = candidates.len() > MAX_ADOPT_SKILLS;
+        let mut git_sources = git_sources.into_values().collect::<Vec<_>>();
+        for source in &mut git_sources {
+            source.tracking_refs.sort();
+            source.tracking_refs.dedup();
+            source.external_ownership_claims.sort();
+            source.external_ownership_claims.dedup();
+        }
+        let truncated = candidates.len() > MAX_ADOPT_SKILLS || git_sources.len() > MAX_ADOPT_SKILLS;
         candidates.truncate(MAX_ADOPT_SKILLS);
+        git_sources.truncate(MAX_ADOPT_SKILLS);
         let generation = self.evidence_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let report = AdoptEvidenceReport {
             generation,
             candidates,
+            git_sources,
             lock_files,
             truncated,
         };
@@ -517,6 +576,7 @@ impl AdoptService {
             }),
             lock: None,
             remote: None,
+            git_source_hint: None,
             local_tree_hash: None,
             requires_relocation: false,
             selectable: false,
@@ -556,6 +616,7 @@ impl AdoptService {
             reason: Some(AdoptVerdictReason::FixtureEntity),
             lock: None,
             remote: None,
+            git_source_hint: None,
             local_tree_hash: None,
             requires_relocation: false,
             selectable: false,
@@ -591,6 +652,7 @@ impl AdoptService {
                 reason: Some(AdoptVerdictReason::FixtureEntity),
                 lock: None,
                 remote: None,
+                git_source_hint: None,
                 local_tree_hash: None,
                 requires_relocation: false,
                 selectable: false,
@@ -616,6 +678,7 @@ impl AdoptService {
                     }),
                     lock: None,
                     remote: None,
+                    git_source_hint: None,
                     local_tree_hash: None,
                     requires_relocation: false,
                     selectable: false,
@@ -635,6 +698,7 @@ impl AdoptService {
                 reason: Some(AdoptVerdictReason::FixtureEntity),
                 lock: None,
                 remote: None,
+                git_source_hint: None,
                 local_tree_hash: None,
                 requires_relocation: false,
                 selectable: false,
@@ -658,6 +722,7 @@ impl AdoptService {
                 }),
                 lock: None,
                 remote: None,
+                git_source_hint: None,
                 local_tree_hash: Some(local_tree_hash),
                 requires_relocation: false,
                 selectable: false,
@@ -714,6 +779,7 @@ impl AdoptService {
                 }),
                 lock: None,
                 remote: None,
+                git_source_hint: None,
                 local_tree_hash: Some(local_tree_hash),
                 requires_relocation: false,
                 selectable: false,
@@ -723,7 +789,8 @@ impl AdoptService {
             });
         }
 
-        // 4. Lock discovery and the closed-loop verdict (ADR-0013 §2).
+        // 4. Lock discovery either keeps an individual Local Source verdict
+        // or emits a supported Git repository source hint.
         let shared = appearances
             .iter()
             .any(|appearance| appearance.appearance.shared);
@@ -732,14 +799,15 @@ impl AdoptService {
         } else {
             Vec::new()
         };
-        let (verdict, reason, lock_evidence, remote_evidence) = self.classify_with_lock(
-            entity,
-            directory_name,
-            lock_files,
-            installer_root,
-            &local_tree_hash,
-            workspaces,
-        )?;
+        let (verdict, reason, lock_evidence, remote_evidence, git_source_hint) = self
+            .classify_with_lock(
+                entity,
+                directory_name,
+                lock_files,
+                installer_root,
+                &local_tree_hash,
+                workspaces,
+            )?;
         let requires_relocation = entity.starts_with(library_root)
             || entity.starts_with(installer_root)
             || agent_roots.iter().any(|root| entity.starts_with(root));
@@ -756,6 +824,7 @@ impl AdoptService {
             reason,
             lock: lock_evidence,
             remote: remote_evidence,
+            git_source_hint,
             local_tree_hash: Some(local_tree_hash),
             requires_relocation,
             selectable,
@@ -765,9 +834,10 @@ impl AdoptService {
         })
     }
 
-    /// Lock discovery and remote verification for one candidate. Network
-    /// Deferred is grouped by normalized remote: one failed group never
-    /// blocks other groups (ADR-0013 §2.3).
+    /// Lock discovery and remote verification for one candidate. Supported
+    /// Git entries additionally emit their canonical repository source hint
+    /// for the source-level presentation; legacy candidate evidence remains
+    /// intact for the handoff boundary.
     fn classify_with_lock(
         &self,
         entity: &Path,
@@ -805,6 +875,7 @@ impl AdoptService {
                         file_fault: Some(fault),
                     }),
                     None,
+                    None,
                 ));
             }
         }
@@ -834,6 +905,7 @@ impl AdoptService {
                     entry_fault: None,
                     file_fault: None,
                 }),
+                None,
                 None,
             ));
         }
@@ -877,11 +949,13 @@ impl AdoptService {
                         file_fault: None,
                     }),
                     None,
+                    None,
                 ));
             }
             return Ok((
                 AdoptVerdict::Local,
                 Some(AdoptVerdictReason::NoLock),
+                None,
                 None,
                 None,
             ));
@@ -903,9 +977,12 @@ impl AdoptService {
                     file_fault: None,
                 }),
                 None,
+                None,
             ));
         }
-        // The lock governs this exact canonical entity: remote verification.
+        // The lock governs this exact canonical entity. Preserve its closed
+        // candidate evidence while also exposing the canonical repository as
+        // a source-level UI grouping key.
         let lock_path = declaration_report.path.clone();
         let lock_evidence = AdoptLockEvidence {
             lock_path: lock_path.clone(),
@@ -925,13 +1002,46 @@ impl AdoptService {
                     }),
                     Some(lock_evidence),
                     None,
+                    None,
                 ));
             }
         };
+        // The source-level transition accepts HTTPS Git Repository Sources.
+        // Keep other legacy transports in their existing per-Skill flow
+        // rather than offering an action that must fail validation.
+        let source_hint =
+            request
+                .canonical_url
+                .starts_with("https://")
+                .then(|| AdoptGitSourceHintClaim {
+                    source_type: source_type_for(request.kind).into(),
+                    source_url: request.canonical_url.clone(),
+                    claim: AdoptGitSourceClaim {
+                        lock_path,
+                        entry_name: directory_name.to_owned(),
+                        requested_ref: request.requested_ref.clone(),
+                    },
+                });
+        if let Some(source_hint) = source_hint {
+            // The whole repository is the current source of truth. Do not
+            // serially materialize and hash every legacy member here: that
+            // repeats local Git work after the one shared fetch, delays the
+            // Adopt ledger, and is superseded by the complete Source Group
+            // Preview. The client preloads that one source preview and the
+            // confirmation path still refetches before any write.
+            return Ok((
+                AdoptVerdict::Deferred,
+                Some(AdoptVerdictReason::RemoteUnavailable {
+                    detail: "Git Repository Source verification continues in the complete source preview"
+                        .into(),
+                }),
+                Some(lock_evidence),
+                None,
+                Some(source_hint),
+            ));
+        }
         // Verification Deferred grouping: one failed group marks every
         // candidate of the same canonical remote; other groups continue.
-        // The workspace is shared by the whole remote group and discarded
-        // by the caller after the scan (ADR-0013 §2.3).
         let workspace = match workspaces.get(&request.canonical_url) {
             Some(workspace) => workspace.clone(),
             None => {
@@ -943,8 +1053,7 @@ impl AdoptService {
                 workspace
             }
         };
-        let outcome = self.remote_provider.verify(&request, &workspace);
-        let facts = match outcome {
+        let facts = match self.remote_provider.verify(&request, &workspace) {
             Ok(facts) => facts,
             Err(RemoteProviderError::Deferred(detail)) => {
                 return Ok((
@@ -952,6 +1061,7 @@ impl AdoptService {
                     Some(AdoptVerdictReason::RemoteUnavailable { detail }),
                     Some(lock_evidence),
                     None,
+                    source_hint,
                 ));
             }
             Err(RemoteProviderError::Conflict(detail)) => {
@@ -960,6 +1070,7 @@ impl AdoptService {
                     Some(AdoptVerdictReason::RemoteConflict { detail }),
                     Some(lock_evidence),
                     None,
+                    source_hint,
                 ));
             }
         };
@@ -973,6 +1084,7 @@ impl AdoptService {
                     }),
                     Some(lock_evidence),
                     None,
+                    source_hint,
                 ));
             }
         };
@@ -996,7 +1108,13 @@ impl AdoptService {
             trees_match,
             default_branch: facts.default_branch,
         };
-        Ok((verdict, None, Some(lock_evidence), Some(remote)))
+        Ok((
+            verdict,
+            None,
+            Some(lock_evidence),
+            Some(remote),
+            source_hint,
+        ))
     }
 
     /// Generation-bound plan: freezes the scan evidence plus the explicit
@@ -1449,6 +1567,14 @@ struct GroupedEvidence {
     appearances: Vec<AdoptAppearanceEvidence>,
     blocked: Option<AdoptEvidenceCandidate>,
     excluded: Option<AdoptEvidenceCandidate>,
+}
+
+fn source_type_for(kind: RemoteKind) -> &'static str {
+    match kind {
+        RemoteKind::Github => "github",
+        RemoteKind::Gitlab => "gitlab",
+        RemoteKind::GenericGit => "git",
+    }
 }
 
 /// A fixture footprint is present when the canonical entity lives under a

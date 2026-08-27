@@ -1313,6 +1313,80 @@ button:active:not(:disabled) {
   background: var(--surface-muted);
 }
 
+.adopt-git-sources {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.adopt-git-source {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid color-mix(in oklch, var(--accent) 34%, var(--border-subtle));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--accent) 5%, var(--surface-raised));
+}
+
+.adopt-git-source h3,
+.adopt-git-source p {
+  margin: 0;
+}
+
+.adopt-git-source h3 {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.adopt-git-source p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.adopt-fact-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: 12px;
+}
+
+.adopt-fact-list dt {
+  color: var(--text-secondary);
+}
+
+.adopt-fact-list dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.adopt-git-source-claims {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.adopt-git-source-claims li {
+  display: grid;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--divider);
+  font-size: 12px;
+}
+
+.adopt-source-content {
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.adopt-git-source > button {
+  justify-self: start;
+}
+
 .operation-status-window {
   position: fixed;
   z-index: 70;
@@ -2068,25 +2142,35 @@ button:active:not(:disabled) {
 
 /* -- Import source kind switch and Git Import flow -- */
 .import-kind-switch {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.import-kind-switch button {
-  flex: 1;
-  padding: 9px 12px;
+  width: min(calc(100% - (var(--space-6) * 2)), 360px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  margin: var(--space-4) var(--space-6) 0;
+  padding: 2px;
+  background: var(--surface-muted);
   border: 1px solid var(--divider);
   border-radius: var(--radius-md);
-  background: var(--surface-muted);
+}
+.import-kind-switch button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: calc(var(--radius-md) - 3px);
+  background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.25;
+  white-space: nowrap;
   cursor: pointer;
 }
 .import-kind-switch button[aria-pressed="true"] {
   background: var(--accent-soft);
-  border-color: var(--accent);
   color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px oklch(72% 0.09 250 / 0.52);
 }
 .import-option {
   display: flex;
@@ -2182,29 +2266,65 @@ button:active:not(:disabled) {
   font-size: 13px;
 }
 .source-group-members .git-import-candidates li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
+
+.source-group-members .git-import-candidates {
+  max-height: clamp(16rem, 38vh, 28rem);
+}
+
+.source-group-member-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.source-group-members .candidate-path,
+.source-group-member-tree dd code {
+  overflow-wrap: anywhere;
+}
+
 .source-group-members small {
   color: var(--text-secondary);
   font-size: 12px;
+  line-height: 1.45;
 }
-.source-group-members dl {
+.source-group-member-tree {
+  min-width: 0;
   margin: 0;
-  text-align: right;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--divider);
 }
-.source-group-members dt,
-.source-group-members dd {
+.source-group-member-tree > div {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.source-group-member-tree dt,
+.source-group-member-tree dd {
   margin: 0;
 }
-.source-group-members dt {
+.source-group-member-tree dt {
   color: var(--text-secondary);
   font-size: 11px;
 }
-.source-group-members dd code {
+.source-group-member-tree dd {
+  min-width: 0;
+}
+.source-group-member-tree dd code {
+  display: block;
   font-size: 11px;
+}
+
+@media (max-width: 430px) {
+  .source-group-member-tree > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
 }
 .source-promotion-resolution {
   display: grid;

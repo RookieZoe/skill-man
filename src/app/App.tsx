@@ -23,6 +23,7 @@ import type {
   ActivationReplaceUndoResult,
   ActivationResult,
   AdoptEvidenceReport,
+  AdoptGitSource,
   AdoptPlan,
   AdoptResult,
   AdoptSelection,
@@ -33,6 +34,7 @@ import type {
   AvailableAppUpdate,
   CatalogClient,
   CatalogFilter,
+  FetchLatestAndManageRequest,
   GitRepositorySourceType,
   GitSourceCapabilityReport,
   LinkImportPreview,
@@ -326,6 +328,9 @@ export function App({ client }: AppProps) {
     "idle" | "scanning" | "planning" | "applying" | "undoing"
   >("idle");
   const adoptRunId = useRef(0);
+  const adoptSourcePreviewCache = useRef<
+    Map<string, Promise<SourceGroupPreviewOutcome>>
+  >(new Map());
   const [linkImportPreview, setLinkImportPreview] =
     useState<LinkImportPreview | null>(null);
   const [linkImportResult, setLinkImportResult] =
@@ -661,6 +666,7 @@ export function App({ client }: AppProps) {
     setReplaceUndo(null);
     setReplaceError(null);
     setIsAdoptOpen(true);
+    adoptSourcePreviewCache.current.clear();
     setAdoptReport(null);
     setAdoptSelections({});
     setAdoptPlan(null);
@@ -674,6 +680,7 @@ export function App({ client }: AppProps) {
       const report = await client.scanAdopt();
       if (runId !== adoptRunId.current) return;
       setAdoptReport(report);
+      preloadAdoptGitSources(report.gitSources);
       // Viewing is never selecting: the ledger preselects nothing, not even
       // the conflicted Skill (spec §2.1 invariant 9).
     } catch (reason) {
@@ -832,7 +839,14 @@ export function App({ client }: AppProps) {
     setIsLinkImportOpen(true);
   }
 
-  async function fetchLatestAndManage() {
+  async function fetchLatestAndManage(
+    request: FetchLatestAndManageRequest = {
+      sourceType: sourceGroupType,
+      sourceUrl: sourceGroupUrl,
+      trackingRef: sourceGroupRef.trim() || null,
+    },
+    preloadedPreview?: Promise<SourceGroupPreviewOutcome>,
+  ) {
     const runId = ++sourceGroupRunId.current;
     setSourceGroupActivity("fetching");
     setSourceGroupError(null);
@@ -842,11 +856,9 @@ export function App({ client }: AppProps) {
     setSourcePromotionDraft(null);
     setSourcePromotionResult(null);
     try {
-      const outcome = await client.fetchLatestAndManage({
-        sourceType: sourceGroupType,
-        sourceUrl: sourceGroupUrl,
-        trackingRef: sourceGroupRef.trim() || null,
-      });
+      const outcome = preloadedPreview
+        ? await preloadedPreview
+        : await client.fetchLatestAndManage(request);
       if (runId !== sourceGroupRunId.current) return;
       setSourceGroupOutcome(outcome);
     } catch (reason) {
@@ -856,6 +868,84 @@ export function App({ client }: AppProps) {
     } finally {
       if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
     }
+  }
+
+  function adoptSourceRequest(
+    source: AdoptGitSource,
+  ): FetchLatestAndManageRequest {
+    return {
+      sourceType: source.sourceType,
+      sourceUrl: source.sourceUrl,
+      trackingRef:
+        source.trackingRefs.length === 1 ? source.trackingRefs[0] : null,
+    };
+  }
+
+  function sourcePreviewKey(request: FetchLatestAndManageRequest) {
+    return JSON.stringify([
+      request.sourceType,
+      request.sourceUrl,
+      request.trackingRef,
+    ]);
+  }
+
+  function preloadAdoptSourcePreview(request: FetchLatestAndManageRequest) {
+    const key = sourcePreviewKey(request);
+    const cached = adoptSourcePreviewCache.current.get(key);
+    if (cached) return cached;
+    const preview = client.fetchLatestAndManage(request);
+    adoptSourcePreviewCache.current.set(key, preview);
+    void preview.catch(() => {
+      // A transient background failure must not turn into a permanently
+      // cached preview error. The explicit management action retries it.
+      if (adoptSourcePreviewCache.current.get(key) === preview) {
+        adoptSourcePreviewCache.current.delete(key);
+      }
+    });
+    return preview;
+  }
+
+  function preloadAdoptGitSources(sources: AdoptGitSource[]) {
+    for (const source of sources) {
+      void preloadAdoptSourcePreview(adoptSourceRequest(source)).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  function manageAdoptGitSource(source: AdoptGitSource) {
+    if (adoptActivity !== "idle") return;
+    const request = adoptSourceRequest(source);
+    const preloadedPreview = preloadAdoptSourcePreview(request);
+    const trackingRef = request.trackingRef ?? "";
+
+    adoptRunId.current += 1;
+    setIsAdoptOpen(false);
+    setAdoptPlan(null);
+    setAdoptResult(null);
+    setAdoptUndo(null);
+    setAdoptError(null);
+    setAdoptSelections({});
+
+    linkImportRunId.current += 1;
+    setLinkImportPreview(null);
+    setLinkImportResult(null);
+    setLinkImportError(null);
+    setImportKind("git");
+    setSourceGroupType(source.sourceType);
+    setSourceGroupUrl(source.sourceUrl);
+    setSourceGroupRef(trackingRef);
+    setSourceGroupOutcome(null);
+    setSourceTransitionResult(null);
+    setSourcePromotionRemoteId(null);
+    setSourceUpdateActive(false);
+    setSourcePromotionDraft(null);
+    setSourcePromotionResult(null);
+    setSourceGroupError(null);
+    setSourceGroupActivity("idle");
+    setIsLinkImportOpen(true);
+
+    void fetchLatestAndManage(request, preloadedPreview);
   }
 
   async function closeImport() {
@@ -1242,6 +1332,7 @@ export function App({ client }: AppProps) {
   async function openAdopt() {
     adoptRunId.current += 1;
     setIsAdoptOpen(true);
+    adoptSourcePreviewCache.current.clear();
     setAdoptReport(null);
     setAdoptSelections({});
     setAdoptPlan(null);
@@ -1255,6 +1346,7 @@ export function App({ client }: AppProps) {
       const report = await client.scanAdopt();
       if (runId !== adoptRunId.current) return;
       setAdoptReport(report);
+      preloadAdoptGitSources(report.gitSources);
     } catch (reason) {
       if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
     } finally {
@@ -1297,6 +1389,7 @@ export function App({ client }: AppProps) {
 
   async function rescanAdopt() {
     const runId = ++adoptRunId.current;
+    adoptSourcePreviewCache.current.clear();
     setAdoptPlan(null);
     setAdoptError(null);
     setAdoptErrorHeading("app.notice.scan_failed");
@@ -1305,6 +1398,7 @@ export function App({ client }: AppProps) {
       const report = await client.scanAdopt();
       if (runId !== adoptRunId.current) return;
       setAdoptReport(report);
+      preloadAdoptGitSources(report.gitSources);
       setAdoptSelections({});
     } catch (reason) {
       if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
@@ -1646,7 +1740,9 @@ export function App({ client }: AppProps) {
     setOnboardingStep(0);
     // Guide into Adopt with the scan results already loaded (spec §8.7);
     // viewing is never selecting, so nothing is pre-included.
+    adoptSourcePreviewCache.current.clear();
     setAdoptReport(report);
+    preloadAdoptGitSources(report.gitSources);
     setAdoptSelections({});
     setAdoptPlan(null);
     setAdoptResult(null);
@@ -1832,6 +1928,7 @@ export function App({ client }: AppProps) {
         onApplyAdopt={applyAdopt}
         onUndoAdopt={undoAdopt}
         onCloseAdopt={closeAdopt}
+        onManageAdoptGitSource={manageAdoptGitSource}
         isPreferencesOpen={isPreferencesOpen}
         preferences={preferences}
         preferencesWarning={preferencesWarning}

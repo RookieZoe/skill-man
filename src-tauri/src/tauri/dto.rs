@@ -2504,6 +2504,48 @@ impl From<crate::core::adopt::AdoptEvidenceCandidate> for AdoptEvidenceCandidate
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdoptGitSourceClaimDto {
+    pub lock_path: String,
+    pub entry_name: String,
+    pub requested_ref: String,
+}
+
+impl From<crate::core::adopt::AdoptGitSourceClaim> for AdoptGitSourceClaimDto {
+    fn from(value: crate::core::adopt::AdoptGitSourceClaim) -> Self {
+        Self {
+            lock_path: value.lock_path.to_string_lossy().into_owned(),
+            entry_name: value.entry_name,
+            requested_ref: value.requested_ref,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptGitSourceHintDto {
+    pub source_type: String,
+    pub source_url: String,
+    pub tracking_refs: Vec<String>,
+    pub external_ownership_claims: Vec<AdoptGitSourceClaimDto>,
+}
+
+impl From<crate::core::adopt::AdoptGitSourceHint> for AdoptGitSourceHintDto {
+    fn from(value: crate::core::adopt::AdoptGitSourceHint) -> Self {
+        Self {
+            source_type: value.source_type,
+            source_url: value.source_url,
+            tracking_refs: value.tracking_refs,
+            external_ownership_claims: value
+                .external_ownership_claims
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdoptLockEntryFaultDto {
     pub name: String,
     pub reason: String,
@@ -2548,6 +2590,7 @@ impl From<crate::seams::installer_lock_store::LockFileReport> for AdoptLockFileD
 pub struct AdoptEvidenceReportDto {
     pub generation: u64,
     pub candidates: Vec<AdoptEvidenceCandidateDto>,
+    pub git_sources: Vec<AdoptGitSourceHintDto>,
     pub lock_files: Vec<AdoptLockFileDto>,
     pub truncated: bool,
 }
@@ -2557,6 +2600,7 @@ impl From<crate::core::adopt::AdoptEvidenceReport> for AdoptEvidenceReportDto {
         Self {
             generation: value.generation,
             candidates: value.candidates.into_iter().map(Into::into).collect(),
+            git_sources: value.git_sources.into_iter().map(Into::into).collect(),
             lock_files: value.lock_files.into_iter().map(Into::into).collect(),
             truncated: value.truncated,
         }
