@@ -115,13 +115,18 @@ Module 不自行读取 Agent 配置；Activation Module 不自行推导路径。
 
 ## 扫描、Adopt 与分发
 
-Rescan 只消费已配置 Agent 的 Root。先按 Root canonical path 求并集、每个物理 Root 扫一次，再按最终
-canonical Skill 实体聚合 appearances。删除 Agent Configuration 会从下一 snapshot 移除仅由它引用的
-Root；未纳管候选随 Rescan 消失，已经 Managed 的 Skill、来源记录和 Home 实体不自动 Remove 或回滚。
+Rescan 只消费已配置 Agent 的 Root。先按 Root canonical path 求并集、每个物理 Root 扫一次，再按
+[ADR-0017](0017-canonical-scan-aggregation-and-source-attribution.md)在一次 generation 内以最终文件
+系统对象身份聚合 Canonical Skill Entity 与全部 Scan Appearance。删除 Agent Configuration 会从下一
+snapshot 移除仅由它引用的 Root；未纳管候选随 Rescan 消失，已经 Managed 的 Skill、来源记录和 Home
+实体不自动 Remove 或回滚。
 
-去重后的候选继续按本 Wayfinder 地图的来源决策处理：Git Repository Source 以完整 Source Release
-安装到 `<Bound Home>/skills/{repo_user}/{repo_name}/{skill_name}`；Local Source 在 Catalog 记录真实
-目标路径。正式路径始终从不可变 Bound Home 解析，不另设固定 Home。
+去重后的候选按 ownership 位置、bounded worktree 与 applicable lock 分类：稳定外部开发工作区即使
+属于 Git repository 仍是 Local Source，在 Catalog 记录真实目标路径；控制区内的 Git hint 与有效
+Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release。Git Repository Source 安装到
+`<Bound Home>/skills/{repo_user}/{repo_name}/{skill_name}`；正式路径始终从不可变 Bound Home 解析，
+不另设固定 Home。单 Root 失败保留 typed diagnostic 和其它 Root 的部分结果，但会移动、删除、替换
+实体或释放 external ownership 的操作必须等待完整 Scan Coverage。
 
 全局 Enable 先选择 Agent，再解析其唯一 Target；不逐次询问目录，也不复制到全部扫描 Root。多个 Agent
 引用同一 Target 时只存在一个物理 Activation。Inspector 必须把这些 Agent 作为同一 Target group

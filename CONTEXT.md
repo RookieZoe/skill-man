@@ -58,6 +58,13 @@
 | Agent Preset | Agent preset | 智能体预设 |
 | Custom Agent | Custom Agent | 自定义智能体 |
 | Global Skills Root | Global skills root | 全局技能根目录 |
+| Scan Appearance | Scan appearance | 扫描出现位置 |
+| Canonical Skill Entity | Canonical skill entity | 规范技能实体 |
+| Scan Coverage | Scan coverage | 扫描覆盖 |
+| Scan Report | Scan report | 扫描报告 |
+| Scan Incomplete | Scan incomplete | 扫描不完整 |
+| Git Repository Source Candidate | Git repository source candidate | Git 仓库来源候选 |
+| Conflict Set | Conflict set | 冲突集 |
 | Agent Detection | Agent detection | 智能体检测 |
 | Agent Configuration | Agent configuration | 智能体配置 |
 | Agent Activation Target | Agent activation target | 智能体启用目标 |
@@ -217,6 +224,10 @@ _Avoid_: Delete(不暗示物理删除), Eject, Uninstall
 状态:命名撞车。两类:Library 内重名(同名 skill 来自不同来源)、Activation 冲突(要 Enable 的 agent 目录已被同名 Untracked 实体/链接占用)。处理规则由「符号链接策略与冲突规则」决策。
 _Avoid_: Name Clash, Collision
 
+**Conflict Set**:
+一次 Scan Report 中,具有同一当前 Skill identity、但指向不同 Canonical Skill Entity 的候选集合。Local 候选可以显式选择一个 winner;系统不按内容合并、自动改名或替换既有 Managed Skill。
+_Avoid_: Duplicate Skill, Merge Group
+
 **Managed**:
 状态:skill 在 Library 中、受 Skill Man 追踪。
 _Avoid_: Adopted
@@ -244,6 +255,10 @@ _Avoid_: Git Repository Source member, Source Release fact, Repository checkout
 **Git Repository Source**:
 以受支持 Git provider 和规范化 Git repository identity 定义的来源单元。它有唯一 tracking ref；该 ref 在每个 Source Release 中解析为一个 commit，仓库内的所有成员随该 release 一起更新。
 _Avoid_: Per-Skill Git source, Git checkout
+
+**Git Repository Source Candidate**:
+Scan Report 中按 provider 与规范化 repository identity 聚合的来源线索;它可汇合 bounded worktree evidence 与 External Ownership Claim,但在 Fetch Latest 发现完整 Source Release 前不是 Git Repository Source。
+_Avoid_: Verified repository, Source Release
 
 **GitHub Repository Source**:
 以 `github` provider 定义的 Git Repository Source。它遵循全部 Git 仓库级成员、release 与更新语义，不形成 GitHub 专有的逐成员例外。
@@ -330,7 +345,7 @@ _Avoid_: Auto removal, inferred rename
 _Avoid_: multiple Git sources, inferred ref
 
 **Fetch Latest and Manage**:
-将旧 Git lock 线索交接为新的 Git Repository Source 的显式操作。用户选择 ref 后，系统从该 ref 当前的 Source Release 发现完整成员；旧 lock 和旧 Home 内容不提供成员路径、内容 baseline 或“已验证”的结论。远端不能完成获取和发现时，交接不成立。
+把 Git Repository Source Candidate 提升为 Git Repository Source 的显式操作。用户选择 tracking ref 后,系统从该 ref 当前的 Source Release 发现完整成员;worktree hint、旧 lock、本地 HEAD/dirty bytes 和旧 Home 内容都不提供当前成员或 baseline。远端不能完成获取和发现时,来源不成立。
 _Avoid_: Revalidate old lock, trust old bytes
 
 **Verification Anchor**:
@@ -338,15 +353,15 @@ _Avoid_: Revalidate old lock, trust old bytes
 _Avoid_: Original install commit, Guessed commit
 
 **Provenance Conflict**:
-外部 lock 声称某个 Skill 有 remote 来源,但来源闭环缺失或证据矛盾的 Adopt 状态。它默认保持 Untracked 并阻止自动降级;用户查看证据后可显式忽略该 lock,再按 Local Link 路径处理。
+worktree、外部 lock、repository、member、ref 或 owner 证据互相矛盾的 Adopt 状态。它保持 Untracked 并阻止自动降级;只有修复证据,或精确处理 applicable external claim 后,才能重新分类。
 _Avoid_: Invalid lock(只描述文件,没有表达领域阻塞状态), Local Skill
 
 **Verification Deferred**:
-外部 lock 的结构与已知证据尚未矛盾,但网络离线、认证失败或 remote 服务暂时故障使 Verified Remote Source 闭环暂时无法完成的 Adopt 状态。它保持 Untracked,可 Retry 或由用户显式忽略 lock 后转 Local Link;不得自动降级。
+已知来源证据尚未矛盾,但网络离线、认证失败或 remote 服务暂时故障使 Source Release 获取与发现暂时无法完成的 Adopt 状态。它保持 Untracked 并可 Retry;不得创建部分来源或自动降级。
 _Avoid_: Provenance Conflict, Offline Skill
 
 **Local Source**:
-未被认定为 Verified Remote Source、由用户继续拥有的 Skill 最终实体。Adopt 以 Link 认领;实体必须位于 Skill Man Home、Agent/shared skills 根与 installer-managed 根之外,否则先由用户显式选择稳定位置并完成可回滚迁出。
+由用户继续拥有、以真实 canonical 路径登记的 Skill 最终实体。它可以位于用户的 Git 开发工作区;版本控制 metadata 不改变 ownership。Adopt 以 Link 认领且不移动、复制或改写稳定外部实体;实体若仍在 Skill Man Home、Global Skills Root 或 installer-managed root 中,须先显式迁到稳定位置。
 _Avoid_: Unverified Remote, File Install
 
 **Ownership Handoff**:
@@ -375,6 +390,26 @@ _Avoid_: Custom Adapter, scan profile
 **Global Skills Root**:
 一个或多个已配置 Agent 在用户全局作用域读取 Skill 的 canonical 目录。它是可私有或共享的扫描输入与 appearance 证据;多个 Agent Configuration 引用同一路径时只扫描一次。
 _Avoid_: Agent path, Agent directory
+
+**Scan Appearance**:
+一次扫描中,Global Skills Root 内某个 Skill 目录入口、关联 Agent 与到最终实体的完整 symlink chain。多个 appearances 可以聚合到同一 Canonical Skill Entity。
+_Avoid_: Candidate, Activation
+
+**Canonical Skill Entity**:
+同一 scan generation 内解析到同一文件系统对象的全部 Scan Appearance 聚合。它不是持久 Skill identity;canonical path、对象 identity 与 tree fingerprint 只共同证明本次扫描事实。
+_Avoid_: Skill ID, Canonical path
+
+**Scan Coverage**:
+一次 Scan Report 对全部 configured canonical Global Skills Root 的成功或 typed failure 记录,并保留每个 Root 的关联 Agent。它说明本次结果看见了什么,不把失败 Root 当成空目录。
+_Avoid_: Detection, Scan scope
+
+**Scan Report**:
+generation-bound 的只读扫描结果,包含 Scan Coverage、Canonical Skill Entity、来源分组、Conflict Set、typed diagnostics 与操作资格。它是 Preview 证据,不是 Catalog truth。
+_Avoid_: Catalog snapshot, Adopt plan
+
+**Scan Incomplete**:
+至少一个 configured canonical Global Skills Root 未成功覆盖的 Scan Report 状态。健康 Root 的非破坏操作可以继续;可能移动、删除、替换实体或释放 external ownership 的操作须等待完整 Scan Coverage。
+_Avoid_: Scan failed, Partial success
 
 **Agent Detection**:
 对 Agent Preset 已知 Global Skills Root 当前是否存在、可读及身份是否一致的只读观察。检测不创建目录、不授予写权限或写入 Agent Configuration;已检测但未配置的 Agent 不进入 Skill 扫描,「未检测到」也不表示 Broken。

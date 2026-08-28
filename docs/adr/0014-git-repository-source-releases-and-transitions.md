@@ -17,6 +17,14 @@
 - **Legacy Per-Skill Git State**：具有旧 parent/binding 的逐成员 ref、commit 或 baseline，但缺少共同 release 与完整成员事实的既有状态。它不是当前 Source Release。
 - **Source Promotion**：用户显式确认的、把无歧义 Legacy Per-Skill Git State 原地提升为 Git Repository Source 的 Source Transition。它保留 `remote_id`，但不继承旧成员证据为当前 release。
 
+## Scan source hint 与 ownership 边界
+
+Rescan 的来源入口以 [ADR-0017](0017-canonical-scan-aggregation-and-source-attribution.md) 为准。受支持 Git provider 的 Git Repository Source Candidate 可以汇合两类独立证据：Global Skills Root/installer-managed root 边界内的 bounded worktree 提供 repository/member hint，唯一有效 applicable lock 提供 repository/ref hint 与 External Ownership Claim。任一 hint 都不构成 Git Repository Source、Source Release 或当前内容 baseline；二者矛盾时 fail closed。
+
+用户拥有、位于全部 Agent/installer/Home 控制区之外且没有 applicable external claim 的开发工作区始终是 Local Source，即使它有完整 `.git`、remote 和 dirty bytes。Adopt 只登记真实路径并让 Activation 直指该实体，不移动、复制或改写工作区。worktree discovery 不越过产生 appearance 的 canonical Root；Root 上层的 dotfiles repository 不参与来源分类。有效 lock 仍可为不含 `.git` 的 materialized entity 提供来源线索。
+
+Scan 先按 canonical filesystem object identity 聚合 appearances，再按 provider 与 canonical repository identity 聚合 Git Repository Source Candidate。同一 repository 的多个 ref 是一个 Repository Ref Conflict，不拆成多个来源。只有 Fetch Latest and Manage 以用户选择的 tracking ref 获取并发现完整 Source Release 后，当前来源才成立。
+
 ## 迁移与能力判定
 
 启动对 Catalog 的实际表、列、约束和 source manifest 做零写入 Source Capability Scan。它不以 `schema_version` 判定状态，不推断 release，不补写缺失结构，也不自动修复数据。
@@ -29,7 +37,7 @@
 
 ## 来源组预览与确认
 
-对受支持 Git 的入口是 Fetch Latest and Manage：以 `sourceType`、`sourceUrl` 和用户选择的 ref 获取仓库并发现当前完整 Source Release。旧 external lock 仅显示 External Ownership Claim；它可说明将被 CAS 释放的声明，却不证明旧实体、成员路径、remote baseline 或旧内容已被验证。
+对受支持 Git 的入口是 Fetch Latest and Manage：以 Git Repository Source Candidate 的 provider、canonical repository 与用户选择的 ref 获取仓库并发现当前完整 Source Release。bounded worktree 只提供 hint；旧 external lock 只显示 External Ownership Claim。二者都不证明旧实体、成员路径、remote baseline 或旧内容已被验证。
 
 Source Group Preview 在一个来源父节点下显示 provider、规范化 repository、tracking ref、resolved commit、完整成员集与每个成员动作。成员资格不可用逐项 Include 裁剪。预览仅创建 Source Group Draft；所有冲突处理都只是草案，取消或重新扫描不写 Home、Catalog、stage、journal 或 lock。
 
