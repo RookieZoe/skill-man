@@ -56,6 +56,11 @@
 | Catalog ReadOnly | Catalog read-only | 技能库只读 |
 | Agent | Agent | 智能体 |
 | Agent Preset | Agent preset | 智能体预设 |
+| Custom Agent | Custom Agent | 自定义智能体 |
+| Global Skills Root | Global skills root | 全局技能根目录 |
+| Agent Detection | Agent detection | 智能体检测 |
+| Agent Configuration | Agent configuration | 智能体配置 |
+| Agent Activation Target | Agent activation target | 智能体启用目标 |
 | Import | Import | 导入 |
 | Link | Link | 链接 |
 | Install | Install | 安装 |
@@ -357,18 +362,37 @@ Remote Source Parent 的 `source.json` 与 Catalog 来源记录缺失或不一�
 _Avoid_: HomeIdentityMismatch, Catalog ReadOnly
 
 **Agent**:
-一个 AI 编码工具(如 Claude Code、Codex),它从约定的 skills 目录加载 skill。Skill Man 以「名称 + 目录路径」描述一个 Agent;内置 Claude Code / Codex 两个 Agent Preset,也支持自定义。
-Agent 还可携带项目级 skills 目录约定(仓库相对路径,如 `.claude/skills`),用于项目级 Enable 目标的解析;无该约定的 Agent 不提供项目级目标。
+一个从一个或多个 Global Skills Root 加载 Skill 的 AI 编码工具。Agent 身份独立于 Root;它通过 Agent Configuration 取得扫描范围、Agent Activation Target 与可空的项目级目录约定。
 
 **Agent Preset**:
-Skill Man 内置的 Agent 初始配置,预填名称与规范 skills 目录。Preset 是可恢复的默认值,不是锁定绑定;用户覆盖路径后仍是同一个 Agent。
+Skill Man 内置的已知 Agent 配置模板,提供稳定 preset key、默认名称、Global Skills Root、Agent Activation Target 与项目级目录约定。Preset 始终可用于创建配置,但创建出的 Agent Configuration 与 Custom Agent 一样可增删改;检测不会自动重建已删除配置。
 _Avoid_: Built-in Agent, 内置 Agent(需要强调预填配置时用 Agent Preset)
 
+**Custom Agent**:
+用户在 Agent 管理中创建的 Agent Configuration,包含稳定身份、显示名、Global Skills Root、Agent Activation Target 与可空的项目级目录约定。Custom Agent 与由 Preset 创建的配置共同决定扫描、Adopt 与分发范围,兼容性保持 unknown。
+_Avoid_: Custom Adapter, scan profile
+
+**Global Skills Root**:
+一个或多个已配置 Agent 在用户全局作用域读取 Skill 的 canonical 目录。它是可私有或共享的扫描输入与 appearance 证据;多个 Agent Configuration 引用同一路径时只扫描一次。
+_Avoid_: Agent path, Agent directory
+
+**Agent Detection**:
+对 Agent Preset 已知 Global Skills Root 当前是否存在、可读及身份是否一致的只读观察。检测不创建目录、不授予写权限或写入 Agent Configuration;已检测但未配置的 Agent 不进入 Skill 扫描,「未检测到」也不表示 Broken。
+_Avoid_: Agent configuration, 自动配置
+
+**Agent Configuration**:
+当前 Home 在 Agent 管理中保存的配置,包括稳定 Agent 身份、一个或多个 Global Skills Root、其中唯一一个可写 Root 作为 Agent Activation Target,以及可空的项目级目录约定。配置的增删改共同改变扫描、Adopt 与分发范围;多个配置可以引用同一共享 Root 或 Target。
+_Avoid_: Agent Detection, scan configuration
+
+**Agent Activation Target**:
+Agent Configuration 从自身可写 Global Skills Root 中指定、供全局 Enable 创建 Activation 的唯一 canonical 目录。Target 按路径身份去重,可以由一个或多个 Agent Configuration 引用;其余 Root 只参与扫描。
+_Avoid_: Global Skills Root, scan root
+
 **Enable / Disable**:
-把一个 Managed skill 在某个 Agent 上打开(Enable)/ 关闭(Disable)的动词对。Enable 的本质是在该 Agent 的 skills 目录创建 Activation;Disable 是移除它。
+把一个 Managed Skill 向选定 Agent 分发(Enable)或撤回(Disable)的动词对。全局操作解析到 Agent Activation Target,共享 Target 统一影响全部引用 Agent;项目级 Enable 依 ADR-0015 创建不追踪的一次性软链。
 _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:
-名词:某个 Agent 的 skills 目录里的符号链接实体,**直指 skill 最终实体**(Install 来源 → Library 目录树内;Link 来源 → 源目录),不经过 Library 指针条目串联。一个 Managed skill 可以在多个 Agent 上各有一个 Activation。
+名词:Agent Activation Target 中的受管符号链接实体,身份由 Managed Skill 与 Target 共同确定,**直指 Skill 最终实体**(Install 来源 → Library 目录树内;Link 来源 → 源目录),不经过 Library 指针条目串联。
 Activation 仅指受 Skill Man 管理(有 Catalog 记录)的启用项;Enable 到项目级 Agent skills 目录产生的一次性软链不作 Activation 追踪(见 ADR-0015)。
 _Avoid_: Link, 启用链接

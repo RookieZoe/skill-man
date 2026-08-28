@@ -16,6 +16,6 @@ Skill Man 支持把 Managed Skill Enable 到项目文件夹内的 Agent skills �
 ## Consequences
 
 - Activation 词条收窄为「受管启用项」；项目级一次性软链不追踪、不建领域词。
-- Agent 模型获得项目级 skills 目录约定（仓库相对路径，可空），详见 [决策:Agent 模型扩展](https://github.com/RookieZoe/skill-man/issues/71)。
+- Agent Configuration 获得项目级 skills 目录约定（仓库相对路径，可空），详见 [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md)。
 - 扫描汇总与去重分类（[决策:扫描去重、来源分类与汇总呈现](https://github.com/RookieZoe/skill-man/issues/77)）只覆盖全局；Enable 操作面（[决策:Enable 操作面与目标选择](https://github.com/RookieZoe/skill-man/issues/72)）增加项目目标分支与批量语义。
 - 共享项目工位（`.agents/skills`）对 Codex/Zed 不可避免：物理共享，但 Skill Man 不做跨 Agent 联动管理，冲突走确认覆盖。

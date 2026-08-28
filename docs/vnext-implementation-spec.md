@@ -13,7 +13,7 @@
 仍未被本文件改动的 MVP 行为继续遵循[历史 MVP 实施 Spec](mvp-implementation-spec.md)；发生冲突时，优先级为：
 
 1. [CONTEXT.md](../CONTEXT.md) 中的规范领域词；
-2. ADR-0010 至 ADR-0014 的长期不变量；
+2. ADR-0010 至 ADR-0016 的长期不变量；
 3. 本 vNext Spec 的实施编排和验收细节；
 4. 旧 ADR 与历史 MVP Spec 中未被取代的部分。
 
@@ -31,7 +31,7 @@
 - Home Binding 建立后的 Preferences 改址、Relocate 或普通 re-home。
 - 自动删除或改写用户来源 Skill；把 fixture 恢复冒充 Remove、Adopt 或 Activation Repair。
 - 翻译 Skill 名称、描述、正文、路径、URL、Git 标识、release notes 或外部命令输出。
-- 非 macOS、CLI、URL scheme、本地 API、项目级 Skill/Profile。
+- 非 macOS、CLI、URL scheme、本地 API、Project 注册、项目级扫描/Adopt/健康检查与项目生命周期。
 - 签名、公证与真实 updater 升级验收；继续由[发布前：配置签名、公证并完成真实升级验收](https://github.com/RookieZoe/skill-man/issues/31)跟踪。
 - 在本 Spec 汇总票内修改产品代码或清理本机数据。
 
@@ -59,6 +59,7 @@
 8. **Adopt 单一 owner。** 对 Git Repository Source，单一 external installer lock 的完整适用 claims CAS 释放是 Source Transition 的逻辑 commit point；commit 前整体 rollback，commit 后只整体 roll-forward。
 9. **查看不等于选择。** Local Source 候选仍需逐项显式 Include；Git Repository Source 的完整成员集不可逐项裁剪，只有全部阻塞项解决后的一次 Source Group Confirmation 才能开始 Source Transition。
 10. **DTO 不携带自由 App 文案。** Core 不接收 locale；跨 Tauri seam 的公开语义使用 closed code、typed params 与单独 diagnostic。
+11. **检测不等于配置。** Agent Preset Detection 只读且零 Catalog 写；只有当前 Home 中用户显式创建的 Agent Configuration 才进入扫描、Adopt 与分发。
 
 ### 2.2 被取代的旧结论
 
@@ -71,11 +72,12 @@
 | 历史 Spec §5.4                      | `remote_sources` 每 Skill 一行且没有 parent        | repository 级 Remote Source Parent + per-Skill Remote Binding；mirror 仅为可重建 cache                             |
 | ADR-0013 的 Git provider 部分、旧 vNext §3.4/§8.3/§8.4 | 同一 Git repository 的 Skill 可有独立 ref、commit、Preview、handoff 与 Update | [ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md)：一个 Git Repository Source 只有一个 tracking ref；完整 Source Release 与 Source Transition 是唯一成员、提交、恢复和更新单位 |
 | ADR-0005、历史 Spec §6.5/§8.4       | Agent/shared 内实体通常直接迁入，safe 候选默认勾选 | lock 闭环才可 Remote Install；其余 Local Source 由用户拥有；所有候选逐项 Include，来源链和阻断证据完整展开         |
+| ADR-0005、ADR-0007、历史 Spec §5.4/§7/§8.7 | 仅 Claude/Codex、一个 Agent 一个路径、固定 shared 扫描源且 Activation 归 Agent | [ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md)：九个 Preset 模板；显式 Home-scoped Agent Configuration 驱动多 Root 扫描；一个 Target；shared Target 的 Activation 归物理 Target |
 | 历史 Spec §8.4                      | external 只是 warning，可手动勾选继续              | Provenance Conflict、Verification Deferred 与链路错误是 closed states；只有精确忽略 lock 或修复/Retry 后才能换路径 |
 | 历史 Spec §9                        | 900×600、三栏到 860px、页面可能滚动                | 原生最小 760×520；1060px 断点；pane/drawer/Notice tray 明确拥有滚动；页面无横向滚动                                |
-| 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + 真实 Preset；失败显示真实状态                            |
+| 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + PresetRegistry/Detection + 零 Agent Configuration；失败显示真实状态 |
 
-ADR-0004 的普通 Import/Update、ADR-0005 未被 ADR-0013 取代的扫描/Conflict/Activation/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。ADR-0007 的四个 boolean 行为和 Agent Preset 路径规则不受影响。
+ADR-0004 的普通 Import/Update、ADR-0005 未被 ADR-0013/ADR-0016 取代的 Conflict/journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准。
 
 ## 3. 持久化权威与 schema
 
@@ -198,6 +200,41 @@ git_source_members(
 - 新的 Git Repository Source 在首次 Source Transition 的来源级 Catalog transaction 中创建。一个无歧义 legacy parent 只在显式 Source Promotion 确认后原地保留 `remote_id` 并创建这些能力；旧逐成员 ref、commit、anchor 和 baseline 复制到 operation audit/history 后不再担任当前 release truth。
 - 两个 parent、多个 ref、部分成员、manifest/row 不一致或 foreign-key/integrity 检查失败均不得自动合并、修复或提升。保留 Legacy Per-Skill Git State，直到用户在新的完整 Preview 中处理冲突。
 
+#### schema v8 — Agent Configuration、Global Skills Root 与 Target-scoped Activation
+
+schema v8 clean-cutover 到 [ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md)：
+
+```text
+agent_configurations(
+  agent_id PK,
+  origin, preset_key nullable,
+  name, name_identity_key UNIQUE,
+  compatibility, project_skills_dir nullable,
+  created_at, updated_at
+)
+global_skill_roots(
+  root_id PK,
+  configured_path, path_identity_key UNIQUE,
+  created_at, updated_at
+)
+agent_global_roots(
+  agent_id FK, root_id FK,
+  role(scan_only/activation_target),
+  PK(agent_id, root_id)
+)
+activations(
+  skill_id FK, target_root_id FK,
+  desired_enabled, expected_entry_path UNIQUE, expected_target_path,
+  observed_state, last_enabled_at, last_checked_at,
+  PK(skill_id, target_root_id)
+)
+```
+
+- 每个 Agent Configuration 恰有一个 `activation_target` membership；同一 Root 可供多个 Agent 共享。
+- `PresetRegistry` 与 Detection Observation 不持久化；空 `agent_configurations` 是 Fresh Home 的合法状态。
+- `activations` 从 Agent FK 改为 Target Root FK；存在 Activation 的 Target 至少有一个 Agent 引用，删除使用 `RESTRICT` 加 Core last-reference invariant，不 cascade 删除 Activation。
+- 旧 `agents.skills_path` 成为单一 Target Root，旧 Activation 按 canonical Target 聚合；路径、name identity、Target 或聚合有歧义时整个 migration fail closed。旧 `detected` 丢弃，不能当配置证据。
+
 ### 3.5 fixture recovery fingerprint
 
 生产代码只保留不可变 `FixtureFingerprintV1` 常量，不保留可用于 seed/fallback 的 composition。安全恢复必须同时满足：
@@ -207,7 +244,7 @@ git_source_members(
 - `fixture-entities/media-xray` tree hash = `tree-sha256-v1:146e94fa7177b5c4b034ccafad6fba24175de8a1030fbc0937744961811a2475`。
 - 完整初始 `fixture-entities` root hash = `tree-sha256-v1:bfbd3ade08b7c05a2f5f806e2a0979dc6b241be253e71d28c73f08651af5cc0a`。
 - `legacy-audit` 实体不存在；任何实际目录都使分类失败。
-- 只迁移白名单 Preferences、可验证的 Claude/Codex Preset path override，以及无 Activation 且路径合法的 Custom Agent；fixture Workbench、detected observation 与 onboarding 状态不迁移。
+- 只迁移白名单 Preferences，以及可按 schema v8 无歧义转换的 Claude/Codex Preset override 与无 Activation、路径合法的 Custom Agent；fixture Workbench、旧 `detected` observation 与 onboarding 状态不迁移。
 
 单个名称、UI 内容、`snapshot_version`、mtime/inode 或路径存在都不是充分证据。任何额外、缺失、修改或无法读取的事实把整个 Home 分类为 mixed/unknown，并保持 `Fixture Recovery Lock`；不得恢复“看起来安全”的子集。
 
@@ -380,7 +417,7 @@ React 只保存 ephemeral UI state（selection、filter、sheet、scroll、focus
 6. 恢复 active ledger operation；路径/identity/manifest 能唯一判断时 rollback 或 roll-forward，歧义则保持 recovery lock。
 7. 只读执行 fixture classifier。pure fixture 进入 Preview；mixed/unknown 进入 Fixture Recovery Lock。
 8. 只有 Bound identity、recovery 与 fixture gate 全部通过后，才打开 `BoundCatalogStore`、recover普通 operations、构造写 Module。
-9. 运行只读 Rescan/Activation health，发布首个 `BootstrapSnapshot`，再呈现 Library Desk。
+9. 对全部 Preset 运行零写入 Agent Detection；只对已配置 Agent 的 canonical Root union 运行只读 Rescan，并按 Target 运行 Activation health；发布首个 `BootstrapSnapshot`，再呈现 Library Desk。
 10. 网络 update check 最后异步启动；不能改变 bootstrap gate。
 
 ### 5.2 Fixture Recovery
@@ -555,7 +592,7 @@ Source Group Draft
 2. 为所有成员 stage 目标 release 内容或用户明确保留的安全当前内容，完成完整 tree、空间和 Install/Link 安全校验；任一成员失败即整组不能进入提交点。
 3. 隔离所有受影响 external canonical entity，并重验每个成员、appearance、固定 release 和 ownership claim。Source Ownership Commit Point 前的任何失败都恢复整个来源原状。
 4. 仅当单一 lock 文件的 full fingerprint 与全部 exact applicable claims 都未变化时，原子 CAS 删除这些 claims；保留 version、其它 top-level values、其它 entries 与未知 JSON fields，最后一个 entry 后仍写合法空 lock。CAS 失败不写 lock/Catalog，恢复整组 external source。
-5. CAS 后只允许按固定 journal roll-forward：原子写 Git Repository Source/Release/Member、全部 Home entity、Skill 和 desired Activation；真实 Agent private appearances 压平为直指 Home entity 的 Activation，shared/installer root 不留 Managed Activation。SQLite、Home 与 lock 没有伪造物理单事务，journal 是唯一恢复方向。
+5. CAS 后只允许按固定 journal roll-forward：原子写 Git Repository Source/Release/Member、全部 Home entity、Skill 和 desired Activation；已配置 Agent appearances 压平为直指 Home entity 的 Activation。scan-only shared/installer root 不留 Managed Activation；被配置为共享 Agent Activation Target 的 Root 只保留一份 Target-scoped Activation。SQLite、Home 与 lock 没有伪造物理单事务，journal 是唯一恢复方向。
 6. 进程在 commit point 前崩溃时回滚完整来源；之后崩溃时进入 recovery write lock，收敛到该 journal 的完整目标 Source Release。不得只提交或恢复其中一个成员。
 
 结果窗口关闭/重启前允许 Source Undo；仅当全部成员、Home/entity/appearances、external paths、lock 和 claims 都满足 guard 才能以一次来源级 CAS 恢复，任一 guard 失败即整体拒绝。普通 Remove 不恢复旧 external owner。日后 Update 重新 fetch 唯一 tracking ref、发现完整 release 并重走 Source Group Preview、Draft、Confirmation 与 Source Transition；external installer 再出现仍是 Ownership Conflict，不自动覆盖、合并或再次纳管。
@@ -626,7 +663,7 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | Scenario                                                                          | Required evidence                                                                            |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | 非 Tauri runtime / SQLite open failure                                            | production client 显示 closed error；不出现 fixture Skill                                    |
-| 空 Fresh Home                                                                     | 只有 schema、identity、真实 Claude/Codex Preset；无 Skill/Source/Activation/fixture entities |
+| 空 Fresh Home                                                                     | 只有 schema/identity；PresetRegistry + Detection 可见；零 Agent Configuration/Skill/Source/Activation/fixture entities |
 | locator/marker/Catalog/卷任一缺失或不一致                                         | 精确进入 Unavailable/Mismatch/AppStateUnavailable；零自动补写                                |
 | Candidate cancel / pre-commit crash                                               | 零绑定；只清理本 operation 创建且 identity 匹配的产物                                        |
 | Candidate locator post-commit crash                                               | 重启只 roll-forward 同一 binding；无重新选址                                                 |
@@ -639,6 +676,10 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | Home offline/permission/path replaced                                             | 常规写关闭；locale 可写；Reconnect 仅同 identity 成功                                        |
 | Restore                                                                           | 同 home_id、locator 不变、不触 Activation、Snapshot 不自动删                                 |
 | Abandon                                                                           | 双确认；old id 进入 history；旧 Home/Activation 不删；新 binding 使用新 UUID                 |
+| Preset detected but unconfigured                                                   | 零 Catalog 写、零目录创建、不进入 Skill Rescan；Agent Management 可显式 Add                 |
+| 九个 Preset 与 Custom Agent 多 Root                                                | 只扫描已配置 Root 的 canonical union；同一物理 Root 一次、同一实体一个候选                   |
+| 两个 Agent 共享 Target                                                            | `(Skill, Target)` 只有一条 Activation；任一入口显示全部受影响 Agent                          |
+| 修改/删除 Target 最后引用                                                         | 有 Activation 时阻止并列出阻塞项；非最后引用只解除 Agent 关系，不迁移或删除目录              |
 
 ### 10.2 自动化：locale、layout 与 Adopt
 

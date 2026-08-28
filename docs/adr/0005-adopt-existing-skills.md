@@ -1,6 +1,6 @@
 # 存量 Skill 的 Adopt 流程
 
-> `.skill-lock.json` 管理候选、installer/shared root 内 Local Source、Remote Install 分类与 Ownership Handoff 已由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 取代；候选默认选择、风险交互与 Preview 证据由 [vNext 实施 Spec](../vnext-implementation-spec.md) 取代；本 ADR 的其它扫描、Conflict、Activation、journal 与批量隔离规则继续有效。
+> `.skill-lock.json` 管理候选、installer/shared root 内 Local Source、Remote Install 分类与 Ownership Handoff 已由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 取代；候选默认选择、风险交互与 Preview 证据由 [vNext 实施 Spec](../vnext-implementation-spec.md) 取代；配置驱动的多 Root 扫描与 shared Activation Target 由 [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md) 取代；项目级排除由 [ADR-0015](0015-project-level-enable-target-only.md) 取代。本 ADR 的其它 Conflict、journal 与批量隔离规则继续有效。
 
 Skill Man 以 **Adopt** 收编用户级 Agent 目录中的 Untracked Skill，同时把既有多级软链和共享目录布局迁移为 Library + 独立 Activation 模型。项目级 Skill 不属于本次 MVP；它需要尚未建立的 Project / Profile 领域模型。
 

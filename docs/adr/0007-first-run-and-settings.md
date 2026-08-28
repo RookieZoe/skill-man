@@ -3,7 +3,10 @@
 > **部分取代。** [ADR-0012](0012-skill-man-home-binding-and-unavailability.md)
 > 取代本文的固定 Library 路径、隐式创建与可跳过首次启动结论；
 > [ADR-0011](0011-interface-locale-and-message-ownership.md) 取代「Preferences
-> 严格四项 / 不提供语言设置」。四个既有 boolean 的行为、Agent Preset 与路径规则继续有效。
+> 严格四项 / 不提供语言设置」；
+> [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md)
+> 取代本文 Claude/Codex-only、单 Agent 单路径、路径存在即状态与独立 Agent 目标规则。
+> 四个既有 boolean 的行为继续有效。
 
 Skill Man 的首次启动应尽快进入可用状态，同时避免静默修改 Agent 目录；MVP 只暴露会显著改变后台行为或 macOS 应用形态的设置。本文补充 [符号链接策略](0003-symlink-strategy.md)、[Install 更新规则](0004-install-sources-and-updates.md)、[Adopt 流程](0005-adopt-existing-skills.md)与[应用更新策略](0006-macos-distribution-and-updates.md)。词汇遵循 [CONTEXT.md](../../CONTEXT.md)。
 
