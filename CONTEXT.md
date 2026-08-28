@@ -358,6 +358,7 @@ _Avoid_: HomeIdentityMismatch, Catalog ReadOnly
 
 **Agent**:
 一个 AI 编码工具(如 Claude Code、Codex),它从约定的 skills 目录加载 skill。Skill Man 以「名称 + 目录路径」描述一个 Agent;内置 Claude Code / Codex 两个 Agent Preset,也支持自定义。
+Agent 还可携带项目级 skills 目录约定(仓库相对路径,如 `.claude/skills`),用于项目级 Enable 目标的解析;无该约定的 Agent 不提供项目级目标。
 
 **Agent Preset**:
 Skill Man 内置的 Agent 初始配置,预填名称与规范 skills 目录。Preset 是可恢复的默认值,不是锁定绑定;用户覆盖路径后仍是同一个 Agent。
@@ -369,4 +370,5 @@ _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:
 名词:某个 Agent 的 skills 目录里的符号链接实体,**直指 skill 最终实体**(Install 来源 → Library 目录树内;Link 来源 → 源目录),不经过 Library 指针条目串联。一个 Managed skill 可以在多个 Agent 上各有一个 Activation。
+Activation 仅指受 Skill Man 管理(有 Catalog 记录)的启用项;Enable 到项目级 Agent skills 目录产生的一次性软链不作 Activation 追踪(见 ADR-0015)。
 _Avoid_: Link, 启用链接

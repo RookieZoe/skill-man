@@ -1,0 +1,21 @@
+# 项目级 Skill 目录仅作 Enable 目标
+
+状态：Accepted
+
+Skill Man 支持把 Managed Skill Enable 到项目文件夹内的 Agent skills 目录（如 `.claude/skills`、`.omp/skills`、`.agents/skills`），但项目级目录不进入扫描、Adopt、Import、健康检查与生命周期管理：Skill Man 不注册 Project 实体，不记录项目级链接，不做优先级管控与反向 Adopt。这取代 [ADR-0005](0005-adopt-existing-skills.md)「项目级 Skill 需要 Project/Profile 模型、留待后续」的排除条款——结论不是延期，而是显式不做。决议过程见 [决策:Project 领域模型与项目级 Activation](https://github.com/RookieZoe/skill-man/issues/70)。
+
+## 背景与理由
+
+[2026-08-28 主流 Agent 调研](https://github.com/RookieZoe/skill-man/blob/research/agent-project-skill-dirs/docs/research/2026-08-28-agent-project-skill-dirs.md)表明：项目级与全局的优先级规则因 Agent 而异且互斥（Zed 项目覆盖全局、Claude Code personal 覆盖 project、Gemini workspace 最高、Codex 同名并存、opencode 扫描序敏感），Skill Man 发明统一层级必然与某家相悖；Gemini/Zed/Claude 的信任门无法从外部代办；项目内同名占位可能是用户自己的内容。因此项目级只保留一个动作面：Enable 时选定项目文件夹与 Agent，按其项目级约定目录建条目级软链（[ADR-0001](0001-activation-points-to-entity.md) 直指实体不变），同名占用经确认框后覆盖；占用为真实目录时对话框必须明示将删除的目录与文件数量。
+
+## Considered Options
+
+- **Project 注册实体 + 项目级 Activation 追踪**：被否。生命周期、移动、失效、优先级全部需要建模，而各 Agent 规则互斥使管控价值落空；用户明确项目自管。
+- **完全不支持项目级目标（维持 ADR-0005 排除）**：被否。把 Library 的 Skill 分发到项目目录是核心诉求。
+
+## Consequences
+
+- Activation 词条收窄为「受管启用项」；项目级一次性软链不追踪、不建领域词。
+- Agent 模型获得项目级 skills 目录约定（仓库相对路径，可空），详见 [决策:Agent 模型扩展](https://github.com/RookieZoe/skill-man/issues/71)。
+- 扫描汇总与去重分类（[决策:扫描去重、来源分类与汇总呈现](https://github.com/RookieZoe/skill-man/issues/77)）只覆盖全局；Enable 操作面（[决策:Enable 操作面与目标选择](https://github.com/RookieZoe/skill-man/issues/72)）增加项目目标分支与批量语义。
+- 共享项目工位（`.agents/skills`）对 Codex/Zed 不可避免：物理共享，但 Skill Man 不做跨 Agent 联动管理，冲突走确认覆盖。
