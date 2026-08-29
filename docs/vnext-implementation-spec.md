@@ -65,6 +65,8 @@
 14. **Git 版本只属于来源。** Git Repository Source 的 Source Tracking Policy、Source Release、Update、成员增删与 Remove 都是来源级事实；Source Member 没有独立版本，不能逐项 Update/Remove。
 15. **Git 快照不可编辑。** Git Source Member 只保存 current Source Release 的只读快照；不支持 Modified，字节不匹配进入 Source Snapshot Mismatch 并阻止 Update、新 Enable 与普通来源写，但保留只读/Disable/Local copy/显式 Restore。
 16. **目录名不是持久身份。** Managed Skill 使用稳定 `skill_id`，Git Source Member 使用 `(remote_id, skillPath)`，Directory Identity 只决定 Activation entry。Git 同名成员可在 Library 共存，但同一 Target 的 entry 仍唯一。
+17. **分发范围不伪装。** Global Enable 创建 Target-scoped Activation；Project Enable 只创建 operation-scoped 一次性软链。二者不混批，Project 不获得持久状态、Disable、健康检查或 Repair。
+18. **批量不伪装全局原子性。** Enable 批次先完整 preflight，再以 `(Managed Skill, resolved physical target, Directory Identity)` cell 为独立提交单位；局部失败不回滚其它成功项，系统级 WriteGate/Home identity 失效才停止尚未开始项。
 
 ### 2.2 被取代的旧结论
 
@@ -79,11 +81,13 @@
 | ADR-0001/ADR-0003/ADR-0014、旧 vNext §3.1/§3.4/§8.3 | Skill 身份等于目录名；Install 使用 flat `skills/<name>`；Git 成员可 Modified、显式 mapping 或逐项 Remove | [ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：`skill_id`/`(remote_id, skillPath)`/Directory Identity 分层；Git 快照使用 `skills/git/<remote_id>/<skill_id>`，来源级同步且不可编辑 |
 | ADR-0005、ADR-0013、历史 Spec §6.5/§8.4 | canonical path 当实体、Git 只从 lock 进入、safe 候选默认勾选 | [ADR-0017](adr/0017-canonical-scan-aggregation-and-source-attribution.md)：scan generation 内按文件系统对象聚合；外部 Git 开发工作区仍是 Local；bounded worktree/lock 只形成 source hint；全部选择显式 |
 | ADR-0005、ADR-0007、历史 Spec §5.4/§7/§8.7 | 仅 Claude/Codex、一个 Agent 一个路径、固定 shared 扫描源且 Activation 归 Agent | [ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md)：九个 Preset 模板；显式 Home-scoped Agent Configuration 驱动多 Root 扫描；一个 Target；shared Target 的 Activation 归物理 Target |
+| ADR-0009、历史 Agent Inspector | 每个 Agent 显示一份看似独立的 Activation 开关；只有单 Skill 全局操作 | [ADR-0019](adr/0019-enable-surfaces-target-resolution-and-batch-semantics.md)：shared Target 合并为单一 Activation Target Group；Global/Project 严格分流；Library 临时多选支持批量 Enable |
+| ADR-0016 的项目路径护栏 | 项目级目录一律不得经过 filesystem symlink | [ADR-0019](adr/0019-enable-surfaces-target-resolution-and-batch-semantics.md)：允许有意的项目内 symlink chain，但每个 hop、最近现存祖先与最终容器都必须受 canonical 项目根 containment |
 | 历史 Spec §8.4                      | external 只是 warning，可手动勾选继续              | Provenance Conflict、Verification Deferred 与链路错误是 closed states；只有精确忽略 lock 或修复/Retry 后才能换路径 |
 | 历史 Spec §9                        | 900×600、三栏到 860px、页面可能滚动                | 原生最小 760×520；1060px 断点；pane/drawer/Notice tray 明确拥有滚动；页面无横向滚动                                |
 | 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + PresetRegistry/Detection + 零 Agent Configuration；失败显示真实状态 |
 
-ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准。
+ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准，Enable 操作面、项目目录解析、Conflict 与批量提交以 ADR-0019 为准。
 
 ## 3. 持久化权威与 schema
 
@@ -232,15 +236,24 @@ agent_global_roots(
 )
 activations(
   skill_id FK, target_root_id FK,
-  desired_enabled, expected_entry_path UNIQUE, expected_target_path,
+  directory_identity_key,
+  desired_enabled, expected_entry_path, expected_target_path,
   observed_state, last_enabled_at, last_checked_at,
   PK(skill_id, target_root_id)
+)
+UNIQUE active_activation_entry(
+  target_root_id, directory_identity_key
+) WHERE desired_enabled
+recent_project_folders(
+  canonical_path_key PK,
+  canonical_path, last_used_at
 )
 ```
 
 - 每个 Agent Configuration 恰有一个 `activation_target` membership；同一 Root 可供多个 Agent 共享。
 - `PresetRegistry` 与 Detection Observation 不持久化；空 `agent_configurations` 是 Fresh Home 的合法状态。
-- `activations` 从 Agent FK 改为 Target Root FK；存在 Activation 的 Target 至少有一个 Agent 引用，删除使用 `RESTRICT` 加 Core last-reference invariant，不 cascade 删除 Activation。
+- `activations` 从 Agent FK 改为 Target Root FK；只有 `desired_enabled` 记录占用 `(Target, Directory Identity)`，disabled 历史不阻止后继 Skill 的 Target-local Switch。存在 Activation 的 Target 至少有一个 Agent 引用，删除使用 `RESTRICT` 加 Core last-reference invariant，不 cascade 删除 Activation。
+- `recent_project_folders` 是当前 Bound Home 内最多 10 条、按 `last_used_at` 驱逐的 UI history；只有 Project Enable 至少一个 cell 成功后更新。它没有 Project ID、Agent FK、状态或权限语义，Clear 只清历史，使用路径仍需完整 preflight。
 - 旧 `agents.skills_path` 成为单一 Target Root，旧 Activation 按 canonical Target 聚合；路径、name identity、Target 或聚合有歧义时整个 migration fail closed。旧 `detected` 丢弃，不能当配置证据。
 
 #### schema v9 — Git namespace、tracking policy 与 immutable member
@@ -458,6 +471,7 @@ CommandFailureDto {
 - Fixture Recovery inspect/plan/apply/confirm/snapshot commands；
 - `get_locale_snapshot`、`set_locale_selection`；
 - expanded scan/Adopt DTO：Root coverage、Canonical Skill Entity/appearance、Git Repository Source Candidate、Local Conflict Set、typed operation eligibility、Local Source 的逐项 selection，以及 Git Repository Source 的 Source Tracking Policy/selected ref/tag、`fetchLatestAndManage`、Source Group Preview/Draft/Confirmation、immutable member add/remove、Source Capability Scan、Source Promotion、Repository Ref Conflict、Repository Ownership Split、Source Snapshot Mismatch、Create Local Source Copy、来源级 handoff/result/Undo；
+- Enable DTO：Activation Target Group、resolved project directory/hop、plan cell eligibility/occupancy/conflict resolution、affected Agent、partial result、operation Undo/finalize，以及 Target/Project containment 的 closed reason；
 - `bootstrap://changed` 与 `locale://changed` events，payload 与 query snapshot 同构并带 generation。
 
 React command client 不得在非 Tauri runtime 自动 fallback fixture。浏览器测试/prototype 必须显式注入 `createFixtureCatalogClient()`；production factory 若无 Tauri bridge，返回 closed bootstrap failure。
@@ -472,11 +486,73 @@ src/features/home/      # Unconfigured/Candidate/Unavailable/Recovery routes
 src/features/locale/    # LocaleProvider、message formatting、Language control
 src/features/library/   # Pinned Workbench shell
 src/features/adopt/     # evidence ledger + result/Undo
+src/features/enable/    # Global/Project target selection + Preview/result/Undo
 src/ui/                 # locale-free primitives；visible copy 由 caller 传 key result
 resources/locales/      # en.json、zh-Hans.json 单一 message catalog
 ```
 
-React 只保存 ephemeral UI state（selection、filter、sheet、scroll、focus）；`home_id`、recovery cursor、locale selection、Adopt evidence generation 与 plan validity 以 native snapshot 为权威。
+React 只保存 ephemeral UI state（selection、filter、sheet、scroll、focus）；`home_id`、recovery cursor、locale selection、Adopt/Enable evidence generation 与 plan validity 以 native snapshot 为权威。
+
+### 4.9 Enable Module
+
+Activation 与 Project Enable 深化为一个 Core-owned Module；React 不根据 Agent 路径拼 entry，也不以
+循环调用单项 command 实现批量：
+
+```text
+list_target_groups(skill_id) -> GlobalTargetGroupSnapshot
+plan_global_enable(skill_ids, target_group_ids, cell_resolutions) -> EnablePlan
+plan_project_enable(skill_ids, project_folder, agent_ids, cell_resolutions) -> EnablePlan
+plan_global_lifecycle(skill_id, target_group_id, action) -> EnablePlan
+apply(plan_token) -> EnableResult
+undo(operation_id) -> EnableUndoResult
+finalize(operation_id) -> Result
+```
+
+`action` 是 closed `enable | disable | repair | switch`；批量 surface 只调用 Global/Project
+`plan_*_enable`，不提供批量 Disable/Repair。`GlobalTargetGroupSnapshot` 以 canonical Target identity
+为 key，包含全部引用 Agent、路径、desired/observed state、compatibility 与 typed availability；
+Target 缺失或 mismatch 只返回 `open_agent_management` action，不创建目录。
+
+Project planner 先 canonicalize 用户明确选择的现存项目根，再把每个 Agent Configuration 的安全
+`project_skills_dir` 交给 bounded symlink walker。每个 hop、最近现存祖先与 resolved/missing
+最终容器都必须在项目根内；安全 missing target 作为显式 create step，outside/cycle/hop-limit/
+unreadable/identity replacement 是无 override 的 closed cell。多个 Agent 的最终容器相同时形成
+operation-scoped group；plan 披露全部已配置 consumer，apply 只写一次。容器 containment 不限制
+entry symlink 的最终 Skill entity 位于 Home 或其它项目外 Local Source。
+
+`EnablePlan` 至少包含：
+
+```text
+EnablePlan {
+  plan_token,
+  scope(global | project),
+  write_gate_generation, catalog_generation, agent_generation,
+  project_root? { canonical_path, identity, hop_evidence[] },
+  cells[] {
+    skill_id, directory_identity,
+    resolved_target, entry_path, final_entity_path,
+    affected_agent_ids[],
+    eligibility(ready | no_op | conflict | blocked),
+    occupancy, resolution?, create_steps[], destructive_counts?
+  }
+}
+```
+
+plan 冻结 Source Snapshot health/tree、final entity、Target/project identity、hop chain、entry lstat 与
+occupier ownership。Source Snapshot Mismatch 阻止新 Enable；Disable 仍可用。apply 前先重验全部
+plan evidence，再按 Target 选择顺序和 Library 顺序稳定执行 cell；普通 cell failure 隔离并继续，
+WriteGate/Home identity 失效则标记余项 `not_attempted` 并停止。Ready、no-op、Skipped、Failed 与
+Not attempted 都进入 typed result，Retry 只能以原 draft 重新 plan。
+
+Managed occupier 只允许当前 Target 的 journaled ownership Switch；旧 Skill 其它 Target 不变。
+Global Untracked occupier 在单 Skill flow 可转到既有 Adopt/Replace/Cancel，在批量 flow 只有逐 cell
+Replace/Skip；精确直指目标但未纳管的 global link 也备份后重建。Project 精确直链为 no-op，其它
+occupier 只允许 Replace/Cancel。真实目录与被替换链接先同父 rename 到 operation backup，Preview
+必须带目录/文件数量；不得无条件递归删除。
+
+operation 的每个成功 cell 保存足够的 before/after CAS facts。`undo` 尝试撤销全部成功 cell，单项被
+外部改变时只拒绝该项；`finalize` 或应用重启清理备份并结束 Undo 窗口。Project 成功至少一个 cell 后
+才在同一 Bound Home 更新有界 MRU；Project entry/group 本身永不进入 Catalog。
 
 ## 5. 启动、Home 与恢复状态机
 
@@ -613,6 +689,58 @@ App shell 使用显式 `Toolbar / NoticeRegion / Workspace` rows；0 Notice 折�
 ### 7.2 overlay/focus
 
 Overlay 位于 inert App background 之外。跨 breakpoint resize 不 remount 当前 sheet/drawer；focus trap 保持，关闭回到逻辑 opener。低高度时 backdrop 自身可滚到全部 action。busy 状态拒绝 Escape 与 backdrop dismissal；普通状态支持 Escape。正式 Empty/Error 使用真实可访问语义 DOM，不复用 prototype 的 CSS label。
+
+### 7.3 Enable 操作面与目标选择
+
+常态 Library Desk 保持 Skill-first：
+
+- Agent Inspector 只显示当前 Skill 的全局 Activation Target Group。同一 canonical Target 的 Agent
+  合并为一张 group card，Agent 名称/compatibility 为成员信息、路径为次级证据，整组只有一个
+  switch、desired/observed state 与 Repair action。Preview 固定列出全部受影响 Agent。
+- Skill detail 提供 `Enable to Project…`；Project flow 依次选择一条 MRU 或 Browse 的项目文件夹、
+  一个或多个有 `project_skills_dir` 的 Agent、Preview 与 Result。Agent 无项目目录约定时 disabled，
+  action 指向 Agent Management。
+- Library Toolbar 的 `Select` 进入临时多选模式，初始无勾选；选择至少一个 Managed Skill 后，
+  fixed action bar 提供 `Enable Globally…` 与 `Enable to Project…`。退出清空 draft。Global 与
+  Project Target/Agent 仍默认空并提供显式 Select all，显示去重后的物理 Target 数与受影响 Agent 数。
+- Global 可选多个 Target group；Project 每个 operation 只选一个项目文件夹，但可选多个 Agent 与
+  Skill。两种 scope 永不出现在同一 plan。
+
+项目目录 Preview 同时显示 configured relative path、完整 hop evidence 与 resolved container。
+项目内有意 symlink（例如 `.claude/skills → ../.agents/skills`）可用；每个 hop 与最终容器必须位于
+canonical 项目根内。安全 missing container 显示将创建的路径；最终目录越界、cycle、不可读或身份
+不稳定时对应 cell Blocked，无 override。解析到同一目录的 Agent 临时合并、只写一次，并列出所有
+已配置 consumer；Result 关闭后 UI 不再声称知道该项目链接的存在或健康。
+
+### 7.4 Enable Preview、Conflict 与 Result
+
+Preview 使用 Skill × resolved target matrix。用户已经显式选择的 Ready cell 默认进入 Apply；
+同一 target/Directory Identity 的所选 Skill 逐 target 选择 winner，未解决项保持 Skipped 而不阻塞
+其它 Ready cell。真实目录 Replace 必须逐 cell 展示路径、目录数与文件数，不提供 Replace all。
+
+Conflict action 固定为：
+
+| scope / occupier | actions |
+| --- | --- |
+| Global / Managed Skill | Switch this Target / Cancel |
+| Global / Untracked，单 Skill | Adopt existing / Remove then replace / Cancel |
+| Global / Untracked，批量 | Replace / Skip |
+| Project / exact direct link to requested entity | Already enabled；no-op |
+| Project / other symlink or real directory | Replace / Cancel |
+
+Global 的未纳管 exact direct link 不作 no-op 或 ownership claim，仍经备份删除并重建。Managed Switch
+不影响旧 Skill 的其它 Target。Project Replace 的 backup/Undo 只属于本 operation，不产生 Project
+Activation。
+
+Result 按 cell 列出 Succeeded、Already enabled/no-op、Skipped、Failed 与 Not attempted。局部失败
+不撤回其它成功项；WriteGate/Home identity 失效才停止剩余项。`Undo this operation` 对成功集合逐项
+CAS 重验，外部已改变项单独失败，其余继续；关闭 Result 或应用重启后 finalize。
+
+Global Disable、startup health 与 Repair 只留在 Inspector 的单一 Target group。missing entry 且
+final entity Healthy 时可 Repair；occupied 进入 Conflict，Target unavailable/mismatch 引导 Agent
+Management，dangling 等待同一来源实体恢复或 Disable，Source Snapshot Mismatch 只允许 Disable /
+Create Local Source Copy / Restore Current Source Release。批量 surface 不提供 Disable/Repair，
+Project 永远不显示这些状态或动作。
 
 ## 8. Adopt、Git Repository Source 与 Source Transition
 

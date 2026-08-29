@@ -89,16 +89,24 @@ agent_global_roots(
 activations(
   skill_id FK,
   target_root_id FK,
+  directory_identity_key,
   desired_enabled,
-  expected_entry_path UNIQUE,
+  expected_entry_path,
   expected_target_path,
   observed_state,
   last_enabled_at, last_checked_at,
   PK(skill_id, target_root_id)
 )
+
+UNIQUE active_activation_entry(
+  target_root_id, directory_identity_key
+) WHERE desired_enabled
 ```
 
 每个 Agent Configuration 恰有一个 `activation_target` membership；同一 Root 可被多个配置引用。
+只有 `desired_enabled` 的记录占用 `(Target, Directory Identity)`；disabled 历史记录不持有 entry，
+因此 [ADR-0019](0019-enable-surfaces-target-resolution-and-batch-semantics.md) 的 Target-local
+Managed Switch 可以在同一 Catalog transaction 中释放旧 ownership、取得新 ownership。
 任何存在 Activation 的 Target 必须至少有一个 Agent Configuration 引用。删除 Agent、Root 或 Target
 使用 `RESTRICT`/Core invariant，而不是 cascade 掉 Activation。旧 `agents.skills_path` 迁移为单一
 `activation_target` Root，旧 Activation 按 canonical Target 聚合；非法路径、重复 identity 或不能
@@ -129,8 +137,10 @@ Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release�
 实体或释放 external ownership 的操作必须等待完整 Scan Coverage。
 
 全局 Enable 先选择 Agent，再解析其唯一 Target；不逐次询问目录，也不复制到全部扫描 Root。多个 Agent
-引用同一 Target 时只存在一个物理 Activation。Inspector 必须把这些 Agent 作为同一 Target group
-呈现；从任一 Agent Enable/Disable 都操作同一记录，并在确认前列出全部受影响 Agent。
+引用同一 Target 时只存在一个物理 Activation。Inspector 必须把这些 Agent 作为同一 Activation Target
+Group 呈现，只提供一个开关与健康状态；从任一 Agent 发起的 Enable/Disable 都操作同一记录，并在确认前
+列出全部受影响 Agent。Target 缺失或 identity mismatch 时，Enable 只引导到 Agent Management，
+不得顺带创建或修复配置。
 
 ## 路径与变更护栏
 
@@ -138,10 +148,13 @@ Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release�
   canonical identity 去重；缺失尾部只能基于已 canonicalize 的现存祖先规范化，并在首次写入前重验。
 - 精确相同的 Root 共享同一记录；不同 Root 不得相同、互为父子、等于 Bound Home、位于 Bound Home
   内或包含 Bound Home。system/builtin/cache Root 不可成为 Target。
-- Agent Activation Target 必须是该 Agent 的可写 Root。缺失 Target 只有用户显式确认后才创建；目标
-  既有内容只读归类为 Untracked/Conflict，不自动 Adopt、覆盖或删除。
-- 项目目录约定必须是无 root、`.`、`..` 或 symlink traversal 的仓库相对目录；项目级写入仍按
-  ADR-0015 逐次选择项目文件夹。
+- Agent Activation Target 必须是该 Agent 的可写 Root。缺失 Target 只有在 Agent Management
+  的显式配置 plan 中确认后才创建；Enable plan 不创建 Target。目标既有内容只读归类为
+  Untracked/Conflict，不自动 Adopt、覆盖或删除。
+- `project_skills_dir` 字符串必须是无 root、`.`、`..` 的仓库相对目录。Project Enable 可以解析
+  既有 filesystem symlink，但 bounded walk 的每个 hop、最近现存祖先与最终 skills 容器都必须位于
+  canonical 项目根内；安全的项目内 missing target 可经 Preview 创建，其余 fail closed。项目级写入
+  仍按 ADR-0015 逐次选择项目文件夹。
 - 修改、恢复或删除配置绝不自动迁移 Activation，也不删除 Root 内容。旧 Target 仍有其它 Agent
   引用时，只解除当前关系并明示该 Agent 将不再看到的 Skill 数；当前配置是最后引用者且 Target 仍有
   Activation 时阻止操作，要求先全部 Disable。

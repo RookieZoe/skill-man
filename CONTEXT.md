@@ -71,6 +71,8 @@
 | Agent Detection | Agent detection | 智能体检测 |
 | Agent Configuration | Agent configuration | 智能体配置 |
 | Agent Activation Target | Agent activation target | 智能体启用目标 |
+| Activation Target Group | Activation target group | 启用目标组 |
+| Resolved Project Skills Directory | Resolved project skills directory | 解析后的项目技能目录 |
 | Import | Import | 导入 |
 | Link | Link | 链接 |
 | Install | Install | 安装 |
@@ -438,8 +440,16 @@ _Avoid_: Agent Detection, scan configuration
 Agent Configuration 从自身可写 Global Skills Root 中指定、供全局 Enable 创建 Activation 的唯一 canonical 目录。Target 按路径身份去重,可以由一个或多个 Agent Configuration 引用;其余 Root 只参与扫描。
 _Avoid_: Global Skills Root, scan root
 
+**Activation Target Group**:
+同一 canonical Agent Activation Target 与全部引用它的 Agent Configuration 组成的操作投影;它只承载一份全局 Enable/Disable 与健康状态,不是一组彼此独立的 Agent Activation。
+_Avoid_: Per-Agent Activation, Agent switch
+
+**Resolved Project Skills Directory**:
+一次项目级 Enable 中,由用户所选文件夹与 Agent 的项目级目录约定解析出的项目内最终 skills 容器;它只存在于本次操作计划,不是 Project 实体或 Agent Activation Target。
+_Avoid_: Project, Project Activation Target
+
 **Enable / Disable**:
-把一个 Managed Skill 向选定 Agent 分发(Enable)或撤回(Disable)的动词对。全局操作解析到 Agent Activation Target,共享 Target 统一影响全部引用 Agent;项目级 Enable 依 ADR-0015 创建不追踪的一次性软链。
+把一个 Managed Skill 向选定 Agent 分发(Enable)或从受管全局 Target 撤回(Disable)的动词对。全局操作解析到 Activation Target Group;项目级 Enable 在 Resolved Project Skills Directory 创建不追踪的一次性软链,没有对应的项目级 Disable。
 _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:
