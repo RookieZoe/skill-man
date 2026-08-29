@@ -62,6 +62,9 @@
 11. **检测不等于配置。** Agent Preset Detection 只读且零 Catalog 写；只有当前 Home 中用户显式创建的 Agent Configuration 才进入扫描、Adopt 与分发。
 12. **版本控制不等于 ownership。** 控制区外、没有 applicable external claim 的用户 Git 开发工作区是 Local Source；Adopt 只登记真实路径，不移动、复制或改写内容。
 13. **部分扫描不冒充完整。** 单 Root 失败不抹掉其它 Root 的只读结果；可能迁移、删除、替换实体或释放 external ownership 的操作必须等待完整 Scan Coverage。
+14. **Git 版本只属于来源。** Git Repository Source 的 Source Tracking Policy、Source Release、Update、成员增删与 Remove 都是来源级事实；Source Member 没有独立版本，不能逐项 Update/Remove。
+15. **Git 快照不可编辑。** Git Source Member 只保存 current Source Release 的只读快照；不支持 Modified，字节不匹配进入 Source Snapshot Mismatch 并阻止 Update、新 Enable 与普通来源写，但保留只读/Disable/Local copy/显式 Restore。
+16. **目录名不是持久身份。** Managed Skill 使用稳定 `skill_id`，Git Source Member 使用 `(remote_id, skillPath)`，Directory Identity 只决定 Activation entry。Git 同名成员可在 Library 共存，但同一 Target 的 entry 仍唯一。
 
 ### 2.2 被取代的旧结论
 
@@ -72,14 +75,15 @@
 | ADR-0007、ADR-0009、历史 Spec §10.2 | Preferences 严格四项且不提供语言设置               | 四个既有 boolean 保留；另加非 switch 的 Language 选择 `system                                                      | en  | zh-Hans` |
 | 历史 Spec §4.6                      | SQLite migration/open 先于状态识别                 | 先读 App-level state、校验 identity、执行 fixture/recovery gate，再决定只读或可写 Catalog open                     |
 | 历史 Spec §5.4                      | `remote_sources` 每 Skill 一行且没有 parent        | repository 级 Remote Source Parent + per-Skill Remote Binding；mirror 仅为可重建 cache                             |
-| ADR-0013 的 Git provider 部分、旧 vNext §3.4/§8.3/§8.4 | 同一 Git repository 的 Skill 可有独立 ref、commit、Preview、handoff 与 Update | [ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md)：一个 Git Repository Source 只有一个 tracking ref；完整 Source Release 与 Source Transition 是唯一成员、提交、恢复和更新单位 |
+| ADR-0013 的 Git provider 部分、旧 vNext §3.4/§8.3/§8.4 | 同一 Git repository 的 Skill 可有独立 ref、commit、Preview、handoff 与 Update | [ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md) + [ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：一个 Git Repository Source 使用一项 Source Tracking Policy；完整 Source Release 与 Source Transition 是唯一成员、提交、恢复和更新单位 |
+| ADR-0001/ADR-0003/ADR-0014、旧 vNext §3.1/§3.4/§8.3 | Skill 身份等于目录名；Install 使用 flat `skills/<name>`；Git 成员可 Modified、显式 mapping 或逐项 Remove | [ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：`skill_id`/`(remote_id, skillPath)`/Directory Identity 分层；Git 快照使用 `skills/git/<remote_id>/<skill_id>`，来源级同步且不可编辑 |
 | ADR-0005、ADR-0013、历史 Spec §6.5/§8.4 | canonical path 当实体、Git 只从 lock 进入、safe 候选默认勾选 | [ADR-0017](adr/0017-canonical-scan-aggregation-and-source-attribution.md)：scan generation 内按文件系统对象聚合；外部 Git 开发工作区仍是 Local；bounded worktree/lock 只形成 source hint；全部选择显式 |
 | ADR-0005、ADR-0007、历史 Spec §5.4/§7/§8.7 | 仅 Claude/Codex、一个 Agent 一个路径、固定 shared 扫描源且 Activation 归 Agent | [ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md)：九个 Preset 模板；显式 Home-scoped Agent Configuration 驱动多 Root 扫描；一个 Target；shared Target 的 Activation 归物理 Target |
 | 历史 Spec §8.4                      | external 只是 warning，可手动勾选继续              | Provenance Conflict、Verification Deferred 与链路错误是 closed states；只有精确忽略 lock 或修复/Retry 后才能换路径 |
 | 历史 Spec §9                        | 900×600、三栏到 860px、页面可能滚动                | 原生最小 760×520；1060px 断点；pane/drawer/Notice tray 明确拥有滚动；页面无横向滚动                                |
 | 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + PresetRegistry/Detection + 零 Agent Configuration；失败显示真实状态 |
 
-ADR-0004 的普通 Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准。
+ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准。
 
 ## 3. 持久化权威与 schema
 
@@ -94,14 +98,16 @@ ADR-0004 的普通 Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 �
 <Skill Man Home>/
 ├── .skill-man-home.json    # Home marker
 ├── skill-man.sqlite3       # Catalog SQLite + WAL/SHM
-├── skills/                 # Home-owned Install 实体
-├── remotes/                # provenance-only Remote Source Parent manifests
+├── skills/
+│   ├── git/<remote-id>/<skill-id>/  # current immutable Git Source Member snapshots
+│   └── …                            # non-Git Install entities；既有 contract 不变
+├── remotes/<remote-id>/source.json  # source identity/policy/current release manifest
 ├── operations/             # durable product operation journals/backups
 ├── cache/                  # 可重建；含 cache/git bare mirrors
 └── staging/                # 瞬态；启动恢复后清理
 ```
 
-`skill-man-state` 与默认 Home 同级且互不包含。Agent skills 目录、shared/installer root 与用户 Local Source 不属于 Home。
+`skill-man-state` 与默认 Home 同级且互不包含。Agent skills 目录、shared/installer root 与用户 Local Source 不属于 Home。Local Source 只在 Catalog 记录 canonical 最终实体路径；Home 不创建 Link pointer。Git member storage path 只由 `remote_id + skill_id` 决定，repository rename、URL alias、Directory Identity 或 `skillPath` 不迁移该路径。
 
 ### 3.2 App-level state 文件
 
@@ -169,9 +175,9 @@ remote_bindings(
 
 #### Git Repository Source capability — 后继来源组 migration
 
-后继实施票可以把新增 migration 编号为 schema v7，以维持 SQLite migration 的线性顺序；**该编号绝不是运行时资格、修复或迁移判定条件**。启动必须以 Source Capability Scan 实际检查 Catalog 的表、列、foreign-key/unique 约束和 `remotes/<remote-id>/source.json` 的必需事实。扫描零写入；缺失、部分或矛盾能力一律归为 Legacy Per-Skill Git State，不得借 `schema_version`、`PRAGMA user_version` 或空值猜测为新模型。
+schema v7 是 ADR-0014 的历史来源组 foundation；它不具备 ADR-0018 的 namespace、tracking policy、immutable member/tombstone 与同名能力，因此不能单独判定为当前 Git Repository Source。**migration 编号绝不是运行时资格、修复或迁移判定条件**。启动必须以 Source Capability Scan 实际检查 Catalog 的表、列、foreign-key/unique 约束和 `remotes/<remote-id>/source.json` 的必需事实；只有本节 v7 foundation 加 schema v9 contract 全部成立才是当前能力。扫描零写入；缺失、部分或矛盾能力一律归为 Legacy Per-Skill Git State，不得借 `schema_version`、`PRAGMA user_version` 或空值猜测为新模型。
 
-受支持 Git provider 的目标物理能力为：
+v7 历史 foundation 为：
 
 ```text
 git_repository_sources(
@@ -236,6 +242,56 @@ activations(
 - `PresetRegistry` 与 Detection Observation 不持久化；空 `agent_configurations` 是 Fresh Home 的合法状态。
 - `activations` 从 Agent FK 改为 Target Root FK；存在 Activation 的 Target 至少有一个 Agent 引用，删除使用 `RESTRICT` 加 Core last-reference invariant，不 cascade 删除 Activation。
 - 旧 `agents.skills_path` 成为单一 Target Root，旧 Activation 按 canonical Target 聚合；路径、name identity、Target 或聚合有歧义时整个 migration fail closed。旧 `detected` 丢弃，不能当配置证据。
+
+#### schema v9 — Git namespace、tracking policy 与 immutable member
+
+schema v9 clean-cutover 到 [ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)。它不重写已发布 migration；SQLite 必须在单一 transaction 中重建 `skills` 的 identity constraint、扩展 Git source tables 并通过 foreign-key/integrity check 后才提交：
+
+```text
+skills(
+  id PK,
+  directory_name, directory_identity_key,   # ordinary indexed comparison key, not globally UNIQUE
+  source_kind, final_entity_path, health, …
+)
+git_repository_sources(
+  remote_id PK/FK remote_source_parents,
+  provider, canonical_url,
+  tracking_mode, tracking_value nullable,
+  current_selected_ref nullable,
+  current_release_id nullable FK,
+  created_at, updated_at,
+  UNIQUE(provider, canonical_url)
+)
+git_source_releases(
+  release_id PK, remote_id FK,
+  selection_kind, selected_ref,
+  resolved_commit, discovered_at,
+  UNIQUE(remote_id, selected_ref, resolved_commit)
+)
+git_source_release_members(
+  release_id FK, skill_id FK,
+  skill_path, directory_name, directory_identity_key,
+  tree_hash, provider_hash nullable,
+  PK(release_id, skill_path),
+  UNIQUE(release_id, skill_id)
+)
+git_source_members(
+  skill_id PK/FK, remote_id FK,
+  skill_path, storage_relpath,
+  presence(current/absent),
+  first_seen_release_id FK, last_seen_release_id FK,
+  last_checked_at, last_updated_at,
+  UNIQUE(remote_id, skill_path),
+  UNIQUE(remote_id, storage_relpath)
+)
+```
+
+- `tracking_mode` 是 `auto_release_tag_head`、`prerelease_channel`、`fixed_tag`、`fixed_commit`、`branch` 或 `head`；只有需要参数的 mode 使用 `tracking_value`。auto policy 依次解析 latest stable provider Release、highest stable SemVer tag、default-branch-reachable latest ordinary tag、`HEAD`。
+- `git_source_release_members` 是成功 Source Transition 后的不可变完整 manifest；Draft 不写表。`git_source_members` 不保存 independent ref/commit/baseline，也不允许改变 `skill_path` 来表达 rename。
+- `storage_relpath` 必须严格等于 `skills/git/<remote_id>/<skill_id>`。current member 必须有匹配 current release row 和可验证只读 tree；absent member 是 Source Member Tombstone，无当前实体，但保留稳定 `(remote_id, skill_path, skill_id)` 到整个来源 Remove。
+- `skills.health` 或等价 closed source state 必须能表达 `source_snapshot_mismatch`，且它与 `modified` 互斥。Git row 不得进入 Modified。
+- 非 Git 与非 Git 的 Directory Identity Conflict 由 Core 执行；数据库不得再用全局 UNIQUE 误阻断 Git 同名成员或 Create Local Source Copy。
+- `source.json` 与 Catalog 必须共同证明 `remote_id`、provider、canonical repository/aliases、tracking mode/value、current selected ref 和 current release。任一缺失/矛盾继续归 Remote Source Identity Conflict 或 Legacy capability，不能启动时补写。
 
 ### 3.5 fixture recovery fingerprint
 
@@ -369,14 +425,14 @@ ScanReport {
 
 Root 先按 canonical identity 求并集，每个物理 Root 扫一次；目录入口再按最终文件系统对象身份聚合 Canonical Skill Entity。对象 identity 只在本 generation 内有效，canonical path、identity、tree 和 appearances 共同参与 plan stale 重验，不能持久化成 Skill identity。单 Root 失败保留 typed diagnostic 与其它 Root 的部分结果；每个候选必须给出 operation eligibility，任何可能迁移、删除、替换实体或释放 external ownership 的 plan 都要求完整 coverage。
 
-控制区外且没有 applicable lock 的用户开发工作区是 Local Source，即使它具有完整 Git metadata；Adopt 只登记 canonical 路径，Activation 直指原实体。控制区内的 bounded worktree 与有效 Git lock 是并列 source hints：前者提供 repository/member，后者提供 repository/ref 与 External Ownership Claim。二者一致时按 provider + canonical repository 聚合；矛盾时 fail closed。用户显式调用 `fetch_latest_and_manage` 后才以所选 tracking ref 获取并发现完整 Source Release；不能用 worktree HEAD/dirty bytes、旧逐成员 Include、anchor、lock skillPath 或本地 hash 合成计划。
+控制区外且没有 applicable lock 的用户开发工作区是 Local Source，即使它具有完整 Git metadata；Adopt 只登记 canonical 最终实体路径，Activation 直指原实体，Catalog 不保存内容 baseline。控制区内的 bounded worktree 与有效 Git lock 是并列 source hints：前者提供 repository/member，后者提供 repository/ref 与 External Ownership Claim。二者一致时按 provider + canonical repository 聚合；矛盾时 fail closed。用户显式调用 `fetch_latest_and_manage` 后才按 Source Tracking Policy 或显式 override 选择 ref/tag、获取 resolved commit 并发现完整 Source Release；不能用 worktree HEAD/dirty bytes、旧逐成员 Include、anchor、lock skillPath 或本地 hash 合成计划。
 
 新增/深化 seam：
 
 - `InstallerLockStore`：枚举已知 lock、strict v3 parse、full fingerprint、完整适用 claims 的单文件 CAS rewrite；system + race-injecting Adapter。多个 lock 文件的同源 claim 返回 Repository Ownership Split。
-- `RemoteProvider`：全部受支持 Git provider 使用同一 repository-source contract：规范化 repository、列出/选择 ref、fetch resolved commit、发现完整 Source Release 和成员 tree；不以旧 lock 的 skillPath/hash 在 ancestry 中找逐成员 anchor，也不写 Home。
-- 现有 `FileSystem`：提供 bounded symlink walk、entry/object identity、whole-tree hash、限定在 originating canonical Root 内的 nearest-worktree discovery、同父 rename、fsync；不暴露无条件递归删除。
-- 现有 `CatalogStore`：提供零写入 Source Capability Scan、Git Repository Source/Release/Member 读写和来源级 write-gate transaction；不接收 lock JSON。
+- `RemoteProvider`：全部受支持 Git provider 使用同一 repository-source contract：规范化 repository、读取 stable provider Release/tag/default-branch facts、按 Source Tracking Policy 或显式 override 确定 selected ref、fetch resolved commit、发现完整 Source Release 和成员 tree；普通 tag 只从 default branch 可达集合中按确定性顺序选择，不以旧 lock 的 skillPath/hash 在 ancestry 中找逐成员 anchor，也不写 Home。
+- 现有 `FileSystem`：提供 bounded symlink walk、entry/object identity、whole-tree hash、只读 permission publish/recheck、`skills/git/<remote_id>/<skill_id>` namespace validation、限定在 originating canonical Root 内的 nearest-worktree discovery、同父 rename、fsync；不暴露无条件递归删除。
+- 现有 `CatalogStore`：提供零写入 Source Capability Scan、tracking policy/immutable release-member/tombstone/Source Snapshot Mismatch 读写和来源级 write-gate transaction；Directory Identity 不能作为全局 UNIQUE，也不接收 lock JSON。
 
 ### 4.7 typed Tauri DTO
 
@@ -401,7 +457,7 @@ CommandFailureDto {
 - `get_bootstrap_snapshot`、Home Candidate/confirm/reconnect/abandon commands；
 - Fixture Recovery inspect/plan/apply/confirm/snapshot commands；
 - `get_locale_snapshot`、`set_locale_selection`；
-- expanded scan/Adopt DTO：Root coverage、Canonical Skill Entity/appearance、Git Repository Source Candidate、Conflict Set、typed operation eligibility、Local Source 的逐项 selection，以及 Git Repository Source 的 `fetchLatestAndManage`、Source Group Preview/Draft/Confirmation、Source Capability Scan、Source Promotion、Repository Ref Conflict、Repository Ownership Split、来源级 handoff/result/Undo；
+- expanded scan/Adopt DTO：Root coverage、Canonical Skill Entity/appearance、Git Repository Source Candidate、Local Conflict Set、typed operation eligibility、Local Source 的逐项 selection，以及 Git Repository Source 的 Source Tracking Policy/selected ref/tag、`fetchLatestAndManage`、Source Group Preview/Draft/Confirmation、immutable member add/remove、Source Capability Scan、Source Promotion、Repository Ref Conflict、Repository Ownership Split、Source Snapshot Mismatch、Create Local Source Copy、来源级 handoff/result/Undo；
 - `bootstrap://changed` 与 `locale://changed` events，payload 与 query snapshot 同构并带 generation。
 
 React command client 不得在非 Tauri runtime 自动 fallback fixture。浏览器测试/prototype 必须显式注入 `createFixtureCatalogClient()`；production factory 若无 Tauri bridge，返回 closed bootstrap failure。
@@ -562,9 +618,9 @@ Overlay 位于 inert App background 之外。跨 breakpoint resize 不 remount �
 
 ### 8.1 Evidence Ledger 与 Source Group Preview
 
-Local Source 的 Adopt Preview 使用逐 Canonical Skill Entity 证据账本和显式 Include。稳定控制区外的用户开发工作区即使属于 Git repository 也保持 Local：Catalog 记录真实路径，Adopt 不移动、复制或改写目录，Activation 直指该实体。受支持 Git provider 的入口显示 bounded worktree hint、provider、规范化 repository、所有命中的 External Ownership Claim、可选 tracking ref 和 Fetch Latest and Manage；用户选择 ref 后才获取远端并发现完整 Source Release。
+Local Source 的 Adopt Preview 使用逐 Canonical Skill Entity 证据账本和显式 Include。稳定控制区外的用户开发工作区即使属于 Git repository 也保持 Local：Catalog 只记录 canonical 最终实体路径，不保存内容 baseline，Adopt 不移动、复制或改写目录，Activation 直指该实体。受支持 Git provider 的入口显示 bounded worktree hint、provider、规范化 repository、所有命中的 External Ownership Claim、默认 Source Tracking Policy 和可选显式 override；Fetch Latest and Manage 按 policy 选择 ref/tag 后才获取远端并发现完整 Source Release。
 
-Scan 先按最终文件系统对象聚合 appearances，再按 provider + canonical repository identity 聚合 Git Repository Source Candidate。同一 repository 的多个 ref 是一个 Repository Ref Conflict，不拆分来源。Git Repository Source Preview 以来源为父节点；固定显示 provider、canonical repository、tracking ref、resolved commit、完整 Source Member 集、每个成员的目标 `skillPath`、目标 tree 摘要、当前路径/本地修改状态、计划动作和外部 lock 影响。成员不能逐项 Include 或跳过。worktree HEAD/dirty bytes、旧 lock、旧本地 `skillPath`、hash 与 commit 只可显示为 hint、External Ownership Claim 或历史事实，绝不作为远端成员、remote baseline 或 verified provenance。
+Scan 先按最终文件系统对象聚合 appearances，再按 provider + canonical repository identity 聚合 Git Repository Source Candidate。同一 repository 的多个 legacy ref 提示是一个 Repository Ref Conflict，不拆分来源。Git Repository Source Preview 以来源为父节点；固定显示 provider、canonical repository、Source Tracking Policy、selected ref/tag、resolved commit、完整 Source Member 集、每个成员的 `skillPath`、Directory Identity、目标 tree 摘要、added/current/removed 动作、Source Snapshot Mismatch 与外部 lock 影响。成员不能逐项 Include、保留旧版本或跳过。worktree HEAD/dirty bytes、旧 lock、旧本地 `skillPath`、hash 与 commit 只可显示为 hint、External Ownership Claim 或历史事实，绝不作为远端成员、remote baseline 或 verified provenance。
 
 同一最终文件系统对象的多个 Agent/Root appearance 只形成一个 Canonical Skill Entity，但每条 appearance、关联 Agent 与完整 chain 都逐条显示。bounded walk 上限 16；dangling、cycle、hop-limit、non-UTF-8、读取失败或 identity replacement 停在精确失败 hop，不生成部分 fingerprint。worktree discovery 不越过 originating canonical Root；Root 上层 dotfiles repository 不参与分类。
 
@@ -576,30 +632,35 @@ Scan Report 分别统计 Root coverage、canonical entities、appearances、Loca
 
 | Evidence | verdict / 动作 |
 | --- | --- |
-| 控制区外、无 applicable lock 的稳定实体，包括 Git 开发工作区 | Local Link；显式 Include；只登记真实 canonical 路径，不移动、复制或改写来源树 |
+| 控制区外、无 applicable lock 的稳定实体，包括 Git 开发工作区 | Local Link；显式 Include；只登记 canonical 最终实体路径，不保存内容 baseline，不移动、复制或改写来源树 |
 | 完整检查后无 Git/lock 信号，但实体位于 Home、Global Skills Root 或 installer root | 先选上述 roots 之外的稳定位置并 journaled move，再 Local Link |
-| 控制区内有受支持 provider 的 bounded worktree，或有唯一有效 applicable Git lock | 按 repository 聚合 Git Repository Source Candidate；用户显式 Fetch Latest and Manage，以所选 ref 获取完整 Source Release |
+| 控制区内有受支持 provider 的 bounded worktree，或有唯一有效 applicable Git lock | 按 repository 聚合 Git Repository Source Candidate；用户显式 Fetch Latest and Manage，以 Source Tracking Policy 或 override 获取完整 Source Release |
 | 控制区外只有损坏 gitdir、多 remote 或其它未能唯一解释的 worktree metadata，且无 applicable lock | Local Link；保留“未采用 Git metadata”的信息，不把版本控制冒充 ownership |
 | 控制区内的 Git metadata 无法解释，或 worktree/lock/repository/member/ref/owner 矛盾 | typed Blocked 或 Provenance Conflict；无 Include；修复或精确处理 applicable claim 后 Rescan |
-| 同一规范化 Git repository 的旧声明提出多个 ref | Repository Ref Conflict；用户选择一个 ref 后重新发现；不拆分来源、不自动选 ref |
+| 同一规范化 Git repository 的旧声明提出多个 ref | Repository Ref Conflict；用户确认 Source Tracking Policy 或显式 override 后重新发现；不拆分来源，也不把任一旧 ref 当 current truth |
 | 同一来源的 applicable claim 跨多个 external lock 文件 | Repository Ownership Split；拒绝 Source Group Confirmation，零写入，直到用户收敛到单一稳定 installer root |
 | 一个或多个 configured canonical Root 扫描失败 | Scan Incomplete；其它 Root 继续只读分类；非破坏 Local Link 可继续，实体迁移/删除/替换与 ownership release 等待完整 coverage |
 | remote fetch/discovery 暂不可用，或目标 Source Release 不完整/不安全 | 保留外部状态与 Source Group Draft；可 Retry；不自动降级为 Local Link 或创建部分来源 |
-| 当前 Source Release 发现完整且一个 lock 文件可承担全部 claims | Source Group Preview；解决所有 Modified/removed/path/ownership 冲突后一次 Source Group Confirmation |
+| 当前 Source Release 发现完整且一个 lock 文件可承担全部 claims | Source Group Preview；确认完整 added/current/removed 成员、tracking policy 与 ownership 影响后一次 Source Group Confirmation |
+| Home Git member tree 不等于 current Source Release | Source Snapshot Mismatch；阻止 Update、新 Enable 与普通来源写；允许只读/Disable/复制当前观察字节为 Local Source/显式 Restore Current Source Release |
 | 非 Git sourceType | 保持 ADR-0013 的现有证据、分类与逐项行为；本节不改变其模型 |
 | fixture 或无文件系统来源证明 | Excluded；不可创建 Include 或 Source Group Draft，由 Fixture Recovery 处理 |
 
-时间字段和 `pluginName` 只展示，不参与信任。受支持 Git 的 lock 缺失 ref 时可将 `HEAD` 作为用户可见选择；bounded worktree 只有唯一 upstream 时可提出建议，多 remote、多 upstream、detached HEAD 或 ref 不明确时必须由用户选择。release truth 永远是本次 fetch 得到的 resolved commit 与完整成员集，而不是 worktree HEAD、dirty bytes 或旧 anchor 的 ancestry 匹配。
+时间字段和 `pluginName` 只展示，不参与信任。默认 Source Tracking Policy 依次选择最新正式 provider Release、最高稳定 SemVer tag、default branch 可达的最新普通 tag，最后才 fallback `HEAD`；draft/prerelease 只有显式 channel 才进入。fixed tag/commit、branch 或 `HEAD` override 由用户明确选择。release truth 永远是本次 fetch 得到的 selected ref/tag、resolved commit 与完整成员集，而不是 worktree HEAD、dirty bytes 或旧 anchor 的 ancestry 匹配。
 
-Local↔Local 的同一 `NFC + Unicode casefold` identity 形成 Conflict Set：默认无 winner，用户可显式选择一个，其余保持 Untracked；同一实体多 identity 必须先改名后 Rescan，既有 Managed Skill 不在 Adopt 中替换。包含 Git Source Member 的潜在同名关系保留 directory identity、canonical entity、repository、`skillPath` 与 source membership 并阻断来源；最终 identity 与跨 repository 同名语义由[决策:Git 来源 Skill 的 Library 布局与命名空间身份](https://github.com/RookieZoe/skill-man/issues/74)决定。
+Local↔Local 的同一 `NFC + Unicode casefold` Directory Identity 形成 Conflict Set：默认无 winner，用户可显式选择一个，其余保持 Untracked；同一实体多 identity 必须先改名后 Rescan，既有非 Git Managed Skill 不在 Adopt 中替换。Git Source Member 使用稳定 `skill_id` 并按 Git Repository Source/`skillPath` 区分，同一或跨 repository 同名不阻断 Source Transition；Create Local Source Copy 也可与原 Git 成员同名共存。只有发布到同一 Agent Activation Target 时才形成 Activation Conflict，不能自动改名或覆盖。
 
-### 8.3 Git Repository Source、Legacy 与成员冲突
+### 8.3 Git Repository Source、namespace 与 immutable member
 
-每个 Git Repository Source 有一个稳定 `remote_id`、provider、canonical repository、confirmed aliases、唯一 tracking ref 与当前 Source Release。`<Home>/remotes/<remote-id>/source.json` 和 Catalog 共同保存这些来源事实；bare mirror 只在 `cache/git`，Skill 实体只在 `skills/<name>`，不保存 checkout、Git object、凭据、外部 lock 全文或旧外部内容。
+每个 Git Repository Source 有一个稳定 `remote_id`、provider、canonical repository/confirmed aliases、Source Tracking Policy、current selected ref/tag 与当前 Source Release。adapter 可证明的纯语法 URL 变体直接规范化；rename/transfer/redirect 经 Preview 确认后保留 `remote_id` 并增加 alias，fork 始终是新来源。`<Home>/remotes/<remote-id>/source.json` 和 Catalog 共同保存来源事实；bare mirror 只在 `cache/git`，当前成员快照严格位于 `<Home>/skills/git/<remote-id>/<skill-id>/`，不保存 checkout、`.git`、凭据、外部 lock 全文或其它旧 Source Content。
 
-启动先做 Source Capability Scan。它根据实际表、列、约束和 manifest 判定新模型、Legacy Per-Skill Git State 或 Remote Source Identity Conflict，不依据 schema version，也不写入。Legacy 只能读取、Disable/Remove 或由用户发起 Source Promotion；Source Promotion 重新发现完整 release，保留无歧义的 `remote_id`，并只在确认后的来源级 transaction 中做结构准备和数据转换。多个 parents、多个 refs、部分能力或 manifest/Catalog 矛盾一律 fail-closed。
+启动先做 Source Capability Scan。它根据实际表、列、约束和 manifest 判定 ADR-0018 current capability、Legacy Per-Skill Git State 或 Remote Source Identity Conflict，不依据 schema version，也不写入。只有旧 v7 tables 而缺少 v9 namespace/tracking/member/tombstone/identity constraints 时仍是 Legacy。Legacy 只能读取、Disable/整来源 Remove 或由用户发起 Source Promotion；Source Promotion 重新按 policy 发现完整 release，保留无歧义 `remote_id`，并只在确认后的来源级 transaction 中准备结构和转换。多个 parents、矛盾 legacy refs、部分能力或 manifest/Catalog 矛盾一律 fail-closed。
 
-目标 release 中仍存在、但当前内容已修改的成员必须选择 Modified Member Resolution：保留当前内容并立即标为 Modified，或替换为目标 release 内容。目标 release 不再含有旧 `skillPath` 时进入 Upstream Member Removed：当前 Home 内容保留，用户明确选择 Remove、Local Link 或 Explicit Member Mapping 到一个指定且未占用的目标路径；名称、hash 和相似度不能自动推断重命名。所有这些选择只改变 Source Group Draft，完成后一次确认完整来源。
+Source Member 由 `(remote_id, skillPath)` 识别并关联稳定 `skill_id`，没有独立版本、Modified、Update、Remove 或 Explicit Member Mapping。目标 release 新路径创建新成员并默认不 Enable；消失路径在确认后删除当前快照并留下 Source Member Tombstone；path rename 是删除加新增。同一路径后继 release 重新出现时复用原 `skill_id` 和 storage path。普通 Remove 删除整个 Git Repository Source。
+
+member tree 在 Healthy 时必须等于 current Source Release hash。启动、Update、新 Enable 和其它来源写之前重验；不一致进入 Source Snapshot Mismatch，阻止普通写且不静默覆盖，但允许只读、Disable、Create Local Source Copy 和显式 Restore Current Source Release。Create Local Source Copy 把当前稳定观察到的成员字节复制到用户选择的外部目录并登记为 Local Source，不含 `.git`，不改变原来源、成员或 Activation；Local Source 后续不保存内容 baseline，也不判断内容变化。
+
+Library Desk 以 Git Repository Source 为分组，来源组拥有 tracking policy、selected ref/tag、resolved commit、Update/Remove 与 Source Release 状态；成员行拥有 Directory Identity、`skillPath`、详情、Enable/Disable 和 Activation 健康。同名成员不改写名称，以来源组和路径区分。
 
 ### 8.4 Source Transition、Ownership Handoff 与 Update
 
@@ -608,20 +669,22 @@ Source Group Draft
 → Journaled
 → Members Staged
 → Source Isolated
-→ Destinations Reserved              # all Home member names are held before the ownership CAS
+→ Destinations Reserved              # source namespace/external destinations held before ownership CAS
 → External Ownership Released   # logical commit: one full-file CAS releases all applicable claims
 → Managed Release Committed
 → Finalized
 ```
 
-1. Source Transition Journal 冻结来源 identity、旧/目标 Source Release、完整成员动作、full lock fingerprint、全部 applicable claims、canonical path/inode/tree、appearances 与用户确认的冲突处置。journal 一旦建立，不再查询或采用远端随后变化的最新 release。
-2. 为所有成员 stage 目标 release 内容或用户明确保留的安全当前内容，完成完整 tree、空间和 Install/Link 安全校验；任一成员失败即整组不能进入提交点。
+1. Source Transition Journal 冻结来源 identity/Source Tracking Policy/selected ref、旧/目标 Source Release、完整 added/current/removed 成员、stable `skill_id`/storage path、full lock fingerprint、全部 applicable claims、canonical path/inode/tree、appearances 与用户确认的来源级处置。journal 一旦建立，不再查询或采用远端随后变化的最新 release。
+2. 先确认现有 current member 全部匹配 current Source Release，随后为目标 release 的完整成员集 stage 只读快照，完成完整 tree、空间和 Install 安全校验；没有“保留 Modified 字节”分支，任一成员失败即整组不能进入提交点。
 3. 隔离所有受影响 external canonical entity，并重验每个成员、appearance、固定 release 和 ownership claim。Source Ownership Commit Point 前的任何失败都恢复整个来源原状。
 4. 仅当单一 lock 文件的 full fingerprint 与全部 exact applicable claims 都未变化时，原子 CAS 删除这些 claims；保留 version、其它 top-level values、其它 entries 与未知 JSON fields，最后一个 entry 后仍写合法空 lock。CAS 失败不写 lock/Catalog，恢复整组 external source。
-5. CAS 后只允许按固定 journal roll-forward：原子写 Git Repository Source/Release/Member、全部 Home entity、Skill 和 desired Activation；已配置 Agent appearances 压平为直指 Home entity 的 Activation。scan-only shared/installer root 不留 Managed Activation；被配置为共享 Agent Activation Target 的 Root 只保留一份 Target-scoped Activation。SQLite、Home 与 lock 没有伪造物理单事务，journal 是唯一恢复方向。
+5. CAS 后只允许按固定 journal roll-forward：发布 `<Home>/skills/git/<remote_id>/<skill_id>` 的完整目标快照、删除 absent member 的旧实体、原子写 Git Repository Source/Release/Member/Tombstone、Skill 和现有 desired Activation state；不自动把删除/rename 的 Activation 改指新成员。已配置 Agent appearances 压平为直指 Home entity 的 Activation。scan-only shared/installer root 不留 Managed Activation；被配置为共享 Agent Activation Target 的 Root 只保留一份 Target-scoped Activation。SQLite、Home 与 lock 没有伪造物理单事务，journal 是唯一恢复方向。
 6. 进程在 commit point 前崩溃时回滚完整来源；之后崩溃时进入 recovery write lock，收敛到该 journal 的完整目标 Source Release。不得只提交或恢复其中一个成员。
 
-结果窗口关闭/重启前允许 Source Undo；仅当全部成员、Home/entity/appearances、external paths、lock 和 claims 都满足 guard 才能以一次来源级 CAS 恢复，任一 guard 失败即整体拒绝。普通 Remove 不恢复旧 external owner。日后 Update 重新 fetch 唯一 tracking ref、发现完整 release 并重走 Source Group Preview、Draft、Confirmation 与 Source Transition；external installer 再出现仍是 Ownership Conflict，不自动覆盖、合并或再次纳管。
+结果窗口关闭/重启前允许 Source Undo；仅当全部成员、Home/entity/appearances、external paths、lock 和 claims 都满足 guard 才能以一次来源级 CAS 恢复，任一 guard 失败即整体拒绝。普通整来源 Remove 不恢复旧 external owner。日后 Update 重新求值 Source Tracking Policy、获取 selected ref/tag 和固定 resolved commit、发现完整 release，并重走 Source Group Preview、Draft、Confirmation 与 Source Transition；external installer 再出现仍是 Ownership Conflict，不自动覆盖、合并或再次纳管。
+
+成员消失或 rename 后，已有全局 Activation 保留并因目标不存在进入 Broken；最小 Source Member Tombstone 与 Activation ownership 继续可读，用户可 Disable。相同 `(remote_id, skillPath)` 重现时复用原 `skill_id`，原 storage path 和对应全局 Activation 自动恢复 Healthy。项目级一次性软链不记录、不检测、不修复。
 
 ## 9. TDD 竖切、实施票与依赖
 
@@ -651,7 +714,7 @@ flowchart LR
     G --> K
     K --> L[实施:Fetch Latest and Manage 的来源组 Preview]
     L --> M[实施:清洁 Git 来源的整仓 Source Transition]
-    K --> N[实施:Legacy Source Promotion 与成员冲突处置]
+    K --> N[实施:Legacy Source Promotion 与 Git namespace cutover]
     M --> N
     M --> J[实施:Git Repository Source 来源级 Update 与 Ownership Conflict]
     N --> J
@@ -660,7 +723,7 @@ flowchart LR
     J --> I
 ```
 
-A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 并行；C 后 D 可与 G 并行。K 在 recovery、binding 与 evidence contracts 完备后提供真实能力扫描和 Legacy 保护；L 到 M 依次完成来源组 Preview 与清洁来源的整仓 Transition；N 以 K/M 为前提处理 Legacy Promotion 和成员冲突；J 只在 M/N 完成后实现来源级 Update 与 Ownership Conflict。最终人工 Gate 等待 D/F/J。历史的逐 Skill [实施：Remote Source Parent 与 Ownership Handoff](https://github.com/RookieZoe/skill-man/issues/48) 不再是该图的 blocker。
+A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 并行；C 后 D 可与 G 并行。K 在 recovery、binding 与 evidence contracts 完备后提供真实能力扫描和 Legacy 保护；L 到 M 依次完成 tracking policy/来源组 Preview 与清洁来源的整仓 Transition；N 以 K/M 为前提处理 Legacy Promotion、schema v9 namespace、immutable member/tombstone 和 Directory Identity cutover；J 只在 M/N 完成后实现来源级 Update、成员同步、Broken global Activation 与 Ownership Conflict。最终人工 Gate 等待 D/F/J。历史的逐 Skill [实施：Remote Source Parent 与 Ownership Handoff](https://github.com/RookieZoe/skill-man/issues/48) 不再是该图的 blocker。
 
 ### 9.2 实施票
 
@@ -676,10 +739,10 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | [实施：Pinned Workbench 响应布局与 overlay 契约](https://github.com/RookieZoe/skill-man/issues/42)            | 760/1060 breakpoints、Notice tray、pane/drawer scroll、overlay/focus                     | 无持久数据；bundle revert                                       |
 | [实施：Adopt 证据账本与 lock 来源验证](https://github.com/RookieZoe/skill-man/issues/47)                      | strict lock/provider/tree evidence、Evidence Ledger、explicit selection、read-only plans | scan/plan 无写；stale evidence 无 plan apply                    |
 | [实施：Git Repository Source 状态识别与 Legacy 保护](https://github.com/RookieZoe/skill-man/issues/61) | current capability scan、Git Repository Source/Legacy Per-Skill Git State 分类、Legacy 只读保护与安全操作边界 | scan/plan 零写；不自动提升、不改写 Legacy truth |
-| [实施：Fetch Latest and Manage 的来源组 Preview](https://github.com/RookieZoe/skill-man/issues/62) | fetch 唯一 tracking ref、完整 release 发现、来源组 Preview/Draft/Confirmation 与 DTO/UI | Draft/取消零写；PlanStale 时零 apply |
-| [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | clean Git 来源持久化、完整成员 transition、来源级 journal/CAS/recovery/Undo | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
-| [实施：Legacy Source Promotion 与成员冲突处置](https://github.com/RookieZoe/skill-man/issues/64) | 显式 Legacy Promotion、Modified/Removed 成员冲突处置与完整来源 Draft | Draft/失败保留旧 Legacy 与当前内容；不自动猜测映射 |
-| [实施：Git Repository Source 来源级 Update 与 Ownership Conflict](https://github.com/RookieZoe/skill-man/issues/60) | 已纳管来源的完整 release Update、fixed journal/recovery、external installer reappearance 的 Ownership Conflict | 固定 release 的 commit point 前整体 rollback；之后完整 release roll-forward |
+| [实施：Fetch Latest and Manage 的来源组 Preview](https://github.com/RookieZoe/skill-man/issues/62) | Source Tracking Policy/override、完整 release 发现、来源组 Preview/Draft/Confirmation 与 DTO/UI | Draft/取消零写；PlanStale 时零 apply |
+| [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | `skills/git/<remote_id>/<skill_id>` 只读 namespace、完整成员 transition、来源级 journal/CAS/recovery/Undo | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
+| [实施：Legacy Source Promotion 与成员冲突处置](https://github.com/RookieZoe/skill-man/issues/64) | 显式 Legacy Promotion、schema v9 identity/namespace/tombstone、Source Snapshot Mismatch 与 Create Local Source Copy | Draft/失败保留旧 Legacy/current release；不补写、不猜测 mapping |
+| [实施：Git Repository Source 来源级 Update 与 Ownership Conflict](https://github.com/RookieZoe/skill-man/issues/60) | 完整 release Update、成员 add/remove/reappear、整来源 Remove、Broken global Activation、external reappearance Ownership Conflict | 固定 release 的 commit point 前整体 rollback；之后完整 release roll-forward |
 | [验收：vNext 本机恢复、真实 Adopt、窗口与双语 Gate](https://github.com/RookieZoe/skill-man/issues/49)         | 四项真实环境 Gate 与签字证据                                                             | Gate 前 Safety Snapshot/isolated test data；不代替自动化        |
 
 ## 10. 验收矩阵
@@ -721,16 +784,22 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | overlay resize                      | 不 remount；focus trap/inert/Escape/busy/return-focus/low-height action 全通过            |
 | Adopt chains                        | multi-Agent、多跳、dangling、cycle、16-hop、non-UTF-8、read error、path replacement       |
 | canonical entity aggregation        | 同一对象经真实目录/软链、多 Agent/Root 只形成一个 generation-bound entity；不同对象不因 path/name/hash 相似而合并 |
-| external Git development workspace  | 控制区外且无 applicable lock 时归 Local；Catalog 记录真实路径；来源 inode/tree 不 move/copy/rewrite |
+| external Git development workspace  | 控制区外且无 applicable lock 时归 Local；Catalog 只记录 canonical 最终路径、无内容 baseline；来源 inode/tree 不 move/copy/rewrite |
 | bounded worktree discovery          | repository root 不越过 originating canonical Root；上层 dotfiles repo 被忽略；无 `.git` 的有效 lock 仍可形成 hint |
 | incomplete Root coverage            | 失败 Root diagnostic 持续可见；其它 Root 继续；非破坏 Local Link 可计划；迁移/删除/替换/ownership release 被阻止 |
 | Scan Report accounting              | Root/entity/appearance/Local/Git group/Conflict/Blocked/Deferred/Excluded 分层计数；Fetch 后 members 单列；所有选择默认空 |
 | Local Conflict Set                  | NFC+casefold 同名不同实体可显式选一个 winner；其余不变；同一实体多 identity 与既有 Managed 冲突不可绕过 |
-| Git source discovery                | `sourceType`/`sourceUrl` 规范化、完整 Source Release、单一 tracking ref、GitHub/GitLab/generic HTTPS Git 同一整仓 contract |
+| Git source tracking policy          | stable provider Release → highest stable SemVer tag → latest default-branch-reachable tag → `HEAD`；显式 prerelease/fixed/branch/HEAD override；resolved commit 固定 |
+| Git source discovery                | `sourceType`/`sourceUrl` 规范化、完整 Source Release、stable `remote_id`/aliases、GitHub/GitLab/generic HTTPS Git 同一整仓 contract；fork 新 identity |
 | Source Capability Scan / promotion  | 实际表/列/约束/manifest 判定；不看 schema version；legacy 零写启动；显式 promotion 保留无歧义 remote_id |
-| ref / ownership conflict            | 多 ref → 显式选择；多 lock 文件 → Repository Ownership Split、零写拒绝；不自动拆分或合并 |
-| Source Group Preview                | 成员集完整且不可逐项 Include；Draft/取消零写；一次 confirmation 才可开始 transition       |
-| Modified / removed member           | 保留或替换仍在同组；Upstream Member Removed 仅可 Remove/Link/Explicit Mapping，不猜测重命名 |
+| ref / ownership conflict            | 多 legacy ref → 明确 policy/override；多 lock 文件 → Repository Ownership Split、零写拒绝；不自动拆分或合并 |
+| Source Group Preview                | policy/selected ref/tag/commit 与 added/current/removed 完整成员集可见且不可逐项 Include；Draft/取消零写；一次 confirmation 才可 transition |
+| Git namespace / same name           | current entity 严格为 `skills/git/<remote_id>/<skill_id>`；同一/跨 repo 同 Directory Identity 可共存，Target entry 仍唯一 |
+| member add/remove/reappear          | 新路径新 `skill_id` 且默认 Disable；消失删除快照并留 tombstone；rename=remove+add；同 `(remote_id, skillPath)` 重现复用 id 并恢复 global Activation |
+| source-level lifecycle              | Source Member 无独立 version/Modified/Update/Remove/mapping；普通 Remove 整来源；每个成员仍可独立 Enable/Disable |
+| Source Snapshot Mismatch            | readonly permission + startup/prewrite tree check；mismatch 阻止来源写/新 Enable；不静默覆盖；Local copy 后显式 Restore |
+| Create Local Source Copy            | 单成员复制到稳定外部目录、登记 canonical path、无 `.git`/baseline、原来源与 Activation 不变；同名可共存 |
+| removed member Activation           | 全局 Activation 保留 dangling/Broken、可 Disable、同路径重现自动 Healthy；项目级一次性软链无记录/检查/修复 |
 | Source Transition TOCTOU            | member/path/inode/tree/full-lock fingerprint/claims 任一变化 → PlanStale、整组零提交       |
 | source handoff crash                | commit point 前整组恢复；之后 recovery gate 下完整 release roll-forward；无长期双 owner/无 owner |
 | source Update / Undo                | 固定 release journal、来源级 conditional Undo、外部 reappearance 是 Ownership Conflict；普通 Remove 不恢复 external owner |
@@ -747,8 +816,9 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
    - Rescan 只报告真实 Untracked；不自动 Adopt/Enable/Repair；用户确认结果后才开放写。
 2. **真实 Source Group Transition Gate**
    - 选一个 Local Link 多跳/多 appearance，以及一个真实 installer 以整仓管理的受支持 Git 来源。
-   - 对 Git 来源核对 provider、canonical repository、唯一 tracking ref、resolved commit、完整发现成员集、单一 lock 文件的全部 applicable claims 与一次 Source Group Confirmation；不得用旧 lock path、anchor 或 hash 声称验证了旧内容。
-   - 至少覆盖一个 Modified Member Resolution 或 Upstream Member Removed 的显式处置。对完整来源做 Apply 前后 Home/Activation tree 与 symlink target 对比，确认所有成员共同进入固定 release，或在失败时整体保持原状；凭据和 Skill 正文不进入日志。
+   - 对 Git 来源核对 provider、canonical repository/aliases、Source Tracking Policy、selected ref/tag、resolved commit、完整发现成员集、单一 lock 文件的全部 applicable claims 与一次 Source Group Confirmation；至少用一个无 provider Release/tag 的 repository 证明只在末级 fallback `HEAD`，不得用旧 lock path、anchor 或 hash 声称验证了旧内容。
+   - 覆盖成员新增、删除、同路径重现与 rename=remove+add；对比 Apply 前后 `skills/git/<remote_id>/<skill_id>`、Library Desk source group、全局 Activation symlink 与 tombstone，证明 removed link Broken、reappear 自动 Healthy、项目级链接无产品记录。
+   - 外部修改一个只读快照，证明 Source Snapshot Mismatch 阻止 Update/新 Enable；Create Local Source Copy 后显式 Restore，Local 副本路径不含 Home/Agent/installer root 且后续内容变化不产生 Modified。凭据和 Skill 正文不进入日志。
 3. **Tauri/WKWebView 视觉 Gate**
    - 真实 app 在 760×520、1059px、1060px 和高窗口检查 0/1/multiple Notice、dense EN/ZH、empty/error。
    - 打开 sheet/drawer 跨断点 resize；验证 scroll owner、无空白/横向溢出、focus trap、Escape、busy 与 return focus。
@@ -765,7 +835,7 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 ## 11. 风险控制与实施纪律
 
 - 任何 ticket 若发现需要改变 Destination、领域不变量或用户可见行为，停止实施并新开决策票；不得在代码 review 中暗改。
-- 已发布的 schema v5、v6 migrations 不重写；schema v7 由 #63 增加 Git Repository Source 的 release/member 结构，且不自动提升已有 Legacy Per-Skill Git State。运行时 Source Capability Scan 只检查实际结构与 manifest 能力，绝不以 migration/schema version 决定可提升、修复或 release。
+- 已发布的 schema v5、v6 migrations 不重写；schema v7 的旧 Git release/member foundation 与 schema v8 Agent Configuration 也不改写。schema v9 以新 migration 重建 Directory Identity constraint 并增加 tracking policy、namespace、immutable release-member 与 tombstone 能力，仍不自动提升 Legacy。运行时 Source Capability Scan 只检查实际结构与 manifest 能力，绝不以 migration/schema version 决定可提升、修复或 release。
 - 每个 fault-injection point 使用稳定名称并写入测试矩阵；实现重构不能悄悄删除 crash coverage。
 - 计划 token 必须绑定 bootstrap/write-gate generation、Catalog snapshot、path identity 与该操作专属 evidence；任一变化即 stale。
 - recovery/operation logs 不记录 Skill 正文、token、credential 或 remote response body。
@@ -782,6 +852,7 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 | lock facts                          | [调研：.skill-lock.json 的来源契约与可信边界](https://github.com/RookieZoe/skill-man/issues/33)、[research report](https://github.com/RookieZoe/skill-man/blob/c8243b545c837720434556de398aa4638951d94e/docs/research/2026-08-11-skill-lock-contract.md) |
 | Adopt model                         | [决策：Adopt 的 lock 驱动来源分类与 remote source 父级模型](https://github.com/RookieZoe/skill-man/issues/40)、[ADR-0013](adr/0013-adopt-provenance-and-remote-source-parents.md)；非 Git sourceType 与 lock/tree/CAS 安全规则继续有效 |
 | Git repository source               | [既有逐 Skill 远程模型迁移与规格取代](https://github.com/RookieZoe/skill-man/issues/59)、[ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md)：受支持 Git provider 使用完整 Source Release 与 Source Transition |
+| Git namespace / identity / tracking | [决策：Git 来源 Skill 的 Library 布局与命名空间身份](https://github.com/RookieZoe/skill-man/issues/74)、[ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：稳定 `remote_id/skill_id` namespace、Source Tracking Policy、不可变来源级成员与同名分组 |
 | Adopt Preview                       | [原型：Adopt Preview 的完整来源链与保真证据](https://github.com/RookieZoe/skill-man/issues/39)                                                                                                                                                           |
 
 本 Spec 冻结上述产品决策；实施票只决定局部代码组织和满足 contract 的最小实现，不重新讨论用户行为。

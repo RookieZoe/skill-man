@@ -26,6 +26,12 @@
 | Git Repository Source | Git Repository Source | Git 仓库来源 |
 | Source Release | Source Release | 来源版本 |
 | Source Member | Source Member | 来源成员 |
+| Directory Identity | Directory identity | 目录身份 |
+| Source Tracking Policy | Source tracking policy | 来源跟踪策略 |
+| Source Snapshot Mismatch | Source snapshot mismatch | 来源快照不一致 |
+| Restore Current Source Release | Restore current source release | 恢复当前来源版本 |
+| Source Member Tombstone | Source member tombstone | 来源成员墓碑 |
+| Create Local Source Copy | Create local source copy | 创建本地来源副本 |
 | Source Transition | Source Transition | 来源切换 |
 | Repository Ownership Split | Repository Ownership Split | 仓库所有权分裂 |
 | Source Transition Journal | Source Transition Journal | 来源切换日志 |
@@ -34,15 +40,12 @@
 | Source Transition Preflight | Source Transition Preflight | 来源切换预检 |
 | Source Group Preview | Source Group Preview | 来源组预览 |
 | External Ownership Claim | External Ownership Claim | 外部所有权线索 |
-| Modified Member Resolution | Modified Member Resolution | 已修改成员处置 |
-| Explicit Member Mapping | Explicit Member Mapping | 显式成员映射 |
 | Source Group Draft | Source Group Draft | 来源组草案 |
 | Source Group Confirmation | Source Group Confirmation | 来源组确认 |
 | Member Diff Summary | Member Diff Summary | 成员差异摘要 |
 | Legacy Per-Skill Git State | Legacy Per-Skill Git State | 旧逐成员 Git 状态 |
 | Source Promotion | Source Promotion | 来源提升 |
 | Source Capability Scan | Source Capability Scan | 来源能力扫描 |
-| Upstream Member Removed | Upstream Member Removed | 上游成员已移除 |
 | Repository Ref Conflict | Repository Ref Conflict | 仓库 ref 冲突 |
 | Fetch Latest and Manage | Fetch Latest and Manage | 获取最新并纳管 |
 | Home Candidate | Home candidate | 候选主目录 |
@@ -93,8 +96,12 @@ Skill、用户或外部来源提供且必须原样展示的内容,包括 Skill �
 ### Domain terms
 
 **Skill**:
-一个 AI agent 技能包:一个含 `SKILL.md` 的目录。**身份 = 目录名**(唯一标识,Conflict 判定基准);`SKILL.md` frontmatter 的 name/description 仅为展示元数据。
+一个 AI agent 技能包：一个含 `SKILL.md` 的目录。Managed Skill 使用稳定 `skill_id`；目录名是 Directory Identity，`SKILL.md` frontmatter 的 name/description 仅为展示元数据。
 _Avoid_: Plugin, Extension, 插件
+
+**Directory Identity**:
+Skill 目录名经 `NFC + Unicode casefold` 得到的比较键。它决定 Activation 在平面 Agent Activation Target 中占用的 entry name，但不是持久 Managed Skill identity；同名 Git Source Member 可按来源和 `skillPath` 区分。
+_Avoid_: Skill ID, Display name, frontmatter name
 
 **Library**:
 Skill Man 管理全部 Managed Skill 的逻辑边界与单一可信源(single source of truth):由 Catalog 中的 Managed Skill 索引和 Skill Man Home 内的 Install 实体组成;Link 来源的实体留在外部,Library 只记录其指针。Library 不复用任何 Agent 约定目录,也不等同于 Skill Man Home 的物理根。
@@ -201,31 +208,31 @@ _Avoid_: Locked catalog, 只读锁定
 _Avoid_: Register, Add, 注册
 
 **Link**:
-Import 方式之一:引用一个在本地开发的 skill 目录 —— 实体留在原地,Library 里放指向它的符号链接。
-_Avoid_: Reference
+Import 方式之一：引用一个用户拥有的 Local Source；实体留在原地，Catalog 只记录 canonical 最终实体路径，Home 不创建第二条 Library 指针软链。
+_Avoid_: Reference, Activation
 
 **Install**:
 Import 方式之一:把 skill 实体装进 Library。两个来源:从远程安装(Git URL 等)与从文件安装(本地文件夹/压缩包拷贝)。
 _Avoid_: Clone(来源不止 git), Copy
 
 **Broken**:
-状态:Library 条目存在,但其目标不可用 —— Link 来源的 skill 源目录被删除/移动,或 Activation 指向已消失的 Library 条目。
+状态：Local Source 最终实体不可用，或全局 Activation 的目标不存在。Git Source Member 从当前 Source Release 消失时，其快照路径消失且既有全局 Activation 进入 Broken；项目级一次性软链不在此状态模型中。
 _Avoid_: Missing, Dangling
 
 **Modified**:
-状态:Install 来源的 skill 在安装或最近一次更新后被本地改动,当前内容不再等同于已记录的安装内容。长期开发中的 skill 应使用 Link,而不是维持 Modified。
+状态：由 File Install 或仍受旧非 Git contract 管理的 Install 在安装后被本地改动，当前内容不再等同于已记录内容。Git Source Member 是不可变快照，不使用 Modified；长期开发使用 Local Source。
 _Avoid_: Dirty, Locally Modified
 
 **Remove**:
-把一个 Managed skill 从 Library 里拿掉的动作。对 Link 来源的 skill 只是断开引用(原地实体不动);对 Install 来源的 skill 是否删除实体,由「符号链接策略与冲突规则」决策。
+把 Managed Skill 或完整 Git Repository Source 从 Library 拿掉的动作。Link 只删除 Catalog 引用、原地实体不动；非 Git Install 删除其实体；Git Source Member 不可单独 Remove，只能 Remove 所属完整来源。
 _Avoid_: Delete(不暗示物理删除), Eject, Uninstall
 
 **Conflict**:
-状态:命名撞车。两类:Library 内重名(同名 skill 来自不同来源)、Activation 冲突(要 Enable 的 agent 目录已被同名 Untracked 实体/链接占用)。处理规则由「符号链接策略与冲突规则」决策。
+状态：非 Git Import/Adopt 违反既有 Library Directory Identity 规则，或 Enable 时 Agent Activation Target 的同名 entry 已被占用。Git Source Member 之间或 Git 与其它 Managed Skill 同名本身不是 Library Conflict；它们只有发布到同一 Target 时才冲突。
 _Avoid_: Name Clash, Collision
 
 **Conflict Set**:
-一次 Scan Report 中,具有同一当前 Skill identity、但指向不同 Canonical Skill Entity 的候选集合。Local 候选可以显式选择一个 winner;系统不按内容合并、自动改名或替换既有 Managed Skill。
+一次 Scan Report 中，具有同一 Directory Identity、但指向不同 Canonical Skill Entity 的非 Git 候选集合。Local 候选可以显式选择一个 winner；Git Source Member 的同名关系按来源分组，不进入该 Library Conflict Set。
 _Avoid_: Duplicate Skill, Merge Group
 
 **Managed**:
@@ -245,7 +252,7 @@ _Avoid_: Import(收编存量用 Adopt;Import 只用于新增入库), 收编(叙�
 _Avoid_: Trusted lock, Lock-managed Skill
 
 **Remote Source Parent**:
-ADR-0013 的历史逐 Skill 来源聚合，内部 `remote_id` 不随 URL 重命名改变。对受支持 Git provider，已有 Remote Source Parent 只属于 Legacy Per-Skill Git State；新的 Git Repository Source 另行记录 durable identity、唯一 tracking ref 与当前 Source Release。非 Git sourceType 保持 ADR-0013 的既有语义；Git mirror 属于可重建 cache，Skill 实体只存在于 `skills/`。
+ADR-0013 的历史逐 Skill 来源聚合，内部 `remote_id` 不随 URL 重命名改变。对受支持 Git provider，已有 Remote Source Parent 只属于 Legacy Per-Skill Git State；新的 Git Repository Source 另行记录 durable identity、Source Tracking Policy 与当前 Source Release。非 Git sourceType 保持 ADR-0013 的既有语义；Git mirror 属于可重建 cache。
 _Avoid_: Git Repository Source, Git checkout, Worktree, Mirror
 
 **Remote Binding**:
@@ -253,8 +260,12 @@ ADR-0013 的历史逐 Skill 绑定，保存 requested ref、Verification Anchor�
 _Avoid_: Git Repository Source member, Source Release fact, Repository checkout
 
 **Git Repository Source**:
-以受支持 Git provider 和规范化 Git repository identity 定义的来源单元。它有唯一 tracking ref；该 ref 在每个 Source Release 中解析为一个 commit，仓库内的所有成员随该 release 一起更新。
+以受支持 Git provider、规范化 Git repository identity 和稳定 `remote_id` 定义的来源聚合。它的 Source Tracking Policy 在每个 Source Release 中选择一个 ref/tag 并解析为 commit；全部 Source Member 共同 Update，成员不可单独 Update 或 Remove。
 _Avoid_: Per-Skill Git source, Git checkout
+
+**Source Tracking Policy**:
+Git Repository Source 选择下一 Source Release 的持久规则：默认依次使用最新正式 provider Release、最高稳定 SemVer tag、default branch 可达的最新普通 tag，最后才 fallback `HEAD`；用户可显式覆盖为 prerelease channel、固定 tag/commit、branch 或 `HEAD`。
+_Avoid_: Source Release, Tracking ref, Always HEAD
 
 **Git Repository Source Candidate**:
 Scan Report 中按 provider 与规范化 repository identity 聚合的来源线索;它可汇合 bounded worktree evidence 与 External Ownership Claim,但在 Fetch Latest 发现完整 Source Release 前不是 Git Repository Source。
@@ -265,8 +276,8 @@ _Avoid_: Verified repository, Source Release
 _Avoid_: GitHub-specific source model, per-Skill GitHub source
 
 **Source Release**:
-Git Repository Source 在某一 resolved commit 的完整、可发现成员清单与共同版本。来源级版本事实属于它，不是单个 Skill 的版本，也不从旧 lock 的本地内容推断。
-_Avoid_: Remote Binding version, install commit
+Source Tracking Policy 一次求值得到的 selected ref/tag、resolved commit、完整 Source Member 清单与 tree manifest。它不是 provider Release；resolved commit 是不可变版本事实，成员没有独立版本，也不从旧 lock 或本地内容推断。
+_Avoid_: GitHub Release, GitLab Release, Remote Binding version, install commit
 
 **Source Transition**:
 Git Repository Source 对一个完整 Source Release 的整体交接或更新。它的成员、来源版本与所有权状态只能共同进入目标 release 或共同保持原状；一旦外部所有权已释放，恢复只能收敛到完整目标 release，不能留下部分成员处于该 release。
@@ -300,16 +311,20 @@ _Avoid_: Per-Skill Include preview, partial source selection
 旧 installer lock 对外部实体所有权的显示线索，说明交接将影响的 lock 文件与声明；它不证明旧本地内容、成员路径或远端 provenance 已被验证。
 _Avoid_: Verified Remote Source, remote baseline
 
-**Modified Member Resolution**:
-对目标 Source Release 仍包含、但当前内容已修改的 Source Member 的显式选择：保留当前内容并标为 Modified，或以目标 release 内容替换。两者都保持该成员属于同一 Source Transition，不能借此转为 Local Link 或跳过成员。
-_Avoid_: Per-member opt-out, silent overwrite
+**Source Snapshot Mismatch**:
+Git Source Member 的 Home 快照字节不等于 current Source Release tree hash 的 closed state。它不是 Modified；Update、新 Enable 与普通来源写保持关闭，但只读查看、Disable、把当前观察字节 Create Local Source Copy，以及显式 Restore Current Source Release 仍可用。
+_Avoid_: Modified, Local changes, Auto overwrite
 
-**Explicit Member Mapping**:
-用户把 Upstream Member Removed 映射到一个指定、未被占用的目标 skillPath 的动作。它不基于名称、hash 或相似度推断，映射后如内容有修改仍须进行 Modified Member Resolution。
-_Avoid_: Inferred rename, automatic path migration
+**Restore Current Source Release**:
+用户明确丢弃 Source Snapshot Mismatch 字节并从已记录 current Source Release 重新物化完整来源快照的恢复动作。它不获取更新版本，也不改变 Source Tracking Policy。
+_Avoid_: Update, Repair Activation, Silent overwrite
+
+**Source Member Tombstone**:
+一个已从 current Source Release 消失、但为保留稳定 `(remote_id, skillPath, skill_id)` 和全局 Activation ownership 而留下的最小记录。它在整个 Git Repository Source 生命周期内保留；相同路径重新出现时复用原 `skill_id`，相关 Activation ownership 在用户 Disable 前持续可读。
+_Avoid_: Managed current member, Local backup
 
 **Source Group Draft**:
-Source Group Preview 中对成员动作和冲突处置的可修改集合。它不是 Source Transition，也不产生来源、Home、Catalog、stage、journal 或 lock 的持久变化；取消后不留下产物。
+Source Group Preview 中对完整目标 Source Release、tracking policy 选择和来源级冲突处置的可修改集合。它不是 Source Transition，也不产生来源、Home、Catalog、stage、journal 或 lock 的持久变化；成员资格不可逐项裁剪。
 _Avoid_: Per-member apply, pending operation
 
 **Source Group Confirmation**:
@@ -317,8 +332,8 @@ _Avoid_: Per-member apply, pending operation
 _Avoid_: Per-Skill confirm, implicit approval
 
 **Member Diff Summary**:
-Source Group Preview 中供审阅 Source Member 状态和动作的最小事实：当前/目标路径、目标内容摘要与本地修改状态。它可展开为安全的受管内容差异，但不把旧外部内容作为远端基线或验证证据。
-_Avoid_: External content proof, remote baseline
+Source Group Preview 中供审阅 Source Member 状态和动作的最小事实：当前/目标 `skillPath`、Directory Identity、目标 tree 摘要，以及 added/current/removed 状态。它可展开为安全的受管内容差异，但不把旧外部内容作为远端基线或允许成员级 opt-out。
+_Avoid_: External content proof, remote baseline, Modified member choice
 
 **Legacy Per-Skill Git State**:
 既有 Remote Source Parent/Binding 仅拥有逐成员 ref、commit 与 baseline、但不具备 Git Repository Source 的共同 release 与成员集事实的状态。它以实际 Catalog 与 manifest 能力识别，不以 schema version 识别；保持安全读取和维护能力，但只能经用户显式的来源组升级进入新模型。
@@ -333,19 +348,15 @@ _Avoid_: Startup migration, inferred source release
 _Avoid_: Schema version gate, automatic source repair
 
 **Source Member**:
-Git Repository Source 中的一个 Managed Skill 成员，具有持久成员记录、当前 repository-relative skillPath 和内容 baseline，并从所属 Source Release 取得成员资格；它不拥有独立的 ref 或 commit。路径变动只有经过显式映射才延续同一成员。
-_Avoid_: Independent Git source, per-Skill release
-
-**Upstream Member Removed**:
-目标 Source Release 不再发现某个 Source Member 原有 skillPath 的状态。它保留现有 Home 内容，须由用户显式选择移除、Link 或映射；系统不会自动删除或推断为重命名。
-_Avoid_: Auto removal, inferred rename
+Git Repository Source 中由 `(remote_id, repository-relative skillPath)` 识别、并关联稳定 `skill_id` 的 Managed Skill 成员。它从 Source Release 取得成员资格和版本，当前字节是 `<Home>/skills/git/<remote_id>/<skill_id>/` 的不可变快照；路径变化是删除加新增，同一路径重现则恢复原成员。
+_Avoid_: Independent Git source, per-Skill release, Editable install
 
 **Repository Ref Conflict**:
 同一规范化 Git repository 的旧 lock 声明提出多个 ref 时的 fail-closed 状态。它不拆分来源，也不验证旧内容；用户必须显式选择一个 ref，以该 ref 当前的 Source Release 建立新来源。
 _Avoid_: multiple Git sources, inferred ref
 
 **Fetch Latest and Manage**:
-把 Git Repository Source Candidate 提升为 Git Repository Source 的显式操作。用户选择 tracking ref 后,系统从该 ref 当前的 Source Release 发现完整成员;worktree hint、旧 lock、本地 HEAD/dirty bytes 和旧 Home 内容都不提供当前成员或 baseline。远端不能完成获取和发现时,来源不成立。
+把 Git Repository Source Candidate 提升为 Git Repository Source 的显式操作。系统按 Source Tracking Policy（或用户显式 override）选择 ref/tag、解析 commit 并发现完整 Source Release；worktree hint、旧 lock、本地 HEAD/dirty bytes 和旧 Home 内容都不提供当前成员或 baseline。远端不能完成获取和发现时，来源不成立。
 _Avoid_: Revalidate old lock, trust old bytes
 
 **Verification Anchor**:
@@ -361,8 +372,12 @@ _Avoid_: Invalid lock(只描述文件,没有表达领域阻塞状态), Local Ski
 _Avoid_: Provenance Conflict, Offline Skill
 
 **Local Source**:
-由用户继续拥有、以真实 canonical 路径登记的 Skill 最终实体。它可以位于用户的 Git 开发工作区;版本控制 metadata 不改变 ownership。Adopt 以 Link 认领且不移动、复制或改写稳定外部实体;实体若仍在 Skill Man Home、Global Skills Root 或 installer-managed root 中,须先显式迁到稳定位置。
+由用户继续拥有、只以真实 canonical 路径登记的 Skill 最终实体。它可以位于用户的 Git 开发工作区；版本控制 metadata 不改变 ownership。Skill Man 不保存 Local Source 内容 baseline 或判断内容变化；稳定外部实体以 Link 原地认领，实体若仍在 Home、Global Skills Root 或 installer root 中则须先显式迁到这些控制区之外。
 _Avoid_: Unverified Remote, File Install
+
+**Create Local Source Copy**:
+把一个 Git Source Member 当前稳定观察字节复制到用户选择的外部目录，并把该 canonical 最终实体路径登记为新的 Local Source 的显式动作。原 Git 来源/成员与 Activation 不自动改变，副本不含 `.git`；需要 Git workspace 时由用户用外部工具 clone 后再 Link。
+_Avoid_: Fork, Detach Source Member, Clone
 
 **Ownership Handoff**:
 外部 installer 向 Skill Man 转交所有权的显式边界。对 Git Repository Source，它只能作为完整 Source Transition 提交：全部适用 external claim 以一次 compare-and-swap 共同释放，之前整体回滚，之后整体收敛到固定 Source Release；非 Git sourceType 保持其既有逐项语义。
@@ -428,6 +443,6 @@ _Avoid_: Global Skills Root, scan root
 _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:
-名词:Agent Activation Target 中的受管符号链接实体,身份由 Managed Skill 与 Target 共同确定,**直指 Skill 最终实体**(Install 来源 → Library 目录树内;Link 来源 → 源目录),不经过 Library 指针条目串联。
-Activation 仅指受 Skill Man 管理(有 Catalog 记录)的启用项;Enable 到项目级 Agent skills 目录产生的一次性软链不作 Activation 追踪(见 ADR-0015)。
+名词：Agent Activation Target 中的受管符号链接实体，身份由 Managed Skill 与 Target 共同确定，entry name 使用 Directory Identity，并**直指 Catalog 解析出的 Skill 最终实体**（Git Source Member → `<Home>/skills/git/<remote_id>/<skill_id>/`；其它 Install → Home 实体；Local Source → canonical 外部路径），不经过 Library 指针条目串联。
+Activation 仅指受 Skill Man 管理且有 Catalog 记录的全局启用项；Enable 到项目级 Agent skills 目录产生的一次性软链不作 Activation 追踪、健康检查或修复(见 ADR-0015)。
 _Avoid_: Link, 启用链接

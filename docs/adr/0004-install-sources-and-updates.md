@@ -1,6 +1,6 @@
 # Install 来源、发现与更新规则
 
-> Remote Source Parent、per-Skill Remote Binding 与 lock 驱动 Adopt 的 Verification Anchor / 所有权交接由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 细化；本 ADR 的新 Import 与 Update 语义继续有效。
+> **部分取代。** 对受支持 Git provider，本 ADR 的逐 Skill 多选、固定 ref、flat `skills/<name>`、逐成员 Update 与 Library 重名语义已由 [ADR-0014](0014-git-repository-source-releases-and-transitions.md) 和 [ADR-0018](0018-git-source-namespaces-and-immutable-members.md) 取代。File Install、非 Git sourceType、tree 安全和 staging 原子性继续有效；旧 Remote Binding 事实由 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 解释。
 
 Skill Man 的 Install 兼容 [`vercel-labs/skills`](https://github.com/vercel-labs/skills) CLI 的来源解析、两阶段 Skill 发现、多选与 lock 元数据语义，但由 **Rust 后端原生实现**；不调用 `npx`，不要求用户安装 Node/npm，也不让上游 CLI 直接操作 Agent 目录。所有 Install 只写入 Library，分发给 Agent 仍由 Activation 负责。
 

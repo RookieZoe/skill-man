@@ -3,15 +3,17 @@
 > **部分取代。** Library Desk 的信息架构继续有效；窗口断点、滚动归属与
 > overlay 行为由[窗口自适应布局决策](https://github.com/RookieZoe/skill-man/issues/36)
 > 取代，locale/Preferences 结论由
-> [ADR-0011](0011-interface-locale-and-message-ownership.md) 取代。
+> [ADR-0011](0011-interface-locale-and-message-ownership.md) 取代；Git Source Member 的
+> 身份、来源分组和同名呈现由
+> [ADR-0018](0018-git-source-namespaces-and-immutable-members.md) 取代。
 
 Skill Man 的主窗口采用 **Library Desk**：以 Library 中的 Managed Skill 为第一视角，使用 Skill 列表、详情与按 Agent Activation 检查器组成三栏工作台。用户从目录名识别 Skill，在同一详情上下文中查看来源、健康状态与只读内容，并对每个 Agent 独立 Enable / Disable。该基线由 [Wayfinder #6 的 A/B/C 原型评审](https://github.com/RookieZoe/skill-man/issues/6) 选定；B 的 Agent-first switchboard 与 C 的 attention queue 不进入首个 spec。
 
-选择 A 是因为它最直接表达现有领域模型：Skill 身份=目录名，Library 是唯一可信源，Activation 是每个 Agent 目录中直指实体的符号链接。它能同时覆盖浏览、诊断与高频开关；Agent 支持、Conflict、Broken、Modified、Import 和 Adopt 则作为当前详情、弹层或明确事务流程进入，而不改变主心智模型。视觉方向遵循评审后的 Apple Liquid Glass：SF Pro、系统灰、Apple 蓝与低对比分隔线；玻璃材质只用于 toolbar、sidebar、inspector、sheet 和菜单栏面板，正文与表格保持清晰。
+选择 A 是因为它保持 Managed Skill 浏览、诊断与 Enable/Disable 的主视角，Library 仍是单一可信源，Activation 仍直指最终实体。Directory Identity 不再充当持久 Managed Skill identity；Library Desk 对 Git 成员按 Git Repository Source 分组，并用来源与 `skillPath` 区分同名成员。Agent 支持、Conflict、Broken、Modified、Import 和 Adopt 仍作为详情、弹层或明确事务流程进入。视觉方向遵循评审后的 Apple Liquid Glass：SF Pro、系统灰、Apple 蓝与低对比分隔线；玻璃材质只用于 toolbar、sidebar、inspector、sheet 和菜单栏面板，正文与表格保持清晰。
 
 ## 主要交互范围
 
-- 左侧 Library 列表按全部、Broken、Modified、Link 和 Install 筛选；Skill 主标识显示目录名，frontmatter 名称只作辅助展示。
+- 左侧 Library 列表按全部、Broken、Modified、Link 和 Install 筛选；Git Source Member 按 Git Repository Source 分组，成员主标识显示 Directory Identity，repository/`skillPath` 区分同名项，frontmatter 名称只作辅助展示。
 - 中间详情显示来源、最终实体路径、健康状态、只读 `SKILL.md` 与必要的 Broken / Modified 提示；不提供 app 内编辑。
 - 右侧 Enable by Agent 检查器显示每个 Agent 的独立 Activation。普通 Enable / Disable 立即可见；Activation Conflict 必须进入 Adopt、显式移除后替换或取消，不静默覆盖。
 - Import 和 Adopt 是顶层入口，但完整流程使用 sheet：Import 经历来源、发现、多选、预览与结果；Adopt 保留扫描表、完整变更计划、逐 Skill 结果与当前会话 Undo。

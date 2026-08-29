@@ -2,6 +2,8 @@
 
 状态：Accepted
 
+> **部分取代。** [ADR-0018](0018-git-source-namespaces-and-immutable-members.md) 取代本文的唯一具体 tracking ref、Modified Member Resolution、Explicit Member Mapping、Upstream Member Removed 保留内容、flat `skills/<name>` 与逐成员 Remove 语义。本文的完整来源聚合、Source Transition journal/CAS/recovery/Undo、Legacy Source Promotion、external ownership 与 fail-closed 边界继续有效。
+
 受支持的远程 Git provider 不再把同一仓库中的每个 Skill 当作可独立验证、交接和更新的来源。它们统一以规范化 Git repository 为一个 Git Repository Source，在唯一 tracking ref 的一个 Source Release 中发现完整成员集，并通过 Source Transition 共同交接或更新。这样与外部 installer 实际按整个仓库安装和更新全部 Skill 的行为一致，也避免把陈旧的逐 Skill lock 或本地内容误称为已验证远端 provenance。
 
 本 ADR 取代 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 中仅针对受支持 Git provider 的逐 Skill Remote Binding、Ownership Handoff、Update 与验收语义；GitHub 是 provider 子类型，不再有例外模型。ADR-0013 的严格 lock 解析、provider URL 规范化与凭据拒绝、安全 tree materialize、exact CAS、单一 owner、失败关闭以及非 Git sourceType 行为继续有效。

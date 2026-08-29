@@ -45,9 +45,9 @@ Scan Report 是 generation-bound 的只读事实，固定携带每个 canonical 
 
 ## Conflict、选择与汇总呈现
 
-Local candidates 以现有 `NFC + Unicode casefold` Skill identity key 形成 Conflict Set。同名不同 canonical entity 默认无 winner；用户可以显式选择一个 Local winner，其余实体与 appearances 原地保持 Untracked。已经 Managed 的同名 Skill 不在 Adopt 中被替换；同一实体多 identity 必须先统一名称后 Rescan。系统不按内容合并、不自动加后缀或改名。
+Local candidates 以 `NFC + Unicode casefold` Directory Identity key 形成 Conflict Set。同名不同 canonical entity 默认无 winner；用户可以显式选择一个 Local winner，其余实体与 appearances 原地保持 Untracked。已经 Managed 的同名 Skill 不在普通 Local Adopt 中被替换；同一实体多 Directory Identity 必须先统一名称后 Rescan。系统不按内容合并、不自动加后缀或改名。
 
-涉及 Git Source Member 的潜在同名关系必须保留 directory identity、canonical entity、repository identity、repository-relative `skillPath` 和 source membership，并暂时阻断对应来源；是否最终构成 Conflict 及跨 repository 同名如何进入 Library，由[决策:Git 来源 Skill 的 Library 布局与命名空间身份](https://github.com/RookieZoe/skill-man/issues/74)唯一决定，本 ADR 不提前把 namespace 定为纯物理布局或领域身份。
+涉及 Git Source Member 的同名关系保留 Directory Identity、canonical entity、repository identity、repository-relative `skillPath` 和 source membership，但名称相同本身不阻断来源。依 [ADR-0018](0018-git-source-namespaces-and-immutable-members.md)，Git Source Member 使用稳定 `skill_id` 并按 Git Repository Source 分组，同一或跨 repository 同名均可进入 Library；只有向同一 Agent Activation Target 发布相同 Directory Identity 时才形成 Activation Conflict。Local↔Local Conflict Set 与非 Git 既有行为不变。
 
 汇总层级固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。External Ownership Claim 是需要来源级审阅的事实；稳定开发目录和 multiple appearances 是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认都未选择；Blocked/Deferred 没有选择控件。
 
