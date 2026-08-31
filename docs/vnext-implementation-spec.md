@@ -13,7 +13,7 @@
 仍未被本文件改动的 MVP 行为继续遵循[历史 MVP 实施 Spec](mvp-implementation-spec.md)；发生冲突时，优先级为：
 
 1. [CONTEXT.md](../CONTEXT.md) 中的规范领域词；
-2. ADR-0010 至 ADR-0016 的长期不变量；
+2. ADR-0010 至 ADR-0021 的长期不变量；
 3. 本 vNext Spec 的实施编排和验收细节；
 4. 旧 ADR 与历史 MVP Spec 中未被取代的部分。
 
@@ -92,7 +92,7 @@
 | 历史 Spec §9                        | 900×600、三栏到 860px、页面可能滚动                | 原生最小 760×520；1060px 断点；pane/drawer/Notice tray 明确拥有滚动；页面无横向滚动                                |
 | 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + PresetRegistry/Detection + 零 Agent Configuration；失败显示真实状态 |
 
-ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准，Enable 操作面、项目目录解析、Conflict 与批量提交以 ADR-0019 为准，启动观察、完整 Rescan 触发/调度、缓存、取消、资源与 stale 语义以 ADR-0020 为准。
+ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准，Enable 操作面、项目目录解析、Conflict 与批量提交以 ADR-0019 为准，启动观察、完整 Rescan 触发/调度、缓存、取消、资源与 stale 语义以 ADR-0020 为准，Agent Management 表面形态、Enable/扫描汇总/来源组的 sheet 信息结构与共享 UI 契约（Evidence rail、selection shelf、mid 抽屉）以 [ADR-0021](adr/0021-agent-management-and-enable-ui-architecture.md) 为准。
 
 ## 3. 持久化权威与 schema
 
@@ -520,6 +520,7 @@ src/app/                # bootstrap provider、typed clients、event reconciliat
 src/features/home/      # Unconfigured/Candidate/Unavailable/Recovery routes
 src/features/locale/    # LocaleProvider、message formatting、Language control
 src/features/library/   # Pinned Workbench shell
+src/features/agents/    # Agent Management 表面：分组导航/列表/详情、配置 CRUD sheet、Detection/Preset 呈现
 src/features/scan/      # startup observations、Scan Run、paged Evidence Ledger
 src/features/adopt/     # report selection draft + plan/result/Undo
 src/features/enable/    # Global/Project target selection + Preview/result/Undo
@@ -778,35 +779,79 @@ Source Content 原样字段：Skill 名称/description/body、用户 Agent 名�
 
 ### 7.1 breakpoints 与滚动
 
-| viewport     | 布局                                                             | 滚动 owner                                       |
-| ------------ | ---------------------------------------------------------------- | ------------------------------------------------ |
-| `>= 1060px`  | Library、Skill detail、Agent Inspector 三栏同屏                  | 三个 pane 分别纵向滚动；Toolbar 固定；页面不滚动 |
-| `760–1059px` | Library + Skill detail 双栏；Agent Inspector 为右侧 modal drawer | 两个 pane 与 drawer 各自滚动；页面不滚动         |
-| `< 760px`    | 防御性单 pane navigation                                         | active pane 滚动；不构成原生窗口支持承诺         |
+| viewport     | Library Desk 布局                                                | Agent Management 布局                                                  | 滚动 owner                                       |
+| ------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
+| `>= 1060px`  | Library、Skill detail、Agent Inspector 三栏同屏                  | 分组导航、配置列表、配置详情三栏同屏                                   | 各 pane 分别纵向滚动；Toolbar 固定；页面不滚动   |
+| `760–1059px` | Library + Skill detail 双栏；Agent Inspector 为右侧 modal drawer | 分组导航 + 配置列表双栏；配置详情收为右侧抽屉并提供浮动入口重新展开     | 各 pane 与 drawer 各自滚动；页面不滚动           |
+| `< 760px`    | 防御性单 pane navigation                                         | 同左（两个表面一致）                                                   | active pane 滚动；不构成原生窗口支持承诺         |
 
 原生窗口最小尺寸改为 `760×520`。精确边界 `1059/1060` 和 `759/760` 必须有自动化测试。
 
 App shell 使用显式 `Toolbar / NoticeRegion / Workspace` rows；0 Notice 折叠、1 Notice 自然高度、多 Notice 进入有界独立滚动 tray，Workspace 永远占剩余高度。删除依赖 `display: contents` 和 implicit grid rows 的生产布局。任何状态下无 page-level 横向溢出。
 
+Toolbar 表面切换只替换 Workspace 内容；Toolbar、NoticeRegion 与 overlay/focus 契约（§7.2）对
+Library Desk 与 Agent Management 一致，Agent Management 的 mid 抽屉与 Agent Inspector drawer
+使用同一 drawer 契约。
+
 ### 7.2 overlay/focus
 
 Overlay 位于 inert App background 之外。跨 breakpoint resize 不 remount 当前 sheet/drawer；focus trap 保持，关闭回到逻辑 opener。低高度时 backdrop 自身可滚到全部 action。busy 状态拒绝 Escape 与 backdrop dismissal；普通状态支持 Escape。正式 Empty/Error 使用真实可访问语义 DOM，不复用 prototype 的 CSS label。
 
-### 7.3 Enable 操作面与目标选择
+### 7.3 表面切换与 Agent Management
 
+主窗口 toolbar 提供 **Library / Agents** 两个表面；Library 仍是默认主页。Agent Management 是
+独立顶层表面，不进入 Preferences（[ADR-0021](adr/0021-agent-management-and-enable-ui-architecture.md)；
+[ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md) 的应用菜单入口进入
+同一表面）；[ADR-0009](adr/0009-ui-information-architecture.md) 的 Library Desk 三栏骨架不变。
+
+Agent Management 以「状态分组导航 + 配置列表 + 配置详情」三栏呈现：
+
+- 左栏分组导航分 Configured / Detected but Unconfigured / Preset templates 三段，携带「检测零写入」
+  常驻提示（Detection 只读、不写 Catalog、不创建目录），并提供 New custom agent 入口。
+- 中栏配置列表：Configured 段每行展开 Root 数与唯一 Agent Activation Target 摘要；Detected 段
+  只列检测证据，不提供扫描或 Enable 动作；Preset 段是可发起配置的横条。Fresh Home 由
+  `PresetRegistry + Detection + 空配置列表` 合成中栏，空配置是合法产品状态。
+- 右栏配置详情：只读 compatibility evidence 卡、Global Skills Roots 列表（radio 标注唯一
+  Agent Activation Target，其余 Root 为 scan-only）、shared consumers 卡（引用同一 Target 的全部
+  Agent），以及 Edit / Configure from template 入口；Library Desk 与 Agent Management 都提供
+  手动 Rescan 入口（§4.10 single-flight）。
+
+增删改使用单一配置 sheet：多个 Global Skills Root 的增删、radio 选唯一 Activation Target、
+`project_skills_dir` 字段与安全约束提示、名称唯一性（NFKC + casefold）。删除确认必须说明既有
+Activation 仍按 Target 保留。Apply 走 ADR-0016 的配置 plan 护栏（重验名称、Root identity、
+Target occupancy、Home overlap 与 WriteGate generation；Target 只在显式配置 plan 中创建）；
+删除或改 Target 的阻塞与解除规则（最后引用者有 Activation 时阻止，非最后引用只解除关系）以
+ADR-0016 为准，sheet 只呈现阻塞清单，不复制判定逻辑。
+
+**Evidence rail 是详情区签名元素**：Library Desk 的 Skill/来源成员详情使用四格横轨
+「Directory identity / Canonical entity / Source release / Activation evidence」；Source
+Snapshot Mismatch 与 Broken 分别以 warning / danger tone 呈现。rail 只读，不承载操作入口。
+
+### 7.4 Enable 操作面与目标选择
+
+Enable 的全部操作面都是上下文保留 sheet（§7.2），以 Agent 为入口、由 Core 把 Agent Configuration
+解析到唯一 canonical Target（[ADR-0019](adr/0019-enable-surfaces-target-resolution-and-batch-semantics.md)）。
 常态 Library Desk 保持 Skill-first：
 
 - Agent Inspector 只显示当前 Skill 的全局 Activation Target Group。同一 canonical Target 的 Agent
-  合并为一张 group card，Agent 名称/compatibility 为成员信息、路径为次级证据，整组只有一个
-  switch、desired/observed state 与 Repair action。Preview 固定列出全部受影响 Agent。
-- Skill detail 提供 `Enable to Project…`；Project flow 依次选择一条 MRU 或 Browse 的项目文件夹、
-  一个或多个有 `project_skills_dir` 的 Agent、Preview 与 Result。Agent 无项目目录约定时 disabled，
-  action 指向 Agent Management。
-- Library Toolbar 的 `Select` 进入临时多选模式，初始无勾选；选择至少一个 Managed Skill 后，
-  fixed action bar 提供 `Enable Globally…` 与 `Enable to Project…`。退出清空 draft。Global 与
-  Project Target/Agent 仍默认空并提供显式 Select all，显示去重后的物理 Target 数与受影响 Agent 数。
-- Global 可选多个 Target group；Project 每个 operation 只选一个项目文件夹，但可选多个 Agent 与
-  Skill。两种 scope 永不出现在同一 plan。
+  合并为一张 group card：shared target 呈现单一 switch 并列出全部消费者数量，Agent 名称/compatibility
+  为成员信息、路径为次级证据，整组只有一个 desired/observed state 与 Repair action；冲突目标单独
+  成卡并提供处置入口。Preview 固定列出全部受影响 Agent。Inspector 底部常驻「项目级操作独立」脚注，
+  防止把一次性软链误读为受管生命周期（[ADR-0015](adr/0015-project-level-enable-target-only.md)）。
+- Skill detail 提供 `Enable to Project…`；详情区以 Evidence rail（§7.3）呈现来源与 Activation 证据。
+- **Global Enable 是三步 sheet**：① 目标组选择——Global 可选多个 Target group，默认空并提供显式
+  Select all，显示去重后的物理 Target 数与受影响 Agent 数；② Skill × resolved target 预览矩阵——
+  §7.5 的逐 cell 冲突决策；③ 结果——§7.5 的 cell 结果与一次 `Undo this operation`。
+- **Project Enable 是四步 sheet**：① 选择一条 MRU 或 Browse 的项目文件夹；② 选择一个或多个有安全
+  `project_skills_dir` 的 Agent——Agent 无项目目录约定时 disabled，action 指向 Agent Management；
+  ③ Preview——按 resolved container 去重为临时 resolved-target group，披露全部受影响 Agent 与
+  「1 次物理写入」，并呈现下段的目录证据与 §7.5 的占用处置；④ Result——警示「未创建 Project
+  记录」，Undo 仅在结果 sheet 关闭前可用。Project 每个 operation 只选一个项目文件夹，但可选多个
+  Agent 与 Skill。
+- **批量经 selection shelf 发起**：Library Toolbar 的 `Select` 进入临时多选模式，初始无勾选；
+  选择至少一个 Managed Skill 后，底部 selection shelf（fixed action bar）提供 `Enable Globally…`
+  与 `Enable to Project…`。退出清空 draft，选择不跨操作记忆。Global 与 Project 不混批
+  （§2.1 不变量 17），永不出现在同一 plan。
 
 项目目录 Preview 同时显示 configured relative path、完整 hop evidence 与 resolved container。
 项目内有意 symlink（例如 `.claude/skills → ../.agents/skills`）可用；每个 hop 与最终容器必须位于
@@ -814,11 +859,13 @@ canonical 项目根内。安全 missing container 显示将创建的路径；最
 不稳定时对应 cell Blocked，无 override。解析到同一目录的 Agent 临时合并、只写一次，并列出所有
 已配置 consumer；Result 关闭后 UI 不再声称知道该项目链接的存在或健康。
 
-### 7.4 Enable Preview、Conflict 与 Result
+### 7.5 Enable Preview、Conflict 与 Result
 
 Preview 使用 Skill × resolved target matrix。用户已经显式选择的 Ready cell 默认进入 Apply；
 同一 target/Directory Identity 的所选 Skill 逐 target 选择 winner，未解决项保持 Skipped 而不阻塞
-其它 Ready cell。真实目录 Replace 必须逐 cell 展示路径、目录数与文件数，不提供 Replace all。
+其它 Ready cell。真实目录 Replace 必须逐 cell 展示路径、目录数与文件数，不提供 Replace all；
+Project scope 的真实目录替换在 Apply 前还要求显式勾选承认删除后果（destructive ack，
+[ADR-0021](adr/0021-agent-management-and-enable-ui-architecture.md)）。
 
 Conflict action 固定为：
 
@@ -841,8 +888,63 @@ CAS 重验，外部已改变项单独失败，其余继续；关闭 Result 或�
 Global Disable、startup health 与 Repair 只留在 Inspector 的单一 Target group。missing entry 且
 final entity Healthy 时可 Repair；occupied 进入 Conflict，Target unavailable/mismatch 引导 Agent
 Management，dangling 等待同一来源实体恢复或 Disable，Source Snapshot Mismatch 只允许 Disable /
-Create Local Source Copy / Restore Current Source Release。批量 surface 不提供 Disable/Repair，
-Project 永远不显示这些状态或动作。
+Create Local Source Copy / Restore Current Source Release——后两个动作呈现在来源组卡的 Mismatch
+面板（§7.6）。成员从 Source Release 消失使全局 Activation Broken 时，该成员不走常态开关或
+Repair：停用走专属 Disable 三步 sheet——① Target group 与 Broken 证据 → ② 确认共享目标组整组
+停用并列出全部消费者 → ③ 结果。批量 surface 不提供 Disable/Repair，Project 永远不显示这些状态
+或动作。
+
+### 7.6 扫描汇总与来源组呈现
+
+onboarding 与常态手动 Rescan 共用同一扫描汇总 sheet。候选资格、选择默认空与部分覆盖的操作资格
+contract 在 §8.1/§8.2；本节冻结其信息结构（[ADR-0021](adr/0021-agent-management-and-enable-ui-architecture.md)）：
+
+1. **funnel 计数**：Configured Agents → declared roots → canonical roots → appearances →
+   canonical entities，逐级展示扫描去重漏斗。
+2. **四类计数卡**：Git source candidate / Local / Conflict set / Excluded·already Managed；
+   卡片只计数，不承载选择控件。
+3. **Root coverage 表**：每个 canonical Root 的 consumer Agent、结果（Complete / Incomplete /
+   typed diagnostic）与 evidence 摘要；失败 Root 的 diagnostic 持续可见。
+4. **候选列表**：Git Repository Source 以来源组为整体行、Local 逐项、Conflict set 挑 winner，
+   全部默认空；Blocked/Deferred 没有选择控件；区块顺序固定为 §8.1 的五段汇总顺序。
+   Scan Incomplete 时破坏性主按钮禁用并说明等待完整 coverage
+   （[ADR-0017](adr/0017-canonical-scan-aggregation-and-source-attribution.md)）；保持实体原位的
+   非破坏 Local Link 不受影响。
+
+**Git 来源组卡**（Library Desk 的来源分组，事实 contract 在 §8.3）承载：Source Tracking Policy
+级联（最新正式 provider Release → 最高稳定 SemVer tag → default-branch 可达的最新普通 tag →
+`HEAD`）与显式 override 并排呈现；来源级 Update / Remove；成员行只读展示 `skillPath`、Activation
+健康与所在 Target group 数，不提供成员级版本操作。**Source Snapshot Mismatch 面板**内嵌于来源组
+卡：声明 Update 与新 Enable 已被阻止，提供 Restore Current Source Release 与 Create Local Source
+Copy，并明示后者不切换任何 Activation。成员删除或 rename 使其全局 Activation Broken：成员行只
+提供进入 §7.4 专属 Disable 流的入口，并提示相同 `(remote_id, skillPath)` 重现时自动恢复 Healthy
+（§8.4）。
+
+### 7.7 新增表面的双语 key 清单
+
+§7.3–§7.6 全部新增表面与 sheet 的可见文案进入 §6.2 的共享 catalog（`resources/locales/en.json` 与
+`zh-Hans.json`；en 为完整基线，`scripts/check-locales.mjs` 强制 key/placeholder/复数 parity），
+不新增 i18n 机制。key 按表面分组、组内 camelCase；路径、`skillPath`、ref/commit、Agent 原始名等
+Source Content 永远是插值参数，不是 key（§6.3）：
+
+| key 前缀            | 覆盖面                   | 代表 key                                                                                                                                                                                                                                                                                     |
+| ------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `surface.`          | toolbar 表面切换         | `surface.library`、`surface.agents`                                                                                                                                                                                                                                                          |
+| `agents.nav.`       | 三段分组导航             | `agents.nav.configured`、`agents.nav.detected`、`agents.nav.presets`、`agents.nav.zeroWriteHint`、`agents.nav.newCustomAgent`                                                                                                                                                                |
+| `agents.list.`      | 配置列表行               | `agents.list.rootCount`、`agents.list.targetSummary`、`agents.list.detectionEvidence`、`agents.list.configureTemplate`                                                                                                                                                                       |
+| `agents.detail.`    | 配置详情                 | `agents.detail.compatibilityEvidence`、`agents.detail.globalRoots`、`agents.detail.uniqueTargetRadio`、`agents.detail.scanOnlyRadio`、`agents.detail.sharedConsumers`、`agents.detail.edit`、`agents.detail.rescan`                                                                           |
+| `agents.sheet.`     | 增删改单一 sheet         | `agents.sheet.addTitle`、`agents.sheet.editTitle`、`agents.sheet.rootsAdd`、`agents.sheet.rootsRemove`、`agents.sheet.targetRadioLabel`、`agents.sheet.projectSkillsDirHint`、`agents.sheet.deleteBody`、`agents.sheet.blockedReasons`                                                        |
+| `enable.global.`    | Global 三步              | `enable.global.stepTargetGroups`、`enable.global.stepPreviewMatrix`、`enable.global.stepResult`、`enable.global.affectedAgents`、`enable.global.undoOperation`                                                                                                                               |
+| `enable.project.`   | Project 四步             | `enable.project.stepFolder`、`enable.project.stepAgents`、`enable.project.stepPreview`、`enable.project.stepResult`、`enable.project.recentFolders`、`enable.project.resolvedGroupDisclosure`、`enable.project.onePhysicalWrite`、`enable.project.destructiveAck`、`enable.project.noProjectRecordWarning` |
+| `enable.broken.`    | Broken 专属 Disable 三步 | `enable.broken.stepEvidence`、`enable.broken.stepConfirm`、`enable.broken.groupDisableBody`、`enable.broken.stepResult`                                                                                                                                                                      |
+| `shelf.`            | selection shelf          | `shelf.select`、`shelf.selectedCount`、`shelf.enableGlobally`、`shelf.enableToProject`、`shelf.exit`                                                                                                                                                                                         |
+| `scan.summary.`     | 扫描汇总 sheet           | `scan.summary.funnel.agents/declaredRoots/canonicalRoots/appearances/entities`、`scan.summary.cards.gitCandidate`、`scan.summary.cards.local`、`scan.summary.cards.conflictSet`、`scan.summary.cards.excluded`、`scan.summary.coverage.*`、`scan.summary.incompleteDestructiveDisabled`        |
+| `sourceGroup.`      | 来源组卡与 Mismatch 面板 | `sourceGroup.trackingPolicy`、`sourceGroup.policyRelease`、`sourceGroup.policySemverTag`、`sourceGroup.policyTag`、`sourceGroup.policyHead`、`sourceGroup.override`、`sourceGroup.update`、`sourceGroup.remove`、`sourceGroup.mismatchBody`、`sourceGroup.restoreRelease`、`sourceGroup.createLocalCopy`、`sourceGroup.localCopyNoSwitchNote`、`sourceGroup.memberBrokenDisable` |
+| `evidenceRail.`     | Evidence rail 四格       | `evidenceRail.directoryIdentity`、`evidenceRail.canonicalEntity`、`evidenceRail.sourceRelease`、`evidenceRail.activationEvidence`                                                                                                                                                             |
+| `inspector.`        | Target group 卡增强      | `inspector.consumerCount`、`inspector.conflictCardTitle`、`inspector.projectFootnote`                                                                                                                                                                                                        |
+
+以上前缀是实施契约：实现可细化叶子 key，不得跨表面复用语义不同的 key；§7.3–§7.6 新增文案不得
+硬编码（§6.3 门禁），ARIA、空态与错误 summary 的 key 与可见文案同轨。
 
 ## 8. Adopt、Git Repository Source 与 Source Transition
 
@@ -856,7 +958,7 @@ Scan 先按最终文件系统对象聚合 appearances，再按 provider + canoni
 
 Scan Report 分别统计 Root coverage、canonical entities、appearances、Local candidates、Git source groups、Conflict Sets、Blocked、Deferred 与 Excluded；Fetch 后的 Source Members 另行计数。Root 是最小证据提交单元：只有完整成功 Root 的 evidence 进入候选聚合；中途 unreadable、identity replacement、Unresponsive，或可证明只影响该 Root transaction 且 Store 仍健康的局部 evidence 错误，只保留 coverage diagnostic、计数与最后 phase/entry，不发布顺序相关的半截候选。Store-wide I/O、磁盘不足、manifest/完整性失败使整次 Run Failed 并保留旧 Report。一个 Root 失败使报告进入 Scan Incomplete，但不抹掉健康 Root 的完整结果。保持最终实体原位的非破坏 Local Link 可以继续；迁移、删除、替换实体或释放 external ownership 必须等待完整 coverage。
 
-汇总顺序固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。multiple appearances 与稳定开发目录是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认未选择；Blocked/Deferred 没有选择控件。onboarding 与手动 Rescan 共用此 report contract：首次配置后的 onboarding 允许零配置、零选择、Skip 或 Cancel；常态启动只运行 Startup Probe，不自动完整 Rescan。手动入口打开非模态 Evidence Ledger；运行期间保留旧 Stale Report，只有 Complete/Incomplete Run 原子发布新 Report，Cancelled/Superseded 保留旧 Report。
+汇总顺序固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。multiple appearances 与稳定开发目录是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认未选择；Blocked/Deferred 没有选择控件。onboarding 与手动 Rescan 共用此 report contract：首次配置后的 onboarding 允许零配置、零选择、Skip 或 Cancel；常态启动只运行 Startup Probe，不自动完整 Rescan。手动入口打开非模态 Evidence Ledger；运行期间保留旧 Stale Report，只有 Complete/Incomplete Run 原子发布新 Report，Cancelled/Superseded 保留旧 Report。该汇总 sheet 的信息结构（funnel、四类计数卡、Root coverage 表、候选列表）见 §7.6，本节 contract 不因呈现而重复。
 
 Skill Man 不限制 Root、entry、Skill、entity、文件或内容字节规模；完整 evidence 按第 3.6/4.10 节流式落盘和分页读取。symlink 16-hop/cycle、originating Root containment、零网络 Rescan、有界并发/背压和 30 秒无进度 watchdog 是终止护栏，不是 Agent Skill 加载限制。Scan 本身只写派生 Evidence Store；selection draft、Source Group Draft、取消、返回或 remote 重新获取前仍不写 Catalog、Skill entity、staging、journal 或 lock。
 
@@ -892,7 +994,7 @@ Source Member 由 `(remote_id, skillPath)` 识别并关联稳定 `skill_id`，�
 
 member tree 在 Healthy 时必须等于 current Source Release hash。启动、Update、新 Enable 和其它来源写之前重验；不一致进入 Source Snapshot Mismatch，阻止普通写且不静默覆盖，但允许只读、Disable、Create Local Source Copy 和显式 Restore Current Source Release。Create Local Source Copy 把当前稳定观察到的成员字节复制到用户选择的外部目录并登记为 Local Source，不含 `.git`，不改变原来源、成员或 Activation；Local Source 后续不保存内容 baseline，也不判断内容变化。
 
-Library Desk 以 Git Repository Source 为分组，来源组拥有 tracking policy、selected ref/tag、resolved commit、Update/Remove 与 Source Release 状态；成员行拥有 Directory Identity、`skillPath`、详情、Enable/Disable 和 Activation 健康。同名成员不改写名称，以来源组和路径区分。
+Library Desk 以 Git Repository Source 为分组，来源组拥有 tracking policy、selected ref/tag、resolved commit、Update/Remove 与 Source Release 状态；成员行拥有 Directory Identity、`skillPath`、详情、Enable/Disable 和 Activation 健康。同名成员不改写名称，以来源组和路径区分。来源组卡与 Mismatch 面板的呈现契约见 §7.6。
 
 ### 8.4 Source Transition、Ownership Handoff 与 Update
 
@@ -1047,6 +1149,15 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | source handoff crash                | commit point 前整组恢复；之后 recovery gate 下完整 release roll-forward；无长期双 owner/无 owner |
 | source Update / Undo                | 固定 release journal、来源级 conditional Undo、外部 reappearance 是 Ownership Conflict；普通 Remove 不恢复 external owner |
 | non-Git regression                  | 非 Git sourceType 仍遵循 ADR-0013 的现有逐项证据和行为                                   |
+| toolbar 表面切换                    | Library/Agents 只替换 Workspace；Library 默认主页；Agent Management 不进 Preferences；Toolbar/Notice/overlay 契约两表面一致 |
+| Agent Management 三栏               | 三段分组导航与零写入常驻提示；Fresh Home 空配置可渲染；mid（760–1059px）详情收为抽屉且有浮动入口；边界有自动化测试 |
+| Agent 配置 sheet                    | 多 Root 增删、radio 唯一 Target、`project_skills_dir` 校验；Apply 重验 ADR-0016 护栏；删除确认披露 Activation 按 Target 保留 |
+| selection shelf 批量                | 多选初始无勾选；Global/Project 不混批；退出清空 draft；批量不提供 Disable/Repair         |
+| Enable sheet 流                     | Global 三步与 Project 四步的步骤序列与默认空目标；Project 真实目录替换 destructive ack；结果警示未创建 Project 记录且关闭即 finalize |
+| Broken 成员 Disable                 | Broken 成员无常态开关/Repair；专属三步 sheet 整组停用并列出全部消费者                    |
+| 扫描汇总 sheet                      | funnel/四类计数卡/coverage 表/候选列表结构；全部默认空；Scan Incomplete 禁用破坏性主按钮且 diagnostic 持续可见 |
+| 来源组卡与 Mismatch 面板            | policy 级联与 override 并排；Mismatch 阻止 Update/新 Enable；Restore 与 Local copy 可用且 copy 不切换 Activation；成员行无版本操作 |
+| 新增表面双语覆盖                    | §7.7 全部前缀进入 en/zh-Hans catalog 且 check-locales parity 通过；§7.3–§7.6 无硬编码文案 |
 
 ### 10.3 必须人工执行的 Gate
 
@@ -1100,6 +1211,7 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 | Git repository source               | [既有逐 Skill 远程模型迁移与规格取代](https://github.com/RookieZoe/skill-man/issues/59)、[ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md)：受支持 Git provider 使用完整 Source Release 与 Source Transition |
 | Git namespace / identity / tracking | [决策：Git 来源 Skill 的 Library 布局与命名空间身份](https://github.com/RookieZoe/skill-man/issues/74)、[ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：稳定 `remote_id/skill_id` namespace、Source Tracking Policy、不可变来源级成员与同名分组 |
 | Scan scheduling / evidence           | [决策：启动 Agent Detection 与全局 Rescan 调度和性能预算](https://github.com/RookieZoe/skill-man/issues/78)、[ADR-0020](adr/0020-startup-observations-and-manual-rescan.md)：Library first、Startup Probe、手动完整 Rescan、流式 Evidence Store、无限业务规模、single-flight/cancel/stale/CAS |
-| Adopt Preview                       | [原型：Adopt Preview 的完整来源链与保真证据](https://github.com/RookieZoe/skill-man/issues/39)                                                                                                                                                           |
+| UI 表面与操作面                      | [原型：Agent 配置、项目作用域与 Enable 操作面 UI](https://github.com/RookieZoe/skill-man/issues/75)、[ADR-0021](adr/0021-agent-management-and-enable-ui-architecture.md)：toolbar Library/Agents 切换、Agent Management 三栏与单一配置 sheet、Enable Global 三步/Project 四步/Broken 专属 Disable、扫描汇总与来源组呈现、Evidence rail/selection shelf/mid 抽屉共享契约与 §7.7 双语 key 清单 |
+| Adopt Preview                        | [原型：Adopt Preview 的完整来源链与保真证据](https://github.com/RookieZoe/skill-man/issues/39)                                                                                                                                                           |
 
 本 Spec 冻结上述产品决策；实施票只决定局部代码组织和满足 contract 的最小实现，不重新讨论用户行为。
