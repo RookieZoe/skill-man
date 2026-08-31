@@ -6,6 +6,8 @@
 > 严格四项 / 不提供语言设置」；
 > [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md)
 > 取代本文 Claude/Codex-only、单 Agent 单路径、路径存在即状态与独立 Agent 目标规则。
+> [ADR-0020](0020-startup-observations-and-manual-rescan.md)
+> 取代本文“启动时轻量 Untracked 扫描”及扫描完成后才呈现主窗口的调度结论。
 > 四个既有 boolean 的行为继续有效。
 
 Skill Man 的首次启动应尽快进入可用状态，同时避免静默修改 Agent 目录；MVP 只暴露会显著改变后台行为或 macOS 应用形态的设置。本文补充 [符号链接策略](0003-symlink-strategy.md)、[Install 更新规则](0004-install-sources-and-updates.md)、[Adopt 流程](0005-adopt-existing-skills.md)与[应用更新策略](0006-macos-distribution-and-updates.md)。词汇遵循 [CONTEXT.md](../../CONTEXT.md)。
@@ -49,7 +51,7 @@ Agent 路径配置属于 Agent 管理界面，不属于 Preferences。下列行�
 
 - 菜单栏在应用运行时始终存在；
 - 红色关闭按钮只关闭主窗口，不退出应用，`⌘Q` 或「退出 Skill Man」才终止进程；
-- 启动时始终执行 Activation 健康检查和轻量 Untracked 扫描；
+- Library Desk 可交互后异步执行 Target-scoped Activation health 与 Startup Probe；常态启动不自动执行完整 Rescan；
 - 两类更新检查的冷却期固定为 24 小时，更新都由用户手动应用；
 - Library 路径、主题、语言、通知和「关闭窗口时退出」不提供 MVP 设置。
 

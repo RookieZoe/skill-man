@@ -54,7 +54,7 @@
 3. **单一写门。** 所有 Import、Adopt、Update、Remove、Enable/Disable、Repair 与 Home 写操作共享一个 `WriteGate` snapshot；Fixture Recovery 自身使用独立、显式确认的 recovery capability。
 4. **绑定身份而非字符串路径。** Bound Home 由 `home_id`、locator、marker、Catalog 与卷身份共同证明；路径相同不等于身份相同。
 5. **无静默 re-home。** Reconnect 与 Restore 只恢复同一 `home_id`；只有 Abandon Home and Start New 能结束旧绑定并产生新身份。
-6. **Safety Snapshot 永不自动删除。** 删除必须由用户显式发起，并在至少一次后续成功启动和 Rescan 后重新验证它仍是非活动 Snapshot。
+6. **Safety Snapshot 永不自动删除。** 删除必须由用户显式发起，并在同一 `home_id` 下至少一次后续成功启动和一份手动产生的 Complete Scan Report 后重新验证它仍是非活动 Snapshot；Startup Probe 与 Incomplete Report 不够。
 7. **Source Content 保真。** locale、Preview、Adopt、迁移与错误呈现都不能改写 Source Content。
 8. **Adopt 单一 owner。** 对 Git Repository Source，单一 external installer lock 的完整适用 claims CAS 释放是 Source Transition 的逻辑 commit point；commit 前整体 rollback，commit 后只整体 roll-forward。
 9. **查看不等于选择。** Local Source 候选仍需逐项显式 Include；Git Repository Source 的完整成员集不可逐项裁剪，只有全部阻塞项解决后的一次 Source Group Confirmation 才能开始 Source Transition。
@@ -67,6 +67,10 @@
 16. **目录名不是持久身份。** Managed Skill 使用稳定 `skill_id`，Git Source Member 使用 `(remote_id, skillPath)`，Directory Identity 只决定 Activation entry。Git 同名成员可在 Library 共存，但同一 Target 的 entry 仍唯一。
 17. **分发范围不伪装。** Global Enable 创建 Target-scoped Activation；Project Enable 只创建 operation-scoped 一次性软链。二者不混批，Project 不获得持久状态、Disable、健康检查或 Repair。
 18. **批量不伪装全局原子性。** Enable 批次先完整 preflight，再以 `(Managed Skill, resolved physical target, Directory Identity)` cell 为独立提交单位；局部失败不回滚其它成功项，系统级 WriteGate/Home identity 失效才停止尚未开始项。
+19. **启动探测不冒充扫描。** Startup Probe 只观察 configured Root/Target 的存在性、可读性与路径身份；不产生 Scan Coverage、Scan Report 或操作资格。常态启动不自动执行完整 Rescan。
+20. **缓存不冒充现场。** 跨启动 Scan Report cache 只能作为 Stale 展示与差异基线；只有当前 Open Home 中手动/onboarding Scan Run 原子发布的 Report 才能创建 Adopt plan。
+21. **扫描不阻塞写。** 相关产品写、Home/WriteGate/Agent Configuration generation 变化优先，使运行中的 Scan Run Superseded；不能用无限规模扫描持锁冻结产品。
+22. **管理工具不替 Agent 限制规模。** Skill Man 不设置 Root、Skill、entry、entity、文件或内容字节的业务上限；以流式磁盘 evidence、有界并发/内存背压、cycle/hop 护栏和无进度 watchdog 保证可终止。
 
 ### 2.2 被取代的旧结论
 
@@ -81,13 +85,14 @@
 | ADR-0001/ADR-0003/ADR-0014、旧 vNext §3.1/§3.4/§8.3 | Skill 身份等于目录名；Install 使用 flat `skills/<name>`；Git 成员可 Modified、显式 mapping 或逐项 Remove | [ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：`skill_id`/`(remote_id, skillPath)`/Directory Identity 分层；Git 快照使用 `skills/git/<remote_id>/<skill_id>`，来源级同步且不可编辑 |
 | ADR-0005、ADR-0013、历史 Spec §6.5/§8.4 | canonical path 当实体、Git 只从 lock 进入、safe 候选默认勾选 | [ADR-0017](adr/0017-canonical-scan-aggregation-and-source-attribution.md)：scan generation 内按文件系统对象聚合；外部 Git 开发工作区仍是 Local；bounded worktree/lock 只形成 source hint；全部选择显式 |
 | ADR-0005、ADR-0007、历史 Spec §5.4/§7/§8.7 | 仅 Claude/Codex、一个 Agent 一个路径、固定 shared 扫描源且 Activation 归 Agent | [ADR-0016](adr/0016-agent-configurations-global-roots-and-shared-targets.md)：九个 Preset 模板；显式 Home-scoped Agent Configuration 驱动多 Root 扫描；一个 Target；shared Target 的 Activation 归物理 Target |
+| ADR-0007、旧 vNext §4.6/§5.1/§8.1 | 启动时轻量/完整扫描并等待 Detection、Rescan、health 后才呈现 Library；Report 全量驻内存 | [ADR-0020](adr/0020-startup-observations-and-manual-rescan.md)：Library first；Detection/Startup Probe/Target health 异步；完整 Rescan 只在 onboarding/手动触发；流式磁盘 Evidence Store、原子 Report 与无限业务规模 |
 | ADR-0009、历史 Agent Inspector | 每个 Agent 显示一份看似独立的 Activation 开关；只有单 Skill 全局操作 | [ADR-0019](adr/0019-enable-surfaces-target-resolution-and-batch-semantics.md)：shared Target 合并为单一 Activation Target Group；Global/Project 严格分流；Library 临时多选支持批量 Enable |
 | ADR-0016 的项目路径护栏 | 项目级目录一律不得经过 filesystem symlink | [ADR-0019](adr/0019-enable-surfaces-target-resolution-and-batch-semantics.md)：允许有意的项目内 symlink chain，但每个 hop、最近现存祖先与最终容器都必须受 canonical 项目根 containment |
 | 历史 Spec §8.4                      | external 只是 warning，可手动勾选继续              | Provenance Conflict、Verification Deferred 与链路错误是 closed states；只有精确忽略 lock 或修复/Retry 后才能换路径 |
 | 历史 Spec §9                        | 900×600、三栏到 860px、页面可能滚动                | 原生最小 760×520；1060px 断点；pane/drawer/Notice tray 明确拥有滚动；页面无横向滚动                                |
 | 当前 production composition         | 空 SQLite seed fixture；读失败 fallback fixture    | 永久删除生产 seed/fallback；Fresh Home 是 Empty Library + PresetRegistry/Detection + 零 Agent Configuration；失败显示真实状态 |
 
-ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准，Enable 操作面、项目目录解析、Conflict 与批量提交以 ADR-0019 为准。
+ADR-0004 的 File Install/非 Git Import/Update、ADR-0005 未被 ADR-0013/ADR-0016/ADR-0017 取代的 journal/批量隔离、ADR-0013 的 lock/tree/CAS/单一 owner 安全规则，以及非 Git sourceType 的既有行为继续有效。受支持 Git provider 的身份、namespace、版本选择、成员生命周期和 Local 出口以 ADR-0018 为准。ADR-0007 的四个 boolean 行为继续有效；Agent Preset、扫描路径和 Activation Target 规则以 ADR-0016 为准，扫描聚合、来源归属、部分结果和汇总 contract 以 ADR-0017 为准，Enable 操作面、项目目录解析、Conflict 与批量提交以 ADR-0019 为准，启动观察、完整 Rescan 触发/调度、缓存、取消、资源与 stale 语义以 ADR-0020 为准。
 
 ## 3. 持久化权威与 schema
 
@@ -319,6 +324,23 @@ git_source_members(
 
 单个名称、UI 内容、`snapshot_version`、mtime/inode 或路径存在都不是充分证据。任何额外、缺失、修改或无法读取的事实把整个 Home 分类为 mixed/unknown，并保持 `Fixture Recovery Lock`；不得恢复“看起来安全”的子集。
 
+### 3.6 Scan Evidence Store
+
+Scan evidence 是当前 Bound Home 的派生 cache，不进入 Catalog schema，也不新增 migration。物理布局固定在
+`<Home>/cache/scan/`，至少区分 current terminal manifest、active temporary Run 与 compact delta
+summary；每个 artifact 写入 `home_id`、report/run generation、Agent Configuration generation、
+configured Root snapshot fingerprint 与完整性校验。只有 manifest 原子切换后，新 Report 才成为 current。
+
+Evidence Store 使用流式、分页模型：Root/entry/entity/source evidence 逐步落盘，内存只保留有界队列、
+调度状态和汇总计数。取消、Supersede、启动恢复发现 orphan temporary Run 或 manifest 校验失败时，只清理
+能够以 `home_id + run_id + artifact identity` 证明属于该 Run 的派生 artifact；不触碰 Catalog、Skill
+实体、Agent Root 或 installer lock。cache 不可读等价于 `No cached report`，不能关闭 Catalog 或改变
+WriteGate；cache 写失败保留旧 current Report。
+
+跨启动载入的 current Report 一律是 Stale 展示证据，不能提供当前 Scan Coverage、创建 Adopt plan 或满足
+Safety Snapshot 删除资格。Abandon 不删除旧 Home cache，新 Home 不继承；Restore 后的干净 Home 不复制旧
+cache。
+
 ## 4. 调用方向与 Interface contract
 
 ### 4.1 单向依赖
@@ -413,30 +435,42 @@ seam：`SystemLocaleSource::preferred_language_tags()` 与 `LocaleStore`。macOS
 
 ### 4.6 Adopt Module
 
-保留 `scan → plan → apply → undo/finalize` 形状，深化而不另建平行 Module：
+Adopt Module 不再自己枚举 Root 或持有内存 `last_report`；完整扫描由第 4.10 节的 Observation and Scan
+Module 统一调度。Adopt 从 current terminal Report 创建 selection draft，再保持
+`plan → apply → undo/finalize`：
 
 ```text
-scan(configured_root_snapshot) -> ScanReport
-plan(scan_generation, selections) -> AdoptPlan
+plan(report_generation, selections[{ entity_ref, action, … }]) -> AdoptPlan
 apply(plan_token) -> AdoptResult
 undo(operation_id) -> AdoptUndoResult
 finalize(operation_id) -> Result
 ```
 
-`ScanReport` 是 generation-bound 的只读事实，至少包含：
+`entity_ref` 是 Evidence Store 中只对该 Report generation 有效的 opaque reference，不是 Skill identity、
+canonical path 或跨 generation key。`plan` 只接受当前 Open Home 中非 Stale 的 Complete/Incomplete
+Report；运行中的 Scan、跨启动 cache、Cancelled/Superseded Run 或旧 generation 都返回 PlanStale。
+
+`ScanReport` 是 generation-bound 的只读事实，其 summary 至少包含：
 
 ```text
-ScanReport {
+ScanReportSummary {
   generation,
-  coverage[],                 # canonical Root、关联 Agent、success/typed diagnostic
-  canonical_entities[],       # 对象 identity、canonical path、tree、全部 appearances
-  git_source_candidates[],    # provider + canonical repository + hints/claims
-  conflict_sets[],
-  counts, incomplete
+  coverage_counts,            # success/typed diagnostic 分层计数；逐 Root 通过 page Interface
+  counts,                     # entity/source/conflict/blocked/deferred/excluded 分层计数
+  incomplete,
+  published_at,
+  agent_configuration_generation,
+  configured_root_snapshot_fingerprint
 }
 ```
 
-Root 先按 canonical identity 求并集，每个物理 Root 扫一次；目录入口再按最终文件系统对象身份聚合 Canonical Skill Entity。对象 identity 只在本 generation 内有效，canonical path、identity、tree 和 appearances 共同参与 plan stale 重验，不能持久化成 Skill identity。单 Root 失败保留 typed diagnostic 与其它 Root 的部分结果；每个候选必须给出 operation eligibility，任何可能迁移、删除、替换实体或释放 external ownership 的 plan 都要求完整 coverage。
+canonical entities、appearances、Git source candidates、Conflict Sets 与 diagnostics 通过 report page
+Interface 读取，不能要求一个 DTO 全量承载。Root 先按 canonical identity 求并集，每个物理 Root 扫一次；
+目录入口再按最终文件系统对象身份聚合 Canonical Skill Entity。对象 identity 只在本 generation 内有效，
+canonical path、identity、tree 和 appearances 共同参与 plan stale 重验，不能持久化成 Skill identity。
+Root 是最小证据提交单元；中途失败 Root 的半截候选不发布，其它成功 Root 可形成 Incomplete Report。每个
+候选必须给出 operation eligibility，任何可能迁移、删除、替换实体或释放 external ownership 的 plan
+都要求完整 coverage。
 
 控制区外且没有 applicable lock 的用户开发工作区是 Local Source，即使它具有完整 Git metadata；Adopt 只登记 canonical 最终实体路径，Activation 直指原实体，Catalog 不保存内容 baseline。控制区内的 bounded worktree 与有效 Git lock 是并列 source hints：前者提供 repository/member，后者提供 repository/ref 与 External Ownership Claim。二者一致时按 provider + canonical repository 聚合；矛盾时 fail closed。用户显式调用 `fetch_latest_and_manage` 后才按 Source Tracking Policy 或显式 override 选择 ref/tag、获取 resolved commit 并发现完整 Source Release；不能用 worktree HEAD/dirty bytes、旧逐成员 Include、anchor、lock skillPath 或本地 hash 合成计划。
 
@@ -470,9 +504,10 @@ CommandFailureDto {
 - `get_bootstrap_snapshot`、Home Candidate/confirm/reconnect/abandon commands；
 - Fixture Recovery inspect/plan/apply/confirm/snapshot commands；
 - `get_locale_snapshot`、`set_locale_selection`；
-- expanded scan/Adopt DTO：Root coverage、Canonical Skill Entity/appearance、Git Repository Source Candidate、Local Conflict Set、typed operation eligibility、Local Source 的逐项 selection，以及 Git Repository Source 的 Source Tracking Policy/selected ref/tag、`fetchLatestAndManage`、Source Group Preview/Draft/Confirmation、immutable member add/remove、Source Capability Scan、Source Promotion、Repository Ref Conflict、Repository Ownership Split、Source Snapshot Mismatch、Create Local Source Copy、来源级 handoff/result/Undo；
+- Observation/Scan commands：`get_observation_scan_snapshot`、`refresh_agent_detection`、`start_rescan`、`cancel_rescan`、`get_observation_page`、`get_scan_report_page`；summary/progress DTO 永远 bounded，完整 Root/Target/entity/appearance/source/conflict/diagnostic 只经 generation-bound page 返回；
+- expanded Adopt DTO：opaque `entityRef`、report generation、typed operation eligibility、Local Source 的逐项 selection，以及 Git Repository Source 的 Source Tracking Policy/selected ref/tag、`fetchLatestAndManage`、Source Group Preview/Draft/Confirmation、immutable member add/remove、Source Capability Scan、Source Promotion、Repository Ref Conflict、Repository Ownership Split、Source Snapshot Mismatch、Create Local Source Copy、来源级 handoff/result/Undo；
 - Enable DTO：Activation Target Group、resolved project directory/hop、plan cell eligibility/occupancy/conflict resolution、affected Agent、partial result、operation Undo/finalize，以及 Target/Project containment 的 closed reason；
-- `bootstrap://changed` 与 `locale://changed` events，payload 与 query snapshot 同构并带 generation。
+- `bootstrap://changed`、`locale://changed`、`observation://changed` 与 `scan://changed` events；每种 payload 与对应 query snapshot 同构并带 generation，scan progress 最多 4 Hz，phase/status transition 立即 publish。
 
 React command client 不得在非 Tauri runtime 自动 fallback fixture。浏览器测试/prototype 必须显式注入 `createFixtureCatalogClient()`；production factory 若无 Tauri bridge，返回 closed bootstrap failure。
 
@@ -485,13 +520,14 @@ src/app/                # bootstrap provider、typed clients、event reconciliat
 src/features/home/      # Unconfigured/Candidate/Unavailable/Recovery routes
 src/features/locale/    # LocaleProvider、message formatting、Language control
 src/features/library/   # Pinned Workbench shell
-src/features/adopt/     # evidence ledger + result/Undo
+src/features/scan/      # startup observations、Scan Run、paged Evidence Ledger
+src/features/adopt/     # report selection draft + plan/result/Undo
 src/features/enable/    # Global/Project target selection + Preview/result/Undo
 src/ui/                 # locale-free primitives；visible copy 由 caller 传 key result
 resources/locales/      # en.json、zh-Hans.json 单一 message catalog
 ```
 
-React 只保存 ephemeral UI state（selection、filter、sheet、scroll、focus）；`home_id`、recovery cursor、locale selection、Adopt/Enable evidence generation 与 plan validity 以 native snapshot 为权威。
+React 只保存 ephemeral UI state（selection、filter、sheet、scroll、focus、paged cursor）；`home_id`、recovery cursor、locale selection、Detection/Probe/health/Scan generation、current Report freshness、Adopt/Enable plan validity 以 native snapshot 为权威。Library Desk 与 Agent Management 都显示手动 Rescan 入口；Evidence Ledger 非模态保留旧 stale Report，并只显示真实 phase/Root/count/elapsed time，不推导 percent 或 ETA。
 
 ### 4.9 Enable Module
 
@@ -554,6 +590,65 @@ operation 的每个成功 cell 保存足够的 before/after CAS facts。`undo` �
 外部改变时只拒绝该项；`finalize` 或应用重启清理备份并结束 Undo 窗口。Project 成功至少一个 cell 后
 才在同一 Bound Home 更新有界 MRU；Project entry/group 本身永不进入 Catalog。
 
+### 4.10 Observation and Scan Module
+
+这是启动观察、手动完整 Rescan、single-flight、Evidence Store、progress、取消与 stale 协调的唯一
+Core Module。React、onboarding、Agent Management 和 Adopt 共用同一 Interface，不各自组合 filesystem
+循环或 generation：
+
+```text
+snapshot() -> ObservationAndScanSnapshot
+refresh_detection() -> ObservationAndScanSnapshot
+start_rescan(trigger(onboarding | manual)) -> ObservationAndScanSnapshot
+cancel_rescan(run_id) -> ObservationAndScanSnapshot
+observation_page(kind(startup_probe | activation_health), generation, cursor) -> ObservationPage
+report_page(report_generation, cursor) -> ScanReportPage
+```
+
+`ObservationAndScanSnapshot` 只携带 bounded summary：
+
+```text
+ObservationAndScanSnapshot {
+  home_id?,
+  write_gate_generation,
+  agent_configuration_generation?,
+  detection { generation, preset_observations[9] },
+  startup_probe { generation, root_counts, target_counts }?,
+  activation_health { generation, target_group_counts }?,
+  scan_run {
+    run_id, generation, trigger,
+    state(queued | running | cancelling | cancelled | superseded | completed | failed),
+    phase, current_root?, counts, elapsed_ms, slow, diagnostic?
+  }?,
+  current_report { summary, freshness(current | stale), stale_reasons[] }?
+}
+```
+
+`snapshot` 与 changed event payload 同构；progress event 最多每 250 ms 发布一次，phase/status 变化立即
+发布。总规模未知，因此 snapshot 只携带九个固定 Preset 和其它集合的计数，Interface 不提供 percent 或
+ETA。`observation_page`/`report_page` 使用稳定 cursor 分页读取同一 generation；generation 不匹配或
+manifest 失效返回 typed stale/not-found，不回落到其它 observation/Report。
+
+Module 冻结 `home_id`、WriteGate、Agent Configuration、configured Root 与 filesystem-mutation
+generation。相关产品写只需推进 mutation generation 并通知协调器；写操作不等待 Scan，Scan
+Superseded 后协作取消。Activation health 使用同一启动调度器但保持 Target-scoped authority；它的
+Catalog observation CAS 不推进 filesystem-mutation generation，也不使 Scan stale。startup、成功的
+Enable/Disable/Repair、Target 配置变化与显式 Retry 只调度受影响 Target；项目级一次性软链永不进入。
+Startup Probe 在 startup、Agent Configuration Apply 后与显式 Retry 运行，但不触发完整 Rescan。
+
+内部并发上限固定为 Root 4、tree hash 2、local Git probe 2；路径/worktree/lock fact 在 Run 内
+memoize。没有 Root/entry/entity/file/byte 业务上限或总 hard deadline；有界队列对生产者施加背压。
+Detection + Startup Probe 1 秒、health 5 秒、Root 10 秒、Run 30 秒只标记 Slow；单 Root/Target 30 秒
+完全无 entry/byte/probe 进度才返回 Unresponsive。symlink cycle 与 16-hop、Root containment、零网络
+Rescan 继续是硬安全边界。
+
+seam：
+
+- `ScanEvidenceStore`：stream Root transaction、atomic current manifest、page query、orphan cleanup；
+  Bound Home system Adapter + failure-injecting temp-dir Adapter。
+- 现有 `FileSystem`、`InstallerLockStore`、Agent Management 与 Activation Store Interface 继续提供
+  filesystem/lock/config/health facts；调度器不复制其领域规则。
+
 ## 5. 启动、Home 与恢复状态机
 
 ### 5.1 production 启动顺序
@@ -566,8 +661,9 @@ operation 的每个成功 cell 保存足够的 before/after CAS facts。`undo` �
 6. 恢复 active ledger operation；路径/identity/manifest 能唯一判断时 rollback 或 roll-forward，歧义则保持 recovery lock。
 7. 只读执行 fixture classifier。pure fixture 进入 Preview；mixed/unknown 进入 Fixture Recovery Lock。
 8. 只有 Bound identity、recovery 与 fixture gate 全部通过后，才打开 `BoundCatalogStore`、recover普通 operations、构造写 Module。
-9. 对全部 Preset 运行零写入 Agent Detection；只对已配置 Agent 的 canonical Root union 运行只读 Rescan，并按 Target 运行 Activation health；发布首个 `BootstrapSnapshot`，再呈现 Library Desk。
-10. 网络 update check 最后异步启动；不能改变 bootstrap gate。
+9. 发布首个 `BootstrapSnapshot` 并呈现可交互 Library Desk；跨启动 Scan Report 与 Activation Health Observation 只能先显示 Stale/Checking，不能延迟首屏。
+10. 在共享有界 I/O 调度器上并发启动：全部 Preset 的零写入 Agent Detection、configured Root/Target 的 Startup Probe、Target-scoped Activation health。三者独立发布、失败隔离；常态启动不自动执行完整 Rescan。
+11. 网络 update check 最后异步启动；不能改变 bootstrap gate。
 
 ### 5.2 Fixture Recovery
 
@@ -639,6 +735,12 @@ Use Default 和 Choose… 都执行相同显式确认；取消零 Home 产物。
 | Abandon Home and Start New | 任意已绑定状态；Legacy Lock 不提供                 | 输入 home_id/固定短语 + 二次确认；CAS 把 current 移入 abandoned，随后回到 Unconfigured                      | locator CAS 是 commit point；不删旧 Home、不清理旧 Activation、不改变 locale |
 
 Abandon 后旧 Activation 可能 Broken，只报告，不自动修复。新绑定生成全新 `home_id`；旧卷回来时只显示已 Abandon，不重新绑定或作为候选。
+
+完整 Rescan 与 Activation health observation persist 都要求 `WriteGate::Open`。CatalogReadOnly/Closed
+只显示旧 Report/health 为 Stale/Unknown，禁用 Rescan、Retry 与 Adopt plan；Agent Detection 仍可
+零写运行，Catalog 可读时 Startup Probe 可只读运行。Restore 产生的 Safety Snapshot 只有在同一
+`home_id` 后续成功启动、用户手动取得 Complete Scan Report 并显式确认后才能规划删除；Incomplete
+Report 或 Startup Probe 不够。Root union 为空时，手动 Rescan 产生的 Complete 空范围 Report 有效。
 
 ## 6. locale、消息与内容所有权
 
@@ -752,9 +854,11 @@ Scan 先按最终文件系统对象聚合 appearances，再按 provider + canoni
 
 同一最终文件系统对象的多个 Agent/Root appearance 只形成一个 Canonical Skill Entity，但每条 appearance、关联 Agent 与完整 chain 都逐条显示。bounded walk 上限 16；dangling、cycle、hop-limit、non-UTF-8、读取失败或 identity replacement 停在精确失败 hop，不生成部分 fingerprint。worktree discovery 不越过 originating canonical Root；Root 上层 dotfiles repository 不参与分类。
 
-Scan Report 分别统计 Root coverage、canonical entities、appearances、Local candidates、Git source groups、Conflict Sets、Blocked、Deferred 与 Excluded；Fetch 后的 Source Members 另行计数。一个 Root 失败使报告进入 Scan Incomplete，但不抹掉健康 Root 的只读结果。保持最终实体原位的非破坏 Local Link 可以继续；迁移、删除、替换实体或释放 external ownership 必须等待完整 coverage。
+Scan Report 分别统计 Root coverage、canonical entities、appearances、Local candidates、Git source groups、Conflict Sets、Blocked、Deferred 与 Excluded；Fetch 后的 Source Members 另行计数。Root 是最小证据提交单元：只有完整成功 Root 的 evidence 进入候选聚合；中途 unreadable、identity replacement、Unresponsive，或可证明只影响该 Root transaction 且 Store 仍健康的局部 evidence 错误，只保留 coverage diagnostic、计数与最后 phase/entry，不发布顺序相关的半截候选。Store-wide I/O、磁盘不足、manifest/完整性失败使整次 Run Failed 并保留旧 Report。一个 Root 失败使报告进入 Scan Incomplete，但不抹掉健康 Root 的完整结果。保持最终实体原位的非破坏 Local Link 可以继续；迁移、删除、替换实体或释放 external ownership 必须等待完整 coverage。
 
-汇总顺序固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。multiple appearances 与稳定开发目录是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认未选择；Blocked/Deferred 没有选择控件。onboarding 与常态 Rescan 共用此 report contract：前者允许零选择完成，后者非打断提示，手动 Rescan 打开同一 Evidence Ledger。预览只能创建 selection draft 或 Source Group Draft；取消、返回或 remote 重新获取前不写 Home、Catalog、staging、journal 或 lock。
+汇总顺序固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。multiple appearances 与稳定开发目录是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认未选择；Blocked/Deferred 没有选择控件。onboarding 与手动 Rescan 共用此 report contract：首次配置后的 onboarding 允许零配置、零选择、Skip 或 Cancel；常态启动只运行 Startup Probe，不自动完整 Rescan。手动入口打开非模态 Evidence Ledger；运行期间保留旧 Stale Report，只有 Complete/Incomplete Run 原子发布新 Report，Cancelled/Superseded 保留旧 Report。
+
+Skill Man 不限制 Root、entry、Skill、entity、文件或内容字节规模；完整 evidence 按第 3.6/4.10 节流式落盘和分页读取。symlink 16-hop/cycle、originating Root containment、零网络 Rescan、有界并发/背压和 30 秒无进度 watchdog 是终止护栏，不是 Agent Skill 加载限制。Scan 本身只写派生 Evidence Store；selection draft、Source Group Draft、取消、返回或 remote 重新获取前仍不写 Catalog、Skill entity、staging、journal 或 lock。
 
 ### 8.2 分类与入口
 
@@ -865,7 +969,7 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | [实施：HomeUnavailable、Reconnect、Restore 与 Abandon](https://github.com/RookieZoe/skill-man/issues/46)      | unavailable/mismatch、Reconnect、Restore、Abandon                                        | Reconnect 无 commit；Restore 复用 recovery；Abandon locator CAS |
 | [实施：English/简体中文 locale authority 与 typed messages](https://github.com/RookieZoe/skill-man/issues/44) | App-level locale authority、shared catalogs、typed public messages、native/React sync    | locale persist 失败不 publish                                   |
 | [实施：Pinned Workbench 响应布局与 overlay 契约](https://github.com/RookieZoe/skill-man/issues/42)            | 760/1060 breakpoints、Notice tray、pane/drawer scroll、overlay/focus                     | 无持久数据；bundle revert                                       |
-| [实施：Adopt 证据账本与 lock 来源验证](https://github.com/RookieZoe/skill-man/issues/47)                      | strict lock/provider/tree evidence、Evidence Ledger、explicit selection、read-only plans | scan/plan 无写；stale evidence 无 plan apply                    |
+| [实施：Adopt 证据账本与 lock 来源验证](https://github.com/RookieZoe/skill-man/issues/47)                      | strict lock/provider/tree evidence、Evidence Ledger、explicit selection、read-only plans | Scan 只写派生 Evidence Store；plan 不写 Catalog/source；stale evidence 无 apply |
 | [实施：Git Repository Source 状态识别与 Legacy 保护](https://github.com/RookieZoe/skill-man/issues/61) | current capability scan、Git Repository Source/Legacy Per-Skill Git State 分类、Legacy 只读保护与安全操作边界 | scan/plan 零写；不自动提升、不改写 Legacy truth |
 | [实施：Fetch Latest and Manage 的来源组 Preview](https://github.com/RookieZoe/skill-man/issues/62) | Source Tracking Policy/override、完整 release 发现、来源组 Preview/Draft/Confirmation 与 DTO/UI | Draft/取消零写；PlanStale 时零 apply |
 | [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | `skills/git/<remote_id>/<skill_id>` 只读 namespace、完整成员 transition、来源级 journal/CAS/recovery/Undo | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
@@ -891,9 +995,13 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | 每个 recovery cursor kill/restart                                                 | 最终唯一收敛 rollback 或 roll-forward；歧义保持 lock                                         |
 | Legacy Default / Choose                                                           | 原位零搬移；或完整 copy/hash/integrity 后 locator commit；旧 Legacy 不自动删                 |
 | Home offline/permission/path replaced                                             | 常规写关闭；locale 可写；Reconnect 仅同 identity 成功                                        |
-| Restore                                                                           | 同 home_id、locator 不变、不触 Activation、Snapshot 不自动删                                 |
+| Restore                                                                           | 同 home_id、locator 不变、不触 Activation、Snapshot 不自动删；后续成功启动 + 手动 Complete Scan Report 前删除资格关闭 |
 | Abandon                                                                           | 双确认；old id 进入 history；旧 Home/Activation 不删；新 binding 使用新 UUID                 |
 | Preset detected but unconfigured                                                   | 零 Catalog 写、零目录创建、不进入 Skill Rescan；Agent Management 可显式 Add                 |
+| 首个 Bound Library Desk                                                           | operation recovery/Catalog/WriteGate ready 后即可交互；不等待 Detection/Probe/health；启动不自动完整 Rescan |
+| Agent Detection lifecycle                                                         | 启动/打开 Agent Management/Refresh 时 single-flight；结果只在内存；Unavailable 不降级 Absent；Add 时重新验证 |
+| Startup Probe                                                                     | 只观察 configured Root/Target existence/readability/identity；不产生 Report/Coverage/Adopt eligibility |
+| Activation health lifecycle                                                       | 首屏旧 observation 为 Stale/Checking；Target 间失败隔离；失败保留旧值为 Unknown；CAS generation 后才持久化 |
 | 九个 Preset 与 Custom Agent 多 Root                                                | 只扫描已配置 Root 的 canonical union；同一物理 Root 一次；按对象 identity 聚合 Canonical Skill Entity 并保留全部 appearances |
 | 两个 Agent 共享 Target                                                            | `(Skill, Target)` 只有一条 Activation；任一入口显示全部受影响 Agent                          |
 | 修改/删除 Target 最后引用                                                         | 有 Activation 时阻止并列出阻塞项；非最后引用只解除 Agent 关系，不迁移或删除目录              |
@@ -915,7 +1023,14 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | external Git development workspace  | 控制区外且无 applicable lock 时归 Local；Catalog 只记录 canonical 最终路径、无内容 baseline；来源 inode/tree 不 move/copy/rewrite |
 | bounded worktree discovery          | repository root 不越过 originating canonical Root；上层 dotfiles repo 被忽略；无 `.git` 的有效 lock 仍可形成 hint |
 | incomplete Root coverage            | 失败 Root diagnostic 持续可见；其它 Root 继续；非破坏 Local Link 可计划；迁移/删除/替换/ownership release 被阻止 |
+| Root evidence atomicity              | 中途失败 Root 只留 coverage/计数/最后进度，不发布半截候选；健康 Root 的完整 evidence 仍形成 Incomplete Report |
 | Scan Report accounting              | Root/entity/appearance/Local/Git group/Conflict/Blocked/Deferred/Excluded 分层计数；Fetch 后 members 单列；所有选择默认空 |
+| Scan single-flight / terminal publish | 重复触发复用当前 Run；Complete/Incomplete 原子替换 Report；Cancel/Supersede 保留旧 Stale Report；Retry 新 generation |
+| Scan generation vs writes            | Home/WriteGate/Agent config/相关 filesystem mutation 变化使 Run Superseded；写不等待 Scan；新 Run 使旧 Adopt plan stale |
+| unlimited streaming evidence         | 超过旧 100 候选和内存 DTO 规模的合成 Root 可持续流式扫描/分页读取；无 Root/entry/entity/file/byte 业务截断；内存保持有界 |
+| Scan progress/watchdog               | 只发布真实 phase/Root/count/elapsed；无 percent/ETA；Slow 不截断；持续进度可超过 30 秒；30 秒零进度只隔离对应 Root/Target |
+| Scan Evidence Store failure          | corrupt cache → No cached report；写失败/磁盘不足保留旧 Report、零 Catalog/WriteGate 变化；orphan temporary 仅按 identity 清理 |
+| read-only scan gate                  | CatalogReadOnly/Closed 禁用完整 Rescan/Retry/Adopt plan；旧 Report/health 保持 Stale；Detection 与可读 Catalog 下 Probe 仍只读可用 |
 | Local Conflict Set                  | NFC+casefold 同名不同实体可显式选一个 winner；其余不变；同一实体多 identity 与既有 Managed 冲突不可绕过 |
 | Git source tracking policy          | stable provider Release → highest stable SemVer tag → latest default-branch-reachable tag → `HEAD`；显式 prerelease/fixed/branch/HEAD override；resolved commit 固定 |
 | Git source discovery                | `sourceType`/`sourceUrl` 规范化、完整 Source Release、stable `remote_id`/aliases、GitHub/GitLab/generic HTTPS Git 同一整仓 contract；fork 新 identity |
@@ -941,7 +1056,8 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
    - 完全退出旧 Skill Man，证明无 SQLite writer。
    - 只读 Preview 当前 Legacy/Bound Home 分类与 exact fixture evidence。
    - 由用户确认后运行恢复；记录 Safety Snapshot 路径、manifest hash、SQLite integrity/foreign-key、恢复前后 row counts。
-   - Rescan 只报告真实 Untracked；不自动 Adopt/Enable/Repair；用户确认结果后才开放写。
+   - 用户确认恢复结果后才恢复同一 Home 的 `WriteGate::Open`；Safety Snapshot 仍不可删除。
+   - 在 Open 状态手动 Rescan，只报告真实 Untracked，不自动 Adopt/Enable/Repair；Complete Report 后再检查 Snapshot 删除资格。
 2. **真实 Source Group Transition Gate**
    - 选一个 Local Link 多跳/多 appearance，以及一个真实 installer 以整仓管理的受支持 Git 来源。
    - 对 Git 来源核对 provider、canonical repository/aliases、Source Tracking Policy、selected ref/tag、resolved commit、完整发现成员集、单一 lock 文件的全部 applicable claims 与一次 Source Group Confirmation；至少用一个无 provider Release/tag 的 repository 证明只在末级 fallback `HEAD`，不得用旧 lock path、anchor 或 hash 声称验证了旧内容。
@@ -966,6 +1082,8 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 - 已发布的 schema v5、v6 migrations 不重写；schema v7 的旧 Git release/member foundation 与 schema v8 Agent Configuration 也不改写。schema v9 以新 migration 重建 Directory Identity constraint 并增加 tracking policy、namespace、immutable release-member 与 tombstone 能力，仍不自动提升 Legacy。运行时 Source Capability Scan 只检查实际结构与 manifest 能力，绝不以 migration/schema version 决定可提升、修复或 release。
 - 每个 fault-injection point 使用稳定名称并写入测试矩阵；实现重构不能悄悄删除 crash coverage。
 - 计划 token 必须绑定 bootstrap/write-gate generation、Catalog snapshot、path identity 与该操作专属 evidence；任一变化即 stale。
+- Scan 实现不得重新引入启动自动完整 Rescan、全量内存 Report DTO、Root/Skill/内容规模业务上限或把跨启动 cache 当现场 Coverage。Evidence Store manifest switch、orphan cleanup、磁盘不足、取消、Supersede 和 30 秒无进度均使用稳定 fault-injection point。
+- 当前 `MAX_ADOPT_SKILLS`、`MAX_SKILL_DOCUMENT_BYTES` 不能继续截断 Scan 候选或决定 Skill 合法性；使用流式读取、分页和背压替代。symlink 16-hop/cycle 是终止护栏，不属于被删除的业务规模限制。
 - recovery/operation logs 不记录 Skill 正文、token、credential 或 remote response body。
 - 测试 fixture 通过 dependency injection 显式注入；禁止环境探测失败后自动选 fixture Adapter。
 
@@ -981,6 +1099,7 @@ Developer ID 签名、公证、Gatekeeper、公开 updater 的真实升级/回�
 | Adopt model                         | [决策：Adopt 的 lock 驱动来源分类与 remote source 父级模型](https://github.com/RookieZoe/skill-man/issues/40)、[ADR-0013](adr/0013-adopt-provenance-and-remote-source-parents.md)；非 Git sourceType 与 lock/tree/CAS 安全规则继续有效 |
 | Git repository source               | [既有逐 Skill 远程模型迁移与规格取代](https://github.com/RookieZoe/skill-man/issues/59)、[ADR-0014](adr/0014-git-repository-source-releases-and-transitions.md)：受支持 Git provider 使用完整 Source Release 与 Source Transition |
 | Git namespace / identity / tracking | [决策：Git 来源 Skill 的 Library 布局与命名空间身份](https://github.com/RookieZoe/skill-man/issues/74)、[ADR-0018](adr/0018-git-source-namespaces-and-immutable-members.md)：稳定 `remote_id/skill_id` namespace、Source Tracking Policy、不可变来源级成员与同名分组 |
+| Scan scheduling / evidence           | [决策：启动 Agent Detection 与全局 Rescan 调度和性能预算](https://github.com/RookieZoe/skill-man/issues/78)、[ADR-0020](adr/0020-startup-observations-and-manual-rescan.md)：Library first、Startup Probe、手动完整 Rescan、流式 Evidence Store、无限业务规模、single-flight/cancel/stale/CAS |
 | Adopt Preview                       | [原型：Adopt Preview 的完整来源链与保真证据](https://github.com/RookieZoe/skill-man/issues/39)                                                                                                                                                           |
 
 本 Spec 冻结上述产品决策；实施票只决定局部代码组织和满足 contract 的最小实现，不重新讨论用户行为。

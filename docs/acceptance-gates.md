@@ -183,8 +183,9 @@ UNION ALL SELECT 'remote_bindings', count(*) FROM remote_bindings;"
 - [ ] 选择 Use Default 时，确认它是 Legacy 原位绑定。选择 Choose 时，确认它走的是唯一一次 copy 过渡。
 - [ ] 在确认页核对 path、模式和 explicit confirmation 文案后，再由操作者确认。
 - [ ] 绑定后记录新 home_id、Home marker 和 Catalog 状态。
-- [ ] 运行 Rescan，只允许它报告真实 Untracked。不得出现自动 Adopt、Enable 或 Activation Repair。
-- [ ] Rescan 结果经操作者确认前，不执行任何普通产品写操作。
+- [ ] 在 Bound Home 的 WriteGate 已 Open 后手动运行 Rescan，只允许它报告真实 Untracked。不得出现自动 Adopt、Enable 或 Activation Repair。
+- [ ] 记录 Complete/Incomplete、Root coverage 与 Report generation；只有 Complete Report 可满足 Safety Snapshot 后续删除资格。
+- [ ] Rescan 结果经操作者确认前，不执行其它普通产品写操作。
 
 ### 3.6 全程禁止项
 

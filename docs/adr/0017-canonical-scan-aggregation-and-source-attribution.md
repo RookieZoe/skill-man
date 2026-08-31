@@ -39,9 +39,10 @@ Scan Report 是 generation-bound 的只读事实，固定携带每个 canonical 
 
 - 保持最终实体原位的稳定 Local Link 等非破坏操作可以继续；
 - 任何需要迁移、删除、替换最终实体或释放 external ownership 的操作，必须等全部 configured canonical Root 成功覆盖后才能计划；
-- 部分报告只声称 known appearances，不能声称完整 appearances，也不能让用户用通用 warning 确认绕过 destructive guard。
+- Root 是最小证据提交单元；中途失败 Root 只发布 coverage diagnostic、计数与最后进度，不把依赖枚举顺序的半截候选写入 Report；
+- 部分报告只声称健康 Root 的 known appearances，不能声称完整 appearances，也不能让用户用通用 warning 确认绕过 destructive guard。
 
-扫描调度、缓存、取消、预算和首个可交互快照由[决策:启动 Agent Detection 与全局 Rescan 调度和性能预算](https://github.com/RookieZoe/skill-man/issues/78)决定；本 ADR 只冻结结果与操作资格 contract。
+扫描调度、缓存、取消、无限规模资源语义和首个可交互快照由 [ADR-0020](0020-startup-observations-and-manual-rescan.md) 冻结；本 ADR 只冻结结果与操作资格 contract。
 
 ## Conflict、选择与汇总呈现
 
@@ -51,7 +52,7 @@ Local candidates 以 `NFC + Unicode casefold` Directory Identity key 形成 Conf
 
 汇总层级固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。External Ownership Claim 是需要来源级审阅的事实；稳定开发目录和 multiple appearances 是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认都未选择；Blocked/Deferred 没有选择控件。
 
-onboarding 与常态 Rescan 共用同一 Scan Report contract。onboarding 在 Agent Configuration 后解释首次完整扫描，允许零选择完成；常态启动 Rescan 不打断 Library Desk，只以 Notice/徽标提示新 Untracked、Conflict 或 Root diagnostic，手动 Rescan 打开同一 Evidence Ledger。具体视觉结构由[原型:Agent 配置、项目作用域与 Enable 操作面 UI](https://github.com/RookieZoe/skill-man/issues/75)决定。
+onboarding 与手动 Rescan 共用同一 Scan Report contract。onboarding 在 Agent Configuration 后解释首次完整扫描，允许零配置、零选择、Skip 或 Cancel；常态启动只做 Startup Probe，不自动执行完整 Rescan。手动 Rescan 使用非模态 Evidence Ledger，运行期间保留旧 stale Report，只有 Complete/Incomplete 才原子发布新 Report。具体视觉结构由[原型:Agent 配置、项目作用域与 Enable 操作面 UI](https://github.com/RookieZoe/skill-man/issues/75)决定。
 
 ## Consequences
 

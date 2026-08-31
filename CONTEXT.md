@@ -64,14 +64,17 @@
 | Scan Appearance | Scan appearance | 扫描出现位置 |
 | Canonical Skill Entity | Canonical skill entity | 规范技能实体 |
 | Scan Coverage | Scan coverage | 扫描覆盖 |
+| Scan Run | Scan run | 扫描运行 |
 | Scan Report | Scan report | 扫描报告 |
 | Scan Incomplete | Scan incomplete | 扫描不完整 |
+| Startup Probe | Startup probe | 启动探测 |
 | Git Repository Source Candidate | Git repository source candidate | Git 仓库来源候选 |
 | Conflict Set | Conflict set | 冲突集 |
 | Agent Detection | Agent detection | 智能体检测 |
 | Agent Configuration | Agent configuration | 智能体配置 |
 | Agent Activation Target | Agent activation target | 智能体启用目标 |
 | Activation Target Group | Activation target group | 启用目标组 |
+| Activation Health Observation | Activation health observation | 启用健康观察 |
 | Resolved Project Skills Directory | Resolved project skills directory | 解析后的项目技能目录 |
 | Import | Import | 导入 |
 | Link | Link | 链接 |
@@ -420,6 +423,10 @@ _Avoid_: Skill ID, Canonical path
 一次 Scan Report 对全部 configured canonical Global Skills Root 的成功或 typed failure 记录,并保留每个 Root 的关联 Agent。它说明本次结果看见了什么,不把失败 Root 当成空目录。
 _Avoid_: Detection, Scan scope
 
+**Scan Run**:
+一次以冻结的 Bound Home、Agent Configuration 与预算开始的完整 Rescan 执行,承载触发来源、进度、取消和 terminal status。只有 Complete 或 Incomplete 的 Scan Run 发布 Scan Report;Cancelled 与 Superseded 不替换 current Report。
+_Avoid_: Scan Report, Scan Task
+
 **Scan Report**:
 generation-bound 的只读扫描结果,包含 Scan Coverage、Canonical Skill Entity、来源分组、Conflict Set、typed diagnostics 与操作资格。它是 Preview 证据,不是 Catalog truth。
 _Avoid_: Catalog snapshot, Adopt plan
@@ -427,6 +434,10 @@ _Avoid_: Catalog snapshot, Adopt plan
 **Scan Incomplete**:
 至少一个 configured canonical Global Skills Root 未成功覆盖的 Scan Report 状态。健康 Root 的非破坏操作可以继续;可能移动、删除、替换实体或释放 external ownership 的操作须等待完整 Scan Coverage。
 _Avoid_: Scan failed, Partial success
+
+**Startup Probe**:
+应用启动后对当前 Agent Configuration 引用的 Global Skills Root 与 Agent Activation Target 做存在性、可读性和路径身份的轻量只读观察。它只提供变化信号,不产生 Scan Coverage、Scan Report 或操作资格。
+_Avoid_: Light Rescan, Lightweight Scan, Cached Scan
 
 **Agent Detection**:
 对 Agent Preset 已知 Global Skills Root 当前是否存在、可读及身份是否一致的只读观察。检测不创建目录、不授予写权限或写入 Agent Configuration;已检测但未配置的 Agent 不进入 Skill 扫描,「未检测到」也不表示 Broken。
@@ -443,6 +454,10 @@ _Avoid_: Global Skills Root, scan root
 **Activation Target Group**:
 同一 canonical Agent Activation Target 与全部引用它的 Agent Configuration 组成的操作投影;它只承载一份全局 Enable/Disable 与健康状态,不是一组彼此独立的 Agent Activation。
 _Avoid_: Per-Agent Activation, Agent switch
+
+**Activation Health Observation**:
+对 Activation Target Group 中受管 Activation 当前 entry 与最终实体状态的有时间戳观察,可以作为历史结果持久化但不是现场 truth。检查失败保留旧结果并标记 Stale/Unknown,不能改写成 Missing 或 Broken。
+_Avoid_: Activation truth, Agent Detection, Project Activation
 
 **Resolved Project Skills Directory**:
 一次项目级 Enable 中,由用户所选文件夹与 Agent 的项目级目录约定解析出的项目内最终 skills 容器;它只存在于本次操作计划,不是 Project 实体或 Agent Activation Target。

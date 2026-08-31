@@ -129,6 +129,11 @@ Rescan 只消费已配置 Agent 的 Root。先按 Root canonical path 求并集�
 snapshot 移除仅由它引用的 Root；未纳管候选随 Rescan 消失，已经 Managed 的 Skill、来源记录和 Home
 实体不自动 Remove 或回滚。
 
+启动与缓存语义以 [ADR-0020](0020-startup-observations-and-manual-rescan.md) 为准：常态启动只运行
+零写入 Detection、Startup Probe 与 Target-scoped Activation health，不自动执行完整 Rescan。
+onboarding 首次配置后或用户手动触发的完整 Scan Run 才产生 Scan Report；配置变化使旧 Report/plan
+stale，但不自动重跑。
+
 去重后的候选按 ownership 位置、bounded worktree 与 applicable lock 分类：稳定外部开发工作区即使
 属于 Git repository 仍是 Local Source，在 Catalog 记录真实目标路径；控制区内的 Git hint 与有效
 Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release。Git Repository Source 安装到

@@ -62,7 +62,7 @@ Home 外新增 `~/Library/Application Support/skill-man-state/`(与默认 Home �
 
 ## 7. cache 与原子性边界
 
-随 Legacy 过渡与 Restore 原子处理:SQLite+WAL+SHM 一致集、`skills/`、`remotes/`、`operations/`、marker 与 manifest。`cache/`、`staging/` 可重建,不要求原子;恢复后的干净 Home 不复制它们,Safety Snapshot 仍整体包含以便可逆。Safety Snapshot = 与 Home 同卷的兄弟目录 `<Home>.snapshot-<op-id>/`,同卷 rename 原子隔离,永不自动删除,至少一次成功启动 + 显式确认后才可删除;记录于外部 ledger。
+随 Legacy 过渡与 Restore 原子处理:SQLite+WAL+SHM 一致集、`skills/`、`remotes/`、`operations/`、marker 与 manifest。`cache/`、`staging/` 可重建,不要求原子;恢复后的干净 Home 不复制它们,Safety Snapshot 仍整体包含以便可逆。Safety Snapshot = 与 Home 同卷的兄弟目录 `<Home>.snapshot-<op-id>/`,同卷 rename 原子隔离,永不自动删除；依 [ADR-0020](0020-startup-observations-and-manual-rescan.md)，至少一次同 `home_id` 的后续成功启动、一份手动产生的 Complete Scan Report 与显式确认后才可删除，记录于外部 ledger。
 
 ## 取代与衔接
 

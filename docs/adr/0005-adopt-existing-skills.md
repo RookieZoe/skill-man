@@ -6,7 +6,7 @@ Skill Man 以 **Adopt** 收编用户级 Agent 目录中的 Untracked Skill，同
 
 ## 扫描与候选识别
 
-Rescan 只消费已配置 Agent 的 canonical Global Skills Root union；Preset Detection、项目级目录、Library、system/builtin/cache 目录不进入扫描。Root scope 与共享 Target 以 ADR-0016 为准，调度和性能预算另行决定；Rescan 始终只读且绝不自动 Adopt。
+Rescan 只消费已配置 Agent 的 canonical Global Skills Root union；Preset Detection、项目级目录、Library、system/builtin/cache 目录不进入扫描。Root scope 与共享 Target 以 [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md) 为准，启动观察、手动触发、流式 Evidence Store 与资源语义以 [ADR-0020](0020-startup-observations-and-manual-rescan.md) 为准；Rescan 始终不修改被扫描 Root 且绝不自动 Adopt。
 
 每个目录条目解析完整 bounded symlink chain，并在一次 generation 内按最终文件系统对象身份形成 Canonical Skill Entity。同一实体经多个 Agent、Root、真实目录或多级软链可达时只形成一个候选，全部 Scan Appearance 逐条保留；canonical path 不是持久 Skill identity。目标已是 Library 实体或已登记的 Link 来源时，相关条目属于已有或待修复 Activation，不算 Untracked。
 
