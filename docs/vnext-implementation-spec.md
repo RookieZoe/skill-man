@@ -1077,6 +1077,17 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | `skills/git/<remote_id>/<skill_id>` 只读 namespace、完整成员 transition、来源级 journal/CAS/recovery/Undo | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
 | [实施：Legacy Source Promotion 与成员冲突处置](https://github.com/RookieZoe/skill-man/issues/64) | 显式 Legacy Promotion、schema v9 identity/namespace/tombstone、Source Snapshot Mismatch 与 Create Local Source Copy | Draft/失败保留旧 Legacy/current release；不补写、不猜测 mapping |
 | [实施：Git Repository Source 来源级 Update 与 Ownership Conflict](https://github.com/RookieZoe/skill-man/issues/60) | 完整 release Update、成员 add/remove/reappear、整来源 Remove、Broken global Activation、external reappearance Ownership Conflict | 固定 release 的 commit point 前整体 rollback；之后完整 release roll-forward |
+| [实施：schema v8 迁移与 Agent Configuration Core](https://github.com/RookieZoe/skill-man/issues/80) | v8 clean cutover、ADR-0016 配置 plan 护栏、PresetRegistry、Agent Management 三栏骨架与单一配置 sheet | v8 migration 单 transaction 前整体 rollback；之后 roll-forward |
+| [实施：Agent Detection 竖切与 Library first 启动](https://github.com/RookieZoe/skill-man/issues/81) | Observation Module 骨架、零写 Detection single-flight、Detected 段、启动不等观察且不自动完整 Rescan | 检测仅内存 observation；零持久产物 |
+| [实施：Rescan Run 生命周期与 Scan Evidence Store](https://github.com/RookieZoe/skill-man/issues/82) | 流式 Evidence Store、Run 全生命周期、真实进度/取消/Supersede、Root 原子提交、Evidence Ledger 非模态 | manifest 切换前旧 current Report 完整保留；orphan 仅按 identity 清理 |
+| [实施：Canonical Skill Entity 聚合与 Evidence Ledger 分页](https://github.com/RookieZoe/skill-man/issues/83) | 两层去重、generation-bound entity/appearances、report_page 分页、完整 funnel | 只写派生 Evidence Store；零 Catalog/WriteGate 变化 |
+| [实施：来源分类、Conflict Set 与扫描汇总完整呈现](https://github.com/RookieZoe/skill-man/issues/84) | §8.2 分类、worktree/lock hint 聚合与 fail-closed、Conflict Set、§7.6 完整汇总与资格门控 | 候选默认空、Draft/取消零写；Incomplete 禁破坏性 |
+| [实施：Adopt 重接线到 terminal Scan Report](https://github.com/RookieZoe/skill-man/issues/85) | generation-bound plan/apply/undo、Local Include 与 Conflict winner、Git 候选接入 fetch/manage、删除内存 last_report | PlanStale 零 apply；Adopt journal 既有 rollback 不变 |
+| [实施：Startup Probe 与 Activation health 竖切](https://github.com/RookieZoe/skill-man/issues/86) | 只读 Probe、Target-scoped health CAS、失败隔离与受影响 Target 调度 | CAS 前不落盘；失败保留旧值 Unknown |
+| [实施：Enable Module Global 竖切与单 Skill 操作面](https://github.com/RookieZoe/skill-man/issues/87) | Target group 解析、preflight/逐 cell 提交、Switch/occupier 处置、逐 cell CAS Undo、Inspector 卡与三步 sheet | cell journal 逐项 undo；finalize 前 CAS；gate 失效余项 not_attempted |
+| [实施：批量 Enable 与 selection shelf](https://github.com/RookieZoe/skill-man/issues/88) | 多选 shelf、批量矩阵与 winner、批量 Untracked 仅 Replace/Skip、一次 operation Undo | 退出 shelf 清空 draft 零写；cell journal 同 #87 |
+| [实施：Project Enable 四步竖切](https://github.com/RookieZoe/skill-man/issues/89) | 项目根 containment 解析、resolved group 单写、destructive ack、MRU、Undo 仅窗口内 | project cell backup rename 保留至 finalize；零成功不写 MRU |
+| [实施：Broken 成员、Mismatch 面板与 Evidence rail 收尾](https://github.com/RookieZoe/skill-man/issues/90) | 来源组卡/成员行只读、Mismatch 面板、Broken 专属 Disable 三步、Evidence rail、§7.7 parity 收口 | 呈现层只读；Restore/Local copy 复用既有来源级 journal |
 | [验收：vNext 本机恢复、真实 Adopt、窗口与双语 Gate](https://github.com/RookieZoe/skill-man/issues/49)         | 四项真实环境 Gate 与签字证据                                                             | Gate 前 Safety Snapshot/isolated test data；不代替自动化        |
 
 ## 10. 验收矩阵
