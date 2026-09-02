@@ -4173,3 +4173,95 @@ button:active:not(:disabled) {
     justify-self: start;
   }
 }
+
+/* -----------------------------------------------------------------------
+ * Scan Evidence Ledger (spec §4.10; ADR-0020): non-modal status strip shared
+ * by Library Desk and Agent Management. Shows only real facts — state,
+ * phase, root, counts, elapsed — never a percent or an ETA. The strip is
+ * NOT scrollable; the surfaces own their scroll (spec §7.1).
+ * --------------------------------------------------------------------- */
+.scan-evidence-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem 1.25rem;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--border, oklch(0.86 0.01 250));
+  background: color-mix(
+    in oklab,
+    var(--panel, oklch(0.99 0.003 250)) 92%,
+    transparent
+  );
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.scan-ledger-status {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 12rem;
+}
+
+.scan-ledger-state {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.scan-ledger-stale {
+  font-style: italic;
+  color: var(--text-tertiary);
+}
+
+.scan-ledger-phase {
+  color: var(--text-tertiary);
+}
+
+.scan-ledger-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem 0.75rem;
+  margin: 0;
+  padding: 0;
+}
+
+.scan-ledger-facts dt,
+.scan-ledger-facts dd {
+  margin: 0;
+}
+
+.scan-ledger-root,
+.scan-ledger-slow,
+.scan-ledger-diagnostic,
+.scan-ledger-error {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-ledger-slow,
+.scan-ledger-diagnostic,
+.scan-ledger-error {
+  color: var(--warn, oklch(50% 0.11 70));
+}
+
+.scan-ledger-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.scan-ledger-actions > button {
+  font: inherit;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--border, oklch(0.86 0.01 250));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.scan-ledger-actions > button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

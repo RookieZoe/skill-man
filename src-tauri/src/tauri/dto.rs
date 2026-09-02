@@ -1162,6 +1162,110 @@ impl From<DetectionSnapshot> for DetectionSnapshotDto {
     }
 }
 
+/// Bounded per-Root view while a Run is active (spec §4.10).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRootViewDto {
+    pub index: u32,
+    pub configured_path: String,
+    pub canonical_path: String,
+    /// `pending | walking | completed | failed | unresponsive`.
+    pub state: String,
+    pub counts: ScanCountsDto,
+    pub elapsed_ms: u64,
+    pub slow: bool,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanCountsDto {
+    pub roots: u64,
+    pub entries: u64,
+    pub entities: u64,
+    pub files: u64,
+    pub bytes: u64,
+    pub git_probes: u64,
+    pub failed_roots: u64,
+}
+
+/// Scan Run snapshot: only real phase/Root/count/elapsed facts — never a
+/// percent or ETA (ADR-0020).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRunSnapshotDto {
+    pub run_id: String,
+    pub generation: u64,
+    /// `onboarding | manual`.
+    pub trigger: String,
+    /// `queued | running | cancelling | cancelled | superseded |
+    /// completed | failed`.
+    pub state: String,
+    pub phase: String,
+    pub current_root: Option<u32>,
+    pub counts: ScanCountsDto,
+    pub roots: Vec<ScanRootViewDto>,
+    pub elapsed_ms: u64,
+    pub slow: bool,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRootCoverageDto {
+    pub index: u32,
+    pub configured_path: String,
+    pub canonical_path: String,
+    /// `completed | failed | unresponsive`.
+    pub state: String,
+    pub counts: ScanCountsDto,
+    pub elapsed_ms: u64,
+    pub slow: bool,
+    pub diagnostic: Option<String>,
+}
+
+/// Bounded terminal Report summary (full pages arrive with #83's
+/// `report_page` contract).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportSummaryDto {
+    pub generation: u64,
+    pub run_id: String,
+    pub trigger: String,
+    /// `complete | incomplete`.
+    pub state: String,
+    pub counts: ScanCountsDto,
+    pub roots: Vec<ScanRootCoverageDto>,
+    pub started_at_ms: u64,
+    pub ended_at_ms: u64,
+    pub slow: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFreshnessDto {
+    Current,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleReasonDto {
+    CrossStartup,
+    ConfigurationChanged,
+    HomeOrGateChanged,
+    FilesystemChanged,
+    CacheUnreadable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentReportDto {
+    pub summary: Option<ScanReportSummaryDto>,
+    pub freshness: ReportFreshnessDto,
+    pub stale_reasons: Vec<StaleReasonDto>,
+}
+
 /// The `observation://changed` payload and the query snapshot are isomorphic
 /// (spec §4.10): the same bounded summary, same generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1171,6 +1275,22 @@ pub struct ObservationAndScanSnapshotDto {
     pub write_gate_generation: u64,
     pub agent_configuration_generation: Option<u64>,
     pub detection: DetectionSnapshotDto,
+    pub scan_run: Option<ScanRunSnapshotDto>,
+    pub current_report: CurrentReportDto,
+}
+
+/// `start_rescan` request: the trigger is a closed contract value
+/// (`onboarding | manual`), never a message.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRescanRequestDto {
+    pub trigger: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRescanRequestDto {
+    pub run_id: String,
 }
 
 impl From<ObservationAndScanSnapshot> for ObservationAndScanSnapshotDto {
@@ -1180,7 +1300,154 @@ impl From<ObservationAndScanSnapshot> for ObservationAndScanSnapshotDto {
             write_gate_generation: value.write_gate_generation,
             agent_configuration_generation: value.agent_configuration_generation,
             detection: value.detection.into(),
+            scan_run: value.scan_run.map(Into::into),
+            current_report: value.current_report.into(),
         }
+    }
+}
+
+impl From<crate::core::scan::ScanRunSnapshot> for ScanRunSnapshotDto {
+    fn from(value: crate::core::scan::ScanRunSnapshot) -> Self {
+        Self {
+            run_id: value.run_id,
+            generation: value.generation,
+            trigger: value.trigger.as_str().to_owned(),
+            state: scan_run_state_name(value.state).to_owned(),
+            phase: scan_phase_name(value.phase).to_owned(),
+            current_root: value.current_root,
+            counts: value.counts.into(),
+            roots: value
+                .roots
+                .into_iter()
+                .map(|root| ScanRootViewDto {
+                    index: root.index,
+                    configured_path: root.configured_path.to_string_lossy().into_owned(),
+                    canonical_path: root.canonical_path.to_string_lossy().into_owned(),
+                    state: scan_root_view_state_name(root.state).to_owned(),
+                    counts: root.counts.into(),
+                    elapsed_ms: root.elapsed_ms,
+                    slow: root.slow,
+                    diagnostic: root.diagnostic,
+                })
+                .collect(),
+            elapsed_ms: value.elapsed_ms,
+            slow: value.slow,
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+impl From<crate::seams::scan_evidence_store::ScanEvidenceCounts> for ScanCountsDto {
+    fn from(value: crate::seams::scan_evidence_store::ScanEvidenceCounts) -> Self {
+        Self {
+            roots: value.roots,
+            entries: value.entries,
+            entities: value.entities,
+            files: value.files,
+            bytes: value.bytes,
+            git_probes: value.git_probes,
+            failed_roots: value.failed_roots,
+        }
+    }
+}
+
+impl From<crate::core::scan::CurrentReportView> for CurrentReportDto {
+    fn from(value: crate::core::scan::CurrentReportView) -> Self {
+        Self {
+            summary: value.summary.map(|summary| ScanReportSummaryDto {
+                generation: summary.generation,
+                run_id: summary.run_id,
+                trigger: summary.trigger.as_str().to_owned(),
+                state: scan_report_state_name(summary.state).to_owned(),
+                counts: summary.counts.into(),
+                roots: summary
+                    .roots
+                    .into_iter()
+                    .map(|root| ScanRootCoverageDto {
+                        index: root.index,
+                        configured_path: root.configured_path.to_string_lossy().into_owned(),
+                        canonical_path: root.canonical_path.to_string_lossy().into_owned(),
+                        state: scan_root_coverage_state_name(root.state).to_owned(),
+                        counts: root.counts.into(),
+                        elapsed_ms: root.elapsed_ms,
+                        slow: root.slow,
+                        diagnostic: root.diagnostic,
+                    })
+                    .collect(),
+                started_at_ms: summary.started_at_ms,
+                ended_at_ms: summary.ended_at_ms,
+                slow: summary.slow,
+            }),
+            freshness: match value.freshness {
+                crate::core::scan::ReportFreshness::Current => ReportFreshnessDto::Current,
+                crate::core::scan::ReportFreshness::Stale => ReportFreshnessDto::Stale,
+            },
+            stale_reasons: value
+                .stale_reasons
+                .into_iter()
+                .map(|reason| match reason {
+                    crate::core::scan::StaleReason::CrossStartup => StaleReasonDto::CrossStartup,
+                    crate::core::scan::StaleReason::ConfigurationChanged => {
+                        StaleReasonDto::ConfigurationChanged
+                    }
+                    crate::core::scan::StaleReason::HomeOrGateChanged => {
+                        StaleReasonDto::HomeOrGateChanged
+                    }
+                    crate::core::scan::StaleReason::FilesystemChanged => {
+                        StaleReasonDto::FilesystemChanged
+                    }
+                    crate::core::scan::StaleReason::CacheUnreadable => {
+                        StaleReasonDto::CacheUnreadable
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+fn scan_run_state_name(state: crate::core::scan::ScanRunState) -> &'static str {
+    match state {
+        crate::core::scan::ScanRunState::Queued => "queued",
+        crate::core::scan::ScanRunState::Running => "running",
+        crate::core::scan::ScanRunState::Cancelling => "cancelling",
+        crate::core::scan::ScanRunState::Cancelled => "cancelled",
+        crate::core::scan::ScanRunState::Superseded => "superseded",
+        crate::core::scan::ScanRunState::Completed => "completed",
+        crate::core::scan::ScanRunState::Failed => "failed",
+    }
+}
+
+fn scan_phase_name(phase: crate::core::scan::ScanPhase) -> &'static str {
+    match phase {
+        crate::core::scan::ScanPhase::Planning => "planning",
+        crate::core::scan::ScanPhase::Walking => "walking",
+        crate::core::scan::ScanPhase::Hashing => "hashing",
+        crate::core::scan::ScanPhase::Finalizing => "finalizing",
+    }
+}
+
+fn scan_root_view_state_name(state: crate::core::scan::ScanRootViewState) -> &'static str {
+    match state {
+        crate::core::scan::ScanRootViewState::Pending => "pending",
+        crate::core::scan::ScanRootViewState::Walking => "walking",
+        crate::core::scan::ScanRootViewState::Completed => "completed",
+        crate::core::scan::ScanRootViewState::Failed => "failed",
+        crate::core::scan::ScanRootViewState::Unresponsive => "unresponsive",
+    }
+}
+
+fn scan_root_coverage_state_name(state: crate::core::scan::ScanRootCoverageState) -> &'static str {
+    match state {
+        crate::core::scan::ScanRootCoverageState::Completed => "completed",
+        crate::core::scan::ScanRootCoverageState::Failed => "failed",
+        crate::core::scan::ScanRootCoverageState::Unresponsive => "unresponsive",
+    }
+}
+
+fn scan_report_state_name(state: crate::core::scan::ScanReportState) -> &'static str {
+    match state {
+        crate::core::scan::ScanReportState::Complete => "complete",
+        crate::core::scan::ScanReportState::Incomplete => "incomplete",
     }
 }
 
@@ -3182,6 +3449,7 @@ pub enum PublicErrorDto {
     RecoveryStepFailed,
     RecoveryStateAmbiguous,
     RecoverySnapshotInUse,
+    RecoverySnapshotNotQualified,
     RecoveryStateStore,
     RecoveryFilesystem,
     RecoveryProbe,
@@ -3207,6 +3475,8 @@ pub enum PublicErrorDto {
         reason: RecoveryProfileRejectionDto,
     },
     LocaleStoreUnavailable,
+    ScanNotWritable,
+    ScanRunNotFound,
     Internal,
 }
 

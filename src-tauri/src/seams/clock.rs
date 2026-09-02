@@ -32,6 +32,19 @@ pub fn uuid_v4_shape(bytes: &mut [u8; 16]) -> String {
     )
 }
 
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm); the
+/// inverse of `civil_from_days`. Used to convert ledger RFC3339 timestamps
+/// to epoch millis for ordering evidence (marker vs restore commit).
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Howard Hinnant's civil-from-days algorithm.
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;

@@ -110,12 +110,46 @@ pub struct StagedTreeEntry {
     pub modified_nanoseconds: i64,
 }
 
+/// One child entry streamed by a Scan Run's tree walk (spec §3.6
+/// "unlimited streaming evidence"): the relative path, the kind and the
+/// byte length; symlink targets are the raw link text (never followed).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeScanEntry {
+    pub relative_path: PathBuf,
+    pub kind: TreeScanEntryKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreeScanEntryKind {
+    Directory,
+    File { length: u64 },
+    Symlink { target: PathBuf },
+}
+
+/// The accumulated facts of a streamed tree walk: file/byte counts and the
+/// tree hash (`None` when the visitor asked the walk to stop — the entity
+/// record then carries a hash fault instead of a partial hash).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StagedTreeSnapshot {
     pub root: DirectoryFingerprint,
     pub entries: Vec<StagedTreeEntry>,
     pub content_hash: String,
     pub total_file_bytes: u64,
+}
+
+/// Stream the full tree of one entity for a Scan Run: yields every child
+/// entry (directories, regular files, symlinks — same rules as
+/// `staged_tree_snapshot`, targets never followed), accumulates the
+/// identical `tree-sha256-v1` content hash and the file/byte counts, and
+/// never requires the whole listing in memory. The visitor returns `false`
+/// to stop the walk (cancel/supersede). The default implementation buffers
+/// through `staged_tree_snapshot` for test stubs; the system adapter walks
+/// the tree level by level.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeScanStatistics {
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub tree_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -965,6 +999,74 @@ pub trait FileSystem: Send + Sync {
     /// with `dangling = true` and no final entity. Files are skipped.
     fn scan_skills_directory(&self, path: &Path)
     -> Result<Vec<ScannedSkillEntry>, FileSystemError>;
+
+    /// Stream the top-level entries of an Agent skills directory for a Scan
+    /// Run (spec §3.6/§10.2 "unlimited streaming evidence"): the same
+    /// filtering rules as `scan_skills_directory` but the caller never
+    /// requires the full listing in memory. The visitor returns `false` to
+    /// stop the walk (cancel/supersede). The default implementation buffers
+    /// through `scan_skills_directory` for test stubs; the system adapter
+    /// streams directly from `read_dir`.
+    fn scan_skills_directory_stream(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(ScannedSkillEntry) -> Result<bool, FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        for entry in self.scan_skills_directory(path)? {
+            if !visitor(entry)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stream the full tree of one entity for a Scan Run (spec §3.6
+    /// "unlimited streaming evidence"): yields every child entry with the
+    /// same rules as `staged_tree_snapshot` (targets never followed),
+    /// accumulates the identical `tree-sha256-v1` content hash and the
+    /// file/byte counts, and never requires the whole listing in memory.
+    /// The visitor returns `false` to stop the walk (cancel/supersede),
+    /// yielding a partial hash (`None`) so the entity record carries a hash
+    /// fault instead of pretending completeness. The default implementation
+    /// buffers through `staged_tree_snapshot` for test stubs; the system
+    /// adapter walks the tree level by level.
+    fn scan_tree_statistics(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
+    ) -> Result<TreeScanStatistics, FileSystemError> {
+        let snapshot = self.staged_tree_snapshot(path)?;
+        let mut file_count = 0_u64;
+        let mut byte_count = 0_u64;
+        for entry in &snapshot.entries {
+            let kind = match &entry.kind {
+                StagedEntryKind::Directory => TreeScanEntryKind::Directory,
+                StagedEntryKind::File { length } => {
+                    file_count += 1;
+                    byte_count += *length;
+                    TreeScanEntryKind::File { length: *length }
+                }
+                StagedEntryKind::Symlink { target } => TreeScanEntryKind::Symlink {
+                    target: target.clone(),
+                },
+            };
+            if !visitor(&TreeScanEntry {
+                relative_path: entry.relative_path.clone(),
+                kind,
+            })? {
+                return Ok(TreeScanStatistics {
+                    file_count,
+                    byte_count,
+                    tree_hash: None,
+                });
+            }
+        }
+        Ok(TreeScanStatistics {
+            file_count,
+            byte_count,
+            tree_hash: Some(snapshot.content_hash.clone()),
+        })
+    }
 
     /// Walk one Adopt appearance to its final entity with full per-hop
     /// evidence (spec §8.1): bounded at 16 hops, cycle-detecting, and

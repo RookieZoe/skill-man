@@ -467,6 +467,96 @@ export interface ObservationAndScanSnapshot {
   writeGateGeneration: number;
   agentConfigurationGeneration: number | null;
   detection: DetectionSnapshot;
+  /** The single-flight Rescan Run (spec §4.10 `scanRun`). */
+  scanRun: ScanRunSnapshot | null;
+  /** Bounded current Report view (`currentReport`). */
+  currentReport: CurrentReport;
+}
+
+/** Closed Run lifecycle states (spec §4.10). */
+export type ScanRunState =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "superseded"
+  | "completed"
+  | "failed";
+
+export type ScanPhase = "planning" | "walking" | "hashing" | "finalizing";
+
+export interface ScanCounts {
+  roots: number;
+  entries: number;
+  entities: number;
+  files: number;
+  bytes: number;
+  gitProbes: number;
+  failedRoots: number;
+}
+
+/** Real phase/Root/count/elapsed facts — never a percent or ETA. */
+export interface ScanRunSnapshot {
+  runId: string;
+  generation: number;
+  trigger: "onboarding" | "manual";
+  state: ScanRunState;
+  phase: ScanPhase;
+  currentRoot: number | null;
+  counts: ScanCounts;
+  roots: ScanRootView[];
+  elapsedMs: number;
+  slow: boolean;
+  diagnostic: string | null;
+}
+
+export interface ScanRootView {
+  index: number;
+  configuredPath: string;
+  canonicalPath: string;
+  state: "pending" | "walking" | "completed" | "failed" | "unresponsive";
+  counts: ScanCounts;
+  elapsedMs: number;
+  slow: boolean;
+  diagnostic: string | null;
+}
+
+export interface ScanRootCoverage {
+  index: number;
+  configuredPath: string;
+  canonicalPath: string;
+  state: "completed" | "failed" | "unresponsive";
+  counts: ScanCounts;
+  elapsedMs: number;
+  slow: boolean;
+  diagnostic: string | null;
+}
+
+export interface ScanReportSummary {
+  generation: number;
+  runId: string;
+  trigger: "onboarding" | "manual";
+  state: "complete" | "incomplete";
+  counts: ScanCounts;
+  roots: ScanRootCoverage[];
+  startedAtMs: number;
+  endedAtMs: number;
+  slow: boolean;
+}
+
+export type ReportFreshness = "current" | "stale";
+
+export type StaleReason =
+  | "cross_startup"
+  | "configuration_changed"
+  | "home_or_gate_changed"
+  | "filesystem_changed"
+  | "cache_unreadable";
+
+export interface CurrentReport {
+  summary: ScanReportSummary | null;
+  freshness: ReportFreshness;
+  staleReasons: StaleReason[];
 }
 
 export interface AgentRootDraft {
@@ -1127,6 +1217,12 @@ export interface CatalogClient {
   getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
   /** Single-flight Detection trigger (spec §4.10; ADR-0020). */
   refreshDetection(): Promise<ObservationAndScanSnapshot>;
+  /** Start a full Rescan Run (single-flight; spec §4.10). */
+  startRescan(
+    trigger: "onboarding" | "manual",
+  ): Promise<ObservationAndScanSnapshot>;
+  /** Coordinate cancellation of the active Rescan Run. */
+  cancelRescan(runId: string): Promise<ObservationAndScanSnapshot>;
   /** `observation://changed`: payload isomorphic with the query snapshot. */
   listenObservationChanged(
     callback: (payload: ObservationAndScanSnapshot) => void,
@@ -1342,6 +1438,16 @@ const tauriCatalogClient: CatalogClient = {
   },
   refreshDetection() {
     return invoke<ObservationAndScanSnapshot>("refresh_detection");
+  },
+  startRescan(trigger) {
+    return invoke<ObservationAndScanSnapshot>("start_rescan", {
+      request: { trigger },
+    });
+  },
+  cancelRescan(runId) {
+    return invoke<ObservationAndScanSnapshot>("cancel_rescan", {
+      request: { runId },
+    });
   },
   planCreateAgentConfiguration(draft) {
     return invoke<AgentConfigurationPlan>("plan_create_agent_configuration", {

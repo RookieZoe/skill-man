@@ -19,6 +19,10 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 
 use crate::core::agent_configuration::PresetRegistry;
+use crate::core::scan::{
+    CurrentReportView, ScanCoordinator, ScanCoordinatorSnapshot, ScanError, ScanRunSnapshot,
+    ScanTrigger,
+};
 use crate::core::write_gate::WriteGate;
 use crate::seams::agent_configuration_fs::{
     AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootProbe,
@@ -79,6 +83,10 @@ pub struct ObservationAndScanSnapshot {
     pub write_gate_generation: u64,
     pub agent_configuration_generation: Option<u64>,
     pub detection: DetectionSnapshot,
+    /// The active/last Rescan Run (spec §4.10 `scan_run`).
+    pub scan_run: Option<ScanRunSnapshot>,
+    /// The bounded current Report view (spec §4.10 `current_report`).
+    pub current_report: CurrentReportView,
 }
 
 /// Single-flight run bookkeeping: exactly one thread may probe; concurrent
@@ -98,6 +106,7 @@ pub struct ObservationService {
     presets: PresetRegistry,
     write_gate: Arc<WriteGate>,
     agent_store: Arc<dyn AgentConfigurationStore>,
+    scan: Option<Arc<ScanCoordinator>>,
     state: Mutex<SharedState>,
 }
 
@@ -126,11 +135,21 @@ impl ObservationService {
             presets,
             write_gate,
             agent_store,
+            scan: None,
             state: Mutex::new(SharedState {
                 run: DetectionRun::Idle,
                 detection,
             }),
         }
+    }
+
+    /// Attach the Observation and Scan Module's Rescan/Evidence Store half
+    /// (spec §4.10): the same Service owns the shared Interface so React,
+    /// onboarding, Agent Management and Adopt never compose their own
+    /// filesystem loops or generations.
+    pub fn with_scan(mut self, scan: Arc<ScanCoordinator>) -> Self {
+        self.scan = Some(scan);
+        self
     }
 
     /// Current in-memory view; never probes the filesystem.
@@ -141,6 +160,7 @@ impl ObservationService {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .detection
             .clone();
+        let scan = self.scan.as_ref().map(|coordinator| coordinator.snapshot());
         ObservationAndScanSnapshot {
             home_id: self.write_gate.bound_home().ok().map(|home| home.home_id.0),
             write_gate_generation: self.write_gate.generation(),
@@ -150,6 +170,59 @@ impl ObservationService {
                 .ok()
                 .map(|snapshot| snapshot.snapshot_version),
             detection,
+            scan_run: scan.as_ref().and_then(|snapshot| snapshot.run.clone()),
+            current_report: scan.map(|snapshot| snapshot.current_report).unwrap_or(
+                CurrentReportView {
+                    summary: None,
+                    freshness: crate::core::scan::ReportFreshness::Stale,
+                    stale_reasons: vec![crate::core::scan::StaleReason::CrossStartup],
+                },
+            ),
+        }
+    }
+
+    /// Start a full Rescan Run (single-flight; spec §4.10). The Run is
+    /// started on the Scan Coordinator; the caller publishes
+    /// `observation://changed` when the Run state advanced.
+    pub fn start_rescan(
+        &self,
+        trigger: ScanTrigger,
+    ) -> Result<ObservationAndScanSnapshot, ScanError> {
+        let scan = self
+            .scan
+            .as_ref()
+            .ok_or_else(|| ScanError::Internal("the Scan Coordinator is not attached".into()))?;
+        let started: ScanCoordinatorSnapshot = scan.start_rescan(trigger)?;
+        Ok(self.snapshot_with(started))
+    }
+
+    /// Coordinate cancellation of the active Run (spec §4.10).
+    pub fn cancel_rescan(&self, run_id: &str) -> Result<ObservationAndScanSnapshot, ScanError> {
+        let scan = self
+            .scan
+            .as_ref()
+            .ok_or_else(|| ScanError::Internal("the Scan Coordinator is not attached".into()))?;
+        let cancelled: ScanCoordinatorSnapshot = scan.cancel_rescan(run_id)?;
+        Ok(self.snapshot_with(cancelled))
+    }
+
+    fn snapshot_with(&self, scan: ScanCoordinatorSnapshot) -> ObservationAndScanSnapshot {
+        ObservationAndScanSnapshot {
+            home_id: self.write_gate.bound_home().ok().map(|home| home.home_id.0),
+            write_gate_generation: self.write_gate.generation(),
+            agent_configuration_generation: self
+                .agent_store
+                .agent_configuration_snapshot()
+                .ok()
+                .map(|snapshot| snapshot.snapshot_version),
+            detection: self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .detection
+                .clone(),
+            scan_run: scan.run,
+            current_report: scan.current_report,
         }
     }
 

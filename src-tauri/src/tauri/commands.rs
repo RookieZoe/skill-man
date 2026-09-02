@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use tauri::{AppHandle, Emitter, State};
 
+use crate::core::scan::mutation::ScanMutationCoordinator;
 use crate::tauri_adapter::adopt_api::AdoptApi;
 use crate::tauri_adapter::agent_configuration_api::AgentConfigurationApi;
 use crate::tauri_adapter::app_update_api::AppUpdateApi;
@@ -15,11 +18,12 @@ use crate::tauri_adapter::dto::{
     ApplySkillUpdatesRequestDto, BootstrapSnapshotDto, CancelAdoptRequestDto,
     CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto,
     CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
-    CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
-    CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmExistingHomeRecoveryRequestDto,
-    ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto,
-    CreateAgentConfigurationRequestDto, CreateAgentDirectoryRequestDto,
-    DeleteAgentConfigurationRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    CancelRescanRequestDto, CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto,
+    CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto, CommandFailureDto,
+    ConfirmExistingHomeRecoveryRequestDto, ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto,
+    ConfirmSourcePromotionRequestDto, CreateAgentConfigurationRequestDto,
+    CreateAgentDirectoryRequestDto, DeleteAgentConfigurationRequestDto,
+    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto, DiagnosticDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
     EditAgentConfigurationRequestDto, ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto,
@@ -32,13 +36,14 @@ use crate::tauri_adapter::dto::{
     PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto,
     PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
     PreferenceUpdatesDto, PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto,
-    PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, RecoveryResultDto,
+    PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, PublicErrorDto, RecoveryResultDto,
     RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
     RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
     SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto,
     SourcePromotionResultDto, SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto,
-    SourceTransitionResultDto, SourceUndoResultDto, StartupInfoDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    SourceTransitionResultDto, SourceUndoResultDto, StartRescanRequestDto, StartupInfoDto,
+    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
+    UpdateResultDto,
 };
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -84,17 +89,27 @@ pub fn cancel_existing_home_recovery(
 #[tauri::command]
 pub fn confirm_existing_home_recovery(
     state: State<'_, ExistingHomeRecoveryApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmExistingHomeRecoveryRequestDto,
 ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-    state.confirm(request)
+    let result = state.confirm(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn confirm_home(
     state: State<'_, HomeBindingApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmHomeRequestDto,
 ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-    state.confirm_home(request)
+    let result = state.confirm_home(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -168,25 +183,40 @@ pub fn preview_source_promotion(
 #[tauri::command]
 pub fn confirm_source_promotion(
     state: State<'_, SourcePromotionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmSourcePromotionRequestDto,
 ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-    state.confirm(request)
+    let result = state.confirm(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn undo_source_promotion(
     state: State<'_, SourcePromotionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<SourcePromotionUndoResultDto, CommandFailureDto> {
-    state.undo(request)
+    let result = state.undo(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn finalize_source_promotion(
     state: State<'_, SourcePromotionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize(request)
+    let result = state.finalize(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -200,41 +230,66 @@ pub fn preview_source_update(
 #[tauri::command]
 pub fn confirm_source_update(
     state: State<'_, SourceUpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmSourcePromotionRequestDto,
 ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-    state.confirm(request)
+    let result = state.confirm(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn finalize_source_update(
     state: State<'_, SourceUpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize(request)
+    let result = state.finalize(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn confirm_source_transition(
     state: State<'_, SourceTransitionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: crate::tauri_adapter::dto::ConfirmSourceTransitionRequestDto,
 ) -> Result<SourceTransitionResultDto, CommandFailureDto> {
-    state.confirm(request)
+    let result = state.confirm(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn undo_source_transition(
     state: State<'_, SourceTransitionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<SourceUndoResultDto, CommandFailureDto> {
-    state.undo(request)
+    let result = state.undo(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn finalize_source_transition(
     state: State<'_, SourceTransitionApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: SourceTransitionOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize(request)
+    let result = state.finalize(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -313,9 +368,11 @@ pub async fn relocate_link(
 pub async fn apply_relocate_link(
     app: AppHandle,
     state: State<'_, HealthApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyRelocateLinkRequestDto,
 ) -> Result<RelocateLinkResultDto, CommandFailureDto> {
     let result = state.apply_relocate_link(request)?;
+    mutation.bump();
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
 }
@@ -340,9 +397,11 @@ pub async fn plan_remove_skill(
 pub async fn apply_remove_skill(
     app: AppHandle,
     state: State<'_, HealthApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyRemoveSkillRequestDto,
 ) -> Result<RemoveSkillResultDto, CommandFailureDto> {
     let result = state.apply_remove_skill(request)?;
+    mutation.bump();
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
 }
@@ -389,6 +448,62 @@ pub fn refresh_detection(state: State<'_, ObservationApi>) -> ObservationAndScan
 }
 
 #[tauri::command]
+pub fn start_rescan(
+    state: State<'_, ObservationApi>,
+    request: StartRescanRequestDto,
+) -> Result<ObservationAndScanSnapshotDto, CommandFailureDto> {
+    let trigger = match request.trigger.as_str() {
+        "manual" => crate::core::scan::ScanTrigger::Manual,
+        "onboarding" => crate::core::scan::ScanTrigger::Onboarding,
+        _ => {
+            return Err(CommandFailureDto {
+                error: PublicErrorDto::Validation,
+                diagnostic: None,
+            });
+        }
+    };
+    state
+        .start_rescan(trigger)
+        .map_err(|error| scan_command_failure(&error))
+}
+
+#[tauri::command]
+pub fn cancel_rescan(
+    state: State<'_, ObservationApi>,
+    request: CancelRescanRequestDto,
+) -> Result<ObservationAndScanSnapshotDto, CommandFailureDto> {
+    state
+        .cancel_rescan(&request.run_id)
+        .map_err(|error| scan_command_failure(&error))
+}
+
+fn scan_command_failure(error: &crate::core::scan::ScanError) -> CommandFailureDto {
+    let (public, diagnostic) = match error {
+        crate::core::scan::ScanError::NotWritable(detail) => {
+            (PublicErrorDto::ScanNotWritable, Some(detail.clone()))
+        }
+        crate::core::scan::ScanError::ConfigurationUnavailable(detail) => {
+            (PublicErrorDto::CatalogUnavailable, Some(detail.clone()))
+        }
+        crate::core::scan::ScanError::StoreUnavailable(detail) => {
+            (PublicErrorDto::CatalogUnavailable, Some(detail.clone()))
+        }
+        crate::core::scan::ScanError::RunNotFound(_) => (PublicErrorDto::ScanRunNotFound, None),
+        crate::core::scan::ScanError::Superseded => (PublicErrorDto::PlanStale, None),
+        crate::core::scan::ScanError::Internal(detail) => {
+            (PublicErrorDto::Internal, Some(detail.clone()))
+        }
+    };
+    CommandFailureDto {
+        error: public,
+        diagnostic: diagnostic.map(|message| DiagnosticDto {
+            code: "scan".into(),
+            message,
+        }),
+    }
+}
+
+#[tauri::command]
 pub fn plan_create_agent_configuration(
     state: State<'_, AgentConfigurationApi>,
     request: CreateAgentConfigurationRequestDto,
@@ -415,9 +530,14 @@ pub fn plan_delete_agent_configuration(
 #[tauri::command]
 pub fn apply_agent_configuration_plan(
     state: State<'_, AgentConfigurationApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyAgentConfigurationPlanRequestDto,
 ) -> Result<AgentConfigurationApplyResultDto, CommandFailureDto> {
-    state.apply(request)
+    let result = state.apply(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -439,9 +559,14 @@ pub async fn plan_link_import(
 #[tauri::command]
 pub async fn apply_link_import(
     state: State<'_, ImportApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyLinkImportRequestDto,
 ) -> Result<LinkImportResultDto, CommandFailureDto> {
-    state.apply_link_import(request)
+    let result = state.apply_link_import(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -495,17 +620,27 @@ pub async fn plan_file_import_selection(
 #[tauri::command]
 pub async fn apply_file_import(
     state: State<'_, ImportApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyFileImportRequestDto,
 ) -> Result<FileImportResultDto, CommandFailureDto> {
-    state.apply_file_import(request)
+    let result = state.apply_file_import(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn apply_file_import_selection(
     state: State<'_, ImportApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyFileImportSelectionRequestDto,
 ) -> Result<FileImportSelectionResultDto, CommandFailureDto> {
-    state.apply_file_import_selection(request)
+    let result = state.apply_file_import_selection(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -535,9 +670,14 @@ pub async fn plan_skill_updates(
 #[tauri::command]
 pub async fn apply_skill_updates(
     state: State<'_, UpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplySkillUpdatesRequestDto,
 ) -> Result<UpdateResultDto, CommandFailureDto> {
-    state.apply_skill_updates(request)
+    let result = state.apply_skill_updates(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -567,9 +707,11 @@ pub async fn plan_adopt(
 pub async fn apply_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyAdoptRequestDto,
 ) -> Result<AdoptResultDto, CommandFailureDto> {
     let result = state.apply_adopt(request)?;
+    mutation.bump();
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
 }
@@ -578,9 +720,11 @@ pub async fn apply_adopt(
 pub async fn undo_adopt(
     app: AppHandle,
     state: State<'_, AdoptApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: UndoAdoptRequestDto,
 ) -> Result<AdoptUndoResultDto, CommandFailureDto> {
     let result = state.undo_adopt(request)?;
+    mutation.bump();
     let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
     Ok(result)
 }
@@ -588,9 +732,14 @@ pub async fn undo_adopt(
 #[tauri::command]
 pub fn finalize_adopt(
     state: State<'_, AdoptApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: FinalizeAdoptRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize_adopt(request)
+    let result = state.finalize_adopt(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -653,9 +802,14 @@ pub fn complete_onboarding(state: State<'_, StartupApi>) -> Result<(), CommandFa
 #[tauri::command]
 pub fn create_agent_directory(
     state: State<'_, StartupApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: CreateAgentDirectoryRequestDto,
 ) -> Result<StartupInfoDto, CommandFailureDto> {
-    state.create_agent_directory(request)
+    let result = state.create_agent_directory(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 // -- Fixture Recovery (spec §4.4, §5.2) --
@@ -692,17 +846,27 @@ pub fn plan_restore(
 #[tauri::command]
 pub fn apply_fixture_recovery(
     state: State<'_, FixtureRecoveryApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyFixtureRecoveryRequestDto,
 ) -> Result<RecoveryResultDto, CommandFailureDto> {
-    state.apply_fixture_recovery(request)
+    let result = state.apply_fixture_recovery(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn confirm_fixture_recovery_result(
     state: State<'_, FixtureRecoveryApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmFixtureRecoveryRequestDto,
 ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-    state.confirm_fixture_recovery_result(request)
+    let result = state.confirm_fixture_recovery_result(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]

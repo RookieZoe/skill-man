@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 
 use crate::core::observation::ObservationService;
+use crate::core::scan::ScanTrigger;
+use crate::core::scan::{ScanError, ScanRunObserver, ScanRunSnapshot};
 use crate::tauri_adapter::dto::ObservationAndScanSnapshotDto;
 
 pub const OBSERVATION_CHANGED_EVENT: &str = "observation://changed";
@@ -73,6 +75,35 @@ impl ObservationApi {
             self.emitter.emit_changed(&dto);
         }
         dto
+    }
+
+    /// Start a full Rescan Run (single-flight; spec §4.10). The Run emits
+    /// `observation://changed` through the same observer channel as the
+    /// Detection results.
+    pub fn start_rescan(
+        &self,
+        trigger: ScanTrigger,
+    ) -> Result<ObservationAndScanSnapshotDto, ScanError> {
+        let dto: ObservationAndScanSnapshotDto = self.service.start_rescan(trigger)?.into();
+        // State/phase changes already published through the observer; the
+        // response itself carries the fresh snapshot.
+        Ok(dto)
+    }
+
+    /// Coordinate cancellation of the active Run (spec §4.10).
+    pub fn cancel_rescan(&self, run_id: &str) -> Result<ObservationAndScanSnapshotDto, ScanError> {
+        let dto: ObservationAndScanSnapshotDto = self.service.cancel_rescan(run_id)?.into();
+        Ok(dto)
+    }
+}
+
+/// The API is the scan progress observer: the coordinator throttles to
+/// ≤250 ms and forces phase/state changes; the API converts to the shared
+/// `observation://changed` payload.
+impl ScanRunObserver for ObservationApi {
+    fn on_scan_change(&self, _snapshot: &ScanRunSnapshot) {
+        let dto = self.snapshot();
+        self.emitter.emit_changed(&dto);
     }
 }
 

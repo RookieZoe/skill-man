@@ -17,6 +17,7 @@ pub mod locale;
 pub mod maintenance;
 pub mod observation;
 pub mod preferences;
+pub mod scan;
 pub mod source_group_preview;
 pub mod source_promotion;
 pub mod source_transition;

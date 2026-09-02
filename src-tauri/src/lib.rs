@@ -16,11 +16,13 @@ pub fn run() {
     use crate::adapters::git_source::SystemGitSource;
     use crate::adapters::git_source_capability::SqliteGitSourceCapabilityReader;
     use crate::adapters::local_file_source::LocalFileSource;
+    use crate::adapters::local_git_probe::SystemLocalGitProbe;
     use crate::adapters::locale_store::LocaleStoreFileSystem;
     use crate::adapters::macos_fs::MacOsFileSystem;
     use crate::adapters::remote_provider::SystemRemoteProvider;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
+    use crate::adapters::scan_evidence_store::SystemScanEvidenceStoreFactory;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
     };
@@ -48,6 +50,9 @@ pub fn run() {
     use crate::core::maintenance::MaintenanceService;
     use crate::core::observation::ObservationService;
     use crate::core::preferences::PreferencesService;
+    use crate::core::scan::ScanCoordinator;
+    use crate::core::scan::mutation::ScanMutationCoordinator;
+    use crate::core::scan::qualifier::SnapshotDeleteQualifier;
     use crate::core::source_group_preview::SourceGroupPreviewService;
     use crate::core::source_promotion::SourcePromotionService;
     use crate::core::source_transition::SourceTransitionService;
@@ -72,8 +77,8 @@ pub fn run() {
         apply_file_import, apply_file_import_selection, apply_fixture_recovery, apply_link_import,
         apply_relocate_link, apply_remove_skill, apply_skill_updates, cancel_adopt,
         cancel_app_update, cancel_candidate, cancel_existing_home_recovery, cancel_file_import,
-        cancel_link_import, cancel_relocate_link, cancel_remove_skill, check_app_update,
-        check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
+        cancel_link_import, cancel_relocate_link, cancel_remove_skill, cancel_rescan,
+        check_app_update, check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
         confirm_fixture_recovery_result, confirm_home, confirm_source_promotion,
         confirm_source_transition, confirm_source_update, continue_candidate,
         create_agent_directory, discover_file_import, discover_file_import_collection,
@@ -89,8 +94,8 @@ pub fn run() {
         plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
         preview_source_promotion, preview_source_update, reconnect_same_home, refresh_detection,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        scan_adopt, set_locale_selection, startup_info, undo_adopt, undo_source_promotion,
-        undo_source_transition, update_preferences,
+        scan_adopt, set_locale_selection, start_rescan, startup_info, undo_adopt,
+        undo_source_promotion, undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -167,7 +172,10 @@ pub fn run() {
                     default_home_path: default_home_path.clone(),
                     catalog_file_name: catalog_file_name.clone(),
                 },
-            ));
+            )
+            .with_delete_qualification(Arc::new(SnapshotDeleteQualifier::new(Arc::new(
+                SystemScanEvidenceStoreFactory,
+            )))));
             // The one-time Home Binding flow (spec §5.3–§5.4): candidates
             // may not overlap the known Agent skills roots (ADR-0012 §3).
             let home_binding_service = Arc::new(HomeBindingService::new(
@@ -405,21 +413,35 @@ pub fn run() {
                     presets.clone(),
                 ),
             )));
-            // Observation and Scan Module skeleton (#81): Agent Detection is
-            // zero-write and runs against the physical preset roots only, so
-            // it starts in every bootstrap state and after the first Library
-            // Desk is interactive (spec §5.1 step 9–10; ADR-0020). The
-            // startup Run is asynchronous: the Library never waits for it and
-            // the normal startup never triggers a full Rescan.
+            // Observation and Scan Module (#81 + #82): Agent Detection stays
+            // zero-write; the full Rescan (manual/onboarding) is streamed to
+            // the Home's Scan Evidence Store with the single-flight Run
+            // lifecycle (spec §4.10; ADR-0020). Library Desk stays
+            // interactive immediately; startup never triggers a full Rescan.
+            let scan_mutation = Arc::new(ScanMutationCoordinator::new());
+            app.manage(scan_mutation.clone());
+            let scan_coordinator = Arc::new(ScanCoordinator::new(
+                Arc::new(SystemScanEvidenceStoreFactory),
+                filesystem.clone(),
+                Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
+                Arc::new(SystemLocalGitProbe),
+                write_gate.clone(),
+                agent_configuration_store.clone(),
+                scan_mutation.clone(),
+                app_state.clone(),
+                Arc::new(SystemClock::new()),
+            ));
             let observation_api = Arc::new(ObservationApi::new(
                 Arc::new(ObservationService::new(
                     agent_configuration_filesystem,
                     presets,
                     write_gate.clone(),
                     agent_configuration_store,
-                )),
+                )
+                .with_scan(scan_coordinator.clone())),
                 Arc::new(TauriObservationChangedEmitter::new(app.handle().clone())),
             ));
+            scan_coordinator.set_observer(observation_api.clone());
             app.manage(observation_api.clone());
             std::thread::spawn(move || {
                 let _ = observation_api.refresh_detection();
@@ -632,6 +654,8 @@ pub fn run() {
             get_agent_management_snapshot,
             get_observation_snapshot,
             refresh_detection,
+            start_rescan,
+            cancel_rescan,
             plan_create_agent_configuration,
             plan_edit_agent_configuration,
             plan_delete_agent_configuration,

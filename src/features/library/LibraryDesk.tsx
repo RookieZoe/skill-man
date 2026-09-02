@@ -48,6 +48,7 @@ import {
 } from "./GitSourceCapabilityNotice";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { SourcePromotionFlow } from "./SourcePromotionFlow";
+import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
@@ -522,6 +523,7 @@ export function LibraryDesk({
             </div>
           </div>
         )}
+        <ScanEvidenceLedger client={client} />
       </div>
       {relocatePanel.isOpen ? (
         <RelocateSheet

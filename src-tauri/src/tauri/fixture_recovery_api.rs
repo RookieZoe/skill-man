@@ -223,6 +223,13 @@ impl FixtureRecoveryApi {
 
 fn failure(error: &FixtureRecoveryError) -> CommandFailureDto {
     let (error, diagnostic) = match error {
+        FixtureRecoveryError::SnapshotNotQualified(detail) => (
+            PublicErrorDto::RecoverySnapshotNotQualified,
+            Some(DiagnosticDto {
+                code: "snapshot_not_qualified".into(),
+                message: detail.clone(),
+            }),
+        ),
         FixtureRecoveryError::NotLocked => (PublicErrorDto::RecoveryNotLocked, None),
         FixtureRecoveryError::NotRestorable(message) => (
             PublicErrorDto::RestoreNotApplicable,

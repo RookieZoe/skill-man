@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
+import type { ObservationAndScanSnapshot } from "../../app/catalog-client";
 import { AgentManagement } from "./AgentManagement";
 
 test("fresh Home renders empty configured state and all zero-write presets", async () => {
@@ -161,6 +162,12 @@ test("unavailable detection evidence is never presented as absent", async () => 
     homeId: null,
     writeGateGeneration: 0,
     agentConfigurationGeneration: 0,
+    scanRun: null,
+    currentReport: {
+      summary: null,
+      freshness: "stale",
+      staleReasons: ["cross_startup"],
+    },
     detection: {
       generation: 1,
       presetObservations: [
@@ -201,10 +208,16 @@ test("unavailable detection evidence is never presented as absent", async () => 
 test("a pending Detection Run is not presented as no agents", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
-  const pending = {
+  const pending: ObservationAndScanSnapshot = {
     homeId: null,
     writeGateGeneration: 0,
     agentConfigurationGeneration: null,
+    scanRun: null,
+    currentReport: {
+      summary: null,
+      freshness: "stale",
+      staleReasons: ["cross_startup"],
+    },
     detection: { generation: 0, presetObservations: [] },
   };
   client.getObservationSnapshot = async () => pending;

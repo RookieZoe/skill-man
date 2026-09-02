@@ -746,12 +746,22 @@ pub enum FixtureRecoveryError {
     AmbiguousState(String),
     #[error("the Safety Snapshot is in use by the active recovery operation")]
     SnapshotInUse,
+    #[error("the Safety Snapshot is not qualified for deletion: {0}")]
+    SnapshotNotQualified(String),
     #[error("recovery could not read or write app state: {0}")]
     StateStore(#[from] AppStateStoreError),
     #[error("recovery failed on the filesystem: {0}")]
     FileSystem(String),
     #[error("recovery failed probing the Catalog: {0}")]
     Probe(String),
+}
+
+/// The Safety Snapshot directory name is the artifact identity the
+/// qualifier lists (ledger `snapshot_path` file name).
+pub(crate) fn snapshot_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 pub struct FixtureRecoveryService {
@@ -761,6 +771,11 @@ pub struct FixtureRecoveryService {
     prepared: Arc<dyn PreparedCatalogFactory>,
     bootstrap: Arc<BootstrapService>,
     config: BootstrapConfig,
+    /// Safety Snapshot deletion qualification (spec §2.1.6): the same
+    /// Home must have had a later successful startup and a manual Complete
+    /// Scan Report since the Restore. `None` fails closed — no Snapshot is
+    /// deletable until the production qualifier is attached.
+    delete_qualifier: Option<Arc<dyn crate::core::scan::qualifier::SnapshotDeleteEvidence>>,
 }
 
 impl FixtureRecoveryService {
@@ -779,7 +794,19 @@ impl FixtureRecoveryService {
             prepared,
             bootstrap,
             config,
+            delete_qualifier: None,
         }
+    }
+
+    /// Attach the Scan Evidence-backed Snapshot deletion qualifier
+    /// (production composition only; test stubs may inject a permissive
+    /// double).
+    pub fn with_delete_qualification(
+        mut self,
+        qualifier: Arc<dyn crate::core::scan::qualifier::SnapshotDeleteEvidence>,
+    ) -> Self {
+        self.delete_qualifier = Some(qualifier);
+        self
     }
 
     /// The recovery route preview: read-only classification and evidence.
@@ -1162,6 +1189,7 @@ impl FixtureRecoveryService {
                 return Err(FixtureRecoveryError::SnapshotInUse);
             }
         }
+        self.verify_delete_qualification(&ledger, &path)?;
         Ok(DeleteSnapshotPreview {
             snapshot_id: snapshot_id.into(),
             path,
@@ -1180,10 +1208,56 @@ impl FixtureRecoveryService {
                 return Err(FixtureRecoveryError::SnapshotInUse);
             }
         }
+        self.verify_delete_qualification(&ledger, &path)?;
         let live = self.resolve_live_path()?;
         self.filesystem
             .remove_recovery_artifact(&path, &live)
             .map_err(|error| FixtureRecoveryError::FileSystem(error.to_string()))
+    }
+
+    /// Spec §2.1 invariant 6: the same `home_id`'s later successful startup
+    /// and a manual Complete Scan Report must be provable at plan AND apply
+    /// time. Startup Probe, onboarding Reports, Stale/cache-carried Reports
+    /// and Incomplete/Failed/Cancelled/Superseded Runs never qualify.
+    fn verify_delete_qualification(
+        &self,
+        ledger: &crate::seams::app_state_store::RecoveryLedgerFile,
+        snapshot_path: &std::path::Path,
+    ) -> Result<(), FixtureRecoveryError> {
+        let qualifier = self.delete_qualifier.as_ref().ok_or_else(|| {
+            FixtureRecoveryError::SnapshotNotQualified(
+                "no Snapshot deletion qualifier is attached".into(),
+            )
+        })?;
+        // Re-verify the current Home identity from disk at plan AND apply
+        // time: Bound is proven again, never assumed from a cached state
+        // (spec §2.1 invariant 6 "current Home/Snapshot identity").
+        let _ = self.bootstrap.inspect();
+        let bound = match self.bootstrap.verified_bound_home() {
+            Some(bound) => bound,
+            None => {
+                return Err(FixtureRecoveryError::SnapshotNotQualified(
+                    "the current Home is not Bound".into(),
+                ));
+            }
+        };
+        let restore_record = ledger
+            .completed
+            .iter()
+            .find(|record| {
+                record.snapshot_path.as_deref() == Some(snapshot_path)
+                    && record.home_id.as_ref().map(|id| id.0.clone())
+                        == Some(bound.home_id.0.clone())
+            })
+            .ok_or_else(|| {
+                FixtureRecoveryError::SnapshotNotQualified(
+                    "no completed Restore operation recorded this Snapshot for the current Home"
+                        .into(),
+                )
+            })?;
+        qualifier
+            .verify_snapshot_delete(&bound, &snapshot_name(snapshot_path), restore_record)
+            .map_err(FixtureRecoveryError::SnapshotNotQualified)
     }
 
     // -- internals ---------------------------------------------------------

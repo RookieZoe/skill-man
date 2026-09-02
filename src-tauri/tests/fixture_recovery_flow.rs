@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use skill_man_lib::adapters::app_state_store::AppStateStoreFileSystem;
 use skill_man_lib::adapters::catalog_probe::SqliteCatalogProbe;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
+use skill_man_lib::adapters::scan_evidence_store::SystemScanEvidenceStoreFactory;
 use skill_man_lib::adapters::sqlite::SqlitePreparedCatalogFactory;
 use skill_man_lib::core::bootstrap::{
     BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
@@ -22,6 +23,7 @@ use skill_man_lib::core::fixture_recovery::{
     FixtureShapeMode, SystemFixtureClassifier, classify_fixture,
 };
 use skill_man_lib::core::home::VolumeIdentity;
+use skill_man_lib::core::scan::qualifier::SnapshotDeleteQualifier;
 use skill_man_lib::seams::app_state_store::{AppStateStore, RecoveryLedgerFile};
 use skill_man_lib::seams::catalog_probe::{CatalogHomeIdentity, CatalogProbe};
 use skill_man_lib::seams::filesystem::FileSystem;
@@ -87,6 +89,9 @@ fn recovery_service(
             catalog_file_name: CATALOG_FILE_NAME.into(),
         },
     )
+    .with_delete_qualification(Arc::new(SnapshotDeleteQualifier::new(Arc::new(
+        SystemScanEvidenceStoreFactory,
+    ))))
 }
 
 fn sibling(live: &Path, kind: &str, operation_id: &str) -> PathBuf {
@@ -233,18 +238,20 @@ fn legacy_flow_recovers_to_a_clean_unbound_home() {
         Some("committed")
     );
 
-    // Snapshot management stays available after the commit.
+    // The delete gate contract (spec §2.1.6): an unbound Home has no
+    // later successful startup + manual Complete Scan Report evidence, so
+    // the Safety Snapshot stays non-deletable even after commit.
     let snapshots = recovery.list_snapshots().expect("list snapshots");
     assert_eq!(snapshots.len(), 1);
-    let delete = recovery
-        .plan_delete_snapshot(&snapshots[0].snapshot_id)
-        .expect("plan delete");
-    assert!(delete.file_count > 0);
-    recovery
-        .apply_delete_snapshot(&delete.snapshot_id)
-        .expect("apply delete");
-    assert!(!snapshot_path.exists(), "user-confirmed delete removes it");
-    assert!(recovery.list_snapshots().unwrap().is_empty());
+    match recovery.plan_delete_snapshot(&snapshots[0].snapshot_id) {
+        Err(FixtureRecoveryError::SnapshotNotQualified(_)) => {}
+        other => panic!("unbound Home must never qualify a Snapshot delete, got {other:?}"),
+    }
+    assert!(
+        snapshot_path.is_dir(),
+        "unqualified delete leaves the Snapshot"
+    );
+    assert_eq!(recovery.list_snapshots().unwrap().len(), 1);
 }
 
 #[test]
@@ -625,13 +632,17 @@ fn snapshot_delete_is_refused_while_the_active_operation_references_it() {
     recovery.confirm_result(&plan.plan_token).expect("confirm");
     let snapshots = recovery.list_snapshots().expect("list after commit");
     assert_eq!(snapshots.len(), 1, "snapshot survives the commit");
-    let delete = recovery
-        .plan_delete_snapshot(&snapshots[0].snapshot_id)
-        .expect("plan delete after commit");
-    recovery
-        .apply_delete_snapshot(&delete.snapshot_id)
-        .expect("apply delete after commit");
-    assert!(recovery.list_snapshots().unwrap().is_empty());
+    // The committed unbound Home still lacks the Scan/startup evidence:
+    // plan and apply both fail closed.
+    match recovery.plan_delete_snapshot(&snapshots[0].snapshot_id) {
+        Err(FixtureRecoveryError::SnapshotNotQualified(_)) => {}
+        other => panic!("expected SnapshotNotQualified, got {other:?}"),
+    }
+    let err = recovery
+        .apply_delete_snapshot(&snapshots[0].snapshot_id)
+        .expect_err("apply delete without qualification must refuse");
+    assert!(matches!(err, FixtureRecoveryError::SnapshotNotQualified(_)));
+    assert_eq!(recovery.list_snapshots().unwrap().len(), 1);
 }
 
 #[test]

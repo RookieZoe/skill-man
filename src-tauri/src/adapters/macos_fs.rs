@@ -21,7 +21,7 @@ use crate::seams::filesystem::{
     RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
     RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
     SkillFingerprint, SourceTransitionJournal, StagedEntryKind, StagedTreeEntry,
-    StagedTreeSnapshot,
+    StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind, TreeScanStatistics,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -1140,6 +1140,15 @@ impl FileSystem for MacOsFileSystem {
 
     fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
         tree_hash_at(path)
+    }
+
+    fn scan_tree_statistics(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
+    ) -> Result<TreeScanStatistics, FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        scan_tree_statistics_at(&path, visitor)
     }
 
     fn staged_tree_snapshot(&self, path: &Path) -> Result<StagedTreeSnapshot, FileSystemError> {
@@ -2770,6 +2779,66 @@ impl FileSystem for MacOsFileSystem {
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(entries)
+    }
+
+    fn scan_skills_directory_stream(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(ScannedSkillEntry) -> Result<bool, FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        let directory = match fs::read_dir(&path) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Scan Run source",
+                    path,
+                    source,
+                });
+            }
+        };
+        for entry in directory {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Scan Run source",
+                path: path.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&entry_path).map_err(|source| FileSystemError::Io {
+                    operation: "inspect Scan Run entry",
+                    path: entry_path.clone(),
+                    source,
+                })?;
+            if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_owned();
+            // The chain evidence is produced per entry by the Run through
+            // `inspect_evidence_chain`; here only the raw kind is surfaced so
+            // the caller can stream without holding the full listing.
+            let kind = if metadata.is_dir() {
+                LinkSourceEntryKind::Directory
+            } else {
+                LinkSourceEntryKind::Symlink {
+                    target: fs::read_link(&entry_path).unwrap_or_default(),
+                }
+            };
+            if !visitor(ScannedSkillEntry {
+                entry_path: entry_path.clone(),
+                name,
+                kind,
+                final_entity_path: None,
+                dangling: false,
+            })? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn inspect_evidence_chain(&self, path: &Path) -> Result<EvidenceChain, FileSystemError> {
@@ -5066,6 +5135,208 @@ pub(crate) fn read_skill_document_at(path: &Path) -> Result<String, FileSystemEr
 
 fn tree_hash_at(root: &Path) -> Result<String, FileSystemError> {
     Ok(staged_tree_snapshot_at(root)?.content_hash)
+}
+
+/// Streaming Scan Run tree walk (spec §3.6): mirrors `tree_hash_at`'s
+/// deterministic rules — each directory level is sorted by relative-path
+/// bytes, symlink targets are hashed raw and never followed, file lengths
+/// and contents are hashed with the same field framing and the same
+/// TOCTOU checks — while never materialising the full listing. The visitor
+/// sees every child entry; returning `false` stops the walk and yields a
+/// partial hash (`None`) so the entity record carries a hash fault instead
+/// of pretending completeness.
+fn scan_tree_statistics_at(
+    root: &Path,
+    visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
+) -> Result<TreeScanStatistics, FileSystemError> {
+    let root_metadata = fs::symlink_metadata(root).map_err(|source| FileSystemError::Io {
+        operation: "inspect Scan tree root",
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(FileSystemError::NotDirectory {
+            path: root.to_path_buf(),
+        });
+    }
+    let canonical = root.canonicalize().map_err(|source| FileSystemError::Io {
+        operation: "canonicalize Scan tree root",
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut file_count = 0_u64;
+    let mut byte_count = 0_u64;
+    let mut stopped = false;
+    scan_tree_walk(
+        &canonical,
+        &canonical,
+        &mut hasher,
+        &mut file_count,
+        &mut byte_count,
+        visitor,
+        &mut stopped,
+    )?;
+    let final_root_metadata =
+        fs::symlink_metadata(&canonical).map_err(|source| FileSystemError::Io {
+            operation: "reinspect Scan tree root",
+            path: canonical.clone(),
+            source,
+        })?;
+    if root_metadata.dev() != final_root_metadata.dev()
+        || root_metadata.ino() != final_root_metadata.ino()
+        || !final_root_metadata.is_dir()
+        || final_root_metadata.file_type().is_symlink()
+    {
+        return Err(stale_tree_entry(&canonical));
+    }
+    Ok(TreeScanStatistics {
+        file_count,
+        byte_count,
+        tree_hash: if stopped {
+            None
+        } else {
+            Some(format!("tree-sha256-v1:{:x}", hasher.finalize()))
+        },
+    })
+}
+
+fn scan_tree_walk(
+    root: &Path,
+    directory: &Path,
+    hasher: &mut Sha256,
+    file_count: &mut u64,
+    byte_count: &mut u64,
+    visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
+    stopped: &mut bool,
+) -> Result<(), FileSystemError> {
+    let mut children: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|source| FileSystemError::Io {
+        operation: "enumerate Scan tree",
+        path: directory.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| FileSystemError::Io {
+            operation: "enumerate Scan tree",
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|source| FileSystemError::Io {
+            operation: "inspect Scan tree entry",
+            path: path.clone(),
+            source,
+        })?;
+        children.push((path, metadata));
+    }
+    children.sort_by(|(left, _), (right, _)| {
+        left.as_os_str()
+            .as_bytes()
+            .cmp(right.as_os_str().as_bytes())
+    });
+    for (path, metadata) in children {
+        let relative = path
+            .strip_prefix(root)
+            .expect("walked entries remain inside their root")
+            .to_path_buf();
+        let entry_kind = if metadata.file_type().is_symlink() {
+            TreeScanEntryKind::Symlink {
+                target: fs::read_link(&path).map_err(|source| FileSystemError::Io {
+                    operation: "read Scan tree symlink",
+                    path: path.clone(),
+                    source,
+                })?,
+            }
+        } else if metadata.is_dir() {
+            TreeScanEntryKind::Directory
+        } else if metadata.is_file() {
+            TreeScanEntryKind::File {
+                length: metadata.len(),
+            }
+        } else {
+            return Err(FileSystemError::Io {
+                operation: "scan Scan tree entry",
+                path: path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Scan tree contains an unsupported filesystem entry",
+                ),
+            });
+        };
+        if !visitor(&TreeScanEntry {
+            relative_path: relative.clone(),
+            kind: entry_kind.clone(),
+        })? {
+            *stopped = true;
+            return Ok(());
+        }
+        match entry_kind {
+            TreeScanEntryKind::Directory => {
+                hash_field(hasher, b"directory");
+                hash_field(hasher, relative.as_os_str().as_bytes());
+                scan_tree_walk(
+                    root, &path, hasher, file_count, byte_count, visitor, stopped,
+                )?;
+                if *stopped {
+                    return Ok(());
+                }
+            }
+            TreeScanEntryKind::Symlink { target } => {
+                hash_field(hasher, b"symlink");
+                hash_field(hasher, relative.as_os_str().as_bytes());
+                hash_field(hasher, target.as_os_str().as_bytes());
+                ensure_entry_unchanged(&path, &metadata)?;
+            }
+            TreeScanEntryKind::File { length } => {
+                hash_field(hasher, b"file");
+                hash_field(hasher, relative.as_os_str().as_bytes());
+                hasher.update(length.to_be_bytes());
+                *file_count += 1;
+                *byte_count = byte_count.saturating_add(length);
+                let mut file = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                    .open(&path)
+                    .map_err(|source| FileSystemError::Io {
+                        operation: "read Scan tree file",
+                        path: path.clone(),
+                        source,
+                    })?;
+                let opened_metadata = file.metadata().map_err(|source| FileSystemError::Io {
+                    operation: "inspect opened Scan tree file",
+                    path: path.clone(),
+                    source,
+                })?;
+                if !same_file_version(&metadata, &opened_metadata) {
+                    return Err(stale_tree_entry(&path));
+                }
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|source| FileSystemError::Io {
+                            operation: "read Scan tree file",
+                            path: path.clone(),
+                            source,
+                        })?;
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+                let finished_metadata = file.metadata().map_err(|source| FileSystemError::Io {
+                    operation: "reinspect opened Scan tree file",
+                    path: path.clone(),
+                    source,
+                })?;
+                if !same_file_version(&metadata, &finished_metadata) {
+                    return Err(stale_tree_entry(&path));
+                }
+                ensure_entry_unchanged(&path, &metadata)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Tree hash that skips files whose name is in `excluded` (SQLite WAL/SHM

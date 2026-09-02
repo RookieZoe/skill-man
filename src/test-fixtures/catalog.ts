@@ -227,7 +227,24 @@ export function createFixtureCatalogClient(
         generation: detectionGeneration,
         presetObservations,
       },
+      scanRun: fixtureScanRun,
+      currentReport: fixtureCurrentReport,
     };
+  }
+
+  let fixtureScanRun: ObservationAndScanSnapshot["scanRun"] = null;
+  let scanRunCounter = 0;
+  const fixtureCurrentReport: ObservationAndScanSnapshot["currentReport"] = {
+    summary: null,
+    freshness: "stale",
+    staleReasons: ["cross_startup"],
+  };
+  const scanRunListeners = new Set<
+    (payload: ObservationAndScanSnapshot) => void
+  >();
+  function publishObservation() {
+    const payload = observationSnapshot();
+    scanRunListeners.forEach((listener) => listener(payload));
   }
 
   function plannedConfiguration(
@@ -378,9 +395,67 @@ export function createFixtureCatalogClient(
     },
     listenObservationChanged(callback) {
       observationListeners.add(callback);
+      scanRunListeners.add(callback);
       return Promise.resolve(() => {
         observationListeners.delete(callback);
+        scanRunListeners.delete(callback);
       });
+    },
+    async startRescan(trigger) {
+      fixtureScanRun = {
+        runId: `fixture-scan-${trigger}-${scanRunCounter++}`,
+        generation: 1,
+        trigger,
+        state: "running",
+        phase: "walking",
+        currentRoot: 0,
+        counts: {
+          roots: 1,
+          entries: 0,
+          entities: 0,
+          files: 0,
+          bytes: 0,
+          gitProbes: 0,
+          failedRoots: 0,
+        },
+        roots: [
+          {
+            index: 0,
+            configuredPath: "/tmp/root",
+            canonicalPath: "/tmp/root",
+            state: "walking",
+            counts: {
+              roots: 1,
+              entries: 0,
+              entities: 0,
+              files: 0,
+              bytes: 0,
+              gitProbes: 0,
+              failedRoots: 0,
+            },
+            elapsedMs: 0,
+            slow: false,
+            diagnostic: null,
+          },
+        ],
+        elapsedMs: 0,
+        slow: false,
+        diagnostic: null,
+      };
+      publishObservation();
+      return observationSnapshot();
+    },
+    async cancelRescan(runId) {
+      if (fixtureScanRun?.runId !== runId) {
+        throw new Error(`no active Run with id ${runId}`);
+      }
+      fixtureScanRun = {
+        ...fixtureScanRun,
+        state: "cancelled",
+        phase: "finalizing",
+      };
+      publishObservation();
+      return observationSnapshot();
     },
     async planCreateAgentConfiguration(draft) {
       const planToken = `fixture-agent-plan-${planCounter++}`;
