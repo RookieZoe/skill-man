@@ -7,11 +7,6 @@ import type {
   RemovePanelState,
 } from "../../app/App";
 import type {
-  ActivationConflictDetails,
-  ActivationPreview,
-  ActivationReplacePreview,
-  ActivationReplaceUndoResult,
-  ActivationResult,
   AdoptEvidenceReport,
   AdoptGitSource,
   AdoptPlan,
@@ -19,18 +14,14 @@ import type {
   AdoptSelection,
   AdoptUndoResult,
   ModifiedBranch,
-  AgentActivation,
   AppPreferences,
+  CatalogClient,
   CatalogFilter,
-  CompatibilityWarning,
   GitRepositorySourceType,
   GitSourceCapabilityReport,
   Health,
   LinkImportPreview,
   LinkImportResult,
-  OccupierNotAdoptableReason,
-  OccupierKind,
-  OccupierSummary,
   PreferenceUpdates,
   PreferencesWarning,
   SkillDetail,
@@ -44,6 +35,7 @@ import type {
   StartupAgent,
 } from "../../app/catalog-client";
 import { EvidenceLedger } from "../adopt/EvidenceLedger";
+import { AgentManagement } from "../agents/AgentManagement";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
 import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
@@ -78,29 +70,15 @@ export function layoutModeForWidth(width: number): LayoutMode {
 }
 
 interface LibraryDeskProps {
+  client: CatalogClient;
   filter: CatalogFilter;
   skills: SkillSummary[];
   libraryEmpty: boolean;
   selectedId: string | null;
   detail: SkillDetail | null;
-  agents: AgentActivation[];
   error: string | null;
   gitSourceCapability: GitSourceCapabilityReport | null;
   gitSourceCapabilityFailure: GitSourceCapabilityFailure | null;
-  activationError: string | null;
-  activationConflict: ActivationConflictDetails | null;
-  activationConflictMessage: string | null;
-  replacePreview: ActivationReplacePreview | null;
-  replaceResult: ActivationResult | null;
-  replaceUndo: ActivationReplaceUndoResult | null;
-  replaceError: string | null;
-  isApplyingReplace: boolean;
-  isUndoingReplace: boolean;
-  activationPreview: ActivationPreview | null;
-  activationTriggerControlId: string | null;
-  pendingAgentId: string | null;
-  isApplyingActivation: boolean;
-  isCheckingActivations: boolean;
   isLinkImportOpen: boolean;
   importKind: ImportKind;
   linkImportPreview: LinkImportPreview | null;
@@ -128,8 +106,6 @@ interface LibraryDeskProps {
   onOpenRemove: () => void;
   onCloseRemove: () => void;
   onApplyRemove: () => void;
-  lockNotice: string | null;
-  onRetryRecovery: () => void;
   isAdoptOpen: boolean;
   adoptReport: AdoptEvidenceReport | null;
   adoptSelections: Record<string, AdoptSelection>;
@@ -141,15 +117,6 @@ interface LibraryDeskProps {
   adoptActivity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
-  onRequestActivation: (agentId: string, enabled: boolean) => void;
-  onRequestActivationRepair: (agentId: string) => void;
-  onApplyActivation: () => void;
-  onCancelActivation: () => void;
-  onCloseActivationConflict: () => void;
-  onAdoptFromConflict: () => void;
-  onPlanReplace: () => void;
-  onApplyReplace: () => void;
-  onUndoReplace: () => void;
   onOpenLinkImport: () => void;
   onImportKindChange: (kind: ImportKind) => void;
   onPreviewLinkImport: (sourcePath: string) => void;
@@ -204,29 +171,15 @@ interface LibraryDeskProps {
 }
 
 export function LibraryDesk({
+  client,
   filter,
   skills,
   libraryEmpty,
   selectedId,
   detail,
-  agents,
   error,
   gitSourceCapability,
   gitSourceCapabilityFailure,
-  activationError,
-  activationConflict,
-  activationConflictMessage,
-  replacePreview,
-  replaceResult,
-  replaceUndo,
-  replaceError,
-  isApplyingReplace,
-  isUndoingReplace,
-  activationPreview,
-  activationTriggerControlId,
-  pendingAgentId,
-  isApplyingActivation,
-  isCheckingActivations,
   isLinkImportOpen,
   importKind,
   linkImportPreview,
@@ -254,19 +207,8 @@ export function LibraryDesk({
   onOpenRemove,
   onCloseRemove,
   onApplyRemove,
-  lockNotice,
-  onRetryRecovery,
   onFilter,
   onSelect,
-  onRequestActivation,
-  onRequestActivationRepair,
-  onApplyActivation,
-  onCancelActivation,
-  onCloseActivationConflict,
-  onAdoptFromConflict,
-  onPlanReplace,
-  onApplyReplace,
-  onUndoReplace,
   onOpenLinkImport,
   onImportKindChange,
   onPreviewLinkImport,
@@ -329,17 +271,18 @@ export function LibraryDesk({
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
     layoutModeForWidth(window.innerWidth),
   );
+  const [surface, setSurface] = useState<"library" | "agents">("library");
+  const [agentOverlayOpen, setAgentOverlayOpen] = useState(false);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [activePane, setActivePane] = useState<PaneKey>("library");
   const agentInspectorRef = useRef<HTMLElement | null>(null);
   const pendingDrawerFocus = useRef(false);
   const promotionTrigger = useRef<HTMLButtonElement | null>(null);
-  const lastOverlay = useRef<
-    "activation" | "import" | "preferences" | "appUpdate" | null
-  >(null);
-  const hasActivationOverlay = Boolean(activationPreview || activationConflict);
+  const lastOverlay = useRef<"import" | "preferences" | "appUpdate" | null>(
+    null,
+  );
   const hasOtherOverlay =
-    hasActivationOverlay ||
+    agentOverlayOpen ||
     isLinkImportOpen ||
     relocatePanel.isOpen ||
     removePanel.isOpen ||
@@ -366,7 +309,7 @@ export function LibraryDesk({
     if (!isAgentDrawerModal) return;
     function handleKeyDown(event: KeyboardEvent) {
       if (hasOverlay) return;
-      if (event.key === "Escape" && !isApplyingActivation) {
+      if (event.key === "Escape") {
         event.preventDefault();
         setAgentDrawerOpen(false);
         document.getElementById("agent-drawer-trigger")?.focus();
@@ -408,7 +351,7 @@ export function LibraryDesk({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [hasOverlay, isAgentDrawerModal, isApplyingActivation]);
+  }, [hasOverlay, isAgentDrawerModal]);
 
   useLayoutEffect(() => {
     if (isAgentDrawerModal && pendingDrawerFocus.current) {
@@ -418,25 +361,14 @@ export function LibraryDesk({
   }, [isAgentDrawerModal]);
 
   useLayoutEffect(() => {
-    if (hasActivationOverlay) {
-      lastOverlay.current = "activation";
-    } else if (isLinkImportOpen) {
+    if (isLinkImportOpen) {
       lastOverlay.current = "import";
     } else if (hasAppUpdateOverlay) {
       lastOverlay.current = "appUpdate";
     } else if (isPreferencesOpen) {
       lastOverlay.current = "preferences";
     } else if (lastOverlay.current) {
-      if (lastOverlay.current === "activation" && activationTriggerControlId) {
-        const trigger = document.getElementById(activationTriggerControlId);
-        const fallback = document.getElementById(
-          activationTriggerControlId.replace(
-            "activation-repair-",
-            "activation-",
-          ),
-        );
-        (trigger ?? fallback)?.focus();
-      } else if (lastOverlay.current === "import") {
+      if (lastOverlay.current === "import") {
         const trigger = promotionTrigger.current;
         promotionTrigger.current = null;
         (trigger ?? document.getElementById("link-import-trigger"))?.focus();
@@ -448,13 +380,7 @@ export function LibraryDesk({
       }
       lastOverlay.current = null;
     }
-  }, [
-    activationTriggerControlId,
-    hasActivationOverlay,
-    hasAppUpdateOverlay,
-    isLinkImportOpen,
-    isPreferencesOpen,
-  ]);
+  }, [hasAppUpdateOverlay, isLinkImportOpen, isPreferencesOpen]);
 
   function toggleAgentDrawer() {
     const next = !agentDrawerOpen;
@@ -477,10 +403,19 @@ export function LibraryDesk({
       data-layout-mode={layoutMode}
       data-active-pane={activePane}
     >
-      <a className="skip-link" href="#skill-detail">
+      <a
+        className="skip-link"
+        href={surface === "library" ? "#skill-detail" : "#agent-management"}
+      >
         {t("library.skip_to_detail")}
       </a>
       <Toolbar
+        surface={surface}
+        onSurfaceChange={(next) => {
+          setSurface(next);
+          setAgentDrawerOpen(false);
+          setActivePane("library");
+        }}
         layoutMode={layoutMode}
         agentDrawerOpen={agentDrawerOpen}
         onToggleAgentDrawer={toggleAgentDrawer}
@@ -498,131 +433,96 @@ export function LibraryDesk({
             <span>{error}</span>
           </div>
         ) : null}
-        {lockNotice ? (
-          <div className="global-notice global-notice--locked" role="alert">
-            <strong>{t("library.notice.recovery_locked")}</strong>
-            <span>{lockNotice}</span>
-            <span>{t("library.notice.recovery_locked_body")}</span>
-            <button
-              type="button"
-              className="repair-button"
-              onClick={onRetryRecovery}
-            >
-              {t("library.notice.retry_recovery")}
-            </button>
-          </div>
-        ) : null}
-        <GitSourceCapabilityNotice
-          report={gitSourceCapability}
-          failure={gitSourceCapabilityFailure}
-          onPromote={(remoteId, trigger) => {
-            promotionTrigger.current = trigger;
-            onPreviewSourcePromotion(remoteId);
-          }}
-          onUpdate={(remoteId, trigger) => {
-            promotionTrigger.current = trigger;
-            onPreviewSourceUpdate(remoteId);
-          }}
-        />
-      </div>
-      <div className="app-background" inert={hasOverlay ? true : undefined}>
-        <div className="library-desk">
-          {layoutMode === "narrow" ? (
-            <div
-              className="pane-nav"
-              role="group"
-              aria-label={t("library.pane.label")}
-            >
-              {(["library", "detail", "agents"] as const).map((pane) => (
-                <button
-                  type="button"
-                  key={pane}
-                  aria-pressed={activePane === pane}
-                  onClick={() => setActivePane(pane)}
-                >
-                  {pane === "library"
-                    ? t("library.pane.library")
-                    : pane === "detail"
-                      ? t("library.pane.skill")
-                      : t("library.pane.agents")}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <LibrarySidebar
-            filter={filter}
-            skills={skills}
-            selectedId={selectedId}
-            onFilter={onFilter}
-            onSelect={(skillId) => {
-              if (layoutMode === "narrow") setActivePane("detail");
-              onSelect(skillId);
+        {surface === "library" ? (
+          <GitSourceCapabilityNotice
+            report={gitSourceCapability}
+            failure={gitSourceCapabilityFailure}
+            onPromote={(remoteId, trigger) => {
+              promotionTrigger.current = trigger;
+              onPreviewSourcePromotion(remoteId);
+            }}
+            onUpdate={(remoteId, trigger) => {
+              promotionTrigger.current = trigger;
+              onPreviewSourceUpdate(remoteId);
             }}
           />
-          <SkillDetailPanel
-            detail={detail}
-            error={error}
-            libraryEmpty={libraryEmpty}
-            relocatePanel={relocatePanel}
-            onOpenRelocate={onOpenRelocate}
-            removePanel={removePanel}
-            onOpenRemove={onOpenRemove}
+        ) : null}
+      </div>
+      <div className="app-background" inert={hasOverlay ? true : undefined}>
+        {surface === "agents" ? (
+          <AgentManagement
+            client={client}
+            layoutMode={layoutMode}
+            onOverlayChange={setAgentOverlayOpen}
           />
-          <div
-            className="agent-drawer"
-            data-open={isAgentDrawerModal ? "true" : undefined}
-          >
-            <div
-              className="agent-drawer-backdrop"
-              onMouseDown={(event) => {
-                if (
-                  event.currentTarget === event.target &&
-                  !isApplyingActivation
-                ) {
-                  closeAgentDrawer();
-                }
+        ) : (
+          <div className="library-desk">
+            {layoutMode === "narrow" ? (
+              <div
+                className="pane-nav"
+                role="group"
+                aria-label={t("library.pane.label")}
+              >
+                {(["library", "detail", "agents"] as const).map((pane) => (
+                  <button
+                    type="button"
+                    key={pane}
+                    aria-pressed={activePane === pane}
+                    onClick={() => setActivePane(pane)}
+                  >
+                    {pane === "library"
+                      ? t("library.pane.library")
+                      : pane === "detail"
+                        ? t("library.pane.skill")
+                        : t("library.pane.agents")}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <LibrarySidebar
+              filter={filter}
+              skills={skills}
+              selectedId={selectedId}
+              onFilter={onFilter}
+              onSelect={(skillId) => {
+                if (layoutMode === "narrow") setActivePane("detail");
+                onSelect(skillId);
               }}
             />
-            <AgentInspector
-              ref={agentInspectorRef}
-              dialog={isAgentDrawerModal}
+            <SkillDetailPanel
               detail={detail}
-              agents={agents}
-              error={activationError}
-              pendingAgentId={pendingAgentId}
-              isApplying={isApplyingActivation}
-              isChecking={isCheckingActivations}
-              onRequest={onRequestActivation}
-              onRepair={onRequestActivationRepair}
+              error={error}
+              libraryEmpty={libraryEmpty}
+              relocatePanel={relocatePanel}
+              onOpenRelocate={onOpenRelocate}
+              removePanel={removePanel}
+              onOpenRemove={onOpenRemove}
             />
+            <div
+              className="agent-drawer"
+              data-open={isAgentDrawerModal ? "true" : undefined}
+            >
+              <div
+                className="agent-drawer-backdrop"
+                onMouseDown={(event) => {
+                  if (event.currentTarget === event.target) {
+                    closeAgentDrawer();
+                  }
+                }}
+              />
+              <ActivationTargetPlaceholder
+                ref={agentInspectorRef}
+                dialog={isAgentDrawerModal}
+                detail={detail}
+                onOpenAgentManagement={() => {
+                  setAgentDrawerOpen(false);
+                  setSurface("agents");
+                }}
+              />
+            </div>
           </div>
-        </div>
+        )}
       </div>
-      {activationPreview ? (
-        <ActivationPreviewSheet
-          preview={activationPreview}
-          isApplying={isApplyingActivation}
-          onApply={onApplyActivation}
-          onCancel={onCancelActivation}
-        />
-      ) : null}
-      {activationConflict ? (
-        <ActivationConflictSheet
-          details={activationConflict}
-          message={activationConflictMessage}
-          replacePreview={replacePreview}
-          replaceResult={replaceResult}
-          replaceUndo={replaceUndo}
-          error={replaceError}
-          isApplying={isApplyingReplace}
-          isUndoing={isUndoingReplace}
-          onAdopt={onAdoptFromConflict}
-          onPlanReplace={onPlanReplace}
-          onApplyReplace={onApplyReplace}
-          onUndoReplace={onUndoReplace}
-          onClose={onCloseActivationConflict}
-        />
-      ) : null}
       {relocatePanel.isOpen ? (
         <RelocateSheet
           panel={relocatePanel}
@@ -730,6 +630,8 @@ export function LibraryDesk({
 }
 
 function Toolbar({
+  surface,
+  onSurfaceChange,
   layoutMode,
   agentDrawerOpen,
   onToggleAgentDrawer,
@@ -737,6 +639,8 @@ function Toolbar({
   onAdopt,
   onOpenPreferences,
 }: {
+  surface: "library" | "agents";
+  onSurfaceChange: (surface: "library" | "agents") => void;
   layoutMode: LayoutMode;
   agentDrawerOpen: boolean;
   onToggleAgentDrawer: () => void;
@@ -754,38 +658,67 @@ function Toolbar({
       </div>
       <div className="toolbar-title">
         <strong>{t("library.toolbar.brand")}</strong>
-        <span>{t("library.toolbar.desk")}</span>
+        <span>
+          {surface === "library"
+            ? t("library.toolbar.desk")
+            : t("agents.surface.toolbar_subtitle")}
+        </span>
+      </div>
+      <div
+        className="surface-switch"
+        role="tablist"
+        aria-label={t("surface.switch_label")}
+      >
+        {(["library", "agents"] as const).map((item) => (
+          <button
+            key={item}
+            type="button"
+            role="tab"
+            aria-selected={surface === item}
+            onClick={() => onSurfaceChange(item)}
+          >
+            {t(`surface.${item}`)}
+          </button>
+        ))}
       </div>
       <div
         className="toolbar-actions"
         aria-label={t("library.toolbar.actions_label")}
       >
-        <button type="button" className="toolbar-button" disabled>
-          {t("library.toolbar.health_check")}
-        </button>
-        <button type="button" className="toolbar-button" onClick={onAdopt}>
-          {t("library.toolbar.adopt")}
-        </button>
-        {layoutMode === "mid" ? (
-          <button
-            id="agent-drawer-trigger"
-            type="button"
-            className="toolbar-button"
-            aria-expanded={agentDrawerOpen}
-            aria-controls="agent-inspector-dialog"
-            onClick={onToggleAgentDrawer}
-          >
-            {t("library.toolbar.agents")}
+        {surface === "library" ? (
+          <>
+            <button type="button" className="toolbar-button" disabled>
+              {t("library.toolbar.health_check")}
+            </button>
+            <button type="button" className="toolbar-button" onClick={onAdopt}>
+              {t("library.toolbar.adopt")}
+            </button>
+            {layoutMode === "mid" ? (
+              <button
+                id="agent-drawer-trigger"
+                type="button"
+                className="toolbar-button"
+                aria-expanded={agentDrawerOpen}
+                aria-controls="agent-inspector-dialog"
+                onClick={onToggleAgentDrawer}
+              >
+                {t("library.toolbar.agents")}
+              </button>
+            ) : null}
+            <button
+              id="link-import-trigger"
+              type="button"
+              className="primary-button"
+              onClick={onImport}
+            >
+              {t("library.toolbar.import")}
+            </button>
+          </>
+        ) : (
+          <button type="button" className="toolbar-button" disabled>
+            {t("agents.surface.rescan")}
           </button>
-        ) : null}
-        <button
-          id="link-import-trigger"
-          type="button"
-          className="primary-button"
-          onClick={onImport}
-        >
-          {t("library.toolbar.import")}
-        </button>
+        )}
         <button
           id="preferences-trigger"
           type="button"
@@ -993,28 +926,16 @@ function SkillDetailPanel({
   );
 }
 
-function AgentInspector({
+function ActivationTargetPlaceholder({
   ref,
   dialog,
   detail,
-  agents,
-  error,
-  pendingAgentId,
-  isApplying,
-  isChecking,
-  onRequest,
-  onRepair,
+  onOpenAgentManagement,
 }: {
   ref: Ref<HTMLElement | null>;
   dialog: boolean;
   detail: SkillDetail | null;
-  agents: AgentActivation[];
-  error: string | null;
-  pendingAgentId: string | null;
-  isApplying: boolean;
-  isChecking: boolean;
-  onRequest: (agentId: string, enabled: boolean) => void;
-  onRepair: (agentId: string) => void;
+  onOpenAgentManagement: () => void;
 }) {
   const { t } = useLocale();
   return (
@@ -1022,7 +943,7 @@ function AgentInspector({
       ref={ref}
       id={dialog ? "agent-inspector-dialog" : undefined}
       className="agent-inspector"
-      aria-label={t("library.activation.enable_by_agent")}
+      aria-label={t("library.activation.target_groups")}
       role={dialog ? "dialog" : undefined}
       aria-modal={dialog ? true : undefined}
       // Constant tabindex keeps the focused element stable across breakpoint
@@ -1032,96 +953,29 @@ function AgentInspector({
       <div className="panel-heading inspector-heading">
         <div>
           <span className="eyebrow">{t("library.activation.eyebrow")}</span>
-          <h2>{t("library.activation.enable_by_agent")}</h2>
+          <h2>{t("library.activation.target_groups")}</h2>
         </div>
       </div>
-      <p className="inspector-intro">{t("library.activation.intro")}</p>
-      {error ? (
-        <div className="activation-error" role="alert">
-          <strong>{t("library.activation.unchanged")}</strong>
-          <span>{error}</span>
-        </div>
-      ) : null}
-      <div className="agent-list">
-        {detail && isChecking ? (
-          <div className="activation-checking" role="status">
-            {t("library.activation.checking")}
-          </div>
-        ) : detail ? (
-          agents.map((agent) => {
-            const isPending = pendingAgentId === agent.id;
-            return (
-              <div
-                className={`agent-row${isPending || isApplying ? " agent-row--busy" : ""}`}
-                key={agent.id}
-              >
-                <div className="agent-row-top">
-                  <span className="agent-monogram" aria-hidden="true">
-                    {agent.name.slice(0, 1)}
-                  </span>
-                  <span className="agent-copy">
-                    <strong>{agent.name}</strong>
-                    <small>{agent.skillsPath}</small>
-                  </span>
-                  <label
-                    className={`switch-control${agent.detected ? " switch-control--interactive" : ""}`}
-                  >
-                    <input
-                      id={activationControlId(detail.id, agent.id)}
-                      type="checkbox"
-                      role="switch"
-                      aria-label={t("library.activation.enable_label", {
-                        skill: detail.directoryName,
-                        agent: agent.name,
-                      })}
-                      checked={agent.desiredEnabled}
-                      disabled={!agent.detected || isPending || isApplying}
-                      onChange={(event) =>
-                        onRequest(agent.id, event.currentTarget.checked)
-                      }
-                    />
-                    <span aria-hidden="true" />
-                  </label>
-                </div>
-                <div className="agent-status">
-                  <span
-                    className={`agent-state agent-state--${activationTone(agent)}`}
-                  >
-                    {isPending
-                      ? t("library.activation.preparing")
-                      : activationLabel(agent, t)}
-                  </span>
-                  {agent.compatibility === "unknown" ? (
-                    <span className="compatibility-note">
-                      {t("library.activation.compat_unknown")}
-                    </span>
-                  ) : null}
-                  {agent.detected &&
-                  agent.desiredEnabled &&
-                  (agent.observedState === "missing" ||
-                    agent.observedState === "occupied") ? (
-                    <button
-                      id={activationRepairControlId(detail.id, agent.id)}
-                      type="button"
-                      className="repair-button"
-                      disabled={isPending || isApplying}
-                      onClick={() => onRepair(agent.id)}
-                    >
-                      {agent.observedState === "occupied"
-                        ? t("library.activation.conflict")
-                        : t("library.activation.repair")}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })
-        ) : (
-          <div className="inspector-empty">
-            <span>{t("library.activation.no_selection")}</span>
-            <small>{t("library.activation.no_selection_body")}</small>
-          </div>
-        )}
+      <p className="inspector-intro">
+        {detail
+          ? t("library.activation.target_groups_body")
+          : t("library.activation.no_selection_body")}
+      </p>
+      <div className="activation-target-placeholder">
+        <span aria-hidden="true" />
+        <strong>
+          {detail
+            ? t("library.activation.target_groups_empty")
+            : t("library.activation.no_selection")}
+        </strong>
+        <small>{t("library.activation.target_groups_hint")}</small>
+        <button
+          type="button"
+          className="toolbar-button"
+          onClick={onOpenAgentManagement}
+        >
+          {t("surface.agents")}
+        </button>
       </div>
       <div className="inspector-footnote">
         <LockIcon />
@@ -1359,16 +1213,13 @@ function LinkImportSheet({
               <button type="button" disabled={isApplying} onClick={onClose}>
                 {t("library.import.close")}
               </button>
-              <button type="button" onClick={onOpenImportedSkill}>
-                {t("library.import.view_in_library")}
-              </button>
               <button
                 ref={primaryButton}
                 type="button"
                 className="activation-confirm-button"
                 onClick={onOpenImportedSkill}
               >
-                {t("library.import.enable_by_agent")}
+                {t("library.import.view_in_library")}
               </button>
             </div>
           </>
@@ -1517,452 +1368,6 @@ function SourceKindSwitch({
       </button>
     </div>
   );
-}
-
-function ActivationPreviewSheet({
-  preview,
-  isApplying,
-  onApply,
-  onCancel,
-}: {
-  preview: ActivationPreview;
-  isApplying: boolean;
-  onApply: () => void;
-  onCancel: () => void;
-}) {
-  const { t } = useLocale();
-  const action = t(`library.activation.kind.${preview.kind}` as MessageKey);
-  const cancelButton = useRef<HTMLButtonElement>(null);
-  const confirmButton = useRef<HTMLButtonElement>(null);
-
-  useLayoutEffect(() => {
-    confirmButton.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isApplying) onCancel();
-      if (
-        event.key === "Tab" &&
-        !event.shiftKey &&
-        document.activeElement === confirmButton.current
-      ) {
-        event.preventDefault();
-        cancelButton.current?.focus();
-      } else if (
-        event.key === "Tab" &&
-        event.shiftKey &&
-        document.activeElement === cancelButton.current
-      ) {
-        event.preventDefault();
-        confirmButton.current?.focus();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isApplying, onCancel]);
-
-  return (
-    <div
-      className="activation-sheet-backdrop"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target && !isApplying) onCancel();
-      }}
-    >
-      <section
-        className="activation-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("library.activation_preview.dialog", { action })}
-      >
-        <div className="activation-sheet-heading">
-          <span className="eyebrow">
-            {t("library.activation_preview.eyebrow")}
-          </span>
-          <h2>
-            {action} {preview.skillDirectoryName}
-          </h2>
-          <p>
-            {preview.kind === "repair"
-              ? t("library.activation_preview.recreate", {
-                  agent: preview.agentName,
-                })
-              : t(
-                  preview.enabled
-                    ? "library.activation_preview.create"
-                    : "library.activation_preview.remove",
-                  { agent: preview.agentName },
-                )}
-          </p>
-        </div>
-        <dl className="activation-paths">
-          <div>
-            <dt>{t("library.activation_preview.agent_entry")}</dt>
-            <dd>{preview.entryPath}</dd>
-          </div>
-          <div>
-            <dt>{t("library.activation_preview.final_entity")}</dt>
-            <dd>{preview.targetPath}</dd>
-          </div>
-        </dl>
-        {preview.compatibilityWarning ? (
-          <div className="activation-warning" role="status">
-            <strong>{t("library.activation_preview.compat_confirm")}</strong>
-            <span>
-              {compatibilityWarningText(t, preview.compatibilityWarning)}
-            </span>
-          </div>
-        ) : null}
-        <div className="activation-sheet-actions">
-          <button
-            ref={cancelButton}
-            type="button"
-            disabled={isApplying}
-            onClick={onCancel}
-          >
-            {t("library.activation_preview.cancel")}
-          </button>
-          <button
-            ref={confirmButton}
-            type="button"
-            className="activation-confirm-button"
-            disabled={isApplying}
-            onClick={onApply}
-          >
-            {isApplying
-              ? t("library.activation_preview.applying")
-              : t("library.activation_preview.apply", {
-                  action,
-                  agent: preview.agentName,
-                })}
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ActivationConflictSheet({
-  details,
-  message,
-  replacePreview,
-  replaceResult,
-  replaceUndo,
-  error,
-  isApplying,
-  isUndoing,
-  onAdopt,
-  onPlanReplace,
-  onApplyReplace,
-  onUndoReplace,
-  onClose,
-}: {
-  details: ActivationConflictDetails;
-  message: string | null;
-  replacePreview: ActivationReplacePreview | null;
-  replaceResult: ActivationResult | null;
-  replaceUndo: ActivationReplaceUndoResult | null;
-  error: string | null;
-  isApplying: boolean;
-  isUndoing: boolean;
-  onAdopt: (canonicalEntity: string) => void;
-  onPlanReplace: () => void;
-  onApplyReplace: () => void;
-  onUndoReplace: () => void;
-  onClose: () => void;
-}) {
-  const { t } = useLocale();
-  const isBusy = isApplying || isUndoing;
-  const sheet = useRef<HTMLElement>(null);
-  const replaceButton = useRef<HTMLButtonElement>(null);
-  const closeButton = useRef<HTMLButtonElement>(null);
-  const step = replaceResult
-    ? "result"
-    : replacePreview
-      ? "preview"
-      : "conflict";
-  const occupier = details.occupier;
-
-  useLayoutEffect(() => {
-    if (step === "preview") {
-      replaceButton.current?.focus();
-    } else if (step === "result" && !replaceUndo) {
-      replaceButton.current?.focus();
-    } else {
-      closeButton.current?.focus();
-    }
-  }, [step, replaceUndo]);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isBusy) onClose();
-      if (event.key === "Tab") {
-        const buttons = Array.from(
-          sheet.current?.querySelectorAll("button") ?? [],
-        );
-        if (buttons.length === 0) return;
-        const first = buttons[0];
-        const last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          (last as HTMLButtonElement).focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          (first as HTMLButtonElement).focus();
-        }
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, onClose]);
-
-  return (
-    <div
-      className="activation-sheet-backdrop"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target && !isBusy) onClose();
-      }}
-    >
-      <section
-        ref={sheet}
-        className="activation-sheet activation-conflict-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("library.conflict.dialog")}
-      >
-        {step === "conflict" ? (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">{t("library.conflict.eyebrow")}</span>
-              <h2>{t("library.conflict.title")}</h2>
-              <p>{t("library.conflict.body")}</p>
-            </div>
-            {message ? (
-              <p className="activation-conflict-detail">{message}</p>
-            ) : null}
-            <dl className="activation-paths">
-              <div>
-                <dt>{t("library.conflict.agent_entry")}</dt>
-                <dd>{details.entryPath}</dd>
-              </div>
-              <div>
-                <dt>{t("library.conflict.would_point_to")}</dt>
-                <dd>{details.targetPath}</dd>
-              </div>
-            </dl>
-            <div className="conflict-occupier">
-              <strong>{occupierHeading(occupier, t)}</strong>
-              <span>{occupierDescription(occupier, t)}</span>
-              {occupier.adoptable ? null : occupier.notAdoptableReason ? (
-                <small className="candidate-conflict" role="status">
-                  {occupierNotAdoptableReasonText(
-                    t,
-                    occupier.notAdoptableReason,
-                  )}
-                </small>
-              ) : null}
-            </div>
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t("library.conflict.replace_unchanged")}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              <button
-                ref={closeButton}
-                type="button"
-                disabled={isBusy}
-                onClick={onClose}
-              >
-                {t("library.conflict.cancel")}
-              </button>
-              <button
-                type="button"
-                disabled={!occupier.adoptable || !occupier.finalEntityPath}
-                onClick={() =>
-                  occupier.finalEntityPath
-                    ? onAdopt(occupier.finalEntityPath)
-                    : undefined
-                }
-              >
-                {t("library.conflict.adopt_existing")}
-              </button>
-              <button
-                ref={replaceButton}
-                type="button"
-                className="activation-confirm-button"
-                disabled={isBusy}
-                onClick={onPlanReplace}
-              >
-                {t("library.conflict.remove_then_replace")}
-              </button>
-            </div>
-          </>
-        ) : step === "preview" && replacePreview ? (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">
-                {t("library.conflict.preview_eyebrow")}
-              </span>
-              <h2>
-                {t("library.conflict.preview_title", {
-                  name: replacePreview.skillDirectoryName,
-                })}
-              </h2>
-              <p>
-                {t("library.conflict.preview_body", {
-                  agent: replacePreview.agentName,
-                })}
-              </p>
-            </div>
-            <dl className="activation-paths">
-              <div>
-                <dt>{t("library.activation_preview.agent_entry")}</dt>
-                <dd>{replacePreview.entryPath}</dd>
-              </div>
-              <div>
-                <dt>{t("library.activation_preview.final_entity")}</dt>
-                <dd>{replacePreview.targetPath}</dd>
-              </div>
-              <div>
-                <dt>{t("library.conflict.temp_backup")}</dt>
-                <dd>{replacePreview.backupPath}</dd>
-              </div>
-            </dl>
-            <div className="activation-warning" role="status">
-              <strong>{t("library.conflict.confirm_heading")}</strong>
-              <span>
-                {t("library.conflict.confirm_body", {
-                  kind: occupierKindLabel(replacePreview.occupantKind, t),
-                })}
-              </span>
-            </div>
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t("library.conflict.replace_unchanged")}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              <button
-                ref={closeButton}
-                type="button"
-                disabled={isBusy}
-                onClick={onClose}
-              >
-                {t("library.conflict.cancel")}
-              </button>
-              <button
-                ref={replaceButton}
-                type="button"
-                className="activation-confirm-button"
-                disabled={isBusy}
-                onClick={onApplyReplace}
-              >
-                {isApplying
-                  ? t("library.conflict.replacing")
-                  : t("library.conflict.replace_button")}
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="activation-sheet-heading">
-              <span className="eyebrow">
-                {t("library.conflict.result_eyebrow")}
-              </span>
-              <h2>{t("library.conflict.result_title")}</h2>
-              <p>{t("library.conflict.result_body")}</p>
-            </div>
-            {replaceUndo ? (
-              <div
-                className={
-                  replaceUndo.undone ? "update-result-ok" : "update-result-fail"
-                }
-                role="status"
-              >
-                {replaceUndo.undone
-                  ? t("library.conflict.undo_restored")
-                  : t("library.conflict.undo_failed", {
-                      detail:
-                        replaceUndo.error ?? t("library.conflict.undo_unknown"),
-                    })}
-              </div>
-            ) : null}
-            {error ? (
-              <div className="activation-error" role="alert">
-                <strong>{t("library.conflict.replace_unchanged")}</strong>
-                <span>{error}</span>
-              </div>
-            ) : null}
-            <div className="activation-sheet-actions">
-              <button
-                ref={closeButton}
-                type="button"
-                disabled={isBusy}
-                onClick={onClose}
-              >
-                {t("library.conflict.close")}
-              </button>
-              {!replaceUndo ? (
-                <button
-                  ref={replaceButton}
-                  type="button"
-                  className="activation-confirm-button"
-                  disabled={isBusy}
-                  onClick={onUndoReplace}
-                >
-                  {isUndoing
-                    ? t("library.conflict.restoring")
-                    : t("library.conflict.restore_button")}
-                </button>
-              ) : null}
-            </div>
-          </>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function occupierHeading(
-  occupier: OccupierSummary,
-  t: LocaleContextValue["t"],
-) {
-  if (occupier.isSkill) {
-    return t("library.conflict.occupier_skill", {
-      name: occupier.directoryName,
-    });
-  }
-  return t("library.conflict.occupier_kind", {
-    name: occupier.directoryName,
-    kind: occupierKindLabel(occupier.kind, t),
-  });
-}
-
-function occupierDescription(
-  occupier: OccupierSummary,
-  t: LocaleContextValue["t"],
-) {
-  if (occupier.finalEntityPath) {
-    return t("library.conflict.resolves_to", {
-      path: occupier.finalEntityPath,
-    });
-  }
-  if (occupier.symlinkTarget) {
-    return t("library.conflict.symlink_to", {
-      path: occupier.symlinkTarget,
-    });
-  }
-  return t("library.conflict.entry_content");
-}
-
-function occupierKindLabel(kind: OccupierKind, t: LocaleContextValue["t"]) {
-  if (kind === "real_directory")
-    return t("library.conflict.kind.real_directory");
-  if (kind === "symlink") return t("library.conflict.kind.symlink");
-  return t("library.conflict.kind.file");
 }
 
 // -- First-run onboarding (spec §8.7) ---------------------------------------
@@ -2918,43 +2323,6 @@ function sourceDetailLabel(
     : t("library.source.file");
 }
 
-function compatibilityWarningText(
-  t: LocaleContextValue["t"],
-  warning: CompatibilityWarning,
-): string {
-  switch (warning.kind) {
-    case "custom_unknown":
-      return t("library.activation_preview.compat_custom");
-    case "frontmatter_mismatch":
-      return t("library.activation_preview.compat_mismatch", {
-        name: warning.frontmatterName,
-        directory: warning.directoryName,
-      });
-  }
-}
-
-function occupierNotAdoptableReasonText(
-  t: LocaleContextValue["t"],
-  reason: OccupierNotAdoptableReason,
-): string {
-  switch (reason.kind) {
-    case "regular_file":
-      return t("library.conflict.reason.regular_file");
-    case "points_at_managed_skill":
-      return t("library.conflict.reason.points_at_managed");
-    case "points_at_this_skill":
-      return t("library.conflict.reason.points_at_this");
-    case "no_readable_skill_md":
-      return t("library.conflict.reason.no_skill_md");
-    case "target_unresolvable":
-      return t("library.conflict.reason.unresolvable");
-    case "identity_conflict":
-      return t("library.conflict.reason.identity_conflict", {
-        name: reason.directoryName,
-      });
-  }
-}
-
 function preferencesWarningText(
   t: LocaleContextValue["t"],
   warning: PreferencesWarning,
@@ -2969,29 +2337,4 @@ function preferencesWarningText(
         ? `${t("library.preferences.warning.launch_at_login")} ${warning.detail}`
         : t("library.preferences.warning.launch_at_login");
   }
-}
-
-function activationTone(agent: AgentActivation) {
-  if (!agent.desiredEnabled) return "neutral";
-  return agent.observedState === "present" ? "healthy" : "warning";
-}
-
-function activationControlId(skillId: string, agentId: string) {
-  return `activation-${skillId}-${agentId}`;
-}
-
-function activationRepairControlId(skillId: string, agentId: string) {
-  return `activation-repair-${skillId}-${agentId}`;
-}
-
-function activationLabel(agent: AgentActivation, t: LocaleContextValue["t"]) {
-  if (!agent.desiredEnabled) return t("library.activation.state.disabled");
-  if (agent.observedState === "present") {
-    return t("library.activation.state.enabled_present");
-  }
-  return t("library.activation.state.enabled", {
-    state: t(
-      `library.activation.observed.${agent.observedState}` as MessageKey,
-    ),
-  });
 }

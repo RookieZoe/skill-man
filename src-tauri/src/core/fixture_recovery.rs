@@ -310,14 +310,17 @@ pub fn classify_fixture(
         ],
         FixtureShapeMode::Bound => vec![
             "activations",
-            "agents",
+            "agent_configurations",
+            "agent_global_roots",
             "catalog_meta",
+            "global_skill_roots",
             "file_sources",
             "git_repository_sources",
             "git_source_releases",
             "git_source_release_members",
             "git_source_members",
             "preferences",
+            "recent_project_folders",
             "remote_bindings",
             "remote_source_aliases",
             "remote_source_parents",
@@ -370,11 +373,11 @@ pub fn classify_fixture(
         }
     }
 
-    let expected_agents = expected_agent_rows();
+    let expected_agents = expected_agent_rows(home_root, mode);
     for expected in &expected_agents {
         match db.agents.iter().find(|row| row.id == expected.id) {
             None => reasons.push(format!("missing_agent_row:{}", expected.id)),
-            Some(row) if row != expected => {
+            Some(row) if !agent_facts_match(row, expected, mode) => {
                 reasons.push(format!("agent_row_modified:{}", expected.id));
             }
             Some(_) => {}
@@ -499,13 +502,49 @@ fn expected_skill_rows(home_root: &Path) -> Vec<FixtureSkillRowEvidence> {
 }
 
 /// The exact fixture `agents` tuples.
-fn expected_agent_rows() -> Vec<FixtureAgentRowEvidence> {
-    let preset = |id: &str, name: &str, kind: &str, skills_path: &str| FixtureAgentRowEvidence {
+/// Bound-mode fingerprint fact comparison: the configured path spellings are
+/// environment-verified at migration time (HOME expansion) and are not
+/// re-derivable by the classifier from the Home root alone, so the exact
+/// fingerprint compares the stable identity facts (id/name/kind/detected/
+/// compatibility) instead of literal path tuples. Legacy mode keeps the
+/// historical exact-tuple comparison.
+fn agent_facts_match(
+    row: &FixtureAgentRowEvidence,
+    expected: &FixtureAgentRowEvidence,
+    mode: FixtureShapeMode,
+) -> bool {
+    if mode == FixtureShapeMode::Legacy {
+        return row == expected;
+    }
+    row.id == expected.id
+        && row.name == expected.name
+        && row.kind == expected.kind
+        && row.detected == expected.detected
+        && row.compatibility == expected.compatibility
+}
+
+fn expected_agent_rows(home_root: &Path, mode: FixtureShapeMode) -> Vec<FixtureAgentRowEvidence> {
+    // The Legacy footprint keeps the historical literal `~` spellings; the
+    // Bound footprint was migrated in place, so its configured paths are the
+    // expanded Home-rooted spellings (spec §3.4 v8).
+    // Closures differ per mode but are only ever used as callable helpers.
+    #[allow(clippy::type_complexity)]
+    let (agent_root, identity_key): (&dyn Fn(&str) -> String, &dyn Fn(&str) -> String) = match mode
+    {
+        FixtureShapeMode::Bound => (
+            &|suffix: &str| home_root.join(suffix).to_string_lossy().into_owned(),
+            &|path: &str| crate::core::domain::configured_path_identity_key(path),
+        ),
+        FixtureShapeMode::Legacy => (&|suffix: &str| format!("~/{suffix}"), &|path: &str| {
+            path.to_lowercase()
+        }),
+    };
+    let preset = |id: &str, name: &str, kind: &str, skills_path: String| FixtureAgentRowEvidence {
         id: id.into(),
         name: name.into(),
         kind: kind.into(),
-        skills_path: skills_path.into(),
-        path_identity_key: skills_path.to_lowercase(),
+        path_identity_key: identity_key(&skills_path.clone()),
+        skills_path: skills_path.clone(),
         detected: true,
         compatibility: "verified".into(),
         created_at: "1970-01-01T00:00:00Z".into(),
@@ -516,15 +555,22 @@ fn expected_agent_rows() -> Vec<FixtureAgentRowEvidence> {
             "claude-code",
             "Claude Code",
             "claude_preset",
-            "~/.claude/skills",
+            agent_root(".claude/skills"),
         ),
-        preset("codex", "Codex", "codex_preset", "~/.codex/skills"),
+        preset(
+            "codex",
+            "Codex",
+            "codex_preset",
+            agent_root(".codex/skills"),
+        ),
         FixtureAgentRowEvidence {
             id: "workbench".into(),
             name: "Workbench".into(),
             kind: "custom".into(),
-            skills_path: "~/Library/Application Support/workbench/skills".into(),
-            path_identity_key: "~/library/application support/workbench/skills".into(),
+            skills_path: agent_root("Library/Application Support/workbench/skills"),
+            path_identity_key: identity_key(&agent_root(
+                "Library/Application Support/workbench/skills",
+            )),
             detected: true,
             compatibility: "unknown".into(),
             created_at: "1970-01-01T00:00:00Z".into(),
@@ -2186,21 +2232,47 @@ mod tests {
             schema_version: crate::seams::catalog_probe::CURRENT_CATALOG_SCHEMA_VERSION,
             first_run_completed_at: None,
         });
+        // In-place migration expanded the `~` Agent roots onto the Home
+        // (spec §3.4 v8), so the Bound fingerprint compares expanded paths.
+        let expanded_root = |suffix: &str| {
+            crate::core::domain::configured_path_identity_key(
+                &home_root().join(suffix).to_string_lossy(),
+            )
+        };
         db.tables = vec![
             "activations".into(),
-            "agents".into(),
+            "agent_configurations".into(),
+            "agent_global_roots".into(),
             "catalog_meta".into(),
             "file_sources".into(),
+            "global_skill_roots".into(),
             "git_repository_sources".into(),
             "git_source_releases".into(),
             "git_source_release_members".into(),
             "git_source_members".into(),
             "preferences".into(),
+            "recent_project_folders".into(),
             "remote_bindings".into(),
             "remote_source_aliases".into(),
             "remote_source_parents".into(),
             "skills".into(),
         ];
+        db.agents[0].skills_path = home_root()
+            .join(".claude/skills")
+            .to_string_lossy()
+            .into_owned();
+        db.agents[0].path_identity_key = expanded_root(".claude/skills");
+        db.agents[1].skills_path = home_root()
+            .join(".codex/skills")
+            .to_string_lossy()
+            .into_owned();
+        db.agents[1].path_identity_key = expanded_root(".codex/skills");
+        db.agents[2].skills_path = home_root()
+            .join("Library/Application Support/workbench/skills")
+            .to_string_lossy()
+            .into_owned();
+        db.agents[2].path_identity_key =
+            expanded_root("Library/Application Support/workbench/skills");
         assert_eq!(
             classify_fixture(&db, &fixture_tree(), home_root(), FixtureShapeMode::Bound),
             FixtureClassification::Pure

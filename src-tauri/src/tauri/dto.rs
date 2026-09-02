@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::activation::{
-    ActivationConflictDetails, ActivationPlanKind, ActivationPreview, ActivationReplacePreview,
-    ActivationReplaceUndoResult, ActivationResult, OccupierKind, OccupierSummary,
+use crate::core::agent_configuration::{
+    AgentConfiguration, AgentConfigurationApplyResult, AgentConfigurationDraft,
+    AgentConfigurationOrigin, AgentConfigurationPlan, AgentConfigurationPlanKind,
+    AgentManagementSnapshot, AgentPreset, AgentRootDraft, AgentRootRole,
 };
 use crate::core::app_update::{
     AppUpdateCheck, AppUpdateOffer, CancelledAppUpdate, DownloadedAppUpdate,
 };
 use crate::core::domain::{
-    ActivationObservedState, AgentActivation, AgentKind, CatalogFilter, Compatibility, Health,
-    SkillDetail, SkillSummary, SourceKind,
+    AgentKind, CatalogFilter, Compatibility, Health, SkillDetail, SkillSummary, SourceKind,
 };
 use crate::core::git_source_capability::{
     GitSourceCapabilityKind, GitSourceCapabilityReport, GitSourceCapabilitySource,
@@ -781,6 +781,277 @@ impl From<SkillDetail> for SkillDetailDto {
     }
 }
 
+// -- Agent Configuration Core (spec §3.4, §4.7; ADR-0016) --
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentConfigurationOriginDto {
+    Preset,
+    Custom,
+}
+
+impl From<AgentConfigurationOrigin> for AgentConfigurationOriginDto {
+    fn from(value: AgentConfigurationOrigin) -> Self {
+        match value {
+            AgentConfigurationOrigin::Preset => Self::Preset,
+            AgentConfigurationOrigin::Custom => Self::Custom,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRootRoleDto {
+    ScanOnly,
+    ActivationTarget,
+}
+
+impl From<AgentRootRole> for AgentRootRoleDto {
+    fn from(value: AgentRootRole) -> Self {
+        match value {
+            AgentRootRole::ScanOnly => Self::ScanOnly,
+            AgentRootRole::ActivationTarget => Self::ActivationTarget,
+        }
+    }
+}
+
+impl From<AgentRootRoleDto> for AgentRootRole {
+    fn from(value: AgentRootRoleDto) -> Self {
+        match value {
+            AgentRootRoleDto::ScanOnly => Self::ScanOnly,
+            AgentRootRoleDto::ActivationTarget => Self::ActivationTarget,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRootDraftDto {
+    pub configured_path: String,
+    pub role: AgentRootRoleDto,
+}
+
+impl From<AgentRootDraftDto> for AgentRootDraft {
+    fn from(value: AgentRootDraftDto) -> Self {
+        Self {
+            configured_path: value.configured_path.into(),
+            role: value.role.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAgentConfigurationRequestDto {
+    pub preset_key: Option<String>,
+    pub name: String,
+    pub roots: Vec<AgentRootDraftDto>,
+    pub project_skills_dir: Option<String>,
+}
+
+impl From<CreateAgentConfigurationRequestDto> for AgentConfigurationDraft {
+    fn from(value: CreateAgentConfigurationRequestDto) -> Self {
+        Self {
+            preset_key: value.preset_key,
+            name: value.name,
+            roots: value.roots.into_iter().map(Into::into).collect(),
+            project_skills_dir: value.project_skills_dir.map(Into::into),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditAgentConfigurationRequestDto {
+    pub agent_id: String,
+    pub preset_key: Option<String>,
+    pub name: String,
+    pub roots: Vec<AgentRootDraftDto>,
+    pub project_skills_dir: Option<String>,
+}
+
+impl EditAgentConfigurationRequestDto {
+    pub fn into_parts(self) -> (String, AgentConfigurationDraft) {
+        (
+            self.agent_id,
+            AgentConfigurationDraft {
+                preset_key: self.preset_key,
+                name: self.name,
+                roots: self.roots.into_iter().map(Into::into).collect(),
+                project_skills_dir: self.project_skills_dir.map(Into::into),
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAgentConfigurationRequestDto {
+    pub agent_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAgentConfigurationPlanRequestDto {
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigurationRootDto {
+    pub root_id: String,
+    pub configured_path: String,
+    pub path_identity_key: String,
+    pub role: AgentRootRoleDto,
+    pub consumer_agent_ids: Vec<String>,
+    pub activation_skill_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigurationDto {
+    pub agent_id: String,
+    pub origin: AgentConfigurationOriginDto,
+    pub preset_key: Option<String>,
+    pub name: String,
+    pub compatibility: CompatibilityDto,
+    pub project_skills_dir: Option<String>,
+    pub roots: Vec<AgentConfigurationRootDto>,
+}
+
+impl From<AgentConfiguration> for AgentConfigurationDto {
+    fn from(value: AgentConfiguration) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            origin: value.origin.into(),
+            preset_key: value.preset_key,
+            name: value.name,
+            compatibility: value.compatibility.into(),
+            project_skills_dir: value
+                .project_skills_dir
+                .map(|path| path.to_string_lossy().into_owned()),
+            roots: value
+                .roots
+                .into_iter()
+                .map(|root| AgentConfigurationRootDto {
+                    root_id: root.root_id,
+                    configured_path: root.configured_path.to_string_lossy().into_owned(),
+                    path_identity_key: root.path_identity_key,
+                    role: root.role.into(),
+                    consumer_agent_ids: root.consumer_agent_ids,
+                    activation_skill_ids: root.activation_skill_ids,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPresetDto {
+    pub preset_key: String,
+    pub name: String,
+    pub compatibility: CompatibilityDto,
+    pub roots: Vec<String>,
+    pub activation_target: String,
+    pub project_skills_dir: String,
+}
+
+impl From<AgentPreset> for AgentPresetDto {
+    fn from(value: AgentPreset) -> Self {
+        Self {
+            preset_key: value.preset_key,
+            name: value.name,
+            compatibility: value.compatibility.into(),
+            roots: value
+                .roots
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            activation_target: value.activation_target.to_string_lossy().into_owned(),
+            project_skills_dir: value.project_skills_dir.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentManagementSnapshotDto {
+    pub generation: u64,
+    pub configurations: Vec<AgentConfigurationDto>,
+    pub presets: Vec<AgentPresetDto>,
+}
+
+impl From<AgentManagementSnapshot> for AgentManagementSnapshotDto {
+    fn from(value: AgentManagementSnapshot) -> Self {
+        Self {
+            generation: value.generation,
+            configurations: value.configurations.into_iter().map(Into::into).collect(),
+            presets: value.presets.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentConfigurationPlanKindDto {
+    Create,
+    Edit,
+    Delete,
+}
+
+impl From<AgentConfigurationPlanKind> for AgentConfigurationPlanKindDto {
+    fn from(value: AgentConfigurationPlanKind) -> Self {
+        match value {
+            AgentConfigurationPlanKind::Create => Self::Create,
+            AgentConfigurationPlanKind::Edit => Self::Edit,
+            AgentConfigurationPlanKind::Delete => Self::Delete,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigurationPlanDto {
+    pub plan_token: String,
+    pub kind: AgentConfigurationPlanKindDto,
+    pub configuration: Option<AgentConfigurationDto>,
+    pub target_will_be_created: bool,
+    pub blocking_activation_skill_ids: Vec<String>,
+    pub retained_activation_count: usize,
+}
+
+impl From<AgentConfigurationPlan> for AgentConfigurationPlanDto {
+    fn from(value: AgentConfigurationPlan) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            kind: value.kind.into(),
+            configuration: value.configuration.map(Into::into),
+            target_will_be_created: value.target_will_be_created,
+            blocking_activation_skill_ids: value.blocking_activation_skill_ids,
+            retained_activation_count: value.retained_activation_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigurationApplyResultDto {
+    pub agent_id: String,
+    pub generation: u64,
+    pub deleted: bool,
+}
+
+impl From<AgentConfigurationApplyResult> for AgentConfigurationApplyResultDto {
+    fn from(value: AgentConfigurationApplyResult) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            generation: value.generation,
+            deleted: value.deleted,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKindDto {
@@ -811,162 +1082,6 @@ impl From<Compatibility> for CompatibilityDto {
         match value {
             Compatibility::Verified => Self::Verified,
             Compatibility::Unknown => Self::Unknown,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivationObservedStateDto {
-    Present,
-    Missing,
-    TargetMismatch,
-    Dangling,
-    Occupied,
-}
-
-impl From<ActivationObservedState> for ActivationObservedStateDto {
-    fn from(value: ActivationObservedState) -> Self {
-        match value {
-            ActivationObservedState::Present => Self::Present,
-            ActivationObservedState::Missing => Self::Missing,
-            ActivationObservedState::TargetMismatch => Self::TargetMismatch,
-            ActivationObservedState::Dangling => Self::Dangling,
-            ActivationObservedState::Occupied => Self::Occupied,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentActivationDto {
-    pub id: String,
-    pub name: String,
-    pub kind: AgentKindDto,
-    pub skills_path: String,
-    pub detected: bool,
-    pub compatibility: CompatibilityDto,
-    pub desired_enabled: bool,
-    pub observed_state: ActivationObservedStateDto,
-}
-
-impl From<AgentActivation> for AgentActivationDto {
-    fn from(value: AgentActivation) -> Self {
-        Self {
-            id: value.id.0,
-            name: value.name,
-            kind: value.kind.into(),
-            skills_path: value.skills_path,
-            detected: value.detected,
-            compatibility: value.compatibility.into(),
-            desired_enabled: value.desired_enabled,
-            observed_state: value.observed_state.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanActivationRequestDto {
-    pub skill_id: String,
-    pub agent_id: String,
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanActivationRepairRequestDto {
-    pub skill_id: String,
-    pub agent_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApplyActivationRequestDto {
-    pub plan_token: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CancelActivationRequestDto {
-    pub plan_token: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationPreviewDto {
-    pub plan_token: String,
-    pub skill_id: String,
-    pub agent_id: String,
-    pub skill_directory_name: String,
-    pub agent_name: String,
-    pub enabled: bool,
-    pub kind: ActivationPlanKindDto,
-    pub entry_path: String,
-    pub target_path: String,
-    pub compatibility_warning: Option<CompatibilityWarningDto>,
-}
-
-/// Closed compatibility warnings (spec §4.7): presentation composes copy
-/// from the typed variant, never from a free string.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CompatibilityWarningDto {
-    CustomUnknown,
-    FrontmatterMismatch {
-        #[serde(rename = "frontmatterName")]
-        frontmatter_name: String,
-        #[serde(rename = "directoryName")]
-        directory_name: String,
-    },
-}
-
-impl From<crate::seams::agent_adapter::CompatibilityWarning> for CompatibilityWarningDto {
-    fn from(value: crate::seams::agent_adapter::CompatibilityWarning) -> Self {
-        match value {
-            crate::seams::agent_adapter::CompatibilityWarning::CustomUnknown => Self::CustomUnknown,
-            crate::seams::agent_adapter::CompatibilityWarning::FrontmatterMismatch {
-                frontmatter_name,
-                directory_name,
-            } => Self::FrontmatterMismatch {
-                frontmatter_name,
-                directory_name,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivationPlanKindDto {
-    Enable,
-    Disable,
-    Repair,
-}
-
-impl From<ActivationPlanKind> for ActivationPlanKindDto {
-    fn from(value: ActivationPlanKind) -> Self {
-        match value {
-            ActivationPlanKind::Enable => Self::Enable,
-            ActivationPlanKind::Disable => Self::Disable,
-            ActivationPlanKind::Repair => Self::Repair,
-        }
-    }
-}
-
-impl From<ActivationPreview> for ActivationPreviewDto {
-    fn from(value: ActivationPreview) -> Self {
-        Self {
-            plan_token: value.plan_token,
-            skill_id: value.skill_id.0,
-            agent_id: value.agent_id.0,
-            skill_directory_name: value.skill_directory_name,
-            agent_name: value.agent_name,
-            enabled: value.enabled,
-            kind: value.kind.into(),
-            entry_path: value.entry_path.to_string_lossy().into_owned(),
-            target_path: value.target_path.to_string_lossy().into_owned(),
-            compatibility_warning: value.compatibility_warning.map(Into::into),
         }
     }
 }
@@ -1116,214 +1231,6 @@ impl From<RemoveResult> for RemoveSkillResultDto {
 #[serde(rename_all = "camelCase")]
 pub struct CancelRemoveSkillRequestDto {
     pub plan_token: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationResultDto {
-    pub skill_id: String,
-    pub agent_id: String,
-    pub desired_enabled: bool,
-    pub observed_state: ActivationObservedStateDto,
-    pub snapshot_version: u64,
-}
-impl From<ActivationResult> for ActivationResultDto {
-    fn from(value: ActivationResult) -> Self {
-        Self {
-            skill_id: value.skill_id.0,
-            agent_id: value.agent_id.0,
-            desired_enabled: value.desired_enabled,
-            observed_state: value.observed_state.into(),
-            snapshot_version: value.snapshot_version,
-        }
-    }
-}
-
-// -- Activation Conflict (Enable 遇占用三选一) --
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationConflictRequestDto {
-    pub skill_id: String,
-    pub agent_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OccupierKindDto {
-    RealDirectory,
-    Symlink,
-    File,
-}
-
-impl From<OccupierKind> for OccupierKindDto {
-    fn from(value: OccupierKind) -> Self {
-        match value {
-            OccupierKind::RealDirectory => Self::RealDirectory,
-            OccupierKind::Symlink => Self::Symlink,
-            OccupierKind::File => Self::File,
-        }
-    }
-}
-
-/// Closed reasons why an occupier cannot be Adopted (spec §4.7).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OccupierNotAdoptableReasonDto {
-    RegularFile,
-    PointsAtManagedSkill,
-    PointsAtThisSkill,
-    NoReadableSkillMd,
-    TargetUnresolvable,
-    IdentityConflict {
-        #[serde(rename = "directoryName")]
-        directory_name: String,
-    },
-}
-
-impl From<crate::core::activation::OccupierNotAdoptableReason> for OccupierNotAdoptableReasonDto {
-    fn from(value: crate::core::activation::OccupierNotAdoptableReason) -> Self {
-        use crate::core::activation::OccupierNotAdoptableReason as Reason;
-        match value {
-            Reason::RegularFile => Self::RegularFile,
-            Reason::PointsAtManagedSkill => Self::PointsAtManagedSkill,
-            Reason::PointsAtThisSkill => Self::PointsAtThisSkill,
-            Reason::NoReadableSkillMd => Self::NoReadableSkillMd,
-            Reason::TargetUnresolvable => Self::TargetUnresolvable,
-            Reason::IdentityConflict { directory_name } => {
-                Self::IdentityConflict { directory_name }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OccupierSummaryDto {
-    pub kind: OccupierKindDto,
-    pub symlink_target: Option<String>,
-    pub final_entity_path: Option<String>,
-    pub directory_name: String,
-    pub is_skill: bool,
-    pub adoptable: bool,
-    pub not_adoptable_reason: Option<OccupierNotAdoptableReasonDto>,
-}
-
-impl From<OccupierSummary> for OccupierSummaryDto {
-    fn from(value: OccupierSummary) -> Self {
-        Self {
-            kind: value.kind.into(),
-            symlink_target: value
-                .symlink_target
-                .map(|path| path.to_string_lossy().into_owned()),
-            final_entity_path: value
-                .final_entity_path
-                .map(|path| path.to_string_lossy().into_owned()),
-            directory_name: value.directory_name,
-            is_skill: value.is_skill,
-            adoptable: value.adoptable,
-            not_adoptable_reason: value.not_adoptable_reason.map(Into::into),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationConflictDetailsDto {
-    pub skill_id: String,
-    pub agent_id: String,
-    pub entry_path: String,
-    pub target_path: String,
-    pub occupier: OccupierSummaryDto,
-}
-
-impl From<ActivationConflictDetails> for ActivationConflictDetailsDto {
-    fn from(value: ActivationConflictDetails) -> Self {
-        Self {
-            skill_id: value.skill_id.0,
-            agent_id: value.agent_id.0,
-            entry_path: value.entry_path.to_string_lossy().into_owned(),
-            target_path: value.target_path.to_string_lossy().into_owned(),
-            occupier: value.occupier.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanActivationReplaceRequestDto {
-    pub skill_id: String,
-    pub agent_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationReplacePreviewDto {
-    pub plan_token: String,
-    pub operation_id: String,
-    pub skill_directory_name: String,
-    pub agent_name: String,
-    pub entry_path: String,
-    pub target_path: String,
-    pub backup_path: String,
-    pub occupant_kind: OccupierKindDto,
-}
-
-impl From<ActivationReplacePreview> for ActivationReplacePreviewDto {
-    fn from(value: ActivationReplacePreview) -> Self {
-        Self {
-            plan_token: value.plan_token,
-            operation_id: value.operation_id,
-            skill_directory_name: value.skill_directory_name,
-            agent_name: value.agent_name,
-            entry_path: value.entry_path.to_string_lossy().into_owned(),
-            target_path: value.target_path.to_string_lossy().into_owned(),
-            backup_path: value.backup_path.to_string_lossy().into_owned(),
-            occupant_kind: value.occupant_kind.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApplyActivationReplaceRequestDto {
-    pub plan_token: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CancelActivationReplaceRequestDto {
-    pub plan_token: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UndoActivationReplaceRequestDto {
-    pub operation_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FinalizeActivationReplaceRequestDto {
-    pub operation_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivationReplaceUndoResultDto {
-    pub undone: bool,
-    pub error: Option<String>,
-    pub snapshot_version: u64,
-}
-
-impl From<ActivationReplaceUndoResult> for ActivationReplaceUndoResultDto {
-    fn from(value: ActivationReplaceUndoResult) -> Self {
-        Self {
-            undone: value.undone,
-            error: value.error,
-            snapshot_version: value.snapshot_version,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3072,6 +2979,45 @@ pub enum RestoreEligibilityDto {
 pub enum PublicErrorDto {
     Validation,
     NotFound,
+    AgentConfigurationNameInvalid,
+    AgentConfigurationNameConflict {
+        name: String,
+    },
+    AgentPresetNotFound {
+        #[serde(rename = "presetKey")]
+        preset_key: String,
+    },
+    AgentRootRequired,
+    AgentActivationTargetRequired,
+    AgentRootDuplicate {
+        path: String,
+    },
+    AgentRootOverlap {
+        path: String,
+        #[serde(rename = "conflictingPath")]
+        conflicting_path: String,
+    },
+    AgentRootHomeOverlap {
+        path: String,
+    },
+    AgentRootInvalid {
+        path: String,
+    },
+    AgentTargetNotWritable {
+        path: String,
+    },
+    AgentTargetNotAllowed {
+        path: String,
+    },
+    AgentProjectSkillsDirInvalid,
+    AgentConfigurationNotFound {
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    AgentTargetInUse {
+        #[serde(rename = "skillIds")]
+        skill_ids: Vec<String>,
+    },
     Conflict {
         #[serde(rename = "directoryName")]
         directory_name: String,

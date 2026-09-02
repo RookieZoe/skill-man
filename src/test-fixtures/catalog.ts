@@ -1,10 +1,12 @@
 import fixtureJson from "../../fixtures/library-desk.json";
 
 import type {
-  ActivationPreview,
-  ActivationReplacePreview,
-  AgentActivation,
+  AgentConfiguration,
+  AgentConfigurationDraft,
+  AgentConfigurationPlan,
   AgentKind,
+  AgentManagementSnapshot,
+  AgentPreset,
   AppPreferences,
   CatalogClient,
   CatalogFilter,
@@ -16,7 +18,6 @@ import type {
   LocaleSnapshot,
   SkillDetail,
   SourceKind,
-  ActivationObservedState,
 } from "../app/catalog-client";
 
 type FixtureSkill = Omit<
@@ -34,7 +35,6 @@ interface FixtureAgent {
   detected: boolean;
   compatibility: Compatibility;
   enabledSkillIds: string[];
-  observedSkillStates?: Record<string, ActivationObservedState>;
 }
 
 interface FixtureFile {
@@ -43,23 +43,15 @@ interface FixtureFile {
   agents: FixtureAgent[];
 }
 
-interface PlannedFixtureActivation extends ActivationPreview {
-  skillId: string;
-  agentId: string;
-}
-
 interface PlannedFixtureLinkImport extends LinkImportPreview {
   skillId: string;
 }
 
-type PlannedFixtureReplace = ActivationReplacePreview & {
-  skillId: string;
-  agentId: string;
-};
-
 const fixture = fixtureJson as FixtureFile;
 
-export function createFixtureCatalogClient(): CatalogClient {
+export function createFixtureCatalogClient(
+  options: { emptyAgentConfigurations?: boolean } = {},
+): CatalogClient {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
   let firstRunCompleted = true;
@@ -90,18 +82,61 @@ export function createFixtureCatalogClient(): CatalogClient {
   const enabledSkillIds = new Map(
     fixture.agents.map((agent) => [agent.id, [...agent.enabledSkillIds]]),
   );
-  const observedStates = new Map(
-    fixture.agents.flatMap((agent) =>
-      agent.enabledSkillIds.map(
-        (skillId) =>
-          [
-            `${agent.id}:${skillId}`,
-            agent.observedSkillStates?.[skillId] ?? "present",
-          ] as const,
-      ),
-    ),
+  const presetRows = [
+    ["omp", "omp", "~/.omp/agent/skills", ".omp/skills"],
+    ["claude-code", "Claude Code", "~/.claude/skills", ".claude/skills"],
+    ["codex", "Codex", "~/.agents/skills", ".agents/skills"],
+    ["gemini-cli", "Gemini CLI", "~/.gemini/skills", ".gemini/skills"],
+    ["cursor", "Cursor", "~/.cursor/skills", ".cursor/skills"],
+    ["opencode", "opencode", "~/.config/opencode/skills", ".opencode/skills"],
+    ["github-copilot", "GitHub Copilot", "~/.copilot/skills", ".github/skills"],
+    ["zed", "Zed", "~/.agents/skills", ".agents/skills"],
+    ["windsurf", "Windsurf", "~/.codeium/windsurf/skills", ".windsurf/skills"],
+  ] as const;
+  const agentPresets: AgentPreset[] = presetRows.map(
+    ([presetKey, name, activationTarget, projectSkillsDir]) => ({
+      presetKey,
+      name,
+      compatibility: "verified",
+      roots: [activationTarget],
+      activationTarget,
+      projectSkillsDir,
+    }),
   );
-  const plans = new Map<string, PlannedFixtureActivation>();
+  let agentConfigurations: AgentConfiguration[] =
+    options.emptyAgentConfigurations
+      ? []
+      : fixture.agents.map((agent) => ({
+          agentId: agent.id,
+          origin: agent.kind === "custom" ? "custom" : "preset",
+          presetKey:
+            agent.kind === "claude_preset"
+              ? "claude-code"
+              : agent.kind === "codex_preset"
+                ? "codex"
+                : null,
+          name: agent.name,
+          compatibility: agent.compatibility,
+          projectSkillsDir: null,
+          roots: [
+            {
+              rootId: `fixture-root:${agent.skillsPath.toLocaleLowerCase()}`,
+              configuredPath: agent.skillsPath,
+              pathIdentityKey: agent.skillsPath.toLocaleLowerCase(),
+              role: "activation_target",
+              consumerAgentIds: [agent.id],
+              activationSkillIds: [...agent.enabledSkillIds],
+            },
+          ],
+        }));
+  const agentConfigurationPlans = new Map<
+    string,
+    {
+      kind: AgentConfigurationPlan["kind"];
+      agentId: string;
+      draft: AgentConfigurationDraft | null;
+    }
+  >();
   const linkImportPlans = new Map<string, PlannedFixtureLinkImport>();
   const relocatePlans = new Map<
     string,
@@ -109,8 +144,6 @@ export function createFixtureCatalogClient(): CatalogClient {
   >();
   const removePlans = new Map<string, { skillId: string }>();
   let planCounter = 1;
-  const replacePlans = new Map<string, PlannedFixtureReplace>();
-  const appliedReplaces = new Map<string, PlannedFixtureReplace>();
 
   function discoverLink(sourcePath: string): LinkImportCandidate {
     const finalEntityPath = sourcePath.replace(/\/+$/, "");
@@ -128,26 +161,6 @@ export function createFixtureCatalogClient(): CatalogClient {
     };
   }
 
-  function activationFor(
-    skillId: string,
-    agent: FixtureAgent,
-  ): AgentActivation {
-    const desiredEnabled =
-      enabledSkillIds.get(agent.id)?.includes(skillId) ?? false;
-    return {
-      id: agent.id,
-      name: agent.name,
-      kind: agent.kind,
-      skillsPath: agent.skillsPath,
-      detected: agent.detected,
-      compatibility: agent.compatibility,
-      desiredEnabled,
-      observedState: desiredEnabled
-        ? (observedStates.get(`${agent.id}:${skillId}`) ?? "missing")
-        : "missing",
-    };
-  }
-
   function toDetail(skill: FixtureSkill): SkillDetail {
     const enabledAgentCount = fixture.agents.filter(
       (agent) => enabledSkillIds.get(agent.id)?.includes(skill.id) ?? false,
@@ -156,6 +169,56 @@ export function createFixtureCatalogClient(): CatalogClient {
       ...skill,
       enabledAgentCount,
       fileSourceOriginalPath: skill.fileSourceOriginalPath ?? null,
+    };
+  }
+
+  function agentSnapshot(): AgentManagementSnapshot {
+    const consumers = new Map<string, string[]>();
+    for (const configuration of agentConfigurations) {
+      for (const root of configuration.roots) {
+        const ids = consumers.get(root.pathIdentityKey) ?? [];
+        ids.push(configuration.agentId);
+        consumers.set(root.pathIdentityKey, ids);
+      }
+    }
+    return {
+      generation: snapshotVersion,
+      configurations: agentConfigurations.map((configuration) => ({
+        ...configuration,
+        roots: configuration.roots.map((root) => ({
+          ...root,
+          consumerAgentIds: [
+            ...(consumers.get(root.pathIdentityKey) ?? [configuration.agentId]),
+          ],
+        })),
+      })),
+      presets: agentPresets.map((preset) => ({
+        ...preset,
+        roots: [...preset.roots],
+      })),
+    };
+  }
+
+  function plannedConfiguration(
+    agentId: string,
+    draft: AgentConfigurationDraft,
+  ): AgentConfiguration {
+    const origin = draft.presetKey ? "preset" : "custom";
+    return {
+      agentId,
+      origin,
+      presetKey: draft.presetKey,
+      name: draft.name.trim(),
+      compatibility: draft.presetKey ? "verified" : "unknown",
+      projectSkillsDir: draft.projectSkillsDir,
+      roots: draft.roots.map((root) => ({
+        rootId: `fixture-root:${root.configuredPath.toLocaleLowerCase()}`,
+        configuredPath: root.configuredPath,
+        pathIdentityKey: root.configuredPath.toLocaleLowerCase(),
+        role: root.role,
+        consumerAgentIds: [agentId],
+        activationSkillIds: [],
+      })),
     };
   }
 
@@ -270,140 +333,86 @@ export function createFixtureCatalogClient(): CatalogClient {
       if (!skill) throw new Error(`Managed Skill '${skillId}' was not found`);
       return toDetail(skill);
     },
-    async listAgents(skillId) {
-      return fixture.agents.map((agent) => activationFor(skillId, agent));
+    async getAgentManagementSnapshot() {
+      return agentSnapshot();
     },
-    async planActivation(skillId, agentId, enabled) {
-      const skill = skills.find(({ id }) => id === skillId);
-      const agent = fixture.agents.find(({ id }) => id === agentId);
-      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      const planToken = `fixture-activation-plan-${nextPlanId++}`;
-      const preview: PlannedFixtureActivation = {
-        planToken,
-        skillId,
+    async planCreateAgentConfiguration(draft) {
+      const planToken = `fixture-agent-plan-${planCounter++}`;
+      const agentId = `fixture-agent-${planCounter}`;
+      agentConfigurationPlans.set(planToken, {
+        kind: "create",
         agentId,
-        skillDirectoryName: skill.directoryName,
-        agentName: agent.name,
-        enabled,
-        kind: enabled ? "enable" : "disable",
-        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
-        targetPath: skill.finalEntityPath,
-        compatibilityWarning:
-          agent.kind === "custom" ? { kind: "custom_unknown" } : null,
+        draft,
+      });
+      return {
+        planToken,
+        kind: "create",
+        configuration: plannedConfiguration(agentId, draft),
+        targetWillBeCreated: false,
+        blockingActivationSkillIds: [],
+        retainedActivationCount: 0,
       };
-      plans.set(planToken, preview);
-      return preview;
     },
-    async planActivationRepair(skillId, agentId) {
-      const skill = skills.find(({ id }) => id === skillId);
-      const agent = fixture.agents.find(({ id }) => id === agentId);
-      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      if (!enabledSkillIds.get(agent.id)?.includes(skillId)) {
-        throw new Error("Repair requires a desired Activation");
+    async planEditAgentConfiguration(agentId, draft) {
+      const planToken = `fixture-agent-plan-${planCounter++}`;
+      agentConfigurationPlans.set(planToken, {
+        kind: "edit",
+        agentId,
+        draft,
+      });
+      return {
+        planToken,
+        kind: "edit",
+        configuration: plannedConfiguration(agentId, draft),
+        targetWillBeCreated: false,
+        blockingActivationSkillIds: [],
+        retainedActivationCount: 0,
+      };
+    },
+    async planDeleteAgentConfiguration(agentId) {
+      const planToken = `fixture-agent-plan-${planCounter++}`;
+      agentConfigurationPlans.set(planToken, {
+        kind: "delete",
+        agentId,
+        draft: null,
+      });
+      return {
+        planToken,
+        kind: "delete",
+        configuration: null,
+        targetWillBeCreated: false,
+        blockingActivationSkillIds: [],
+        retainedActivationCount:
+          agentConfigurations.find(
+            (configuration) => configuration.agentId === agentId,
+          )?.roots[0]?.activationSkillIds.length ?? 0,
+      };
+    },
+    async applyAgentConfigurationPlan(planToken) {
+      const plan = agentConfigurationPlans.get(planToken);
+      if (!plan) throw { code: "plan_stale" };
+      if (plan.kind === "delete") {
+        agentConfigurations = agentConfigurations.filter(
+          (configuration) => configuration.agentId !== plan.agentId,
+        );
+      } else if (plan.draft) {
+        const configuration = plannedConfiguration(plan.agentId, plan.draft);
+        agentConfigurations =
+          plan.kind === "create"
+            ? [...agentConfigurations, configuration]
+            : agentConfigurations.map((current) =>
+                current.agentId === plan.agentId ? configuration : current,
+              );
       }
-      const planToken = `fixture-activation-plan-${nextPlanId++}`;
-      const preview: PlannedFixtureActivation = {
-        planToken,
-        skillId,
-        agentId,
-        skillDirectoryName: skill.directoryName,
-        agentName: agent.name,
-        enabled: true,
-        kind: "repair",
-        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
-        targetPath: skill.finalEntityPath,
-        compatibilityWarning:
-          agent.kind === "custom" ? { kind: "custom_unknown" } : null,
-      };
-      plans.set(planToken, preview);
-      return preview;
-    },
-    async activationConflictDetails(skillId, agentId) {
-      const skill = skills.find(({ id }) => id === skillId);
-      const agent = fixture.agents.find(({ id }) => id === agentId);
-      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      return {
-        skillId,
-        agentId,
-        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
-        targetPath: skill.finalEntityPath,
-        occupier: {
-          kind: "real_directory",
-          symlinkTarget: null,
-          finalEntityPath: `${agent.skillsPath}/${skill.directoryName}`,
-          directoryName: skill.directoryName,
-          isSkill: true,
-          adoptable: true,
-          notAdoptableReason: null,
-        },
-      };
-    },
-    async planActivationReplace(skillId, agentId) {
-      const skill = skills.find(({ id }) => id === skillId);
-      const agent = fixture.agents.find(({ id }) => id === agentId);
-      if (!skill || !agent) throw new Error("Managed Skill or Agent not found");
-      const planToken = `fixture-replace-plan-${nextPlanId++}`;
-      const operationId = `fixture-replace-${nextPlanId}`;
-      const preview: PlannedFixtureReplace = {
-        planToken,
-        operationId,
-        skillId,
-        agentId,
-        skillDirectoryName: skill.directoryName,
-        agentName: agent.name,
-        entryPath: `${agent.skillsPath}/${skill.directoryName}`,
-        targetPath: skill.finalEntityPath,
-        backupPath: `${skill.directoryName}.backup`,
-        occupantKind: "real_directory",
-      };
-      replacePlans.set(planToken, preview);
-      return preview;
-    },
-    async applyActivationReplace(planToken) {
-      const plan = replacePlans.get(planToken);
-      if (!plan)
-        throw { code: "plan_stale", message: "Replace preview expired." };
-      replacePlans.delete(planToken);
-      const current = enabledSkillIds.get(plan.agentId) ?? [];
-      enabledSkillIds.set(
-        plan.agentId,
-        Array.from(new Set([...current, plan.skillId])),
-      );
-      observedStates.set(`${plan.agentId}:${plan.skillId}`, "present");
-      appliedReplaces.set(plan.operationId, plan);
+      agentConfigurationPlans.delete(planToken);
       snapshotVersion += 1;
       return {
-        skillId: plan.skillId,
         agentId: plan.agentId,
-        desiredEnabled: true,
-        observedState: "present",
-        snapshotVersion,
+        generation: snapshotVersion,
+        deleted: plan.kind === "delete",
       };
     },
-    async cancelActivationReplace(planToken) {
-      return replacePlans.delete(planToken);
-    },
-    async undoActivationReplace(operationId) {
-      const plan = appliedReplaces.get(operationId);
-      if (!plan)
-        throw { code: "plan_stale", message: "Replace already finalized." };
-      appliedReplaces.delete(operationId);
-      const current = enabledSkillIds.get(plan.agentId) ?? [];
-      enabledSkillIds.set(
-        plan.agentId,
-        current.filter((skillId) => skillId !== plan.skillId),
-      );
-      observedStates.set(`${plan.agentId}:${plan.skillId}`, "occupied");
-      snapshotVersion += 1;
-      return {
-        undone: true,
-        error: null,
-        snapshotVersion,
-      };
-    },
-    async finalizeActivationReplace(operationId) {
-      appliedReplaces.delete(operationId);
-    },
+
     async loadPreferences() {
       return { ...preferences };
     },
@@ -463,15 +472,6 @@ export function createFixtureCatalogClient(): CatalogClient {
           skillsPath: agent.skillsPath,
           detected: agent.detected || detectedOverrides.has(agent.id),
         })),
-      };
-    },
-    async runActivationHealthCheck() {
-      return {
-        checked: Array.from(enabledSkillIds.values()).reduce(
-          (count, skillIds) => count + skillIds.length,
-          0,
-        ),
-        snapshotVersion,
       };
     },
     async relocateLink(skillId, sourcePath) {
@@ -562,33 +562,6 @@ export function createFixtureCatalogClient(): CatalogClient {
     },
     async cancelRemoveSkill(planToken) {
       return removePlans.delete(planToken);
-    },
-    async applyActivation(planToken) {
-      const plan = plans.get(planToken);
-      if (!plan) throw new Error("Activation preview expired");
-      plans.delete(planToken);
-      const current = enabledSkillIds.get(plan.agentId) ?? [];
-      enabledSkillIds.set(
-        plan.agentId,
-        plan.enabled
-          ? Array.from(new Set([...current, plan.skillId]))
-          : current.filter((skillId) => skillId !== plan.skillId),
-      );
-      observedStates.set(
-        `${plan.agentId}:${plan.skillId}`,
-        plan.enabled ? "present" : "missing",
-      );
-      snapshotVersion += 1;
-      return {
-        skillId: plan.skillId,
-        agentId: plan.agentId,
-        desiredEnabled: plan.enabled,
-        observedState: plan.enabled ? "present" : "missing",
-        snapshotVersion,
-      };
-    },
-    async cancelActivation(planToken) {
-      return plans.delete(planToken);
     },
     async discoverLinkImport(sourcePath) {
       return discoverLink(sourcePath);

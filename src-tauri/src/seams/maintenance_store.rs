@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::core::domain::{AgentId, Health, SkillId, SourceKind};
+use crate::core::domain::{Health, SkillId, SourceKind};
 use crate::seams::activation_store::ActivationStore;
 use crate::seams::filesystem::ActivationRecoveryBaseline;
 use crate::seams::import_store::RemoteImportRecord;
@@ -40,7 +40,7 @@ pub struct LinkSkillRecord {
 /// or removed when its Skill leaves the Library.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelocateActivationBaseline {
-    pub agent_id: AgentId,
+    pub target_root_id: String,
     pub expected_entry_path: PathBuf,
     pub expected_target_path: PathBuf,
 }
@@ -122,7 +122,7 @@ pub trait MaintenanceStore: ActivationStore {
                 .into_iter()
                 .filter(|activation| activation.skill_id == skill_id.0)
                 .map(|activation| RelocateActivationBaseline {
-                    agent_id: AgentId(activation.agent_id),
+                    target_root_id: activation.target_root_id,
                     expected_entry_path: activation.expected_entry_path,
                     expected_target_path: activation.expected_target_path,
                 })

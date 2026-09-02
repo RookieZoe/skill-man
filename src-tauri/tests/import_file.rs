@@ -4,7 +4,6 @@ use std::sync::Arc;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::system_clock::SystemClock;
-use skill_man_lib::core::activation::ActivationService;
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
@@ -16,14 +15,12 @@ use skill_man_lib::seams::filesystem::{
     FileSystemError, LinkSourceSnapshot, ScannedSkillEntry, ScannedSkillEvidence, SkillFingerprint,
     StagedTreeSnapshot,
 };
-use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{
-    ApplyActivationRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    CancelFileImportRequestDto, CatalogFilterDto, DiscoverFileImportCollectionRequestDto,
-    DiscoverFileImportRequestDto, HealthDto, ListSkillsRequestDto, PlanActivationRequestDto,
-    PlanFileImportRequestDto, PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto,
-    PublicErrorDto, SourceKindDto,
+    ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto, CancelFileImportRequestDto,
+    CatalogFilterDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    HealthDto, ListSkillsRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
+    PlanFileReinstallRequestDto, PublicErrorDto, SourceKindDto,
 };
 use skill_man_lib::tauri_adapter::health_api::HealthApi;
 use skill_man_lib::tauri_adapter::import_api::ImportApi;
@@ -1031,12 +1028,6 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
     ));
-    let activation = ActivationApi::new(ActivationService::new(
-        runtime,
-        filesystem,
-        library_root.clone(),
-    ));
-
     let first_preview = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -1047,21 +1038,12 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
             plan_token: first_preview.plan_token,
         })
         .expect("apply initial file Install");
-    let activation_preview = activation
-        .plan_activation(PlanActivationRequestDto {
-            skill_id: first.skill_id.clone(),
-            agent_id: "claude-code".into(),
-            enabled: true,
-        })
-        .expect("plan Activation");
-    let activation_target = std::path::PathBuf::from(&activation_preview.target_path);
-    activation
-        .apply_activation(ApplyActivationRequestDto {
-            plan_token: activation_preview.plan_token,
-        })
-        .expect("apply Activation");
     let stable_path = library_root.join("skills/reinstallable");
     let activation_path = claude_root.join("reinstallable");
+    let activation_target = stable_path.clone();
+    std::os::unix::fs::symlink(&activation_target, &activation_path)
+        .expect("create Target-scoped Activation");
+    home.seed_activation(&first.skill_id, "claude-code", true, "present");
     assert_eq!(
         std::fs::read_link(&activation_path).expect("read initial Activation target"),
         activation_target
@@ -1411,7 +1393,7 @@ fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
 }
 
 #[test]
-fn startup_write_gate_blocks_import_and_activation_writes() {
+fn startup_write_gate_blocks_import_writes() {
     let home = BoundTestHome::new();
     home.seed_standard_library();
     let library_root = home.library_root.clone();
@@ -1433,11 +1415,6 @@ fn startup_write_gate_blocks_import_and_activation_writes() {
         )
         .with_write_gate(write_gate.clone()),
     );
-    let activation = ActivationApi::new(
-        ActivationService::new(runtime, filesystem, library_root.clone())
-            .with_write_gate(write_gate),
-    );
-
     let import_error = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -1445,17 +1422,6 @@ fn startup_write_gate_blocks_import_and_activation_writes() {
         .expect_err("file Import is gated during recovery");
     assert!(matches!(
         import_error.error,
-        PublicErrorDto::RecoveryRequired
-    ));
-    let activation_error = activation
-        .plan_activation(PlanActivationRequestDto {
-            skill_id: "skill-authoring".into(),
-            agent_id: "claude-code".into(),
-            enabled: true,
-        })
-        .expect_err("Activation is gated during recovery");
-    assert!(matches!(
-        activation_error.error,
         PublicErrorDto::RecoveryRequired
     ));
     assert!(!library_root.join("staging").exists());

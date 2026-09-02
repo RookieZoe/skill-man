@@ -190,8 +190,14 @@ fn seed_legacy_home(home_root: &Path) {
             .expect("drop identity column");
     }
     // The current schema also carries the Git Repository Source and Remote
-    // Source Parent tables; a real pre-identity v4 file has none of them.
+    // Source Parent tables plus the v8 Agent Configuration model; a real
+    // pre-identity v4 file has none of those and keeps the per-Agent
+    // `agents`/`activations` shape the v8 migration consumes.
     for table in [
+        "recent_project_folders",
+        "agent_global_roots",
+        "agent_configurations",
+        "global_skill_roots",
         "git_source_release_members",
         "git_source_members",
         "git_repository_sources",
@@ -204,6 +210,37 @@ fn seed_legacy_home(home_root: &Path) {
             .execute(&format!("DROP TABLE {table}"), [])
             .expect("drop v6 parent table");
     }
+    connection
+        .execute("DROP TABLE activations", [])
+        .expect("drop v8 activations table");
+    connection
+        .execute_batch(
+            "CREATE TABLE agents (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL CHECK (kind IN ('claude_preset', 'codex_preset', 'custom')),
+                skills_path TEXT NOT NULL,
+                path_identity_key TEXT NOT NULL UNIQUE,
+                detected INTEGER NOT NULL CHECK (detected IN (0, 1)),
+                compatibility TEXT NOT NULL CHECK (compatibility IN ('verified', 'unknown')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE activations (
+                skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
+                expected_entry_path TEXT NOT NULL UNIQUE,
+                expected_target_path TEXT NOT NULL,
+                observed_state TEXT NOT NULL CHECK (
+                    observed_state IN ('present', 'missing', 'target_mismatch', 'dangling', 'occupied')
+                ),
+                last_enabled_at TEXT,
+                last_checked_at TEXT,
+                PRIMARY KEY (skill_id, agent_id)
+            );",
+        )
+        .expect("recreate legacy per-Agent shape");
     // A real v4 file still carries the legacy remote_sources table the v6
     // migration consumes.
     connection

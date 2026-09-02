@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::core::domain::{AgentActivation, CatalogFilter, SkillDetail, SkillId, SkillSummary};
+use crate::core::domain::{CatalogFilter, SkillDetail, SkillId, SkillSummary};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupAccess {
@@ -41,11 +41,6 @@ pub trait CatalogStore: Send + Sync {
     fn snapshot_version(&self) -> u64;
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError>;
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError>;
-    fn list_agents(
-        &self,
-        skill_id: &SkillId,
-    ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError>;
-
     /// When the onboarding was completed (or explicitly skipped); `None`
     /// means the next launch is still a first run (spec §8.7).
     fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {

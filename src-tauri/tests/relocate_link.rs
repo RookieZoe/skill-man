@@ -7,14 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
-use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
-use skill_man_lib::core::domain::{AgentId, Health, SkillId};
+use skill_man_lib::core::domain::{Health, SkillId};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::{MaintenanceError, MaintenanceService};
 use skill_man_lib::seams::filesystem::{
@@ -31,7 +29,6 @@ struct TestHarness {
     runtime: Arc<RuntimeCatalogStore>,
     catalog: CatalogService,
     import: ImportService,
-    activation: ActivationService,
     maintenance: MaintenanceService,
 }
 
@@ -49,9 +46,6 @@ fn harness() -> TestHarness {
         library_root.clone(),
     );
     let catalog = CatalogService::new(runtime.clone());
-    let activation =
-        ActivationService::new(runtime.clone(), filesystem.clone(), library_root.clone())
-            .with_agent_adapters(Arc::new(BuiltInAgentAdapters));
     let maintenance = MaintenanceService::new(runtime.clone(), filesystem)
         .with_library_root(library_root.clone());
     TestHarness {
@@ -60,7 +54,6 @@ fn harness() -> TestHarness {
         runtime,
         catalog,
         import,
-        activation,
         maintenance,
     }
 }
@@ -86,18 +79,20 @@ fn import_and_enable(harness: &TestHarness, source: &Path, agents: &[&str]) -> S
         .apply_link(&preview.plan_token)
         .expect("apply Link Import");
     for agent in agents {
-        let activation = harness
-            .activation
-            .plan(SetActivation {
-                skill_id: imported.skill_id.clone(),
-                agent_id: AgentId((*agent).into()),
-                enabled: true,
-            })
-            .expect("plan Enable");
+        let root = match *agent {
+            "claude-code" => harness.home.claude_root(),
+            "codex" => harness.home.codex_root(),
+            other => harness.home.path().join(format!("agents/{other}/skills")),
+        };
+        std::fs::create_dir_all(&root).expect("create Target root");
+        std::os::unix::fs::symlink(
+            source.canonicalize().expect("canonical Link source"),
+            root.join(&imported.directory_name),
+        )
+        .expect("create Target-scoped Activation");
         harness
-            .activation
-            .apply(&activation.plan_token)
-            .expect("apply Enable");
+            .home
+            .seed_activation(&imported.skill_id.0, agent, true, "present");
     }
     imported.skill_id
 }
@@ -390,7 +385,7 @@ fn interrupted_relocation_rolls_back_at_startup_when_the_catalog_never_committed
         old_final_entity_path: old_entity.clone(),
         new_final_entity_path: new_entity.clone(),
         activations: vec![RelocateActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: entry_path.clone(),
             old_target_path: old_entity.clone(),
             new_target_path: new_entity.clone(),
@@ -477,7 +472,7 @@ fn interrupted_relocation_rolls_forward_at_startup_when_the_catalog_committed() 
         old_final_entity_path: old_entity.clone(),
         new_final_entity_path: new_entity.clone(),
         activations: vec![RelocateActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: entry_path.clone(),
             old_target_path: old_entity.clone(),
             new_target_path: new_entity.clone(),

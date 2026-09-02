@@ -10,7 +10,7 @@ pub fn run() {
     use ::tauri::tray::TrayIconBuilder;
     use ::tauri::{Listener, Manager, RunEvent, WindowEvent};
 
-    use crate::adapters::agent_adapters::BuiltInAgentAdapters;
+    use crate::adapters::agent_configuration_fs::MacOsAgentConfigurationFileSystem;
     use crate::adapters::app_state_store::AppStateStoreFileSystem;
     use crate::adapters::catalog_probe::SqliteCatalogProbe;
     use crate::adapters::git_source::SystemGitSource;
@@ -29,8 +29,8 @@ pub fn run() {
     use crate::adapters::system_locale::MacOsSystemLocaleSource;
     use crate::adapters::tauri_app_updater::TauriAppUpdater;
     use crate::adapters::volume_identity::MacOsVolumeIdentitySource;
-    use crate::core::activation::ActivationService;
     use crate::core::adopt::AdoptService;
+    use crate::core::agent_configuration::{AgentConfigurationService, PresetRegistry};
     use crate::core::app_update::AppUpdateService;
     use crate::core::bootstrap::{
         BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
@@ -54,42 +54,41 @@ pub fn run() {
     use crate::core::startup::StartupService;
     use crate::core::update::UpdateService;
     use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
-    use crate::seams::activation_store::ActivationStore;
     use crate::seams::adopt_store::AdoptStore;
+    use crate::seams::agent_configuration_store::AgentConfigurationStore;
     use crate::seams::app_state_store::AppStateStore;
     use crate::seams::catalog_store::CatalogStore;
     use crate::seams::import_store::ImportStore;
     use crate::seams::maintenance_store::MaintenanceStore;
     use crate::seams::preferences_store::PreferencesStore;
-    use crate::tauri_adapter::activation_api::ActivationApi;
     use crate::tauri_adapter::adopt_api::AdoptApi;
+    use crate::tauri_adapter::agent_configuration_api::AgentConfigurationApi;
     use crate::tauri_adapter::app_update_api::AppUpdateApi;
     use crate::tauri_adapter::bootstrap_api::{BootstrapApi, TauriBootstrapChangedEmitter};
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
-        activation_conflict_details, apply_abandon, apply_activation, apply_activation_replace,
-        apply_adopt, apply_delete_safety_snapshot, apply_file_import, apply_file_import_selection,
-        apply_fixture_recovery, apply_link_import, apply_relocate_link, apply_remove_skill,
-        apply_skill_updates, cancel_activation, cancel_activation_replace, cancel_adopt,
+        apply_abandon, apply_adopt, apply_agent_configuration_plan, apply_delete_safety_snapshot,
+        apply_file_import, apply_file_import_selection, apply_fixture_recovery, apply_link_import,
+        apply_relocate_link, apply_remove_skill, apply_skill_updates, cancel_adopt,
         cancel_app_update, cancel_candidate, cancel_existing_home_recovery, cancel_file_import,
         cancel_link_import, cancel_relocate_link, cancel_remove_skill, check_app_update,
         check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
         confirm_fixture_recovery_result, confirm_home, confirm_source_promotion,
         confirm_source_transition, confirm_source_update, continue_candidate,
         create_agent_directory, discover_file_import, discover_file_import_collection,
-        discover_link_import, download_app_update, fetch_latest_and_manage,
-        finalize_activation_replace, finalize_adopt, finalize_source_promotion,
-        finalize_source_transition, finalize_source_update, get_bootstrap_snapshot,
-        get_fixture_recovery_preview, get_git_source_capability, get_locale_snapshot,
-        inspect_skill, install_app_update, list_agents, list_safety_snapshots, list_skills,
-        load_preferences, pin_skill_updates, plan_abandon, plan_activation, plan_activation_repair,
-        plan_activation_replace, plan_adopt, plan_delete_safety_snapshot, plan_file_import,
+        discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
+        finalize_source_promotion, finalize_source_transition, finalize_source_update,
+        get_agent_management_snapshot, get_bootstrap_snapshot, get_fixture_recovery_preview,
+        get_git_source_capability, get_locale_snapshot, inspect_skill, install_app_update,
+        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_abandon,
+        plan_adopt, plan_create_agent_configuration, plan_delete_agent_configuration,
+        plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
         plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_link_import,
         plan_remove_skill, plan_restore, plan_skill_updates, prepare_existing_home_recovery,
         prepare_home, preview_source_promotion, preview_source_update, reconnect_same_home,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        scan_adopt, set_locale_selection, startup_info, undo_activation_replace, undo_adopt,
-        undo_source_promotion, undo_source_transition, update_preferences,
+        scan_adopt, set_locale_selection, startup_info, undo_adopt, undo_source_promotion,
+        undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -296,13 +295,12 @@ pub fn run() {
             // closed outside Bound, and a later Reconnect/Restore swap
             // reaches every service.
             let catalog_store: Arc<dyn CatalogStore> = runtime_store.clone();
+            let agent_configuration_store: Arc<dyn AgentConfigurationStore> =
+                runtime_store.clone();
             let import_store: Arc<dyn ImportStore> = runtime_store.clone();
             let adopt_store: Arc<dyn AdoptStore> = runtime_store.clone();
-            let activation_store: Arc<dyn ActivationStore> = runtime_store.clone();
             let maintenance_store: Arc<dyn MaintenanceStore> = runtime_store.clone();
             let preferences_store: Arc<dyn PreferencesStore> = runtime_store.clone();
-            let conflict_checker: Arc<dyn crate::core::activation::ActivationConflictChecker> =
-                runtime_store.clone();
 
             app.manage(BootstrapApi::new(
                 bootstrap.clone(),
@@ -392,6 +390,16 @@ pub fn run() {
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
             app.manage(CatalogApi::new(CatalogService::new(catalog_store.clone())));
+            app.manage(AgentConfigurationApi::new(Arc::new(
+                AgentConfigurationService::new(
+                    agent_configuration_store,
+                    Arc::new(MacOsAgentConfigurationFileSystem::new(
+                        home_directory.clone(),
+                    )),
+                    write_gate.clone(),
+                    PresetRegistry::system(),
+                ),
+            )));
             let git_source_capability_scan = Arc::new(GitSourceCapabilityScan::new(Arc::new(
                 SqliteGitSourceCapabilityReader::new(
                     write_gate.clone(),
@@ -493,17 +501,6 @@ pub fn run() {
                 .with_remote_provider(Arc::new(SystemRemoteProvider::new(
                     Arc::new(SystemGitSource::new()),
                 ))),
-            ));
-            app.manage(ActivationApi::new(
-                ActivationService::new(
-                    activation_store.clone(),
-                    filesystem.clone(),
-                    resolved_library_root,
-                )
-                .with_write_gate(write_gate.clone())
-                .with_home_context(write_gate.clone())
-                .with_agent_adapters(Arc::new(BuiltInAgentAdapters))
-                .with_conflict_checker(conflict_checker),
             ));
             app.manage(StartupApi::new(
                 PreferencesService::new(preferences_store.clone()),
@@ -608,7 +605,11 @@ pub fn run() {
             install_app_update,
             list_skills,
             inspect_skill,
-            list_agents,
+            get_agent_management_snapshot,
+            plan_create_agent_configuration,
+            plan_edit_agent_configuration,
+            plan_delete_agent_configuration,
+            apply_agent_configuration_plan,
             run_activation_health_check,
             relocate_link,
             apply_relocate_link,
@@ -616,16 +617,6 @@ pub fn run() {
             plan_remove_skill,
             apply_remove_skill,
             cancel_remove_skill,
-            plan_activation,
-            plan_activation_repair,
-            apply_activation,
-            cancel_activation,
-            activation_conflict_details,
-            plan_activation_replace,
-            apply_activation_replace,
-            cancel_activation_replace,
-            undo_activation_replace,
-            finalize_activation_replace,
             discover_link_import,
             plan_link_import,
             apply_link_import,

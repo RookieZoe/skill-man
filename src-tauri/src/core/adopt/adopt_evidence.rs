@@ -364,7 +364,6 @@ impl AdoptService {
         let library_root = self.seam_canonical_root(&active_library_root);
         let agent_roots = agents
             .iter()
-            .filter(|agent| agent.detected)
             .map(|agent| {
                 self.filesystem
                     .normalize_configured_path(&agent.skills_path)
@@ -375,9 +374,6 @@ impl AdoptService {
 
         let mut grouped: BTreeMap<PathBuf, GroupedEvidence> = BTreeMap::new();
         for agent in &agents {
-            if !agent.detected {
-                continue;
-            }
             for entry in self.filesystem.scan_skills_evidence(&agent.skills_path)? {
                 self.accumulate_evidence(entry, Some(agent), false, &library_root, &mut grouped);
             }
@@ -389,7 +385,7 @@ impl AdoptService {
         let suggested = agents
             .iter()
             .filter(|agent| {
-                agent.detected
+                agent.activation_target
                     && matches!(agent.kind, AgentKind::ClaudePreset | AgentKind::CodexPreset)
             })
             .map(|agent| agent.agent_id.clone())
@@ -499,6 +495,9 @@ impl AdoptService {
                 _ => AdoptAppearanceKind::RealDirectory,
             },
             agent_id: agent.map(|agent| agent.agent_id.clone()),
+            target_root_id: agent
+                .filter(|agent| agent.activation_target)
+                .map(|agent| agent.root_id.clone()),
             shared,
         };
         let Some(final_entity) = entry.chain.final_entity.clone() else {
@@ -566,6 +565,7 @@ impl AdoptService {
                         _ => AdoptAppearanceKind::RealDirectory,
                     },
                     agent_id: None,
+                    target_root_id: None,
                     shared: false,
                 },
                 chain: entry.chain.clone(),
@@ -608,6 +608,7 @@ impl AdoptService {
                         _ => AdoptAppearanceKind::RealDirectory,
                     },
                     agent_id: None,
+                    target_root_id: None,
                     shared: false,
                 },
                 chain: entry.chain.clone(),

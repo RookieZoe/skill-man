@@ -1,5 +1,5 @@
-pub mod activation_api;
 pub mod adopt_api;
+pub mod agent_configuration_api;
 pub mod app_update_api;
 pub mod bootstrap_api;
 pub mod catalog_api;

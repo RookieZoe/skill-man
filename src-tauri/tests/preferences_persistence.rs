@@ -114,11 +114,13 @@ fn recently_enabled_orders_by_last_enable_and_limits() {
         connection
             .execute(
                 "INSERT INTO activations (
-                    skill_id, agent_id, desired_enabled, expected_entry_path,
-                    expected_target_path, observed_state, last_enabled_at, last_checked_at
-                 ) VALUES (?1, 'claude-code', 1, ?2, ?3, 'present', ?4, ?4)",
+                    skill_id, target_root_id, directory_identity_key, desired_enabled,
+                    expected_entry_path, expected_target_path, observed_state,
+                    last_enabled_at, last_checked_at
+                 ) VALUES (?1, 'root-claude-code', ?2, 1, ?3, ?4, 'present', ?5, ?5)",
                 rusqlite::params![
                     skill_id,
+                    name,
                     format!("/.claude/skills/{name}"),
                     format!("/Library/skills/{name}"),
                     enabled_at.to_string()
@@ -130,11 +132,13 @@ fn recently_enabled_orders_by_last_enable_and_limits() {
     connection
         .execute(
             "INSERT INTO activations (
-                skill_id, agent_id, desired_enabled, expected_entry_path,
-                expected_target_path, observed_state, last_enabled_at, last_checked_at
-             ) VALUES (?1, 'codex', 1, ?2, ?3, 'present', ?4, ?4)",
+                    skill_id, target_root_id, directory_identity_key, desired_enabled,
+                    expected_entry_path, expected_target_path, observed_state,
+                    last_enabled_at, last_checked_at
+                 ) VALUES (?1, 'root-codex', ?2, 1, ?3, ?4, 'present', ?5, ?5)",
             rusqlite::params![
                 second_id,
+                second_name,
                 format!("/.codex/skills/{second_name}"),
                 format!("/Library/skills/{second_name}"),
                 "1700000001"
@@ -214,14 +218,16 @@ fn create_agent_directory_only_creates_known_missing_presets() {
         skill_man_lib::core::startup::StartupError::Validation(_)
     ));
 
-    // A detected preset is rejected — nothing is created.
+    // An existing Agent Target directory is rejected — nothing is created.
+    std::fs::create_dir_all(home.claude_root()).expect("create existing Target directory");
     let error = startup
         .create_agent_directory(&skill_man_lib::core::domain::AgentId("claude-code".into()))
-        .expect_err("detected preset is not created again");
+        .expect_err("existing preset Target is not created again");
     assert!(matches!(
         error,
         skill_man_lib::core::startup::StartupError::Validation(_)
     ));
+    assert!(home.claude_root().is_dir());
 
     // A configured preset with a missing directory is created on request.
     let missing_skills_path = home.path().join(".custom-tools/skills");
@@ -230,18 +236,37 @@ fn create_agent_directory_only_creates_known_missing_presets() {
         let connection = Connection::open(&database_path).expect("open SQLite");
         connection
             .execute(
-                "INSERT INTO agents (
-                    id, name, kind, skills_path, path_identity_key, detected,
-                    compatibility, created_at, updated_at
-                 ) VALUES (?1, ?2, 'custom', ?3, ?4, 0, 'unknown', '0', '0')",
+                "INSERT INTO agent_configurations (
+                    agent_id, origin, preset_key, name, name_identity_key,
+                    compatibility, project_skills_dir, created_at, updated_at
+                 ) VALUES (?1, 'custom', NULL, ?2, ?3, 'unknown', NULL, '0', '0')",
                 rusqlite::params![
                     "custom-workbench",
                     "Custom Workbench",
-                    missing_skills_path.to_string_lossy(),
-                    missing_skills_path.to_string_lossy(),
+                    skill_man_lib::core::domain::agent_name_identity_key("Custom Workbench"),
                 ],
             )
-            .expect("seed undetected Agent");
+            .expect("seed custom Agent Configuration");
+        connection
+            .execute(
+                "INSERT INTO global_skill_roots (
+                    root_id, configured_path, path_identity_key, created_at, updated_at
+                 ) VALUES ('root-custom-workbench', ?1, ?2, '0', '0')",
+                rusqlite::params![
+                    missing_skills_path.to_string_lossy(),
+                    skill_man_lib::core::domain::configured_path_identity_key(
+                        &missing_skills_path.to_string_lossy()
+                    ),
+                ],
+            )
+            .expect("seed Target root");
+        connection
+            .execute(
+                "INSERT INTO agent_global_roots (agent_id, root_id, role)
+                 VALUES ('custom-workbench', 'root-custom-workbench', 'activation_target')",
+                [],
+            )
+            .expect("seed Target membership");
     }
     let missing_agent = {
         let agents =
@@ -263,7 +288,6 @@ fn create_agent_directory_only_creates_known_missing_presets() {
             ),
         }
     };
-    assert!(!missing_agent.detected);
     let skills_path = missing_agent.skills_path.clone();
     assert!(!skills_path.exists());
     startup
@@ -273,14 +297,6 @@ fn create_agent_directory_only_creates_known_missing_presets() {
         skills_path.is_dir(),
         "directory was created after confirmation"
     );
-    // The Agent is now detected.
-    let agents = skill_man_lib::seams::adopt_store::AdoptStore::list_agents(runtime.as_ref())
-        .expect("list agents after creation");
-    let agent = agents
-        .iter()
-        .find(|agent| agent.agent_id == missing_agent.agent_id)
-        .expect("Agent still configured");
-    assert!(agent.detected);
 }
 
 #[test]

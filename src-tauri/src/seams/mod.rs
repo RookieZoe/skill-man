@@ -1,6 +1,7 @@
 pub mod activation_store;
 pub mod adopt_store;
-pub mod agent_adapter;
+pub mod agent_configuration_fs;
+pub mod agent_configuration_store;
 pub mod app_state_store;
 pub mod app_updater;
 pub mod catalog_probe;

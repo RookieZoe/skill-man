@@ -2242,7 +2242,7 @@ impl FileSystem for MacOsFileSystem {
                 ActivationReplacePhase::Applying => {
                     let committed = baselines.iter().any(|baseline| {
                         baseline.skill_id == journal.skill_id
-                            && baseline.agent_id == journal.agent_id
+                            && baseline.target_root_id == journal.agent_id
                             && baseline.expected_entry_path == journal.entry_path
                             && baseline.expected_target_path == journal.target_path
                     });

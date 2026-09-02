@@ -8,15 +8,16 @@ use crate::seams::import_store::RemoteParentRecord;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdoptAgent {
     pub agent_id: AgentId,
+    pub root_id: String,
     pub name: String,
     pub kind: AgentKind,
     pub skills_path: PathBuf,
-    pub detected: bool,
+    pub activation_target: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdoptedActivation {
-    pub agent_id: AgentId,
+    pub target_root_id: String,
     pub expected_entry_path: PathBuf,
     pub expected_target_path: PathBuf,
 }
@@ -85,13 +86,6 @@ pub enum AdoptStoreError {
 
 pub trait AdoptStore: Send + Sync {
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError>;
-
-    /// Record that an Agent's skills directory now exists after an explicit
-    /// user-confirmed creation (spec §8.7). Default: no-op for stores that do
-    /// not persist Agent detection.
-    fn mark_agent_detected(&self, _agent_id: &AgentId) -> Result<(), AdoptStoreError> {
-        Ok(())
-    }
 
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError>;
 

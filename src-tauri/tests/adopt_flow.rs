@@ -15,7 +15,7 @@ use skill_man_lib::core::adopt::{
     AdoptSelection, AdoptService, AdoptVerdict,
 };
 use skill_man_lib::core::catalog::CatalogService;
-use skill_man_lib::core::domain::{AgentId, CatalogFilter, SkillId, SourceKind};
+use skill_man_lib::core::domain::{CatalogFilter, SkillId, SourceKind};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::MaintenanceService;
 use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
@@ -79,10 +79,6 @@ impl FailFirstAdoptRemovalStore {
 impl AdoptStore for FailFirstAdoptRemovalStore {
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
         AdoptStore::list_agents(self.delegate.as_ref())
-    }
-
-    fn mark_agent_detected(&self, agent_id: &AgentId) -> Result<(), AdoptStoreError> {
-        AdoptStore::mark_agent_detected(self.delegate.as_ref(), agent_id)
     }
 
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
@@ -1756,7 +1752,7 @@ fn adopt_recovery_discards_uncommitted_entities_and_forwards_committed_items() {
                     kind: skill_man_lib::seams::filesystem::AdoptAppearanceKind::RealDirectory,
                 }],
                 activations: vec![skill_man_lib::seams::filesystem::AdoptActivationStep {
-                    agent_id: "claude-code".into(),
+                    target_root_id: harness.home.activation_root_id("claude-code"),
                     entry_path: claude.join("committed"),
                     target_path: committed.clone(),
                 }],
@@ -2213,7 +2209,7 @@ fn startup_recovery_retains_a_committed_adopt_when_the_final_entity_is_missing()
     item.phase = skill_man_lib::seams::filesystem::AdoptItemPhase::CatalogCommitted;
     item.installed_fingerprint = Some(item.staged_fingerprint.clone());
     item.activations = vec![skill_man_lib::seams::filesystem::AdoptActivationStep {
-        agent_id: "claude-code".into(),
+        target_root_id: harness.home.activation_root_id("claude-code"),
         entry_path: activation.clone(),
         target_path: item.final_entity_path.clone(),
     }];
@@ -2474,7 +2470,7 @@ fn startup_recovery_restores_original_symlink_appearances_when_the_catalog_is_ab
     let migrated_final = fixture.journal.items[0].final_entity_path.clone();
     fixture.journal.items[0].activations.push(
         skill_man_lib::seams::filesystem::AdoptActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: migrated_appearance.clone(),
             target_path: migrated_final,
         },
@@ -2512,7 +2508,7 @@ fn startup_recovery_restores_original_symlink_appearances_when_the_catalog_is_ab
                 },
             }],
             activations: vec![skill_man_lib::seams::filesystem::AdoptActivationStep {
-                agent_id: "claude-code".into(),
+                target_root_id: harness.home.activation_root_id("claude-code"),
                 entry_path: linked_appearance.clone(),
                 target_path: external.clone(),
             }],
@@ -2574,7 +2570,7 @@ fn startup_recovery_accepts_an_appearance_already_replaced_by_its_planned_activa
             },
         });
     item.activations = vec![skill_man_lib::seams::filesystem::AdoptActivationStep {
-        agent_id: "claude-code".into(),
+        target_root_id: harness.home.activation_root_id("claude-code"),
         entry_path: activation.clone(),
         target_path: item.final_entity_path.clone(),
     }];
@@ -2649,7 +2645,7 @@ fn startup_recovery_converges_each_item_in_a_committed_adopt_journal() {
             },
         }],
         activations: vec![skill_man_lib::seams::filesystem::AdoptActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: activation.clone(),
             target_path: external.clone(),
         }],
@@ -2670,7 +2666,7 @@ fn startup_recovery_converges_each_item_in_a_committed_adopt_journal() {
             original_path: None,
             original_filename: link_item.original_filename.clone(),
             activations: vec![skill_man_lib::seams::adopt_store::AdoptedActivation {
-                agent_id: AgentId("claude-code".into()),
+                target_root_id: harness.home.activation_root_id("claude-code"),
                 expected_entry_path: activation.clone(),
                 expected_target_path: external.clone(),
             }],

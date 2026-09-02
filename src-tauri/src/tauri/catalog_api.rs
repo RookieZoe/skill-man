@@ -1,8 +1,8 @@
 use crate::core::catalog::{CatalogError, CatalogService};
 use crate::core::domain::SkillId;
 use crate::tauri_adapter::dto::{
-    AgentActivationDto, CatalogListDto, CommandFailureDto, DiagnosticDto, ListSkillsRequestDto,
-    PublicErrorDto, SkillDetailDto, SkillSummaryDto,
+    CatalogListDto, CommandFailureDto, DiagnosticDto, ListSkillsRequestDto, PublicErrorDto,
+    SkillDetailDto, SkillSummaryDto,
 };
 
 #[derive(Clone)]
@@ -38,16 +38,6 @@ impl CatalogApi {
         self.catalog
             .inspect(SkillId(skill_id))
             .map(SkillDetailDto::from)
-            .map_err(command_error)
-    }
-
-    pub fn list_agents(
-        &self,
-        skill_id: String,
-    ) -> Result<Vec<AgentActivationDto>, CommandFailureDto> {
-        self.catalog
-            .list_agents(SkillId(skill_id))
-            .map(|agents| agents.into_iter().map(AgentActivationDto::from).collect())
             .map_err(command_error)
     }
 }

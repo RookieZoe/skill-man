@@ -57,6 +57,9 @@ pub struct AdoptAppearance {
     pub kind: AdoptAppearanceKind,
     /// The Agent whose skills directory holds this entry; `None` for shared.
     pub agent_id: Option<AgentId>,
+    /// Present only when this appearance itself is in the configuration's
+    /// unique Activation Target. Scan-only appearances never become writes.
+    pub target_root_id: Option<String>,
     pub shared: bool,
 }
 
@@ -339,14 +342,11 @@ impl AdoptService {
                 _ => item.final_entity_path.clone(),
             };
             for appearance in &item.appearances {
-                if appearance.shared {
+                if appearance.shared || appearance.target_root_id.is_none() {
                     continue;
                 }
-                let agent_id = appearance.agent_id.clone().ok_or_else(|| {
-                    AdoptError::Internal("Agent appearance lacks an Agent".into())
-                })?;
                 activations.push(AdoptActivationStep {
-                    agent_id: agent_id.0,
+                    target_root_id: appearance.target_root_id.clone().expect("checked above"),
                     // The scan already returned absolute entry paths; they must
                     // stay unresolved (the entry IS the symlink being replaced).
                     entry_path: appearance.entry_path.clone(),
@@ -354,12 +354,14 @@ impl AdoptService {
                 });
             }
             for agent in agents.iter().filter(|agent| {
-                item.target_agents
-                    .iter()
-                    .any(|target| target.agent_id == agent.agent_id)
+                agent.activation_target
+                    && item
+                        .target_agents
+                        .iter()
+                        .any(|target| target.agent_id == agent.agent_id)
             }) {
                 activations.push(AdoptActivationStep {
-                    agent_id: agent.agent_id.0.clone(),
+                    target_root_id: agent.root_id.clone(),
                     entry_path: self
                         .filesystem
                         .normalize_configured_path(&agent.skills_path.join(&item.directory_name))?,
@@ -975,7 +977,7 @@ impl AdoptService {
                 .activations
                 .iter()
                 .map(|activation| AdoptedActivation {
-                    agent_id: AgentId(activation.agent_id.clone()),
+                    target_root_id: activation.target_root_id.clone(),
                     expected_entry_path: activation.entry_path.clone(),
                     expected_target_path: activation.target_path.clone(),
                 })
@@ -1349,7 +1351,7 @@ impl AdoptService {
                     .activations
                     .iter()
                     .map(|activation| AdoptedActivation {
-                        agent_id: AgentId(activation.agent_id.clone()),
+                        target_root_id: activation.target_root_id.clone(),
                         expected_entry_path: activation.entry_path.clone(),
                         expected_target_path: activation.target_path.clone(),
                     })
@@ -1372,7 +1374,7 @@ impl AdoptService {
                     .activations
                     .iter()
                     .map(|activation| AdoptedActivation {
-                        agent_id: AgentId(activation.agent_id.clone()),
+                        target_root_id: activation.target_root_id.clone(),
                         expected_entry_path: activation.entry_path.clone(),
                         expected_target_path: activation.target_path.clone(),
                     })

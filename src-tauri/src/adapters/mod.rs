@@ -1,4 +1,4 @@
-pub mod agent_adapters;
+pub mod agent_configuration_fs;
 pub mod app_state_store;
 pub mod catalog_probe;
 pub mod fixture_catalog;

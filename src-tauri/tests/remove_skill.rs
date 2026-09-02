@@ -8,14 +8,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
-use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
-use skill_man_lib::core::domain::{AgentId, CatalogFilter, SkillId};
+use skill_man_lib::core::domain::{CatalogFilter, SkillId};
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::core::maintenance::{MaintenanceError, MaintenanceService};
 use skill_man_lib::core::write_gate::WriteGate;
@@ -35,7 +33,6 @@ struct TestHarness {
     runtime: Arc<RuntimeCatalogStore>,
     catalog: CatalogService,
     import: ImportService,
-    activation: ActivationService,
     maintenance: MaintenanceService,
 }
 
@@ -58,10 +55,6 @@ fn harness_with_gate(write_gate: Arc<WriteGate>) -> TestHarness {
     )
     .with_write_gate(write_gate.clone());
     let catalog = CatalogService::new(runtime.clone());
-    let activation =
-        ActivationService::new(runtime.clone(), filesystem.clone(), library_root.clone())
-            .with_agent_adapters(Arc::new(BuiltInAgentAdapters))
-            .with_write_gate(write_gate.clone());
     let maintenance = MaintenanceService::new(runtime.clone(), filesystem)
         .with_library_root(library_root.clone())
         .with_write_gate(write_gate);
@@ -71,7 +64,6 @@ fn harness_with_gate(write_gate: Arc<WriteGate>) -> TestHarness {
         runtime,
         catalog,
         import,
-        activation,
         maintenance,
     }
 }
@@ -91,18 +83,20 @@ fn import_link_and_enable(harness: &TestHarness, source: &Path, agent: &str) -> 
         .import
         .apply_link(&preview.plan_token)
         .expect("apply Link Import");
-    let activation = harness
-        .activation
-        .plan(SetActivation {
-            skill_id: imported.skill_id.clone(),
-            agent_id: AgentId(agent.into()),
-            enabled: true,
-        })
-        .expect("plan Enable");
+    let root = match agent {
+        "claude-code" => harness.home.claude_root(),
+        "codex" => harness.home.codex_root(),
+        other => harness.home.path().join(format!("agents/{other}/skills")),
+    };
+    std::fs::create_dir_all(&root).expect("create Target root");
+    std::os::unix::fs::symlink(
+        source.canonicalize().expect("canonical Link source"),
+        root.join(&imported.directory_name),
+    )
+    .expect("create Target-scoped Activation");
     harness
-        .activation
-        .apply(&activation.plan_token)
-        .expect("apply Enable");
+        .home
+        .seed_activation(&imported.skill_id.0, agent, true, "present");
     imported.skill_id
 }
 
@@ -273,20 +267,16 @@ fn interrupted_remove_rolls_back_at_startup_when_the_catalog_survives() {
         .expect("apply file Import");
     let agent_root = harness.home.path().join(".claude/skills");
     std::fs::create_dir_all(&agent_root).expect("create Agent directory");
-    let activation = harness
-        .activation
-        .plan(SetActivation {
-            skill_id: imported.skill_id.clone(),
-            agent_id: AgentId("claude-code".into()),
-            enabled: true,
-        })
-        .expect("plan Enable");
-    harness
-        .activation
-        .apply(&activation.plan_token)
-        .expect("apply Enable");
     let entity = harness.library_root.join("skills/rollback-install");
     let entry_path = agent_root.join("rollback-install");
+    std::os::unix::fs::symlink(
+        entity.canonicalize().expect("canonical Install entity"),
+        &entry_path,
+    )
+    .expect("create Target-scoped Activation");
+    harness
+        .home
+        .seed_activation(&imported.skill_id.0, "claude-code", true, "present");
 
     // Simulate a crash after the Activation was removed and the entity
     // backed up, before the catalog commit.
@@ -312,7 +302,7 @@ fn interrupted_remove_rolls_back_at_startup_when_the_catalog_survives() {
             inode: entity_fingerprint.ino(),
         }),
         activations: vec![RemoveActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: entry_path.clone(),
             target_path: entity.clone(),
             initial_entry: RemoveInitialEntry::Symlink,
@@ -432,7 +422,7 @@ fn unrecoverable_remove_locks_writes_and_keeps_browsing_available() {
         backup_path: None,
         backup_fingerprint: None,
         activations: vec![RemoveActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: entry_path.clone(),
             target_path: source.canonicalize().expect("canonical source"),
             initial_entry: RemoveInitialEntry::Symlink,
@@ -534,7 +524,7 @@ fn retrying_recovery_after_repair_unlocks_writes() {
         backup_path: None,
         backup_fingerprint: None,
         activations: vec![RemoveActivationStep {
-            agent_id: "claude-code".into(),
+            target_root_id: harness.home.activation_root_id("claude-code"),
             entry_path: entry_path.clone(),
             target_path: entity.clone(),
             initial_entry: RemoveInitialEntry::Symlink,

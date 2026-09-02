@@ -20,8 +20,6 @@ export interface GitSourceCapabilityReport {
 export type Health = "healthy" | "broken" | "modified";
 export type AgentKind = "claude_preset" | "codex_preset" | "custom";
 export type Compatibility = "verified" | "unknown";
-export type ActivationObservedState =
-  "present" | "missing" | "target_mismatch" | "dangling" | "occupied";
 
 export type CatalogAccess = "read_write" | "read_only";
 export type CatalogReadOnlyReason =
@@ -306,6 +304,20 @@ export type ExistingHomeRecoveryProfileRejection =
 export type PublicError =
   | { code: "validation" }
   | { code: "not_found" }
+  | { code: "agent_configuration_name_invalid" }
+  | { code: "agent_configuration_name_conflict"; name: string }
+  | { code: "agent_preset_not_found"; presetKey: string }
+  | { code: "agent_root_required" }
+  | { code: "agent_activation_target_required" }
+  | { code: "agent_root_duplicate"; path: string }
+  | { code: "agent_root_overlap"; path: string; conflictingPath: string }
+  | { code: "agent_root_home_overlap"; path: string }
+  | { code: "agent_root_invalid"; path: string }
+  | { code: "agent_target_not_writable"; path: string }
+  | { code: "agent_target_not_allowed"; path: string }
+  | { code: "agent_project_skills_dir_invalid" }
+  | { code: "agent_configuration_not_found"; agentId: string }
+  | { code: "agent_target_in_use"; skillIds: string[] }
   | { code: "conflict"; directoryName: string }
   | { code: "plan_stale" }
   | { code: "permission_denied" }
@@ -377,81 +389,68 @@ export interface SkillDetail extends SkillSummary {
   skillMarkdown: string;
 }
 
-export interface AgentActivation {
-  id: string;
+export type AgentConfigurationOrigin = "preset" | "custom";
+export type AgentRootRole = "scan_only" | "activation_target";
+
+export interface AgentConfigurationRoot {
+  rootId: string;
+  configuredPath: string;
+  pathIdentityKey: string;
+  role: AgentRootRole;
+  consumerAgentIds: string[];
+  activationSkillIds: string[];
+}
+
+export interface AgentConfiguration {
+  agentId: string;
+  origin: AgentConfigurationOrigin;
+  presetKey: string | null;
   name: string;
-  kind: AgentKind;
-  skillsPath: string;
-  detected: boolean;
   compatibility: Compatibility;
-  desiredEnabled: boolean;
-  observedState: ActivationObservedState;
+  projectSkillsDir: string | null;
+  roots: AgentConfigurationRoot[];
 }
 
-export interface ActivationPreview {
+export interface AgentPreset {
+  presetKey: string;
+  name: string;
+  compatibility: Compatibility;
+  roots: string[];
+  activationTarget: string;
+  projectSkillsDir: string;
+}
+
+export interface AgentManagementSnapshot {
+  generation: number;
+  configurations: AgentConfiguration[];
+  presets: AgentPreset[];
+}
+
+export interface AgentRootDraft {
+  configuredPath: string;
+  role: AgentRootRole;
+}
+
+export interface AgentConfigurationDraft {
+  presetKey: string | null;
+  name: string;
+  roots: AgentRootDraft[];
+  projectSkillsDir: string | null;
+}
+
+export interface AgentConfigurationPlan {
   planToken: string;
-  skillId: string;
+  kind: "create" | "edit" | "delete";
+  configuration: AgentConfiguration | null;
+  targetWillBeCreated: boolean;
+  blockingActivationSkillIds: string[];
+  retainedActivationCount: number;
+}
+
+export interface AgentConfigurationApplyResult {
   agentId: string;
-  skillDirectoryName: string;
-  agentName: string;
-  enabled: boolean;
-  kind: "enable" | "disable" | "repair";
-  entryPath: string;
-  targetPath: string;
-  compatibilityWarning: CompatibilityWarning | null;
-}
-
-export type CompatibilityWarning =
-  | { kind: "custom_unknown" }
-  | {
-      kind: "frontmatter_mismatch";
-      frontmatterName: string;
-      directoryName: string;
-    };
-
-export type OccupierKind = "real_directory" | "symlink" | "file";
-
-export interface OccupierSummary {
-  kind: OccupierKind;
-  symlinkTarget: string | null;
-  finalEntityPath: string | null;
-  directoryName: string;
-  isSkill: boolean;
-  adoptable: boolean;
-  notAdoptableReason: OccupierNotAdoptableReason | null;
-}
-
-export type OccupierNotAdoptableReason =
-  | { kind: "regular_file" }
-  | { kind: "points_at_managed_skill" }
-  | { kind: "points_at_this_skill" }
-  | { kind: "no_readable_skill_md" }
-  | { kind: "target_unresolvable" }
-  | { kind: "identity_conflict"; directoryName: string };
-
-export interface ActivationConflictDetails {
-  skillId: string;
-  agentId: string;
-  entryPath: string;
-  targetPath: string;
-  occupier: OccupierSummary;
-}
-
-export interface ActivationReplacePreview {
-  planToken: string;
-  operationId: string;
-  skillDirectoryName: string;
-  agentName: string;
-  entryPath: string;
-  targetPath: string;
-  backupPath: string;
-  occupantKind: OccupierKind;
-}
-
-export interface ActivationReplaceUndoResult {
-  undone: boolean;
-  error: string | null;
-  snapshotVersion: number;
+  generation: number;
+  deleted: boolean;
 }
 
 export interface AppPreferences {
@@ -518,11 +517,6 @@ export interface StartupInfo {
   agents: StartupAgent[];
 }
 
-export interface ActivationHealthReport {
-  checked: number;
-  snapshotVersion: number;
-}
-
 export interface RelocateLinkPreview {
   planToken: string;
   skillId: string;
@@ -555,14 +549,6 @@ export interface RemoveSkillPreview {
 export interface RemoveSkillResult {
   skillId: string;
   directoryName: string;
-  snapshotVersion: number;
-}
-
-export interface ActivationResult {
-  skillId: string;
-  agentId: string;
-  desiredEnabled: boolean;
-  observedState: ActivationObservedState;
   snapshotVersion: number;
 }
 
@@ -1093,30 +1079,20 @@ export interface CatalogClient {
   /** Read-only Source Capability Scan (ADR-0014, spec §8.3). */
   getGitSourceCapability(): Promise<GitSourceCapabilityReport>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
-  listAgents(skillId: string): Promise<AgentActivation[]>;
-  planActivation(
-    skillId: string,
+  getAgentManagementSnapshot(): Promise<AgentManagementSnapshot>;
+  planCreateAgentConfiguration(
+    draft: AgentConfigurationDraft,
+  ): Promise<AgentConfigurationPlan>;
+  planEditAgentConfiguration(
     agentId: string,
-    enabled: boolean,
-  ): Promise<ActivationPreview>;
-  planActivationRepair(
-    skillId: string,
+    draft: AgentConfigurationDraft,
+  ): Promise<AgentConfigurationPlan>;
+  planDeleteAgentConfiguration(
     agentId: string,
-  ): Promise<ActivationPreview>;
-  activationConflictDetails(
-    skillId: string,
-    agentId: string,
-  ): Promise<ActivationConflictDetails>;
-  planActivationReplace(
-    skillId: string,
-    agentId: string,
-  ): Promise<ActivationReplacePreview>;
-  applyActivationReplace(planToken: string): Promise<ActivationResult>;
-  cancelActivationReplace(planToken: string): Promise<boolean>;
-  undoActivationReplace(
-    operationId: string,
-  ): Promise<ActivationReplaceUndoResult>;
-  finalizeActivationReplace(operationId: string): Promise<void>;
+  ): Promise<AgentConfigurationPlan>;
+  applyAgentConfigurationPlan(
+    planToken: string,
+  ): Promise<AgentConfigurationApplyResult>;
   loadPreferences(): Promise<AppPreferences>;
   updatePreferences(
     updates: PreferenceUpdates,
@@ -1128,7 +1104,6 @@ export interface CatalogClient {
   startupInfo(): Promise<StartupInfo>;
   completeOnboarding(): Promise<void>;
   createAgentDirectory(agentId: string): Promise<StartupInfo>;
-  runActivationHealthCheck(): Promise<ActivationHealthReport>;
   relocateLink(
     skillId: string,
     sourcePath: string,
@@ -1138,8 +1113,6 @@ export interface CatalogClient {
   planRemoveSkill(skillId: string): Promise<RemoveSkillPreview>;
   applyRemoveSkill(planToken: string): Promise<RemoveSkillResult>;
   cancelRemoveSkill(planToken: string): Promise<boolean>;
-  applyActivation(planToken: string): Promise<ActivationResult>;
-  cancelActivation(planToken: string): Promise<boolean>;
   discoverLinkImport(sourcePath: string): Promise<LinkImportCandidate>;
   planLinkImport(sourcePath: string): Promise<LinkImportPreview>;
   applyLinkImport(planToken: string): Promise<LinkImportResult>;
@@ -1187,8 +1160,6 @@ export interface CatalogClient {
   planDeleteSafetySnapshot(snapshotId: string): Promise<DeleteSnapshotPreview>;
   applyDeleteSafetySnapshot(planToken: string): Promise<void>;
 }
-
-let startupHealthCheck: Promise<ActivationHealthReport> | null = null;
 
 const tauriCatalogClient: CatalogClient = {
   getBootstrapSnapshot() {
@@ -1304,48 +1275,29 @@ const tauriCatalogClient: CatalogClient = {
   inspectSkill(skillId) {
     return invoke<SkillDetail>("inspect_skill", { skillId });
   },
-  listAgents(skillId) {
-    return invoke<AgentActivation[]>("list_agents", { skillId });
+  getAgentManagementSnapshot() {
+    return invoke<AgentManagementSnapshot>("get_agent_management_snapshot");
   },
-  planActivation(skillId, agentId, enabled) {
-    return invoke<ActivationPreview>("plan_activation", {
-      request: { skillId, agentId, enabled },
+  planCreateAgentConfiguration(draft) {
+    return invoke<AgentConfigurationPlan>("plan_create_agent_configuration", {
+      request: draft,
     });
   },
-  planActivationRepair(skillId, agentId) {
-    return invoke<ActivationPreview>("plan_activation_repair", {
-      request: { skillId, agentId },
+  planEditAgentConfiguration(agentId, draft) {
+    return invoke<AgentConfigurationPlan>("plan_edit_agent_configuration", {
+      request: { agentId, ...draft },
     });
   },
-  activationConflictDetails(skillId, agentId) {
-    return invoke<ActivationConflictDetails>("activation_conflict_details", {
-      request: { skillId, agentId },
+  planDeleteAgentConfiguration(agentId) {
+    return invoke<AgentConfigurationPlan>("plan_delete_agent_configuration", {
+      request: { agentId },
     });
   },
-  planActivationReplace(skillId, agentId) {
-    return invoke<ActivationReplacePreview>("plan_activation_replace", {
-      request: { skillId, agentId },
-    });
-  },
-  applyActivationReplace(planToken) {
-    return invoke<ActivationResult>("apply_activation_replace", {
-      request: { planToken },
-    });
-  },
-  cancelActivationReplace(planToken) {
-    return invoke<boolean>("cancel_activation_replace", {
-      request: { planToken },
-    });
-  },
-  undoActivationReplace(operationId) {
-    return invoke<ActivationReplaceUndoResult>("undo_activation_replace", {
-      request: { operationId },
-    });
-  },
-  finalizeActivationReplace(operationId) {
-    return invoke<void>("finalize_activation_replace", {
-      request: { operationId },
-    });
+  applyAgentConfigurationPlan(planToken) {
+    return invoke<AgentConfigurationApplyResult>(
+      "apply_agent_configuration_plan",
+      { request: { planToken } },
+    );
   },
   loadPreferences() {
     return invoke<AppPreferences>("load_preferences");
@@ -1384,24 +1336,6 @@ const tauriCatalogClient: CatalogClient = {
   createAgentDirectory(agentId) {
     return invoke<StartupInfo>("create_agent_directory", {
       request: { agentId },
-    });
-  },
-  runActivationHealthCheck() {
-    startupHealthCheck ??= invoke<ActivationHealthReport>(
-      "run_activation_health_check",
-    ).finally(() => {
-      startupHealthCheck = null;
-    });
-    return startupHealthCheck;
-  },
-  applyActivation(planToken) {
-    return invoke<ActivationResult>("apply_activation", {
-      request: { planToken },
-    });
-  },
-  cancelActivation(planToken) {
-    return invoke<boolean>("cancel_activation", {
-      request: { planToken },
     });
   },
   discoverLinkImport(sourcePath) {

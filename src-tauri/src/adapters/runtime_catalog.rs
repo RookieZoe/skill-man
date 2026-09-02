@@ -4,17 +4,19 @@ use std::sync::{Arc, RwLock};
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::bootstrap::{BootstrapService, BootstrapSnapshot, CatalogAccess};
 use crate::core::domain::{
-    AgentActivation, AgentId, CatalogFilter, Health, SkillDetail, SkillId, SkillSummary,
-    parse_skill_metadata,
+    CatalogFilter, Health, SkillDetail, SkillId, SkillSummary, parse_skill_metadata,
 };
 use crate::core::home::BoundHome;
 use crate::seams::activation_store::{
-    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
-    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
+    ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict as AdoptConflict,
     RemoteAdoptedSkillRecord,
+};
+use crate::seams::agent_configuration_store::{
+    AgentConfigurationStore, AgentConfigurationStoreChange, AgentConfigurationStoreError,
+    AgentConfigurationStoreSnapshot, RecentProjectFolder,
 };
 use crate::seams::catalog_store::StartupAccess;
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
@@ -304,13 +306,6 @@ impl CatalogStore for RuntimeCatalogStore {
         }))
     }
 
-    fn list_agents(
-        &self,
-        skill_id: &SkillId,
-    ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError> {
-        self.require_catalog()?.list_agent_activations(skill_id)
-    }
-
     fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {
         if !self.is_writable() {
             // A read-only catalog must not masquerade as a first run: the
@@ -399,6 +394,67 @@ impl SourcePromotionStore for RuntimeCatalogStore {
             ));
         }
         self.require().undo_source_promotion(record, legacy)
+    }
+}
+
+impl AgentConfigurationStore for RuntimeCatalogStore {
+    fn agent_configuration_snapshot(
+        &self,
+    ) -> Result<AgentConfigurationStoreSnapshot, AgentConfigurationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                AgentConfigurationStoreError::Unavailable(
+                    "no Bound Home: the catalog is closed".into(),
+                )
+            })?
+            .agent_configuration_snapshot()
+    }
+
+    fn apply_agent_configuration_change(
+        &self,
+        expected_snapshot_version: u64,
+        change: AgentConfigurationStoreChange,
+    ) -> Result<u64, AgentConfigurationStoreError> {
+        if !self.is_writable() {
+            return Err(AgentConfigurationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require()
+            .apply_agent_configuration_change(expected_snapshot_version, change)
+    }
+
+    fn list_recent_project_folders(
+        &self,
+    ) -> Result<Vec<RecentProjectFolder>, AgentConfigurationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                AgentConfigurationStoreError::Unavailable(
+                    "no Bound Home: the catalog is closed".into(),
+                )
+            })?
+            .list_recent_project_folders()
+    }
+
+    fn record_recent_project_folder(
+        &self,
+        folder: RecentProjectFolder,
+    ) -> Result<(), AgentConfigurationStoreError> {
+        if !self.is_writable() {
+            return Err(AgentConfigurationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().record_recent_project_folder(folder)
+    }
+
+    fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
+        if !self.is_writable() {
+            return Err(AgentConfigurationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().clear_recent_project_folders()
     }
 }
 
@@ -703,15 +759,6 @@ impl AdoptStore for RuntimeCatalogStore {
         self.require().list_agents()
     }
 
-    fn mark_agent_detected(&self, agent_id: &AgentId) -> Result<(), AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().mark_agent_detected(agent_id)
-    }
-
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
         if !self.is_writable() {
             return Err(AdoptStoreError::Unavailable(
@@ -795,37 +842,6 @@ impl AdoptStore for RuntimeCatalogStore {
 }
 
 impl ActivationStore for RuntimeCatalogStore {
-    fn load(
-        &self,
-        skill_id: &SkillId,
-        agent_id: &crate::core::domain::AgentId,
-    ) -> Result<Option<ActivationContext>, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().load(skill_id, agent_id)
-    }
-
-    fn configured_agent_paths(&self) -> Result<Vec<ConfiguredAgentPath>, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().configured_agent_paths()
-    }
-
-    fn record(&self, record: ActivationRecord) -> Result<u64, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record(record)
-    }
-
     fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
         if !self.is_writable() {
             return Err(ActivationStoreError::Unavailable(
@@ -1040,7 +1056,7 @@ impl MaintenanceStore for RuntimeCatalogStore {
                 .into_iter()
                 .map(|activation| ActivationRecoveryBaseline {
                     skill_id: activation.skill_id.0,
-                    agent_id: activation.agent_id.0,
+                    target_root_id: activation.target_root_id,
                     expected_entry_path: activation.expected_entry_path,
                     expected_target_path: activation.expected_target_path,
                 })
@@ -1109,24 +1125,6 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
             );
         }
         self.require().record_app_update_check_at(checked_at)
-    }
-}
-
-impl crate::core::activation::ActivationConflictChecker for RuntimeCatalogStore {
-    fn library_identity_conflict(
-        &self,
-        identity_key: &str,
-    ) -> Result<Option<AdoptConflict>, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        crate::seams::adopt_store::AdoptStore::find_library_conflict(
-            self.require().as_ref(),
-            identity_key,
-        )
-        .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))
     }
 }
 

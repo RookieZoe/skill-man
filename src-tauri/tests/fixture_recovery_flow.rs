@@ -357,49 +357,29 @@ fn active_writer_blocks_apply_without_mutating_anything() {
 /// fixture Agents, three fixture Skills pointing into `fixture-entities/`,
 /// the two entity trees, zero relations.
 fn contaminate_bound_home(home: &common::BoundTestHome) {
-    for (id, name, kind, skills_path, compatibility) in [
-        (
-            "claude-code",
-            "Claude Code",
-            "claude_preset",
-            "~/.claude/skills",
-            "verified",
-        ),
-        (
-            "codex",
-            "Codex",
-            "codex_preset",
-            "~/.codex/skills",
-            "verified",
-        ),
-        (
-            "workbench",
-            "Workbench",
-            "custom",
-            "~/Library/Application Support/workbench/skills",
-            "unknown",
-        ),
-    ] {
-        home.with_sql("seed fixture Agent", |connection| {
-            connection
-                .execute(
-                    "INSERT INTO agents (
-                        id, name, kind, skills_path, path_identity_key, detected,
-                        compatibility, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?7)",
-                    rusqlite::params![
-                        id,
-                        name,
-                        kind,
-                        skills_path,
-                        skills_path.to_lowercase(),
-                        compatibility,
-                        "1970-01-01T00:00:00Z"
-                    ],
-                )
-                .expect("seed fixture Agent");
-        });
-    }
+    // The fixture footprint's Agents are explicit user-confirmed
+    // Agent Configurations in the current schema (spec §3.4 v8; ADR-0016).
+    home.seed_agent(
+        "claude-code",
+        "Claude Code",
+        "claude_preset",
+        "~/.claude/skills",
+        "verified",
+    );
+    home.seed_agent(
+        "codex",
+        "Codex",
+        "codex_preset",
+        "~/.codex/skills",
+        "verified",
+    );
+    home.seed_agent(
+        "workbench",
+        "Workbench",
+        "custom",
+        "~/Library/Application Support/workbench/skills",
+        "unknown",
+    );
     let entities = home.library_root.join("fixture-entities");
     for (name, document) in [
         ("skill-authoring", common::FIXTURE_SKILL_AUTHORING_SKILL_MD),

@@ -88,22 +88,19 @@ export function createMatrixCatalogClient(
     scenario.language === "zh" ? DENSE_MARKDOWN_ZH : DENSE_MARKDOWN_EN;
 
   if (scenario.notices !== "none") {
-    const realHealthCheck = client.runActivationHealthCheck.bind(client);
-    client.runActivationHealthCheck = async () => {
-      await realHealthCheck();
+    client.getGitSourceCapability = async () => {
       throw {
-        code: "recovery_required",
-        message:
-          scenario.language === "zh"
-            ? "需要先完成恢复，写入已锁定。"
-            : "Recovery is required before writes are unlocked.",
+        error: { code: "catalog_unavailable" },
+        diagnostic: {
+          code: "capability_failed",
+          message: "Git source capability unavailable.",
+        },
       };
     };
   }
 
   if (scenario.notices === "stack") {
-    // Stacked Notices = the Catalog error Notice plus the recovery lock
-    // Notice, both owned by the NoticeRegion tray.
+    // Stacked Notices = Catalog read plus Source Capability failure.
     client.listSkills = async () => {
       throw new Error("Catalog read failed");
     };

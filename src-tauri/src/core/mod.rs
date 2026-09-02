@@ -1,5 +1,5 @@
-pub mod activation;
 pub mod adopt;
+pub mod agent_configuration;
 pub mod app_update;
 pub mod bootstrap;
 pub mod catalog;

@@ -1,19 +1,15 @@
 use std::sync::Arc;
 
-use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::system_clock::SystemClock;
-use skill_man_lib::core::activation::ActivationService;
 use skill_man_lib::core::catalog::CatalogService;
 use skill_man_lib::core::import::ImportService;
 use skill_man_lib::seams::filesystem::FileSystem;
-use skill_man_lib::tauri_adapter::activation_api::ActivationApi;
 use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{
-    ApplyActivationRequestDto, ApplyLinkImportRequestDto, CatalogFilterDto,
-    DiscoverLinkImportRequestDto, ListSkillsRequestDto, PlanActivationRequestDto,
-    PlanLinkImportRequestDto, PublicErrorDto, SourceKindDto,
+    ApplyLinkImportRequestDto, CatalogFilterDto, DiscoverLinkImportRequestDto,
+    ListSkillsRequestDto, PlanLinkImportRequestDto, PublicErrorDto, SourceKindDto,
 };
 use skill_man_lib::tauri_adapter::import_api::ImportApi;
 
@@ -21,20 +17,12 @@ mod common;
 use common::BoundTestHome;
 
 #[test]
-fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
+fn link_import_stays_at_its_source_and_enters_the_library_without_distribution() {
     let home = BoundTestHome::new();
     home.seed_standard_library();
     let library_root = home.library_root.clone();
     let source = home.path().join("Projects/linked-authoring");
-    let claude_root = home.path().join(".claude/skills");
-    let codex_root = home.path().join(".codex/skills");
-    let workbench_root = home
-        .path()
-        .join("Library/Application Support/workbench/skills");
     std::fs::create_dir_all(&source).expect("create Link source");
-    std::fs::create_dir_all(&claude_root).expect("create Claude skills directory");
-    std::fs::create_dir_all(&codex_root).expect("create Codex skills directory");
-    std::fs::create_dir_all(&workbench_root).expect("create Custom Agent skills directory");
     std::fs::write(
         source.join("SKILL.md"),
         "---\nname: linked-authoring\ndescription: Author linked Skills in place.\n---\n\n# Linked authoring\n",
@@ -51,10 +39,6 @@ fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
         library_root.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
-    let activation = ActivationApi::new(
-        ActivationService::new(runtime, filesystem, library_root.clone())
-            .with_agent_adapters(Arc::new(BuiltInAgentAdapters)),
-    );
 
     let discovered = import
         .discover_link_import(DiscoverLinkImportRequestDto {
@@ -106,38 +90,6 @@ fn link_import_stays_at_its_source_and_enables_with_a_direct_activation() {
         .expect("inspect imported Link");
     assert_eq!(detail.final_entity_path, discovered.final_entity_path);
     assert!(detail.skill_markdown.contains("# Linked authoring"));
-
-    for (agent_id, agent_root, expects_warning) in [
-        ("claude-code", claude_root, false),
-        ("codex", codex_root, false),
-        ("workbench", workbench_root, true),
-    ] {
-        let activation_preview = activation
-            .plan_activation(PlanActivationRequestDto {
-                skill_id: result.skill_id.clone(),
-                agent_id: agent_id.into(),
-                enabled: true,
-            })
-            .expect("plan Enable for imported Link");
-        assert_eq!(
-            activation_preview.compatibility_warning.is_some(),
-            expects_warning
-        );
-        assert_eq!(
-            activation_preview.target_path,
-            canonical_source.to_string_lossy()
-        );
-        activation
-            .apply_activation(ApplyActivationRequestDto {
-                plan_token: activation_preview.plan_token,
-            })
-            .expect("Enable imported Link");
-        assert_eq!(
-            std::fs::read_link(agent_root.join("linked-authoring"))
-                .expect("read direct Activation"),
-            canonical_source
-        );
-    }
 }
 
 #[test]

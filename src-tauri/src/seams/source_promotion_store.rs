@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::core::domain::{ActivationObservedState, AgentId, Health, SkillId};
+use crate::core::domain::{ActivationObservedState, Health, SkillId};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LegacySourcePromotionRecord {
@@ -56,7 +56,7 @@ pub struct LegacySourcePromotionMemberRecord {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourcePromotionActivationRecord {
-    pub agent_id: AgentId,
+    pub target_root_id: String,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
     pub desired_enabled: bool,

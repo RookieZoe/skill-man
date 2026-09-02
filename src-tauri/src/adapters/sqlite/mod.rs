@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -7,13 +7,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use thiserror::Error;
 
 use crate::core::domain::{
-    ActivationObservedState, AgentActivation, AgentId, AgentKind, CatalogFilter, Compatibility,
-    Health, SkillId, SkillSummary, SourceKind,
+    ActivationObservedState, AgentId, AgentKind, CatalogFilter, Health, SkillId, SkillSummary,
+    SourceKind, agent_name_identity_key, configured_path_identity_key,
 };
 use crate::core::home::{BoundHome, HomeId};
 use crate::seams::activation_store::{
-    ActivationContext, ActivationObservation, ActivationRecord, ActivationStore,
-    ActivationStoreError, ConfiguredAgentPath, DesiredActivation,
+    ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
@@ -46,6 +45,7 @@ use crate::seams::source_update_store::{
     SourceUpdateCurrentSource, SourceUpdateMember, SourceUpdateStore, SourceUpdateStoreError,
 };
 
+mod agent_configuration;
 mod prepared;
 pub use prepared::SqlitePreparedCatalogFactory;
 
@@ -102,30 +102,64 @@ CREATE TABLE skills (
     )
 );
 
-CREATE TABLE agents (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL CHECK (kind IN ('claude_preset', 'codex_preset', 'custom')),
-    skills_path TEXT NOT NULL,
-    path_identity_key TEXT NOT NULL UNIQUE,
-    detected INTEGER NOT NULL CHECK (detected IN (0, 1)),
+CREATE TABLE agent_configurations (
+    agent_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL CHECK (origin IN ('preset', 'custom')),
+    preset_key TEXT,
+    name TEXT NOT NULL,
+    name_identity_key TEXT NOT NULL UNIQUE,
     compatibility TEXT NOT NULL CHECK (compatibility IN ('verified', 'unknown')),
+    project_skills_dir TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (
+        (origin = 'preset' AND preset_key IS NOT NULL)
+        OR (origin = 'custom' AND preset_key IS NULL)
+    )
+);
+
+CREATE TABLE global_skill_roots (
+    root_id TEXT PRIMARY KEY,
+    configured_path TEXT NOT NULL,
+    path_identity_key TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE agent_global_roots (
+    agent_id TEXT NOT NULL REFERENCES agent_configurations(agent_id) ON DELETE CASCADE,
+    root_id TEXT NOT NULL REFERENCES global_skill_roots(root_id) ON DELETE RESTRICT,
+    role TEXT NOT NULL CHECK (role IN ('scan_only', 'activation_target')),
+    PRIMARY KEY (agent_id, root_id)
+);
+
+CREATE UNIQUE INDEX one_activation_target_per_agent
+ON agent_global_roots(agent_id)
+WHERE role = 'activation_target';
+
 CREATE TABLE activations (
     skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    target_root_id TEXT NOT NULL REFERENCES global_skill_roots(root_id) ON DELETE RESTRICT,
+    directory_identity_key TEXT NOT NULL,
     desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
-    expected_entry_path TEXT NOT NULL UNIQUE,
+    expected_entry_path TEXT NOT NULL,
     expected_target_path TEXT NOT NULL,
     observed_state TEXT NOT NULL CHECK (
         observed_state IN ('present', 'missing', 'target_mismatch', 'dangling', 'occupied')
     ),
     last_enabled_at TEXT,
     last_checked_at TEXT,
-    PRIMARY KEY (skill_id, agent_id)
+    PRIMARY KEY (skill_id, target_root_id)
+);
+
+CREATE UNIQUE INDEX active_activation_entry
+ON activations(target_root_id, directory_identity_key)
+WHERE desired_enabled = 1;
+
+CREATE TABLE recent_project_folders (
+    canonical_path_key TEXT PRIMARY KEY,
+    canonical_path TEXT NOT NULL,
+    last_used_at TEXT NOT NULL
 );
 
 CREATE TABLE file_sources (
@@ -212,7 +246,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 7, 0);
+VALUES (1, 8, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -596,27 +630,6 @@ impl SqliteCatalogStore {
             .map_err(sqlite_activation_error)
     }
 
-    pub fn persisted_activation(
-        &self,
-        skill_id: &SkillId,
-        agent_id: &AgentId,
-    ) -> Result<Option<PersistedActivation>, ActivationStoreError> {
-        self.connection()?
-            .query_row(
-                "SELECT desired_enabled, observed_state FROM activations
-                 WHERE skill_id = ?1 AND agent_id = ?2",
-                params![skill_id.0, agent_id.0],
-                |row| {
-                    Ok(PersistedActivation {
-                        desired_enabled: row.get(0)?,
-                        observed_state: parse_observed_state(&row.get::<_, String>(1)?)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(sqlite_activation_error)
-    }
-
     pub fn list_skill_summaries(
         &self,
         filter: CatalogFilter,
@@ -761,55 +774,6 @@ impl SqliteCatalogStore {
                 },
             )
             .optional()
-            .map_err(sqlite_catalog_error)
-    }
-
-    pub fn list_agent_activations(
-        &self,
-        skill_id: &SkillId,
-    ) -> Result<Option<Vec<AgentActivation>>, CatalogStoreError> {
-        let connection = self
-            .connection()
-            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
-        let skill_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM skills WHERE id = ?1)",
-                [&skill_id.0],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_catalog_error)?;
-        if !skill_exists {
-            return Ok(None);
-        }
-        let mut statement = connection
-            .prepare(
-                "SELECT
-                    agents.id, agents.name, agents.kind, agents.skills_path,
-                    agents.detected, agents.compatibility,
-                    COALESCE(activations.desired_enabled, 0),
-                    COALESCE(activations.observed_state, 'missing')
-                 FROM agents
-                 LEFT JOIN activations
-                    ON activations.agent_id = agents.id AND activations.skill_id = ?1
-                 ORDER BY agents.rowid",
-            )
-            .map_err(sqlite_catalog_error)?;
-        statement
-            .query_map([&skill_id.0], |row| {
-                Ok(AgentActivation {
-                    id: AgentId(row.get(0)?),
-                    name: row.get(1)?,
-                    kind: parse_agent_kind(&row.get::<_, String>(2)?)?,
-                    skills_path: row.get(3)?,
-                    detected: row.get(4)?,
-                    compatibility: parse_compatibility(&row.get::<_, String>(5)?)?,
-                    desired_enabled: row.get(6)?,
-                    observed_state: parse_observed_state(&row.get::<_, String>(7)?)?,
-                })
-            })
-            .map_err(sqlite_catalog_error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map(Some)
             .map_err(sqlite_catalog_error)
     }
 
@@ -986,16 +950,16 @@ impl SqliteCatalogStore {
             .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?;
         let mut statement = connection
             .prepare(
-                "SELECT agent_id, expected_entry_path, expected_target_path
+                "SELECT target_root_id, expected_entry_path, expected_target_path
                  FROM activations
                  WHERE skill_id = ?1 AND desired_enabled = 1
-                 ORDER BY agent_id",
+                 ORDER BY target_root_id",
             )
             .map_err(sqlite_maintenance_error)?;
         statement
             .query_map([&skill_id.0], |row| {
                 Ok(RelocateActivationBaseline {
-                    agent_id: AgentId(row.get(0)?),
+                    target_root_id: row.get(0)?,
                     expected_entry_path: PathBuf::from(row.get::<_, String>(1)?),
                     expected_target_path: PathBuf::from(row.get::<_, String>(2)?),
                 })
@@ -1053,10 +1017,10 @@ impl SqliteCatalogStore {
                     "UPDATE activations
                      SET expected_target_path = ?3, observed_state = 'present',
                          last_checked_at = ?4
-                     WHERE skill_id = ?1 AND agent_id = ?2 AND desired_enabled = 1",
+                     WHERE skill_id = ?1 AND target_root_id = ?2 AND desired_enabled = 1",
                     params![
                         skill_id.0,
-                        activation.agent_id.0,
+                        activation.target_root_id,
                         new_target_path.to_string_lossy(),
                         checked_at,
                     ],
@@ -1279,15 +1243,17 @@ impl SqliteCatalogStore {
                 transaction
                     .execute(
                         "INSERT INTO activations (
-                            skill_id, agent_id, desired_enabled, expected_entry_path,
-                            expected_target_path, observed_state, last_enabled_at, last_checked_at
-                         ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                            skill_id, target_root_id, directory_identity_key, desired_enabled,
+                            expected_entry_path, expected_target_path, observed_state,
+                            last_enabled_at, last_checked_at
+                         ) VALUES (?1, ?2, ?3, 1, ?4, ?5, 'present',
                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                         ON CONFLICT(skill_id, agent_id) DO NOTHING",
+                         ON CONFLICT(skill_id, target_root_id) DO NOTHING",
                         params![
                             record.skill.skill_id.0,
-                            activation.agent_id,
+                            activation.target_root_id,
+                            record.skill.identity_key,
                             activation.expected_entry_path.to_string_lossy(),
                             activation.expected_target_path.to_string_lossy(),
                         ],
@@ -1381,12 +1347,6 @@ impl SqliteCatalogStore {
             .map_err(|error| error.to_string())?;
         Ok(changed == 1)
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PersistedActivation {
-    pub desired_enabled: bool,
-    pub observed_state: ActivationObservedState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1499,14 +1459,14 @@ impl SourceUpdateStore for SqliteCatalogStore {
         for member in &mut members {
             member.activations = connection
                 .prepare(
-                    "SELECT agent_id, expected_entry_path, expected_target_path,
+                    "SELECT target_root_id, expected_entry_path, expected_target_path,
                             desired_enabled, observed_state, last_enabled_at, last_checked_at
-                       FROM activations WHERE skill_id = ?1 ORDER BY agent_id",
+                       FROM activations WHERE skill_id = ?1 ORDER BY target_root_id",
                 )
                 .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
                 .query_map([&member.skill_id.0], |row| {
                     Ok(SourcePromotionActivationRecord {
-                        agent_id: AgentId(row.get(0)?),
+                        target_root_id: row.get(0)?,
                         entry_path: PathBuf::from(row.get::<_, String>(1)?),
                         target_path: PathBuf::from(row.get::<_, String>(2)?),
                         desired_enabled: row.get(3)?,
@@ -1571,7 +1531,7 @@ impl SourceUpdateStore for SqliteCatalogStore {
             ));
         }
         let forbidden_local_link_roots = connection
-            .prepare("SELECT skills_path FROM agents ORDER BY id")
+            .prepare("SELECT configured_path FROM global_skill_roots ORDER BY path_identity_key")
             .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
@@ -1993,7 +1953,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
             }
         }
         let forbidden_local_link_roots = connection
-            .prepare("SELECT skills_path FROM agents ORDER BY id")
+            .prepare("SELECT configured_path FROM global_skill_roots ORDER BY path_identity_key")
             .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
@@ -2007,16 +1967,16 @@ impl SourcePromotionStore for SqliteCatalogStore {
             .map(|(mut member, _, _)| {
                 member.activations = connection
                     .prepare(
-                        "SELECT agent_id, expected_entry_path, expected_target_path,
+                        "SELECT target_root_id, expected_entry_path, expected_target_path,
                                 desired_enabled, observed_state, last_enabled_at, last_checked_at
                          FROM activations
                          WHERE skill_id = ?1
-                         ORDER BY agent_id",
+                         ORDER BY target_root_id",
                     )
                     .map_err(|error| SourcePromotionStoreError::Unavailable(error.to_string()))?
                     .query_map([&member.skill_id.0], |row| {
                         Ok(SourcePromotionActivationRecord {
-                            agent_id: AgentId(row.get(0)?),
+                            target_root_id: row.get(0)?,
                             entry_path: PathBuf::from(row.get::<_, String>(1)?),
                             target_path: PathBuf::from(row.get::<_, String>(2)?),
                             desired_enabled: row.get(3)?,
@@ -2385,12 +2345,14 @@ impl SourcePromotionStore for SqliteCatalogStore {
                 transaction
                     .execute(
                         "INSERT INTO activations (
-                            skill_id, agent_id, desired_enabled, expected_entry_path,
-                            expected_target_path, observed_state, last_enabled_at, last_checked_at
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            skill_id, target_root_id, directory_identity_key, desired_enabled,
+                            expected_entry_path, expected_target_path, observed_state,
+                            last_enabled_at, last_checked_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             member.skill_id.0,
-                            activation.agent_id.0,
+                            activation.target_root_id,
+                            member.identity_key,
                             activation.desired_enabled,
                             activation.entry_path.to_string_lossy(),
                             activation.target_path.to_string_lossy(),
@@ -2987,14 +2949,14 @@ fn validate_source_promotion_record(
         }
         let activations = connection
             .prepare(
-                "SELECT agent_id, expected_entry_path, expected_target_path,
+                "SELECT target_root_id, expected_entry_path, expected_target_path,
                         desired_enabled, observed_state, last_enabled_at, last_checked_at
-                 FROM activations WHERE skill_id = ?1 ORDER BY agent_id",
+                 FROM activations WHERE skill_id = ?1 ORDER BY target_root_id",
             )
             .map_err(source_promotion_sql_error)?
             .query_map([&legacy.skill_id.0], |row| {
                 Ok(SourcePromotionActivationRecord {
-                    agent_id: AgentId(row.get(0)?),
+                    target_root_id: row.get(0)?,
                     entry_path: PathBuf::from(row.get::<_, String>(1)?),
                     target_path: PathBuf::from(row.get::<_, String>(2)?),
                     desired_enabled: row.get(3)?,
@@ -4417,31 +4379,41 @@ impl ImportStore for SqliteCatalogStore {
 }
 
 impl AdoptStore for SqliteCatalogStore {
-    fn mark_agent_detected(&self, agent_id: &AgentId) -> Result<(), AdoptStoreError> {
-        self.connection
-            .lock()
-            .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
-            .execute(
-                "UPDATE agents SET detected = 1, updated_at = ?1 WHERE id = ?2",
-                rusqlite::params![unix_timestamp(), agent_id.0],
-            )
-            .map_err(sqlite_adopt_error)?;
-        Ok(())
-    }
-
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
         self.connection
             .lock()
             .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
-            .prepare("SELECT id, name, kind, skills_path, detected FROM agents ORDER BY name")
+            .prepare(
+                "SELECT
+                    configurations.agent_id,
+                    configurations.name,
+                    configurations.origin,
+                    configurations.preset_key,
+                    roots.root_id,
+                    roots.configured_path,
+                    memberships.role
+                 FROM agent_configurations configurations
+                 JOIN agent_global_roots memberships
+                   ON memberships.agent_id = configurations.agent_id
+                 JOIN global_skill_roots roots
+                   ON roots.root_id = memberships.root_id
+                 ORDER BY configurations.name_identity_key, roots.path_identity_key",
+            )
             .map_err(sqlite_adopt_error)?
             .query_map([], |row| {
+                let origin = row.get::<_, String>(2)?;
+                let preset_key = row.get::<_, Option<String>>(3)?;
                 Ok(AdoptAgent {
                     agent_id: AgentId(row.get(0)?),
+                    root_id: row.get(4)?,
                     name: row.get(1)?,
-                    kind: parse_agent_kind(&row.get::<_, String>(2)?)?,
-                    skills_path: PathBuf::from(row.get::<_, String>(3)?),
-                    detected: row.get::<_, bool>(4)?,
+                    kind: match (origin.as_str(), preset_key.as_deref()) {
+                        ("preset", Some("claude-code")) => AgentKind::ClaudePreset,
+                        ("preset", Some("codex")) => AgentKind::CodexPreset,
+                        _ => AgentKind::Custom,
+                    },
+                    skills_path: PathBuf::from(row.get::<_, String>(5)?),
+                    activation_target: row.get::<_, String>(6)? == "activation_target",
                 })
             })
             .map_err(sqlite_adopt_error)?
@@ -4515,14 +4487,16 @@ impl AdoptStore for SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO activations (
-                        skill_id, agent_id, desired_enabled, expected_entry_path,
-                        expected_target_path, observed_state, last_enabled_at, last_checked_at
-                     ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                        skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, ?3, 1, ?4, ?5, 'present',
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
                     params![
                         record.skill_id.0,
-                        activation.agent_id.0,
+                        activation.target_root_id,
+                        record.identity_key,
                         activation.expected_entry_path.to_string_lossy(),
                         activation.expected_target_path.to_string_lossy(),
                     ],
@@ -4703,14 +4677,16 @@ impl AdoptStore for SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO activations (
-                        skill_id, agent_id, desired_enabled, expected_entry_path,
-                        expected_target_path, observed_state, last_enabled_at, last_checked_at
-                     ) VALUES (?1, ?2, 1, ?3, ?4, 'present',
+                        skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, ?3, 1, ?4, ?5, 'present',
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
                     params![
                         record.skill_id.0,
-                        activation.agent_id.0,
+                        activation.target_root_id,
+                        record.identity_key,
                         activation.expected_entry_path.to_string_lossy(),
                         activation.expected_target_path.to_string_lossy(),
                     ],
@@ -4873,125 +4849,21 @@ impl crate::seams::preferences_store::PreferencesStore for SqliteCatalogStore {
 }
 
 impl ActivationStore for SqliteCatalogStore {
-    fn load(
-        &self,
-        skill_id: &SkillId,
-        agent_id: &AgentId,
-    ) -> Result<Option<ActivationContext>, ActivationStoreError> {
-        self.connection()?
-            .query_row(
-                "SELECT
-                    skills.directory_name, skills.final_entity_path,
-                    agents.name, agents.kind, agents.skills_path,
-                    COALESCE(activations.desired_enabled, 0),
-                    activations.expected_target_path
-                 FROM skills
-                 JOIN agents ON agents.id = ?2
-                 LEFT JOIN activations
-                    ON activations.skill_id = skills.id AND activations.agent_id = agents.id
-                 WHERE skills.id = ?1",
-                params![skill_id.0, agent_id.0],
-                |row| {
-                    Ok(ActivationContext {
-                        skill_id: skill_id.clone(),
-                        directory_name: row.get(0)?,
-                        final_entity_path: PathBuf::from(row.get::<_, String>(1)?),
-                        agent_id: agent_id.clone(),
-                        agent_name: row.get(2)?,
-                        agent_kind: parse_agent_kind(&row.get::<_, String>(3)?)?,
-                        agent_skills_path: PathBuf::from(row.get::<_, String>(4)?),
-                        desired_enabled: row.get(5)?,
-                        expected_target_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
-                    })
-                },
-            )
-            .optional()
-            .map_err(sqlite_activation_error)
-    }
-
-    fn configured_agent_paths(&self) -> Result<Vec<ConfiguredAgentPath>, ActivationStoreError> {
-        let connection = self.connection()?;
-        let mut statement = connection
-            .prepare("SELECT id, skills_path FROM agents ORDER BY id")
-            .map_err(sqlite_activation_error)?;
-        statement
-            .query_map([], |row| {
-                Ok(ConfiguredAgentPath {
-                    agent_id: AgentId(row.get(0)?),
-                    skills_path: PathBuf::from(row.get::<_, String>(1)?),
-                })
-            })
-            .map_err(sqlite_activation_error)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(sqlite_activation_error)
-    }
-
-    fn record(&self, record: ActivationRecord) -> Result<u64, ActivationStoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_activation_error)?;
-        transaction
-            .execute(
-                "INSERT INTO activations (
-                    skill_id, agent_id, desired_enabled, expected_entry_path,
-                    expected_target_path, observed_state, last_enabled_at, last_checked_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-                 ON CONFLICT(skill_id, agent_id) DO UPDATE SET
-                    desired_enabled = excluded.desired_enabled,
-                    expected_entry_path = excluded.expected_entry_path,
-                    expected_target_path = excluded.expected_target_path,
-                    observed_state = excluded.observed_state,
-                    last_enabled_at = CASE
-                        WHEN excluded.desired_enabled = 1 THEN excluded.last_enabled_at
-                        ELSE activations.last_enabled_at
-                    END,
-                    last_checked_at = excluded.last_checked_at",
-                params![
-                    record.skill_id.0,
-                    record.agent_id.0,
-                    record.desired_enabled,
-                    record.expected_entry_path.to_string_lossy(),
-                    record.expected_target_path.to_string_lossy(),
-                    observed_state_value(record.observed_state),
-                    unix_timestamp(),
-                ],
-            )
-            .map_err(sqlite_activation_error)?;
-        transaction
-            .execute(
-                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
-                [],
-            )
-            .map_err(sqlite_activation_error)?;
-        let snapshot_version: i64 = transaction
-            .query_row(
-                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_activation_error)?;
-        transaction.commit().map_err(sqlite_activation_error)?;
-        u64::try_from(snapshot_version).map_err(|_| {
-            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
-        })
-    }
-
     fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT skill_id, agent_id, expected_entry_path, expected_target_path
+                "SELECT skill_id, target_root_id, expected_entry_path, expected_target_path
                  FROM activations
                  WHERE desired_enabled = 1
-                 ORDER BY skill_id, agent_id",
+                 ORDER BY skill_id, target_root_id",
             )
             .map_err(sqlite_activation_error)?;
         statement
             .query_map([], |row| {
                 Ok(DesiredActivation {
                     skill_id: SkillId(row.get(0)?),
-                    agent_id: AgentId(row.get(1)?),
+                    target_root_id: row.get(1)?,
                     expected_entry_path: PathBuf::from(row.get::<_, String>(2)?),
                     expected_target_path: PathBuf::from(row.get::<_, String>(3)?),
                 })
@@ -5015,12 +4887,12 @@ impl ActivationStore for SqliteCatalogStore {
                 .execute(
                     "UPDATE activations
                      SET observed_state = ?1, last_checked_at = ?2
-                     WHERE skill_id = ?3 AND agent_id = ?4 AND desired_enabled = 1",
+                     WHERE skill_id = ?3 AND target_root_id = ?4 AND desired_enabled = 1",
                     params![
                         observed_state_value(observation.observed_state),
                         checked_at,
                         observation.skill_id.0,
-                        observation.agent_id.0,
+                        observation.target_root_id,
                     ],
                 )
                 .map_err(sqlite_activation_error)?;
@@ -5031,46 +4903,6 @@ impl ActivationStore for SqliteCatalogStore {
                  SET snapshot_version = snapshot_version + 1, last_startup_check_at = ?1
                  WHERE singleton = 1",
                 [checked_at],
-            )
-            .map_err(sqlite_activation_error)?;
-        let snapshot_version: i64 = transaction
-            .query_row(
-                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_activation_error)?;
-        transaction.commit().map_err(sqlite_activation_error)?;
-        u64::try_from(snapshot_version).map_err(|_| {
-            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
-        })
-    }
-
-    fn record_observation(
-        &self,
-        observation: &ActivationObservation,
-    ) -> Result<u64, ActivationStoreError> {
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_activation_error)?;
-        transaction
-            .execute(
-                "UPDATE activations
-                 SET observed_state = ?1, last_checked_at = ?2
-                 WHERE skill_id = ?3 AND agent_id = ?4 AND desired_enabled = 1",
-                params![
-                    observed_state_value(observation.observed_state),
-                    unix_timestamp(),
-                    observation.skill_id.0,
-                    observation.agent_id.0,
-                ],
-            )
-            .map_err(sqlite_activation_error)?;
-        transaction
-            .execute(
-                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
-                [],
             )
             .map_err(sqlite_activation_error)?;
         let snapshot_version: i64 = transaction
@@ -5309,7 +5141,543 @@ fn migrate_to_current(
              UPDATE catalog_meta SET schema_version = 7 WHERE singleton = 1;",
         )?;
     }
+    if matches!(existing_schema_version, 4..=7) {
+        // Schema v8: Agent Configuration, shared Global Skills Roots and
+        // Target-scoped Activations (spec §3.4, ADR-0016). Every validation,
+        // copy, integrity check and legacy-table drop stays inside this
+        // transaction. Any ambiguous path/name/Target aggregation therefore
+        // leaves the complete v7 shape untouched.
+        migrate_legacy_agents_to_configurations(&transaction)?;
+    }
     transaction.commit()
+}
+
+#[derive(Clone, Debug)]
+struct LegacyAgentMigrationRow {
+    agent_id: String,
+    origin: &'static str,
+    preset_key: Option<&'static str>,
+    name: String,
+    name_identity_key: String,
+    compatibility: String,
+    path_identity_key: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyActivationAggregate {
+    skill_id: String,
+    root_id: String,
+    directory_identity_key: String,
+    desired_enabled: bool,
+    expected_entry_path: String,
+    expected_target_path: String,
+    observed_state: String,
+    last_enabled_at: Option<String>,
+    last_checked_at: Option<String>,
+}
+
+fn migrate_legacy_agents_to_configurations(
+    transaction: &rusqlite::Transaction,
+) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE agents RENAME TO legacy_agents;
+         ALTER TABLE activations RENAME TO legacy_activations;
+
+         CREATE TABLE agent_configurations (
+            agent_id TEXT PRIMARY KEY,
+            origin TEXT NOT NULL CHECK (origin IN ('preset', 'custom')),
+            preset_key TEXT,
+            name TEXT NOT NULL,
+            name_identity_key TEXT NOT NULL UNIQUE,
+            compatibility TEXT NOT NULL CHECK (compatibility IN ('verified', 'unknown')),
+            project_skills_dir TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                (origin = 'preset' AND preset_key IS NOT NULL)
+                OR (origin = 'custom' AND preset_key IS NULL)
+            )
+         );
+         CREATE TABLE global_skill_roots (
+            root_id TEXT PRIMARY KEY,
+            configured_path TEXT NOT NULL,
+            path_identity_key TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE agent_global_roots (
+            agent_id TEXT NOT NULL
+                REFERENCES agent_configurations(agent_id) ON DELETE CASCADE,
+            root_id TEXT NOT NULL
+                REFERENCES global_skill_roots(root_id) ON DELETE RESTRICT,
+            role TEXT NOT NULL CHECK (role IN ('scan_only', 'activation_target')),
+            PRIMARY KEY (agent_id, root_id)
+         );
+         CREATE UNIQUE INDEX one_activation_target_per_agent
+            ON agent_global_roots(agent_id)
+            WHERE role = 'activation_target';
+         CREATE TABLE activations (
+            skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            target_root_id TEXT NOT NULL
+                REFERENCES global_skill_roots(root_id) ON DELETE RESTRICT,
+            directory_identity_key TEXT NOT NULL,
+            desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
+            expected_entry_path TEXT NOT NULL,
+            expected_target_path TEXT NOT NULL,
+            observed_state TEXT NOT NULL CHECK (
+                observed_state IN (
+                    'present', 'missing', 'target_mismatch', 'dangling', 'occupied'
+                )
+            ),
+            last_enabled_at TEXT,
+            last_checked_at TEXT,
+            PRIMARY KEY (skill_id, target_root_id)
+         );
+         CREATE UNIQUE INDEX active_activation_entry
+            ON activations(target_root_id, directory_identity_key)
+            WHERE desired_enabled = 1;
+         CREATE TABLE recent_project_folders (
+            canonical_path_key TEXT PRIMARY KEY,
+            canonical_path TEXT NOT NULL,
+            last_used_at TEXT NOT NULL
+         );",
+    )?;
+
+    let legacy_agents = {
+        let mut statement = transaction.prepare(
+            "SELECT id, name, kind, skills_path, compatibility, created_at, updated_at
+             FROM legacy_agents
+             ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut names = BTreeMap::<String, String>::new();
+    let mut roots = BTreeMap::<String, (String, String)>::new();
+    let mut agents = Vec::with_capacity(legacy_agents.len());
+    for (agent_id, raw_name, kind, skills_path, compatibility, created_at, updated_at) in
+        legacy_agents
+    {
+        if agent_id.is_empty() {
+            return Err(migration_constraint(
+                "schema v8 migration found an empty Agent identity",
+            ));
+        }
+        let name = raw_name.trim().to_owned();
+        if !(1..=80).contains(&name.chars().count()) {
+            return Err(migration_constraint(format!(
+                "legacy Agent '{agent_id}' has an invalid name length"
+            )));
+        }
+        let name_identity_key = agent_name_identity_key(&name);
+        if let Some(existing) = names.insert(name_identity_key.clone(), agent_id.clone()) {
+            return Err(migration_constraint(format!(
+                "legacy Agents '{existing}' and '{agent_id}' have the same NFKC-casefold name"
+            )));
+        }
+        let (configured_path, path_identity_key) =
+            normalize_legacy_configured_path(&skills_path).map_err(migration_constraint)?;
+        roots
+            .entry(path_identity_key.clone())
+            .or_insert_with(|| (configured_path.clone(), created_at.clone()));
+        let (origin, preset_key) = match kind.as_str() {
+            "claude_preset" => ("preset", Some("claude-code")),
+            "codex_preset" => ("preset", Some("codex")),
+            "custom" => ("custom", None),
+            value => {
+                return Err(migration_constraint(format!(
+                    "legacy Agent '{agent_id}' has unknown kind '{value}'"
+                )));
+            }
+        };
+        if !matches!(compatibility.as_str(), "verified" | "unknown") {
+            return Err(migration_constraint(format!(
+                "legacy Agent '{agent_id}' has unknown compatibility '{compatibility}'"
+            )));
+        }
+        agents.push(LegacyAgentMigrationRow {
+            agent_id,
+            origin,
+            preset_key,
+            name,
+            name_identity_key,
+            compatibility,
+            path_identity_key,
+            created_at,
+            updated_at,
+        });
+    }
+
+    let distinct_roots = roots
+        .iter()
+        .map(|(identity, (path, _))| (identity.clone(), PathBuf::from(path)))
+        .collect::<Vec<_>>();
+    for (index, (identity, path)) in distinct_roots.iter().enumerate() {
+        for (other_identity, other_path) in distinct_roots.iter().skip(index + 1) {
+            if path.starts_with(other_path) || other_path.starts_with(path) {
+                return Err(migration_constraint(format!(
+                    "legacy Target roots '{identity}' and '{other_identity}' overlap"
+                )));
+            }
+        }
+    }
+
+    let mut root_ids = BTreeMap::<String, String>::new();
+    for (identity, (configured_path, created_at)) in &roots {
+        let root_id = new_remote_id(transaction)?;
+        transaction.execute(
+            "INSERT INTO global_skill_roots (
+                root_id, configured_path, path_identity_key, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![root_id, configured_path, identity, created_at],
+        )?;
+        root_ids.insert(identity.clone(), root_id);
+    }
+
+    let mut agent_root_ids = BTreeMap::<String, String>::new();
+    for agent in &agents {
+        transaction.execute(
+            "INSERT INTO agent_configurations (
+                agent_id, origin, preset_key, name, name_identity_key,
+                compatibility, project_skills_dir, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
+            params![
+                agent.agent_id,
+                agent.origin,
+                agent.preset_key,
+                agent.name,
+                agent.name_identity_key,
+                agent.compatibility,
+                agent.created_at,
+                agent.updated_at
+            ],
+        )?;
+        let root_id = root_ids
+            .get(&agent.path_identity_key)
+            .ok_or_else(|| migration_constraint("schema v8 migration lost a Target root"))?;
+        transaction.execute(
+            "INSERT INTO agent_global_roots (agent_id, root_id, role)
+             VALUES (?1, ?2, 'activation_target')",
+            params![agent.agent_id, root_id],
+        )?;
+        agent_root_ids.insert(agent.agent_id.clone(), root_id.clone());
+    }
+
+    let legacy_activations = {
+        let mut statement = transaction.prepare(
+            "SELECT
+                legacy_activations.skill_id,
+                legacy_activations.agent_id,
+                legacy_activations.desired_enabled,
+                legacy_activations.expected_entry_path,
+                legacy_activations.expected_target_path,
+                legacy_activations.observed_state,
+                legacy_activations.last_enabled_at,
+                legacy_activations.last_checked_at,
+                skills.identity_key
+             FROM legacy_activations
+             JOIN skills ON skills.id = legacy_activations.skill_id
+             ORDER BY legacy_activations.skill_id, legacy_activations.agent_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let root_paths_by_id = root_ids
+        .iter()
+        .map(|(identity, root_id)| {
+            let path = &roots
+                .get(identity)
+                .expect("root ids are built from the same map")
+                .0;
+            (root_id.clone(), PathBuf::from(path))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut activations = BTreeMap::<(String, String), LegacyActivationAggregate>::new();
+    for (
+        skill_id,
+        agent_id,
+        desired_enabled,
+        expected_entry_path,
+        expected_target_path,
+        observed_state,
+        last_enabled_at,
+        last_checked_at,
+        directory_identity_key,
+    ) in legacy_activations
+    {
+        if !matches!(
+            observed_state.as_str(),
+            "present" | "missing" | "target_mismatch" | "dangling" | "occupied"
+        ) {
+            return Err(migration_constraint(format!(
+                "legacy Activation for Agent '{agent_id}' has unknown observed state \
+                 '{observed_state}'"
+            )));
+        }
+        let root_id = agent_root_ids.get(&agent_id).ok_or_else(|| {
+            migration_constraint(format!(
+                "legacy Activation references unknown Agent '{agent_id}'"
+            ))
+        })?;
+        let root_path = root_paths_by_id
+            .get(root_id)
+            .ok_or_else(|| migration_constraint("schema v8 migration lost a Target path"))?;
+        let normalized_entry = normalize_legacy_activation_entry(&expected_entry_path)
+            .map_err(migration_constraint)?;
+        let entry_path = PathBuf::from(&normalized_entry);
+        if entry_path.parent() != Some(root_path.as_path()) {
+            return Err(migration_constraint(format!(
+                "legacy Activation entry '{expected_entry_path}' does not belong to \
+                 Agent '{agent_id}' Target"
+            )));
+        }
+        let (normalized_target, _) = normalize_legacy_configured_path(&expected_target_path)
+            .map_err(migration_constraint)?;
+        let aggregate = LegacyActivationAggregate {
+            skill_id: skill_id.clone(),
+            root_id: root_id.clone(),
+            directory_identity_key,
+            desired_enabled,
+            expected_entry_path: normalized_entry,
+            expected_target_path: normalized_target,
+            observed_state,
+            last_enabled_at,
+            last_checked_at,
+        };
+        let key = (skill_id, root_id.clone());
+        if let Some(existing) = activations.get_mut(&key) {
+            let same_physical_fact = existing.skill_id == aggregate.skill_id
+                && existing.root_id == aggregate.root_id
+                && existing.directory_identity_key == aggregate.directory_identity_key
+                && existing.desired_enabled == aggregate.desired_enabled
+                && existing.expected_entry_path == aggregate.expected_entry_path
+                && existing.expected_target_path == aggregate.expected_target_path
+                && existing.observed_state == aggregate.observed_state;
+            if !same_physical_fact {
+                return Err(migration_constraint(format!(
+                    "legacy Activations for Skill '{}' have ambiguous shared-Target state",
+                    aggregate.skill_id
+                )));
+            }
+            existing.last_enabled_at =
+                latest_optional_timestamp(&existing.last_enabled_at, &aggregate.last_enabled_at);
+            existing.last_checked_at =
+                latest_optional_timestamp(&existing.last_checked_at, &aggregate.last_checked_at);
+        } else {
+            activations.insert(key, aggregate);
+        }
+    }
+
+    for activation in activations.values() {
+        transaction.execute(
+            "INSERT INTO activations (
+                skill_id, target_root_id, directory_identity_key, desired_enabled,
+                expected_entry_path, expected_target_path, observed_state,
+                last_enabled_at, last_checked_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                activation.skill_id,
+                activation.root_id,
+                activation.directory_identity_key,
+                activation.desired_enabled,
+                activation.expected_entry_path,
+                activation.expected_target_path,
+                activation.observed_state,
+                activation.last_enabled_at,
+                activation.last_checked_at
+            ],
+        )?;
+    }
+
+    let targetless_agents: i64 = transaction.query_row(
+        "SELECT COUNT(*)
+         FROM agent_configurations c
+         WHERE NOT EXISTS (
+            SELECT 1 FROM agent_global_roots r
+            WHERE r.agent_id = c.agent_id AND r.role = 'activation_target'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if targetless_agents != 0 {
+        return Err(migration_constraint(format!(
+            "schema v8 migration left {targetless_agents} Agent Configurations without a Target"
+        )));
+    }
+
+    transaction.execute_batch("DROP TABLE legacy_activations; DROP TABLE legacy_agents;")?;
+    let violations: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        return Err(migration_constraint(format!(
+            "schema v8 migration left {violations} foreign-key violations"
+        )));
+    }
+    let integrity: String =
+        transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("schema v8 migration failed the integrity check".into()),
+        ));
+    }
+    transaction.execute(
+        "UPDATE catalog_meta SET schema_version = 8 WHERE singleton = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+fn normalize_legacy_activation_entry(path: &str) -> Result<String, String> {
+    let path = expand_legacy_home(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("legacy Activation entry '{path:?}' has no directory name"))?
+        .to_owned();
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("legacy Activation entry '{path:?}' has no Target parent"))?;
+    let (parent, _) = normalize_legacy_configured_path(
+        parent
+            .to_str()
+            .ok_or_else(|| "legacy Activation Target path is not UTF-8".to_owned())?,
+    )?;
+    let normalized = PathBuf::from(parent).join(name);
+    normalized
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "legacy Activation entry path is not UTF-8".to_owned())
+}
+
+fn normalize_legacy_configured_path(path: &str) -> Result<(String, String), String> {
+    let expanded = expand_legacy_home(path)?;
+    if !expanded.is_absolute()
+        || expanded.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(format!(
+            "legacy configured path '{}' is not a safe absolute path",
+            expanded.display()
+        ));
+    }
+    let mut ancestor = expanded.clone();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(metadata) => {
+                if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "legacy configured path ancestor '{}' is not a directory",
+                        ancestor.display()
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = ancestor.file_name().ok_or_else(|| {
+                    format!(
+                        "legacy configured path '{}' has no existing ancestor",
+                        expanded.display()
+                    )
+                })?;
+                missing.push(component.to_owned());
+                if !ancestor.pop() {
+                    return Err(format!(
+                        "legacy configured path '{}' has no existing ancestor",
+                        expanded.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "legacy configured path '{}' is unreadable: {error}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    let mut normalized = ancestor.canonicalize().map_err(|error| {
+        format!(
+            "legacy configured path ancestor '{}' cannot be canonicalized: {error}",
+            ancestor.display()
+        )
+    })?;
+    for component in missing.into_iter().rev() {
+        normalized.push(component);
+    }
+    if normalized.parent().is_none() {
+        return Err("the filesystem root cannot be an Agent Target".into());
+    }
+    let normalized = normalized
+        .to_str()
+        .ok_or_else(|| "legacy configured path is not UTF-8".to_owned())?
+        .to_owned();
+    let identity = configured_path_identity_key(&normalized);
+    Ok((normalized, identity))
+}
+
+fn expand_legacy_home(path: &str) -> Result<PathBuf, String> {
+    if path == "~" || path.starts_with("~/") {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "HOME is unavailable while migrating a '~' Agent path".to_owned())?;
+        let suffix = path.strip_prefix("~/").unwrap_or("");
+        return Ok(PathBuf::from(home).join(suffix));
+    }
+    if path.starts_with('~') {
+        return Err(format!(
+            "legacy configured path '{path}' uses an unsupported home alias"
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn latest_optional_timestamp(left: &Option<String>, right: &Option<String>) -> Option<String> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right).clone()),
+        (Some(value), None) | (None, Some(value)) => Some(value.clone()),
+        (None, None) => None,
+    }
+}
+
+fn migration_constraint(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(message.into()),
+    )
 }
 
 /// Copy legacy `remote_sources` rows into parents and bindings (spec
@@ -5518,23 +5886,6 @@ fn parse_health(value: &str) -> rusqlite::Result<Health> {
         "healthy" => Ok(Health::Healthy),
         "broken" => Ok(Health::Broken),
         "modified" => Ok(Health::Modified),
-        value => Err(invalid_enum_value(5, value)),
-    }
-}
-
-fn parse_agent_kind(value: &str) -> rusqlite::Result<AgentKind> {
-    match value {
-        "claude_preset" => Ok(AgentKind::ClaudePreset),
-        "codex_preset" => Ok(AgentKind::CodexPreset),
-        "custom" => Ok(AgentKind::Custom),
-        value => Err(invalid_enum_value(3, value)),
-    }
-}
-
-fn parse_compatibility(value: &str) -> rusqlite::Result<Compatibility> {
-    match value {
-        "verified" => Ok(Compatibility::Verified),
-        "unknown" => Ok(Compatibility::Unknown),
         value => Err(invalid_enum_value(5, value)),
     }
 }

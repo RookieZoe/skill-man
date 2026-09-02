@@ -426,10 +426,11 @@ fn corrupt_catalog(composition: &Composition) {
         connection
             .execute(
                 "INSERT INTO activations (
-                        skill_id, agent_id, desired_enabled, expected_entry_path,
-                        expected_target_path, observed_state, last_enabled_at, last_checked_at
+                        skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at, last_checked_at
                      ) VALUES (
-                        'ghost-skill', 'ghost-agent', 1, '/tmp/ghost-entry',
+                        'ghost-skill', 'ghost-root', 'ghost-skill', 1, '/tmp/ghost-entry',
                         '/tmp/ghost-target', 'missing', NULL, NULL
                      )",
                 [],

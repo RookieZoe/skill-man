@@ -144,9 +144,25 @@ impl BoundTestHome {
         f(&connection);
     }
 
-    /// The standard Library the old fixture seeded, now real rows at
-    /// temp-home paths: three Agents and three Skills (no Activations — the
-    /// fixture seed never inserted any).
+    /// The persisted `root_id` of one Agent Configuration's unique
+    /// Activation Target (journal baselines must match real row identity).
+    pub fn activation_root_id(&self, agent_id: &str) -> String {
+        let connection = Connection::open(self.catalog_path()).expect("open catalog");
+        connection
+            .query_row(
+                "SELECT memberships.root_id
+                 FROM agent_global_roots memberships
+                 WHERE memberships.agent_id = ?1
+                   AND memberships.role = 'activation_target'",
+                [agent_id],
+                |row| row.get(0),
+            )
+            .expect("resolve Agent Target root_id")
+    }
+
+    /// Standard test Library: three explicit Agent Configurations and three
+    /// Skills. Presets are never seeded by production; these rows represent
+    /// user-confirmed configurations in the isolated test Home.
     pub fn seed_standard_library(&self) {
         for (id, name, kind, skills_path, compatibility) in [
             (
@@ -202,24 +218,59 @@ impl BoundTestHome {
         skills_path: &str,
         compatibility: &str,
     ) {
+        // `~` expands against the filesystem's home directory (the temp
+        // root), exactly as `claude_root()` and `codex_root()` do.
+        let configured_path = skills_path
+            .strip_prefix("~/")
+            .map(|suffix| self.path().join(suffix))
+            .unwrap_or_else(|| PathBuf::from(skills_path));
+        let root_id = format!("root-{id}");
+        let (origin, preset_key) = match kind {
+            "claude_preset" => ("preset", Some("claude-code")),
+            "codex_preset" => ("preset", Some("codex")),
+            _ => ("custom", None),
+        };
         self.with_sql("seed Agent", |connection| {
+            let timestamp = "1970-01-01T00:00:00Z";
             connection
                 .execute(
-                    "INSERT INTO agents (
-                        id, name, kind, skills_path, path_identity_key, detected,
-                        compatibility, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?7)",
+                    "INSERT INTO agent_configurations (
+                        agent_id, origin, preset_key, name, name_identity_key,
+                        compatibility, project_skills_dir, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?7)",
                     params![
                         id,
+                        origin,
+                        preset_key,
                         name,
-                        kind,
-                        skills_path,
-                        skills_path.to_lowercase(),
+                        skill_man_lib::core::domain::agent_name_identity_key(name),
                         compatibility,
-                        "1970-01-01T00:00:00Z"
+                        timestamp,
                     ],
                 )
-                .expect("seed Agent");
+                .expect("seed Agent Configuration");
+            connection
+                .execute(
+                    "INSERT INTO global_skill_roots (
+                        root_id, configured_path, path_identity_key, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    params![
+                        root_id,
+                        configured_path.to_string_lossy(),
+                        skill_man_lib::core::domain::configured_path_identity_key(
+                            &configured_path.to_string_lossy()
+                        ),
+                        timestamp,
+                    ],
+                )
+                .expect("seed Global Skills Root");
+            connection
+                .execute(
+                    "INSERT INTO agent_global_roots (agent_id, root_id, role)
+                     VALUES (?1, ?2, 'activation_target')",
+                    params![id, root_id],
+                )
+                .expect("seed Agent Target membership");
         });
     }
 
@@ -301,27 +352,42 @@ impl BoundTestHome {
     }
 
     pub fn seed_activation(&self, skill_id: &str, agent_id: &str, enabled: bool, observed: &str) {
-        let entry_path = match agent_id {
-            "claude-code" => self.claude_root().join(skill_id),
-            "codex" => self.codex_root().join(skill_id),
-            agent => self
-                .path()
-                .join(format!("agents/{agent}/skills/{skill_id}")),
-        };
-        let final_entity = self.library_root.join("skills").join(skill_id);
         self.with_sql("seed Activation", |connection| {
+            let (root_id, configured_path): (String, String) = connection
+                .query_row(
+                    "SELECT roots.root_id, roots.configured_path
+                     FROM agent_global_roots memberships
+                     JOIN global_skill_roots roots ON roots.root_id = memberships.root_id
+                     WHERE memberships.agent_id = ?1
+                       AND memberships.role = 'activation_target'",
+                    [agent_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("Agent Target");
+            let (directory_identity_key, directory_name, final_entity): (String, String, String) =
+                connection
+                    .query_row(
+                        "SELECT identity_key, directory_name, final_entity_path
+                     FROM skills WHERE id = ?1",
+                        [skill_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .expect("Activation Skill");
+            let entry_path = PathBuf::from(configured_path).join(directory_name);
             connection
                 .execute(
                     "INSERT INTO activations (
-                        skill_id, agent_id, desired_enabled, expected_entry_path,
-                        expected_target_path, observed_state, last_enabled_at, last_checked_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                        skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
                     params![
                         skill_id,
-                        agent_id,
+                        root_id,
+                        directory_identity_key,
                         enabled as i64,
                         entry_path.to_string_lossy(),
-                        final_entity.to_string_lossy(),
+                        final_entity,
                         observed,
                         "2026-07-20T10:42:00Z",
                     ],

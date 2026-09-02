@@ -222,29 +222,81 @@ impl CatalogProbe for SqliteCatalogProbe {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
 
-        let agents = connection
-            .prepare(
-                "SELECT id, name, kind, skills_path, path_identity_key, detected,
-                        compatibility, created_at, updated_at
-                 FROM agents ORDER BY id",
-            )
-            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
-            .query_map([], |row| {
-                Ok(FixtureAgentRowEvidence {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    skills_path: row.get(3)?,
-                    path_identity_key: row.get(4)?,
-                    detected: row.get::<_, i64>(5)? != 0,
-                    compatibility: row.get(6)?,
-                    created_at: row.get(7)?,
-                    updated_at: row.get(8)?,
+        // Fixture agent evidence is shape-dependent: the Legacy footprint
+        // carries the historical `agents` tuples, while a current-schema
+        // (v8) footprint carries the same facts as one Agent Configuration
+        // plus its unique Activation Target root (spec §3.4 v8).
+        let agents = if tables.iter().any(|table| table == "agents") {
+            connection
+                .prepare(
+                    "SELECT id, name, kind, skills_path, path_identity_key, detected,
+                            compatibility, created_at, updated_at
+                     FROM agents ORDER BY id",
+                )
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+                .query_map([], |row| {
+                    Ok(FixtureAgentRowEvidence {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        kind: row.get(2)?,
+                        skills_path: row.get(3)?,
+                        path_identity_key: row.get(4)?,
+                        detected: row.get::<_, i64>(5)? != 0,
+                        compatibility: row.get(6)?,
+                        created_at: row.get(7)?,
+                        updated_at: row.get(8)?,
+                    })
                 })
-            })
-            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+        } else if tables.iter().any(|table| table == "agent_configurations") {
+            connection
+                .prepare(
+                    "SELECT
+                        configurations.agent_id,
+                        configurations.name,
+                        configurations.origin,
+                        configurations.preset_key,
+                        configurations.compatibility,
+                        configurations.created_at,
+                        configurations.updated_at,
+                        roots.configured_path,
+                        roots.path_identity_key
+                     FROM agent_configurations configurations
+                     JOIN agent_global_roots memberships
+                       ON memberships.agent_id = configurations.agent_id
+                      AND memberships.role = 'activation_target'
+                     JOIN global_skill_roots roots
+                       ON roots.root_id = memberships.root_id
+                     ORDER BY configurations.agent_id",
+                )
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+                .query_map([], |row| {
+                    let origin: String = row.get(2)?;
+                    let preset_key: Option<String> = row.get(3)?;
+                    Ok(FixtureAgentRowEvidence {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        kind: match (origin.as_str(), preset_key.as_deref()) {
+                            ("preset", Some("claude-code")) => "claude_preset".to_owned(),
+                            ("preset", Some("codex")) => "codex_preset".to_owned(),
+                            _ => "custom".to_owned(),
+                        },
+                        skills_path: row.get(7)?,
+                        path_identity_key: row.get(8)?,
+                        detected: true,
+                        compatibility: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    })
+                })
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+        } else {
+            Vec::new()
+        };
 
         let preferences = connection
             .query_row(
@@ -336,24 +388,36 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             ],
         ),
         (
-            "agents",
+            "agent_configurations",
             &[
-                "id",
+                "agent_id",
+                "origin",
+                "preset_key",
                 "name",
-                "kind",
-                "skills_path",
-                "path_identity_key",
-                "detected",
+                "name_identity_key",
                 "compatibility",
+                "project_skills_dir",
                 "created_at",
                 "updated_at",
             ],
         ),
         (
+            "global_skill_roots",
+            &[
+                "root_id",
+                "configured_path",
+                "path_identity_key",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        ("agent_global_roots", &["agent_id", "root_id", "role"]),
+        (
             "activations",
             &[
                 "skill_id",
-                "agent_id",
+                "target_root_id",
+                "directory_identity_key",
                 "desired_enabled",
                 "expected_entry_path",
                 "expected_target_path",
@@ -361,6 +425,10 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
                 "last_enabled_at",
                 "last_checked_at",
             ],
+        ),
+        (
+            "recent_project_folders",
+            &["canonical_path_key", "canonical_path", "last_used_at"],
         ),
         (
             "file_sources",
@@ -455,8 +523,11 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
     const PRIMARY_KEYS: &[(&str, &[&str])] = &[
         ("catalog_meta", &["singleton"]),
         ("skills", &["id"]),
-        ("agents", &["id"]),
-        ("activations", &["skill_id", "agent_id"]),
+        ("agent_configurations", &["agent_id"]),
+        ("global_skill_roots", &["root_id"]),
+        ("agent_global_roots", &["agent_id", "root_id"]),
+        ("activations", &["skill_id", "target_root_id"]),
+        ("recent_project_folders", &["canonical_path_key"]),
         ("file_sources", &["skill_id"]),
         ("remote_source_parents", &["remote_id"]),
         ("remote_source_aliases", &["remote_id", "alias_url"]),
@@ -469,9 +540,10 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
     ];
     const UNIQUE_INDEXES: &[(&str, &[&str])] = &[
         ("skills", &["identity_key"]),
-        ("agents", &["name"]),
-        ("agents", &["path_identity_key"]),
-        ("activations", &["expected_entry_path"]),
+        ("agent_configurations", &["name_identity_key"]),
+        ("global_skill_roots", &["path_identity_key"]),
+        ("agent_global_roots", &["agent_id"]),
+        ("activations", &["target_root_id", "directory_identity_key"]),
         ("remote_source_parents", &["canonical_url"]),
         ("remote_source_aliases", &["alias_url"]),
         ("git_repository_sources", &["provider", "canonical_url"]),
@@ -479,7 +551,27 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
     ];
     const FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
         ("activations", "skill_id", "skills", "id", "CASCADE"),
-        ("activations", "agent_id", "agents", "id", "CASCADE"),
+        (
+            "activations",
+            "target_root_id",
+            "global_skill_roots",
+            "root_id",
+            "RESTRICT",
+        ),
+        (
+            "agent_global_roots",
+            "agent_id",
+            "agent_configurations",
+            "agent_id",
+            "CASCADE",
+        ),
+        (
+            "agent_global_roots",
+            "root_id",
+            "global_skill_roots",
+            "root_id",
+            "RESTRICT",
+        ),
         ("file_sources", "skill_id", "skills", "id", "CASCADE"),
         (
             "remote_source_aliases",
@@ -557,6 +649,35 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             .all(|(table, from, referenced_table, to, on_delete)| {
                 has_foreign_key(connection, table, from, referenced_table, to, on_delete)
             })
+        && agent_configuration_rows_are_complete(connection)
+}
+
+fn agent_configuration_rows_are_complete(connection: &Connection) -> bool {
+    let invalid_target_memberships = connection.query_row(
+        "SELECT COUNT(*)
+         FROM agent_configurations configuration
+         WHERE (
+            SELECT COUNT(*)
+            FROM agent_global_roots membership
+            WHERE membership.agent_id = configuration.agent_id
+              AND membership.role = 'activation_target'
+         ) != 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    let orphan_activation_targets = connection.query_row(
+        "SELECT COUNT(*)
+         FROM activations activation
+         WHERE NOT EXISTS (
+            SELECT 1
+            FROM agent_global_roots membership
+            WHERE membership.root_id = activation.target_root_id
+              AND membership.role = 'activation_target'
+         )",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    matches!(invalid_target_memberships, Ok(0)) && matches!(orphan_activation_targets, Ok(0))
 }
 
 fn has_primary_key(connection: &Connection, table: &str, expected: &[&str]) -> bool {

@@ -78,7 +78,7 @@ pub struct ActivationReplaceJournal {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActivationRecoveryBaseline {
     pub skill_id: String,
-    pub agent_id: String,
+    pub target_root_id: String,
     pub expected_entry_path: PathBuf,
     pub expected_target_path: PathBuf,
 }
@@ -187,7 +187,7 @@ pub enum RemoveInitialEntry {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoveActivationStep {
-    pub agent_id: String,
+    pub target_root_id: String,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
     pub initial_entry: RemoveInitialEntry,
@@ -252,7 +252,7 @@ pub enum RelocateInitialEntry {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RelocateActivationStep {
-    pub agent_id: String,
+    pub target_root_id: String,
     pub entry_path: PathBuf,
     pub old_target_path: PathBuf,
     pub new_target_path: PathBuf,
@@ -312,7 +312,7 @@ pub struct AdoptAppearanceStep {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AdoptActivationStep {
-    pub agent_id: String,
+    pub target_root_id: String,
     pub entry_path: PathBuf,
     pub target_path: PathBuf,
 }

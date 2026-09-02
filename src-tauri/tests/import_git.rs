@@ -8,16 +8,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use skill_man_lib::adapters::agent_adapters::BuiltInAgentAdapters;
 use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::adapters::git_source_capability::SqliteGitSourceCapabilityReader;
 use skill_man_lib::adapters::local_file_source::LocalFileSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::system_clock::SystemClock;
-use skill_man_lib::core::activation::{ActivationService, SetActivation};
 use skill_man_lib::core::catalog::CatalogService;
-use skill_man_lib::core::domain::{AgentId, CatalogFilter, Health, SourceKind};
+use skill_man_lib::core::domain::{CatalogFilter, Health, SourceKind};
 use skill_man_lib::core::git_source_capability::{
     GitRepositorySourceFact, GitSourceCapabilityFacts, GitSourceCapabilityReader,
     GitSourceCapabilityScan, GitSourceCatalogStructure, GitSourceFact, GitSourceManifestFact,
@@ -655,24 +653,11 @@ fn update_keeps_activations_pointing_at_the_stable_path() {
     let skill_id = installed.items[0].skill_id.clone();
     let entity = harness.library_root.join("skills/alpha");
 
-    let activation = ActivationService::new(
-        harness.runtime.clone(),
-        harness.filesystem.clone(),
-        harness.library_root.clone(),
-    )
-    .with_agent_adapters(Arc::new(BuiltInAgentAdapters));
-    let agent_id = AgentId("claude-code".into());
-    let activation_preview = activation
-        .plan(SetActivation {
-            skill_id: skill_id.clone(),
-            agent_id: agent_id.clone(),
-            enabled: true,
-        })
-        .expect("plan Activation");
-    activation
-        .apply(&activation_preview.plan_token)
-        .expect("apply Activation");
     let entry = claude_root.join("alpha");
+    std::os::unix::fs::symlink(&entity, &entry).expect("create Target-scoped Activation entry");
+    harness
+        .home
+        .seed_activation(&skill_id.0, "claude-code", true, "present");
     assert!(
         entry
             .symlink_metadata()
@@ -705,7 +690,7 @@ fn update_keeps_activations_pointing_at_the_stable_path() {
     assert!(applied.items[0].updated, "{:?}", applied.items[0].error);
 
     let target = std::fs::read_link(&entry).expect("read Activation target");
-    assert_eq!(target, entity.canonicalize().expect("canonical entity"));
+    assert_eq!(target, entity);
     assert_eq!(
         std::fs::read_to_string(entry.join("SKILL.md")).expect("read through Activation"),
         "# Alpha v2\n"

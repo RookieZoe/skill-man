@@ -1,10 +1,4 @@
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 
@@ -57,7 +51,7 @@ function toolbar() {
 }
 
 function agentsTrigger() {
-  return within(toolbar()).queryByRole("button", { name: "Agents" });
+  return within(toolbar()).queryByRole("button", { name: "Target groups" });
 }
 
 async function renderWideLibrary() {
@@ -107,7 +101,7 @@ test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", a
   expect(document.querySelector(".app-shell > .app-background")).toBeTruthy();
   // The Agent Inspector stays a plain pane (not a dialog) in wide mode.
   expect(
-    screen.getByRole("complementary", { name: "Enable by Agent" }),
+    screen.getByRole("complementary", { name: "Activation Target Groups" }),
   ).toBeInTheDocument();
   expect(inspector()).not.toHaveAttribute("role");
   // Each pane owns its vertical scroll.
@@ -127,7 +121,7 @@ test("mid mode opens the Agent Inspector as a modal drawer with inert background
   await renderWideLibrary();
   setViewportWidth(1059);
 
-  const trigger = screen.getByRole("button", { name: "Agents" });
+  const trigger = screen.getByRole("button", { name: "Target groups" });
   expect(trigger).toHaveAttribute("aria-expanded", "false");
   expect(trigger).toHaveAttribute("aria-controls", "agent-inspector-dialog");
   expect(drawer()).not.toHaveAttribute("data-open");
@@ -144,7 +138,7 @@ test("mid mode opens the Agent Inspector as a modal drawer with inert background
   // aria-modal rather than the inert attribute; sheets own the inert gate.
   expect(background()).not.toHaveAttribute("inert");
   expect(
-    screen.getByRole("dialog", { name: "Enable by Agent" }),
+    screen.getByRole("dialog", { name: "Activation Target Groups" }),
   ).toBeInTheDocument();
   expect(inspector()).toHaveFocus();
   expect(getComputedStyle(inspector()).visibility).toBe("visible");
@@ -154,7 +148,7 @@ test("drawer Escape and backdrop close and restore focus to the trigger", async 
   const user = userEvent.setup();
   await renderWideLibrary();
   setViewportWidth(1059);
-  const trigger = screen.getByRole("button", { name: "Agents" });
+  const trigger = screen.getByRole("button", { name: "Target groups" });
 
   await user.click(trigger);
   await user.keyboard("{Escape}");
@@ -169,37 +163,29 @@ test("drawer Escape and backdrop close and restore focus to the trigger", async 
   expect(trigger).toHaveFocus();
 });
 
-test("drawer traps Tab focus within its activation controls", async () => {
+test("drawer traps Tab focus within its Target-scoped placeholder", async () => {
   const user = userEvent.setup();
   await renderWideLibrary();
   setViewportWidth(1059);
-  await user.click(screen.getByRole("button", { name: "Agents" }));
+  await user.click(screen.getByRole("button", { name: "Target groups" }));
   expect(inspector()).toHaveFocus();
 
-  const claudeSwitch = screen.getByRole("switch", {
-    name: "Enable skill-authoring for Claude Code",
-  });
-  const workbenchSwitch = screen.getByRole("switch", {
-    name: "Enable skill-authoring for Workbench",
+  const managementButton = within(inspector()).getByRole("button", {
+    name: "Agents",
   });
   await user.tab();
-  expect(claudeSwitch).toHaveFocus();
-  // Wrap forward from the last focusable back to the first.
+  expect(managementButton).toHaveFocus();
   await user.tab();
-  await user.tab();
-  await user.tab();
-  await user.tab();
-  expect(claudeSwitch).toHaveFocus();
-  // Wrap backward from the first focusable to the last.
+  expect(managementButton).toHaveFocus();
   await user.tab({ shift: true });
-  expect(workbenchSwitch).toHaveFocus();
+  expect(managementButton).toHaveFocus();
 });
 
 test("drawer keeps its DOM and focus when resizing across the 1059/1060 breakpoint", async () => {
   const user = userEvent.setup();
   await renderWideLibrary();
   setViewportWidth(1059);
-  await user.click(screen.getByRole("button", { name: "Agents" }));
+  await user.click(screen.getByRole("button", { name: "Target groups" }));
   const inspectorNode = inspector();
   const focusedBefore = document.activeElement;
 
@@ -219,83 +205,59 @@ test("drawer keeps its DOM and focus when resizing across the 1059/1060 breakpoi
 
 // -- Overlay and focus contract --
 
-test("activation sheet survives a breakpoint resize and restores its opener on close", async () => {
+test("Agent Configuration sheet survives resize, inerts the workspace, and restores focus", async () => {
   const user = userEvent.setup();
-  await renderWideLibrary();
-  setViewportWidth(1059);
-  await user.click(screen.getByRole("button", { name: "Agents" }));
-  const activationSwitch = screen.getByRole("switch", {
-    name: "Enable skill-authoring for Workbench",
-  });
-  await user.click(activationSwitch);
-  const dialog = await screen.findByRole("dialog", { name: "Preview Enable" });
-
-  setViewportWidth(1060);
-  expect(document.querySelector(".activation-sheet")).toBe(dialog);
-  expect(dialog).toBeInTheDocument();
+  render(
+    <App
+      client={createFixtureCatalogClient({ emptyAgentConfigurations: true })}
+    />,
+  );
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("tab", { name: "Agents" }));
+  await screen.findByRole("heading", { name: "No Agent Configuration yet" });
+  const opener = screen.getAllByRole("button", {
+    name: "New custom agent",
+  })[0];
+  await user.click(opener);
+  const dialog = screen.getByRole("dialog", { name: "Agent Configuration" });
   expect(background()).toHaveAttribute("inert");
 
-  await user.keyboard("{Escape}");
-  expect(
-    screen.queryByRole("dialog", { name: "Preview Enable" }),
-  ).not.toBeInTheDocument();
-  expect(activationSwitch).toHaveFocus();
-});
-
-test("busy overlay rejects Escape and backdrop dismissal until the operation settles", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  let finishApply: (() => void) | undefined;
-  const realApply = client.applyActivation.bind(client);
-  client.applyActivation = async (planToken: string) => {
-    const result = await realApply(planToken);
-    await new Promise<void>((resolve) => {
-      finishApply = resolve;
-    });
-    return result;
-  };
-  render(<App client={client} />);
-  const activationSwitch = await screen.findByRole("switch", {
-    name: "Enable skill-authoring for Workbench",
-  });
-  await user.click(activationSwitch);
-  const dialog = await screen.findByRole("dialog", { name: "Preview Enable" });
-  await user.click(screen.getByRole("button", { name: "Enable in Workbench" }));
+  setViewportWidth(1059);
+  expect(screen.getByRole("dialog", { name: "Agent Configuration" })).toBe(
+    dialog,
+  );
+  setViewportWidth(1060);
+  expect(screen.getByRole("dialog", { name: "Agent Configuration" })).toBe(
+    dialog,
+  );
 
   await user.keyboard("{Escape}");
-  expect(dialog).toBeInTheDocument();
-  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
-  expect(dialog).toBeInTheDocument();
-
-  finishApply?.();
-  await waitFor(() => expect(dialog).not.toBeInTheDocument());
-  expect(activationSwitch).toBeChecked();
+  expect(dialog).not.toBeInTheDocument();
+  expect(background()).not.toHaveAttribute("inert");
+  expect(opener).toHaveFocus();
 });
 
 // -- Notice counts --
 
 test("NoticeRegion: zero collapses, one is single, two stack in the region", async () => {
-  const lockClient = createFixtureCatalogClient();
-  lockClient.runActivationHealthCheck = async () => {
-    throw {
-      code: "recovery_required",
-      message: "An operation needs recovery.",
-    };
+  const errorClient = createFixtureCatalogClient();
+  errorClient.listSkills = async () => {
+    throw new Error("Catalog read failed");
   };
-  render(<App client={lockClient} />);
-  await screen.findByRole("alert");
+  render(<App client={errorClient} />);
+  await within(noticeRegion()).findByText("Library unavailable");
   expect(noticeRegion().children).toHaveLength(1);
   expect(
-    within(noticeRegion()).getByText("Recovery required — writes locked"),
+    within(noticeRegion()).getByText("Library unavailable"),
   ).toBeInTheDocument();
 });
 
-test("NoticeRegion stacks the Catalog error and the recovery lock together", async () => {
+test("NoticeRegion stacks Catalog and source capability failures", async () => {
   const stackedClient = createFixtureCatalogClient();
-  stackedClient.runActivationHealthCheck = async () => {
+  stackedClient.getGitSourceCapability = async () => {
     throw {
-      code: "recovery_required",
-      message: "An operation needs recovery.",
+      error: { code: "catalog_unavailable" },
+      diagnostic: { code: "capability_failed", message: "unreadable" },
     };
   };
   stackedClient.listSkills = async () => {
@@ -308,7 +270,7 @@ test("NoticeRegion stacks the Catalog error and the recovery lock together", asy
     within(noticeRegion()).getByText("Library unavailable"),
   ).toBeInTheDocument();
   expect(
-    within(noticeRegion()).getByText("Recovery required — writes locked"),
+    within(noticeRegion()).getByText("Git source status unavailable"),
   ).toBeInTheDocument();
 });
 

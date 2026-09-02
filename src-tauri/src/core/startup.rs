@@ -85,7 +85,10 @@ impl StartupService {
                 name: agent.name,
                 kind: agent.kind,
                 skills_path: agent.skills_path,
-                detected: agent.detected,
+                // Detection visibility is in-memory observation (#81); every
+                // persisted Agent Configuration is a real, user-confirmed
+                // configuration whose Target path may still be missing.
+                detected: true,
             })
             .collect();
         Ok(StartupInfo {
@@ -101,9 +104,9 @@ impl StartupService {
     }
 
     /// Create a missing Agent skills directory for a configured Agent Preset
-    /// (spec §8.7: missing directories are only marked until the user
-    /// explicitly confirms creation). Refuses when the directory already
-    /// exists or the Agent is unknown.
+    /// (spec §8.7). Refuses when the directory already exists or the Agent
+    /// is unknown; the persisted configuration is untouched — detection is
+    /// never written back.
     pub fn create_agent_directory(&self, agent_id: &AgentId) -> Result<(), StartupError> {
         let agent = self
             .agents
@@ -111,13 +114,16 @@ impl StartupService {
             .into_iter()
             .find(|agent| &agent.agent_id == agent_id)
             .ok_or_else(|| StartupError::Validation("the Agent is not configured".into()))?;
-        if agent.detected {
+        if self
+            .filesystem
+            .canonical_directory(&agent.skills_path)
+            .is_ok()
+        {
             return Err(StartupError::Validation(
                 "the Agent skills directory already exists".into(),
             ));
         }
         self.filesystem.create_directory(&agent.skills_path)?;
-        self.agents.mark_agent_detected(agent_id)?;
         Ok(())
     }
 }

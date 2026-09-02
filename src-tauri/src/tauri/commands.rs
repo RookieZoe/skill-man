@@ -1,36 +1,33 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::tauri_adapter::activation_api::ActivationApi;
 use crate::tauri_adapter::adopt_api::AdoptApi;
+use crate::tauri_adapter::agent_configuration_api::AgentConfigurationApi;
 use crate::tauri_adapter::app_update_api::AppUpdateApi;
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    AbandonPreviewDto, ActivationConflictDetailsDto, ActivationConflictRequestDto,
-    ActivationHealthReportDto, ActivationPreviewDto, ActivationReplacePreviewDto,
-    ActivationReplaceUndoResultDto, ActivationResultDto, AdoptEvidenceReportDto, AdoptPlanDto,
-    AdoptResultDto, AdoptUndoResultDto, AgentActivationDto, AppPreferencesDto, AppUpdateCheckDto,
-    ApplyAbandonRequestDto, ApplyActivationReplaceRequestDto, ApplyActivationRequestDto,
-    ApplyAdoptRequestDto, ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto,
-    ApplyFixtureRecoveryRequestDto, ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto,
-    ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto, BootstrapSnapshotDto,
-    CancelActivationReplaceRequestDto, CancelActivationRequestDto, CancelAdoptRequestDto,
+    AbandonPreviewDto, ActivationHealthReportDto, AdoptEvidenceReportDto, AdoptPlanDto,
+    AdoptResultDto, AdoptUndoResultDto, AgentConfigurationApplyResultDto,
+    AgentConfigurationPlanDto, AgentManagementSnapshotDto, AppPreferencesDto, AppUpdateCheckDto,
+    ApplyAbandonRequestDto, ApplyAdoptRequestDto, ApplyAgentConfigurationPlanRequestDto,
+    ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto,
+    ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
+    ApplySkillUpdatesRequestDto, BootstrapSnapshotDto, CancelAdoptRequestDto,
     CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto,
     CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
     CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
     CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmExistingHomeRecoveryRequestDto,
     ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto,
-    CreateAgentDirectoryRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    CreateAgentConfigurationRequestDto, CreateAgentDirectoryRequestDto,
+    DeleteAgentConfigurationRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
     DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
-    ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto, FileImportCandidateDto,
-    FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
-    FileImportSelectionPreviewDto, FileImportSelectionResultDto,
-    FinalizeActivationReplaceRequestDto, FinalizeAdoptRequestDto, FixtureRecoveryPlanDto,
-    FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto, HomeCandidateDto,
-    InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto,
-    ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
-    PlanActivationRepairRequestDto, PlanActivationReplaceRequestDto, PlanActivationRequestDto,
+    EditAgentConfigurationRequestDto, ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto,
+    FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
+    FileImportSelectionPreviewDto, FileImportSelectionResultDto, FinalizeAdoptRequestDto,
+    FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto,
+    HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto,
+    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanLinkImportRequestDto,
     PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
@@ -40,8 +37,8 @@ use crate::tauri_adapter::dto::{
     RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
     SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto, SourcePromotionResultDto,
     SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
-    SourceUndoResultDto, StartupInfoDto, UndoActivationReplaceRequestDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    SourceUndoResultDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto,
+    UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -294,22 +291,6 @@ pub fn install_app_update(
 }
 
 #[tauri::command]
-pub async fn plan_activation(
-    state: State<'_, ActivationApi>,
-    request: PlanActivationRequestDto,
-) -> Result<ActivationPreviewDto, CommandFailureDto> {
-    state.plan_activation(request)
-}
-
-#[tauri::command]
-pub async fn plan_activation_repair(
-    state: State<'_, ActivationApi>,
-    request: PlanActivationRepairRequestDto,
-) -> Result<ActivationPreviewDto, CommandFailureDto> {
-    state.plan_activation_repair(request)
-}
-
-#[tauri::command]
 pub async fn run_activation_health_check(
     app: AppHandle,
     state: State<'_, HealthApi>,
@@ -374,78 +355,6 @@ pub fn cancel_remove_skill(
 }
 
 #[tauri::command]
-pub async fn apply_activation(
-    app: AppHandle,
-    state: State<'_, ActivationApi>,
-    request: ApplyActivationRequestDto,
-) -> Result<ActivationResultDto, CommandFailureDto> {
-    let result = state.apply_activation(request)?;
-    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
-    Ok(result)
-}
-
-#[::tauri::command]
-pub fn cancel_activation(
-    state: State<'_, ActivationApi>,
-    request: CancelActivationRequestDto,
-) -> Result<bool, CommandFailureDto> {
-    state.cancel_activation(request)
-}
-#[tauri::command]
-pub fn activation_conflict_details(
-    state: State<'_, ActivationApi>,
-    request: ActivationConflictRequestDto,
-) -> Result<ActivationConflictDetailsDto, CommandFailureDto> {
-    state.activation_conflict_details(request)
-}
-
-#[tauri::command]
-pub async fn plan_activation_replace(
-    state: State<'_, ActivationApi>,
-    request: PlanActivationReplaceRequestDto,
-) -> Result<ActivationReplacePreviewDto, CommandFailureDto> {
-    state.plan_activation_replace(request)
-}
-
-#[tauri::command]
-pub async fn apply_activation_replace(
-    app: AppHandle,
-    state: State<'_, ActivationApi>,
-    request: ApplyActivationReplaceRequestDto,
-) -> Result<ActivationResultDto, CommandFailureDto> {
-    let result = state.apply_activation_replace(request)?;
-    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
-    Ok(result)
-}
-
-#[tauri::command]
-pub fn cancel_activation_replace(
-    state: State<'_, ActivationApi>,
-    request: CancelActivationReplaceRequestDto,
-) -> Result<bool, CommandFailureDto> {
-    state.cancel_activation_replace(request)
-}
-
-#[tauri::command]
-pub async fn undo_activation_replace(
-    app: AppHandle,
-    state: State<'_, ActivationApi>,
-    request: UndoActivationReplaceRequestDto,
-) -> Result<ActivationReplaceUndoResultDto, CommandFailureDto> {
-    let result = state.undo_activation_replace(request)?;
-    let _ = app.emit(tray::CATALOG_CHANGED_EVENT, ());
-    Ok(result)
-}
-
-#[tauri::command]
-pub fn finalize_activation_replace(
-    state: State<'_, ActivationApi>,
-    request: FinalizeActivationReplaceRequestDto,
-) -> Result<(), CommandFailureDto> {
-    state.finalize_activation_replace(request)
-}
-
-#[tauri::command]
 pub fn list_skills(
     state: State<'_, CatalogApi>,
     request: ListSkillsRequestDto,
@@ -462,11 +371,42 @@ pub fn inspect_skill(
 }
 
 #[tauri::command]
-pub fn list_agents(
-    state: State<'_, CatalogApi>,
-    skill_id: String,
-) -> Result<Vec<AgentActivationDto>, CommandFailureDto> {
-    state.list_agents(skill_id)
+pub fn get_agent_management_snapshot(
+    state: State<'_, AgentConfigurationApi>,
+) -> Result<AgentManagementSnapshotDto, CommandFailureDto> {
+    state.snapshot()
+}
+
+#[tauri::command]
+pub fn plan_create_agent_configuration(
+    state: State<'_, AgentConfigurationApi>,
+    request: CreateAgentConfigurationRequestDto,
+) -> Result<AgentConfigurationPlanDto, CommandFailureDto> {
+    state.plan_create(request)
+}
+
+#[tauri::command]
+pub fn plan_edit_agent_configuration(
+    state: State<'_, AgentConfigurationApi>,
+    request: EditAgentConfigurationRequestDto,
+) -> Result<AgentConfigurationPlanDto, CommandFailureDto> {
+    state.plan_edit(request)
+}
+
+#[tauri::command]
+pub fn plan_delete_agent_configuration(
+    state: State<'_, AgentConfigurationApi>,
+    request: DeleteAgentConfigurationRequestDto,
+) -> Result<AgentConfigurationPlanDto, CommandFailureDto> {
+    state.plan_delete(request)
+}
+
+#[tauri::command]
+pub fn apply_agent_configuration_plan(
+    state: State<'_, AgentConfigurationApi>,
+    request: ApplyAgentConfigurationPlanRequestDto,
+) -> Result<AgentConfigurationApplyResultDto, CommandFailureDto> {
+    state.apply(request)
 }
 
 #[tauri::command]

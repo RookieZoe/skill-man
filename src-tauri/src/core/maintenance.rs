@@ -485,7 +485,7 @@ impl MaintenanceService {
                 .iter()
                 .map(|activation| ActivationRecoveryBaseline {
                     skill_id: item.skill_id.clone(),
-                    agent_id: activation.agent_id.clone(),
+                    target_root_id: activation.target_root_id.clone(),
                     expected_entry_path: activation.entry_path.clone(),
                     expected_target_path: activation.target_path.clone(),
                 })
@@ -522,7 +522,7 @@ impl MaintenanceService {
                 };
                 Ok(ActivationObservation {
                     skill_id: activation.skill_id.clone(),
-                    agent_id: activation.agent_id.clone(),
+                    target_root_id: activation.target_root_id.clone(),
                     observed_state,
                 })
             })
@@ -737,7 +737,7 @@ impl MaintenanceService {
                     _ => return Err(MaintenanceError::PlanStale),
                 };
                 Ok(RelocateActivationStep {
-                    agent_id: activation.agent_id.0.clone(),
+                    target_root_id: activation.target_root_id.clone(),
                     entry_path: activation.expected_entry_path.clone(),
                     old_target_path: old_target,
                     new_target_path: new_target,
@@ -1156,7 +1156,7 @@ impl MaintenanceService {
                     .activation_snapshot(&activation.expected_entry_path)
                     .map_err(|_| MaintenanceError::PlanStale)?;
                 Ok(RemoveActivationStep {
-                    agent_id: activation.agent_id.0.clone(),
+                    target_root_id: activation.target_root_id.clone(),
                     entry_path: activation.expected_entry_path.clone(),
                     target_path: activation.expected_target_path.clone(),
                     initial_entry: if initial_entry == ActivationEntrySnapshot::Missing {

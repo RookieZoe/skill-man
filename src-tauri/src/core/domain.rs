@@ -10,6 +10,22 @@ pub fn skill_identity_key(directory_name: &str) -> String {
     normalized.as_str().case_fold().collect()
 }
 
+/// Agent Configuration names use compatibility normalization before Unicode
+/// case folding (ADR-0016). Display names remain untouched Source Content;
+/// this key exists only for identity and uniqueness.
+pub fn agent_name_identity_key(name: &str) -> String {
+    let normalized: String = name.nfkc().collect();
+    normalized.as_str().case_fold().collect()
+}
+
+/// Configured paths compare by their normalized spelling after filesystem
+/// canonicalization. NFKC + casefold closes case/compatibility aliases on the
+/// default macOS filesystems without rewriting the displayed path.
+pub fn configured_path_identity_key(path: &str) -> String {
+    let normalized: String = path.nfkc().collect();
+    normalized.as_str().case_fold().collect()
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillMetadata {
     pub name: Option<String>,
@@ -135,18 +151,6 @@ pub struct SkillDetail {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentActivation {
-    pub id: AgentId,
-    pub name: String,
-    pub kind: AgentKind,
-    pub skills_path: String,
-    pub detected: bool,
-    pub compatibility: Compatibility,
-    pub desired_enabled: bool,
-    pub observed_state: ActivationObservedState,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogSnapshot<T> {
     pub snapshot_version: u64,
     pub items: Vec<T>,
@@ -171,7 +175,7 @@ pub struct CatalogSeed {
 
 #[cfg(test)]
 mod tests {
-    use super::skill_identity_key;
+    use super::{agent_name_identity_key, configured_path_identity_key, skill_identity_key};
 
     #[test]
     fn identity_key_uses_unicode_case_folding_after_nfc() {
@@ -179,6 +183,18 @@ mod tests {
         assert_eq!(
             skill_identity_key("Édit"),
             skill_identity_key("E\u{301}DIT")
+        );
+    }
+
+    #[test]
+    fn agent_and_path_identity_keys_use_nfkc_casefold() {
+        assert_eq!(
+            agent_name_identity_key("Ａgent Straße"),
+            agent_name_identity_key("agent STRASSE")
+        );
+        assert_eq!(
+            configured_path_identity_key("/Users/Zoë/Ｓkills"),
+            configured_path_identity_key("/users/zoë/skills")
         );
     }
 }

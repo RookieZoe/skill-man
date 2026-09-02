@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::core::domain::{
-    AgentActivation, CatalogFilter, CatalogSnapshot, SkillDetail, SkillId, SkillSummary,
-};
+use crate::core::domain::{CatalogFilter, CatalogSnapshot, SkillDetail, SkillId, SkillSummary};
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 
 #[derive(Clone)]
@@ -30,12 +28,6 @@ impl CatalogService {
     pub fn inspect(&self, skill_id: SkillId) -> Result<SkillDetail, CatalogError> {
         self.store
             .inspect(&skill_id)?
-            .ok_or(CatalogError::SkillNotFound(skill_id.0))
-    }
-
-    pub fn list_agents(&self, skill_id: SkillId) -> Result<Vec<AgentActivation>, CatalogError> {
-        self.store
-            .list_agents(&skill_id)?
             .ok_or(CatalogError::SkillNotFound(skill_id.0))
     }
 }
