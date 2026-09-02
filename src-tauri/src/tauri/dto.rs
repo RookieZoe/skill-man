@@ -23,6 +23,10 @@ use crate::core::import::{
 use crate::core::maintenance::{
     ActivationHealthReport, RelocatePreview, RelocateResult, RemovePreview, RemoveResult,
 };
+use crate::core::observation::{
+    DetectionSnapshot, ObservationAndScanSnapshot, PresetDetectionState, PresetObservation,
+    RootDetectionState, RootObservation,
+};
 use crate::core::source_group_preview::{
     ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
     RepositoryRefConflict, SourceGroupMember, SourceGroupPreview, SourceGroupPreviewOutcome,
@@ -1048,6 +1052,134 @@ impl From<AgentConfigurationApplyResult> for AgentConfigurationApplyResultDto {
             agent_id: value.agent_id,
             generation: value.generation,
             deleted: value.deleted,
+        }
+    }
+}
+
+// -- Observation and Scan Module (spec §4.10; ADR-0020) --
+
+/// Closed per-root Detection observation state; probe failures are
+/// `Unavailable` with a diagnostic, never downgraded to `Absent`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootDetectionStateDto {
+    Present,
+    Unavailable,
+    Absent,
+}
+
+impl From<RootDetectionState> for RootDetectionStateDto {
+    fn from(value: RootDetectionState) -> Self {
+        match value {
+            RootDetectionState::Present => Self::Present,
+            RootDetectionState::Unavailable => Self::Unavailable,
+            RootDetectionState::Absent => Self::Absent,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootObservationDto {
+    pub configured_path: String,
+    pub state: RootDetectionStateDto,
+    pub canonical_path: Option<String>,
+    pub diagnostic: Option<String>,
+}
+
+impl From<RootObservation> for RootObservationDto {
+    fn from(value: RootObservation) -> Self {
+        Self {
+            configured_path: value.configured_path.to_string_lossy().into_owned(),
+            state: value.state.into(),
+            canonical_path: value
+                .canonical_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetDetectionStateDto {
+    Present,
+    Unavailable,
+    Absent,
+    Unknown,
+}
+
+impl From<PresetDetectionState> for PresetDetectionStateDto {
+    fn from(value: PresetDetectionState) -> Self {
+        match value {
+            PresetDetectionState::Present => Self::Present,
+            PresetDetectionState::Unavailable => Self::Unavailable,
+            PresetDetectionState::Absent => Self::Absent,
+            PresetDetectionState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetObservationDto {
+    pub preset_key: String,
+    pub name: String,
+    pub state: PresetDetectionStateDto,
+    pub roots: Vec<RootObservationDto>,
+}
+
+impl From<PresetObservation> for PresetObservationDto {
+    fn from(value: PresetObservation) -> Self {
+        Self {
+            preset_key: value.preset_key,
+            name: value.name,
+            state: value.state.into(),
+            roots: value.roots.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// In-memory Detection result: bounded to the nine fixed Presets, generation
+/// increments on every published run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionSnapshotDto {
+    pub generation: u64,
+    pub preset_observations: Vec<PresetObservationDto>,
+}
+
+impl From<DetectionSnapshot> for DetectionSnapshotDto {
+    fn from(value: DetectionSnapshot) -> Self {
+        Self {
+            generation: value.generation,
+            preset_observations: value
+                .preset_observations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+/// The `observation://changed` payload and the query snapshot are isomorphic
+/// (spec §4.10): the same bounded summary, same generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationAndScanSnapshotDto {
+    pub home_id: Option<String>,
+    pub write_gate_generation: u64,
+    pub agent_configuration_generation: Option<u64>,
+    pub detection: DetectionSnapshotDto,
+}
+
+impl From<ObservationAndScanSnapshot> for ObservationAndScanSnapshotDto {
+    fn from(value: ObservationAndScanSnapshot) -> Self {
+        Self {
+            home_id: value.home_id,
+            write_gate_generation: value.write_gate_generation,
+            agent_configuration_generation: value.agent_configuration_generation,
+            detection: value.detection.into(),
         }
     }
 }

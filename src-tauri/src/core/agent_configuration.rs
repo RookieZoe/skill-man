@@ -223,6 +223,11 @@ impl PresetRegistry {
             .iter()
             .find(|preset| preset.preset_key == preset_key)
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_presets(presets: Vec<AgentPreset>) -> Self {
+        Self { presets }
+    }
 }
 
 fn preset(

@@ -16,6 +16,8 @@ import type {
   LinkImportPreview,
   LocaleSelection,
   LocaleSnapshot,
+  ObservationAndScanSnapshot,
+  PresetObservation,
   SkillDetail,
   SourceKind,
 } from "../app/catalog-client";
@@ -71,6 +73,10 @@ export function createFixtureCatalogClient(
     localeListeners.forEach((listener) => listener(payload));
     return payload;
   };
+  let detectionGeneration = 0;
+  const observationListeners = new Set<
+    (payload: ObservationAndScanSnapshot) => void
+  >();
   const detectedOverrides = new Set<string>();
   let preferences: AppPreferences = {
     launchAtLogin: false,
@@ -196,6 +202,31 @@ export function createFixtureCatalogClient(
         ...preset,
         roots: [...preset.roots],
       })),
+    };
+  }
+
+  function observationSnapshot(): ObservationAndScanSnapshot {
+    const presetObservations: PresetObservation[] = agentPresets.map(
+      (preset) => ({
+        presetKey: preset.presetKey,
+        name: preset.name,
+        state: "present",
+        roots: preset.roots.map((configuredPath) => ({
+          configuredPath,
+          state: "present" as const,
+          canonicalPath: configuredPath,
+          diagnostic: null,
+        })),
+      }),
+    );
+    return {
+      homeId: null,
+      writeGateGeneration: 0,
+      agentConfigurationGeneration: snapshotVersion,
+      detection: {
+        generation: detectionGeneration,
+        presetObservations,
+      },
     };
   }
 
@@ -335,6 +366,21 @@ export function createFixtureCatalogClient(
     },
     async getAgentManagementSnapshot() {
       return agentSnapshot();
+    },
+    async getObservationSnapshot() {
+      return observationSnapshot();
+    },
+    async refreshDetection() {
+      detectionGeneration += 1;
+      const payload = observationSnapshot();
+      observationListeners.forEach((listener) => listener(payload));
+      return payload;
+    },
+    listenObservationChanged(callback) {
+      observationListeners.add(callback);
+      return Promise.resolve(() => {
+        observationListeners.delete(callback);
+      });
     },
     async planCreateAgentConfiguration(draft) {
       const planToken = `fixture-agent-plan-${planCounter++}`;

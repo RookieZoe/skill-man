@@ -15,6 +15,7 @@ pub mod home_lifecycle;
 pub mod import;
 pub mod locale;
 pub mod maintenance;
+pub mod observation;
 pub mod preferences;
 pub mod source_group_preview;
 pub mod source_promotion;

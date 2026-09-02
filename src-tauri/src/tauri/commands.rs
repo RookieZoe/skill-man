@@ -27,18 +27,18 @@ use crate::tauri_adapter::dto::{
     FileImportSelectionPreviewDto, FileImportSelectionResultDto, FinalizeAdoptRequestDto,
     FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto,
     HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto,
-    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, PinSkillUpdatesRequestDto,
-    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
-    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanLinkImportRequestDto,
-    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
-    PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto, PrepareHomeRequestDto,
-    PreviewSourcePromotionRequestDto, RecoveryResultDto, RelocateLinkPreviewDto,
-    RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto,
-    RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto,
-    SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto, SourcePromotionResultDto,
-    SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
-    SourceUndoResultDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto,
-    UpdatePreferencesResultDto, UpdateResultDto,
+    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, ObservationAndScanSnapshotDto,
+    PinSkillUpdatesRequestDto, PlanAdoptRequestDto, PlanFileImportRequestDto,
+    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto,
+    PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
+    PreferenceUpdatesDto, PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto,
+    PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, RecoveryResultDto,
+    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
+    RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
+    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto,
+    SourcePromotionResultDto, SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto,
+    SourceTransitionResultDto, SourceUndoResultDto, StartupInfoDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -48,6 +48,7 @@ use crate::tauri_adapter::home_binding_api::HomeBindingApi;
 use crate::tauri_adapter::home_lifecycle_api::HomeLifecycleApi;
 use crate::tauri_adapter::import_api::ImportApi;
 use crate::tauri_adapter::locale_api::LocaleApi;
+use crate::tauri_adapter::observation_api::ObservationApi;
 use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
 use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
 use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
@@ -375,6 +376,16 @@ pub fn get_agent_management_snapshot(
     state: State<'_, AgentConfigurationApi>,
 ) -> Result<AgentManagementSnapshotDto, CommandFailureDto> {
     state.snapshot()
+}
+
+#[tauri::command]
+pub fn get_observation_snapshot(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+    state.snapshot()
+}
+
+#[tauri::command]
+pub fn refresh_detection(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+    state.refresh_detection()
 }
 
 #[tauri::command]

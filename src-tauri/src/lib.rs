@@ -46,6 +46,7 @@ pub fn run() {
     use crate::core::import::ImportService;
     use crate::core::locale::LocaleService;
     use crate::core::maintenance::MaintenanceService;
+    use crate::core::observation::ObservationService;
     use crate::core::preferences::PreferencesService;
     use crate::core::source_group_preview::SourceGroupPreviewService;
     use crate::core::source_promotion::SourcePromotionService;
@@ -79,13 +80,14 @@ pub fn run() {
         discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
         finalize_source_promotion, finalize_source_transition, finalize_source_update,
         get_agent_management_snapshot, get_bootstrap_snapshot, get_fixture_recovery_preview,
-        get_git_source_capability, get_locale_snapshot, inspect_skill, install_app_update,
-        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_abandon,
-        plan_adopt, plan_create_agent_configuration, plan_delete_agent_configuration,
-        plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
-        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_link_import,
-        plan_remove_skill, plan_restore, plan_skill_updates, prepare_existing_home_recovery,
-        prepare_home, preview_source_promotion, preview_source_update, reconnect_same_home,
+        get_git_source_capability, get_locale_snapshot, get_observation_snapshot, inspect_skill,
+        install_app_update, list_safety_snapshots, list_skills, load_preferences,
+        pin_skill_updates, plan_abandon, plan_adopt, plan_create_agent_configuration,
+        plan_delete_agent_configuration, plan_delete_safety_snapshot,
+        plan_edit_agent_configuration, plan_file_import, plan_file_import_selection,
+        plan_file_reinstall, plan_fixture_recovery, plan_link_import, plan_remove_skill,
+        plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
+        preview_source_promotion, preview_source_update, reconnect_same_home, refresh_detection,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
         scan_adopt, set_locale_selection, startup_info, undo_adopt, undo_source_promotion,
         undo_source_transition, update_preferences,
@@ -102,6 +104,7 @@ pub fn run() {
         LOCALE_CHANGED_EVENT, LocaleApi, TauriLocaleChangedEmitter,
     };
     use crate::tauri_adapter::menu;
+    use crate::tauri_adapter::observation_api::{ObservationApi, TauriObservationChangedEmitter};
     use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
     use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
     use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
@@ -390,16 +393,37 @@ pub fn run() {
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
             app.manage(CatalogApi::new(CatalogService::new(catalog_store.clone())));
+            let agent_configuration_filesystem = Arc::new(
+                MacOsAgentConfigurationFileSystem::new(home_directory.clone()),
+            );
+            let presets = PresetRegistry::system();
             app.manage(AgentConfigurationApi::new(Arc::new(
                 AgentConfigurationService::new(
-                    agent_configuration_store,
-                    Arc::new(MacOsAgentConfigurationFileSystem::new(
-                        home_directory.clone(),
-                    )),
+                    agent_configuration_store.clone(),
+                    agent_configuration_filesystem.clone(),
                     write_gate.clone(),
-                    PresetRegistry::system(),
+                    presets.clone(),
                 ),
             )));
+            // Observation and Scan Module skeleton (#81): Agent Detection is
+            // zero-write and runs against the physical preset roots only, so
+            // it starts in every bootstrap state and after the first Library
+            // Desk is interactive (spec §5.1 step 9–10; ADR-0020). The
+            // startup Run is asynchronous: the Library never waits for it and
+            // the normal startup never triggers a full Rescan.
+            let observation_api = Arc::new(ObservationApi::new(
+                Arc::new(ObservationService::new(
+                    agent_configuration_filesystem,
+                    presets,
+                    write_gate.clone(),
+                    agent_configuration_store,
+                )),
+                Arc::new(TauriObservationChangedEmitter::new(app.handle().clone())),
+            ));
+            app.manage(observation_api.clone());
+            std::thread::spawn(move || {
+                let _ = observation_api.refresh_detection();
+            });
             let git_source_capability_scan = Arc::new(GitSourceCapabilityScan::new(Arc::new(
                 SqliteGitSourceCapabilityReader::new(
                     write_gate.clone(),
@@ -606,6 +630,8 @@ pub fn run() {
             list_skills,
             inspect_skill,
             get_agent_management_snapshot,
+            get_observation_snapshot,
+            refresh_detection,
             plan_create_agent_configuration,
             plan_edit_agent_configuration,
             plan_delete_agent_configuration,

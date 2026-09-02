@@ -20,6 +20,7 @@ tauri-build = { version = "2.5.2", features = [] }
 [dependencies]
 futures-util = "0.3.33"
 libc = "0.2.189"
+parking_lot = "0.12"
 plist = "1.8.0"
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

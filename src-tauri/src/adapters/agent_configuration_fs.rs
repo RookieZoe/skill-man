@@ -7,7 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::seams::agent_configuration_fs::{
     AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootEntryEvidence,
-    AgentRootEntryKind, AgentRootFingerprint, AgentRootInspection, CreatedAgentTargetDirectory,
+    AgentRootEntryKind, AgentRootFingerprint, AgentRootInspection, AgentRootProbe,
+    CreatedAgentTargetDirectory,
 };
 
 pub struct MacOsAgentConfigurationFileSystem {
@@ -39,18 +40,29 @@ impl MacOsAgentConfigurationFileSystem {
 }
 
 impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
+    fn probe_root(
+        &self,
+        configured_path: &Path,
+    ) -> Result<AgentRootProbe, AgentConfigurationFileSystemError> {
+        let expanded = self.expand_home(configured_path)?;
+        validate_absolute_safe_path(&expanded)?;
+        match fs::symlink_metadata(&expanded) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(AgentRootProbe::Absent)
+            }
+            Err(error) => Ok(AgentRootProbe::Unavailable {
+                diagnostic: error.to_string(),
+            }),
+            Ok(_) => probe_present(&expanded),
+        }
+    }
+
     fn inspect_root(
         &self,
         configured_path: &Path,
     ) -> Result<AgentRootInspection, AgentConfigurationFileSystemError> {
         let expanded = self.expand_home(configured_path)?;
-        if !expanded.is_absolute()
-            || expanded
-                .components()
-                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-        {
-            return Err(AgentConfigurationFileSystemError::InvalidPath);
-        }
+        validate_absolute_safe_path(&expanded)?;
 
         let mut ancestor = expanded.clone();
         let mut missing_components = Vec::new();
@@ -217,6 +229,55 @@ impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
     }
 }
 
+/// The shared path-safety gate for every configured-path probe: absolute,
+/// no `.`/`..` components, no unsupported anchored shortcuts (validated by
+/// `expand_home`).
+fn validate_absolute_safe_path(expanded: &Path) -> Result<(), AgentConfigurationFileSystemError> {
+    if expanded.is_absolute()
+        && !expanded
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        Ok(())
+    } else {
+        Err(AgentConfigurationFileSystemError::InvalidPath)
+    }
+}
+
+/// Continue a root probe for a path that exists: resolve identity, require a
+/// directory and check readability. Every verification failure is
+/// `Unavailable` with a raw (never app-authored) diagnostic; only a clean,
+/// readable directory yields `Present`.
+fn probe_present(expanded: &Path) -> Result<AgentRootProbe, AgentConfigurationFileSystemError> {
+    let canonical_path = match fs::canonicalize(expanded) {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(AgentRootProbe::Unavailable {
+                diagnostic: error.to_string(),
+            });
+        }
+    };
+    let metadata = match fs::metadata(&canonical_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Ok(AgentRootProbe::Unavailable {
+                diagnostic: error.to_string(),
+            });
+        }
+    };
+    if !metadata.is_dir() {
+        return Ok(AgentRootProbe::Unavailable {
+            diagnostic: "not_a_directory".to_owned(),
+        });
+    }
+    if let Err(error) = fs::read_dir(&canonical_path) {
+        return Ok(AgentRootProbe::Unavailable {
+            diagnostic: error.to_string(),
+        });
+    }
+    Ok(AgentRootProbe::Present { canonical_path })
+}
+
 fn fingerprint(path: &Path, metadata: &fs::Metadata) -> AgentRootFingerprint {
     AgentRootFingerprint {
         canonical_path: path.to_path_buf(),
@@ -241,5 +302,93 @@ fn path_is_writable(path: &Path) -> Result<bool, AgentConfigurationFileSystemErr
         Err(AgentConfigurationFileSystemError::Unavailable(
             error.to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_present_root_resolves_identity_via_home_expansion() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills-root");
+        std::fs::create_dir(&root).expect("create root");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+
+        let probe = filesystem
+            .probe_root(Path::new("~/skills-root"))
+            .expect("probe");
+        assert_eq!(
+            probe,
+            AgentRootProbe::Present {
+                canonical_path: root.canonicalize().expect("canonical root")
+            }
+        );
+    }
+
+    #[test]
+    fn probe_missing_root_is_absent_and_never_creates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+
+        let probe = filesystem
+            .probe_root(Path::new("~/missing/skills"))
+            .expect("probe");
+        assert_eq!(probe, AgentRootProbe::Absent);
+        assert!(
+            !temp.path().join("missing").exists(),
+            "probing is read-only"
+        );
+    }
+
+    #[test]
+    fn probe_file_root_is_unavailable_not_absent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("blocked"), b"not a directory").expect("write file");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+
+        match filesystem
+            .probe_root(Path::new("~/blocked"))
+            .expect("probe")
+        {
+            AgentRootProbe::Unavailable { diagnostic } => {
+                assert_eq!(
+                    diagnostic, "not_a_directory",
+                    "diagnostic is a technical token, never app copy: {diagnostic}"
+                );
+            }
+            other => panic!("a non-directory root must be Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_symlink_root_resolves_to_canonical_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target = temp.path().join("real-skills");
+        std::fs::create_dir(&target).expect("create target");
+        let link = temp.path().join("linked-skills");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+
+        let probe = filesystem
+            .probe_root(Path::new("~/linked-skills"))
+            .expect("probe");
+        assert_eq!(
+            probe,
+            AgentRootProbe::Present {
+                canonical_path: target.canonicalize().expect("canonical target")
+            }
+        );
+    }
+
+    #[test]
+    fn probe_home_shortcut_outside_home_is_invalid_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+        assert!(matches!(
+            filesystem.probe_root(Path::new("~other/skills")),
+            Err(AgentConfigurationFileSystemError::InvalidPath)
+        ));
     }
 }

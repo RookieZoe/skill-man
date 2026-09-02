@@ -426,6 +426,49 @@ export interface AgentManagementSnapshot {
   presets: AgentPreset[];
 }
 
+// -- Observation and Scan Module (spec §4.10; ADR-0020) --
+
+/** Closed per-root Detection state; probe failures are `unavailable` with a
+ * diagnostic and are never downgraded to `absent`. */
+export type RootDetectionState = "present" | "unavailable" | "absent";
+
+export interface RootObservation {
+  configuredPath: string;
+  state: RootDetectionState;
+  /** Resolved directory identity when `present`. */
+  canonicalPath: string | null;
+  /** Raw reason when `unavailable`; never user copy. */
+  diagnostic: string | null;
+}
+
+/** Closed per-preset Detection state; `unknown` is the honest pre-run state. */
+export type PresetDetectionState =
+  "present" | "unavailable" | "absent" | "unknown";
+
+export interface PresetObservation {
+  presetKey: string;
+  name: string;
+  state: PresetDetectionState;
+  roots: RootObservation[];
+}
+
+/** In-memory Detection result: bounded to the nine fixed Presets. */
+export interface DetectionSnapshot {
+  generation: number;
+  presetObservations: PresetObservation[];
+}
+
+/**
+ * The `observation://changed` payload and the query snapshot are isomorphic
+ * (spec §4.10): the same bounded summary with the same generations.
+ */
+export interface ObservationAndScanSnapshot {
+  homeId: string | null;
+  writeGateGeneration: number;
+  agentConfigurationGeneration: number | null;
+  detection: DetectionSnapshot;
+}
+
 export interface AgentRootDraft {
   configuredPath: string;
   role: AgentRootRole;
@@ -1080,6 +1123,14 @@ export interface CatalogClient {
   getGitSourceCapability(): Promise<GitSourceCapabilityReport>;
   inspectSkill(skillId: string): Promise<SkillDetail>;
   getAgentManagementSnapshot(): Promise<AgentManagementSnapshot>;
+  /** Current in-memory Observation snapshot; never triggers detection. */
+  getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
+  /** Single-flight Detection trigger (spec §4.10; ADR-0020). */
+  refreshDetection(): Promise<ObservationAndScanSnapshot>;
+  /** `observation://changed`: payload isomorphic with the query snapshot. */
+  listenObservationChanged(
+    callback: (payload: ObservationAndScanSnapshot) => void,
+  ): Promise<() => void>;
   planCreateAgentConfiguration(
     draft: AgentConfigurationDraft,
   ): Promise<AgentConfigurationPlan>;
@@ -1236,6 +1287,14 @@ const tauriCatalogClient: CatalogClient = {
       callback(event.payload);
     });
   },
+  listenObservationChanged(callback) {
+    return listen<ObservationAndScanSnapshot>(
+      "observation://changed",
+      (event) => {
+        callback(event.payload);
+      },
+    );
+  },
   listSkills(filter) {
     return invoke<CatalogList>("list_skills", { request: { filter } });
   },
@@ -1277,6 +1336,12 @@ const tauriCatalogClient: CatalogClient = {
   },
   getAgentManagementSnapshot() {
     return invoke<AgentManagementSnapshot>("get_agent_management_snapshot");
+  },
+  getObservationSnapshot() {
+    return invoke<ObservationAndScanSnapshot>("get_observation_snapshot");
+  },
+  refreshDetection() {
+    return invoke<ObservationAndScanSnapshot>("refresh_detection");
   },
   planCreateAgentConfiguration(draft) {
     return invoke<AgentConfigurationPlan>("plan_create_agent_configuration", {

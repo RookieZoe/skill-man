@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import { AgentManagement } from "./AgentManagement";
@@ -126,4 +126,113 @@ test("mid layout opens configuration details in the shared drawer contract", asy
   expect(
     screen.getByRole("button", { name: "Open details" }),
   ).toBeInTheDocument();
+});
+
+test("detected section shows read-only evidence without scan or enable actions", async () => {
+  const user = userEvent.setup();
+  render(
+    <AgentManagement client={createFixtureCatalogClient()} layoutMode="wide" />,
+  );
+  const navigation = await screen.findByRole("navigation", {
+    name: "Agent groups",
+  });
+  await user.click(within(navigation).getByText("Detected but unconfigured"));
+
+  expect(await screen.findByText("Windsurf")).toBeInTheDocument();
+  // The fixture resolves canonical identity to the same text; the configured
+  // path and the resolved path both render as evidence.
+  expect(
+    screen.getAllByText("~/.codeium/windsurf/skills").length,
+  ).toBeGreaterThan(0);
+  expect(screen.getAllByText("Present").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Scan/i }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Enable/i }),
+  ).not.toBeInTheDocument();
+});
+
+test("unavailable detection evidence is never presented as absent", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.refreshDetection = async () => ({
+    homeId: null,
+    writeGateGeneration: 0,
+    agentConfigurationGeneration: 0,
+    detection: {
+      generation: 1,
+      presetObservations: [
+        {
+          presetKey: "windsurf",
+          name: "Windsurf",
+          state: "unavailable",
+          roots: [
+            {
+              configuredPath: "~/.codeium/windsurf/skills",
+              state: "unavailable",
+              canonicalPath: null,
+              diagnostic: "read denied",
+            },
+            {
+              configuredPath: "~/.agents/skills",
+              state: "present",
+              canonicalPath: "/Users/me/.agents/skills",
+              diagnostic: null,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AgentManagement client={client} layoutMode="wide" />);
+  const navigation = await screen.findByRole("navigation", {
+    name: "Agent groups",
+  });
+  await user.click(within(navigation).getByText("Detected but unconfigured"));
+
+  expect(await screen.findByText("Windsurf")).toBeInTheDocument();
+  expect(screen.getByText("read denied")).toBeInTheDocument();
+  expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
+  expect(screen.queryByText("Absent")).not.toBeInTheDocument();
+});
+
+test("a pending Detection Run is not presented as no agents", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const pending = {
+    homeId: null,
+    writeGateGeneration: 0,
+    agentConfigurationGeneration: null,
+    detection: { generation: 0, presetObservations: [] },
+  };
+  client.getObservationSnapshot = async () => pending;
+  client.refreshDetection = async () => pending;
+  render(<AgentManagement client={client} layoutMode="wide" />);
+  const navigation = await screen.findByRole("navigation", {
+    name: "Agent groups",
+  });
+  await user.click(within(navigation).getByText("Detected but unconfigured"));
+
+  expect(
+    await screen.findByText("Detecting preset skill roots…"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("No agents detected")).not.toBeInTheDocument();
+});
+
+test("refresh button triggers a single-flight detection refresh", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const refresh = vi.spyOn(client, "refreshDetection");
+  render(<AgentManagement client={client} layoutMode="wide" />);
+  const navigation = await screen.findByRole("navigation", {
+    name: "Agent groups",
+  });
+  await user.click(within(navigation).getByText("Detected but unconfigured"));
+  const button = await screen.findByRole("button", {
+    name: "Refresh detection",
+  });
+  await user.click(button);
+  expect(refresh).toHaveBeenCalled();
 });

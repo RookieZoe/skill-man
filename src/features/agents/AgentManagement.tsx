@@ -16,6 +16,8 @@ import type {
   AgentPreset,
   CatalogClient,
   CommandFailure,
+  ObservationAndScanSnapshot,
+  PresetObservation,
   PublicError,
 } from "../../app/catalog-client";
 import type { LayoutMode } from "../library/LibraryDesk";
@@ -56,6 +58,9 @@ export function AgentManagement({
   const [sheet, setSheet] = useState<SheetState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [observation, setObservation] =
+    useState<ObservationAndScanSnapshot | null>(null);
+  const [detectionRefreshing, setDetectionRefreshing] = useState(false);
   const sheetOpener = useRef<HTMLElement | null>(null);
   const detailDrawerRef = useRef<HTMLElement | null>(null);
 
@@ -121,6 +126,59 @@ export function AgentManagement({
     };
   }, [client, t]);
 
+  // Detection lifecycle (ADR-0020): opening Agent Management is a trigger,
+  // single-flight on the backend; the in-memory result also arrives through
+  // `observation://changed`. Evidence is read-only and never configured
+  // automatically.
+  useEffect(() => {
+    let current = true;
+    let unlisten: (() => void) | null = null;
+    client
+      .getObservationSnapshot()
+      .then((next) => {
+        if (current) setObservation(next);
+      })
+      .catch((reason: unknown) => {
+        if (current) setError(agentFailureMessage(reason, t));
+      });
+    client
+      .listenObservationChanged((payload) => {
+        if (current) setObservation(payload);
+      })
+      .then((stop) => {
+        if (!current) stop();
+        else unlisten = stop;
+      })
+      .catch((reason: unknown) => {
+        if (current) setError(agentFailureMessage(reason, t));
+      });
+    client
+      .refreshDetection()
+      .then((next) => {
+        if (current) setObservation(next);
+      })
+      .catch((reason: unknown) => {
+        if (current) setError(agentFailureMessage(reason, t));
+      });
+    return () => {
+      current = false;
+      unlisten?.();
+    };
+  }, [client, t]);
+
+  async function refreshDetection() {
+    setDetectionRefreshing(true);
+    try {
+      setObservation(await client.refreshDetection());
+    } catch (reason) {
+      // Per-root probe failures already surface as Unavailable evidence; a
+      // whole-command failure is surfaced like every other inline error.
+      setError(agentFailureMessage(reason, t));
+    } finally {
+      setDetectionRefreshing(false);
+    }
+  }
+
   const configuredPresetKeys = useMemo(
     () =>
       new Set(
@@ -130,6 +188,20 @@ export function AgentManagement({
       ),
     [snapshot],
   );
+  const detectedObservations = useMemo(
+    () =>
+      (observation?.detection.presetObservations ?? []).filter(
+        (preset) =>
+          preset.state !== "absent" &&
+          preset.state !== "unknown" &&
+          !configuredPresetKeys.has(preset.presetKey),
+      ),
+    [observation, configuredPresetKeys],
+  );
+  // Generation zero is the honest pre-run state: evidence is not the same
+  // as absence, so the pending Run is never rendered as "no agents".
+  const detectionPending =
+    observation === null || observation.detection.generation === 0;
   const availablePresets =
     snapshot?.presets.filter(
       (preset) => !configuredPresetKeys.has(preset.presetKey),
@@ -341,6 +413,7 @@ export function AgentManagement({
         <AgentNavigation
           section={section}
           configuredCount={snapshot?.configurations.length ?? 0}
+          detectedCount={detectedObservations.length}
           presetCount={availablePresets.length}
           onSelect={selectSection}
           onNewCustom={openCustomSheet}
@@ -349,6 +422,10 @@ export function AgentManagement({
         <AgentList
           section={section}
           snapshot={snapshot}
+          detectedObservations={detectedObservations}
+          detectionPending={detectionPending}
+          detectionRefreshing={detectionRefreshing}
+          onRefreshDetection={refreshDetection}
           availablePresets={availablePresets}
           selection={selection}
           error={error}
@@ -429,12 +506,14 @@ export function AgentManagement({
 function AgentNavigation({
   section,
   configuredCount,
+  detectedCount,
   presetCount,
   onSelect,
   onNewCustom,
 }: {
   section: AgentSection;
   configuredCount: number;
+  detectedCount: number;
   presetCount: number;
   onSelect: (section: AgentSection) => void;
   onNewCustom: () => void;
@@ -442,7 +521,7 @@ function AgentNavigation({
   const { t } = useLocale();
   const rows: Array<{ section: AgentSection; count: number }> = [
     { section: "configured", count: configuredCount },
-    { section: "detected", count: 0 },
+    { section: "detected", count: detectedCount },
     { section: "presets", count: presetCount },
   ];
   return (
@@ -466,7 +545,7 @@ function AgentNavigation({
       </div>
       <div className="agent-detection-note" role="note">
         <strong>{t("agents.nav.detection_title")}</strong>
-        <span>{t("agents.nav.detection_note")}</span>
+        <span>{t("agents.nav.zeroWriteHint")}</span>
       </div>
       <button
         type="button"
@@ -482,6 +561,10 @@ function AgentNavigation({
 function AgentList({
   section,
   snapshot,
+  detectedObservations,
+  detectionPending,
+  detectionRefreshing,
+  onRefreshDetection,
   availablePresets,
   selection,
   error,
@@ -491,6 +574,10 @@ function AgentList({
 }: {
   section: AgentSection;
   snapshot: AgentManagementSnapshot | null;
+  detectedObservations: PresetObservation[];
+  detectionPending: boolean;
+  detectionRefreshing: boolean;
+  onRefreshDetection: () => void;
   availablePresets: AgentPreset[];
   selection: AgentSelection;
   error: string | null;
@@ -505,6 +592,16 @@ function AgentList({
         <span className="eyebrow">{t(`agents.nav.${section}`)}</span>
         <h2>{t(`agents.list.${section}_title`)}</h2>
         <p>{t(`agents.list.${section}_body`)}</p>
+        {section === "detected" ? (
+          <button
+            type="button"
+            className="agents-detection-refresh"
+            disabled={detectionRefreshing}
+            onClick={onRefreshDetection}
+          >
+            {t("agents.list.detected_refresh")}
+          </button>
+        ) : null}
       </header>
       {error ? (
         <div className="agents-inline-error" role="alert">
@@ -561,10 +658,62 @@ function AgentList({
         )
       ) : null}
       {snapshot && section === "detected" ? (
-        <div className="agents-empty">
-          <h3>{t("agents.list.detected_empty_title")}</h3>
-          <p>{t("agents.list.detected_empty_body")}</p>
-        </div>
+        detectionPending ? (
+          <div className="agents-empty" role="status">
+            {t("agents.list.detected_detecting")}
+          </div>
+        ) : detectedObservations.length > 0 ? (
+          <div className="agent-detection-list">
+            {detectedObservations.map((preset) => (
+              <article key={preset.presetKey} className="agent-detection-card">
+                <header className="agent-detection-card-heading">
+                  <h3>{preset.name}</h3>
+                  <span
+                    className={`agent-detection-state agent-detection-state--${preset.state}`}
+                  >
+                    {t(`agents.list.detected_state_${preset.state}`)}
+                  </span>
+                </header>
+                <p className="agent-detection-roots-label">
+                  {t("agents.list.detectionEvidence")}
+                </p>
+                <ul className="agent-detection-roots">
+                  {preset.roots.map((root) => (
+                    <li key={root.configuredPath}>
+                      <code>{root.configuredPath}</code>
+                      <span
+                        className={`agent-detection-root-state agent-detection-root-state--${root.state}`}
+                      >
+                        {t(`agents.list.detected_state_${root.state}`)}
+                      </span>
+                      {root.canonicalPath ? (
+                        <span className="agent-detection-canonical">
+                          <span className="agent-detection-canonical-label">
+                            {t("agents.list.detected_canonical_label")}
+                          </span>
+                          <code>{root.canonicalPath}</code>
+                        </span>
+                      ) : null}
+                      {root.diagnostic ? (
+                        <details className="agent-detection-diagnostic">
+                          <summary>
+                            {t("agents.list.detected_diagnostic_title")}
+                          </summary>
+                          <code>{root.diagnostic}</code>
+                        </details>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="agents-empty">
+            <h3>{t("agents.list.detected_empty_title")}</h3>
+            <p>{t("agents.list.detected_empty_body")}</p>
+          </div>
+        )
       ) : null}
       {snapshot && section === "presets" ? (
         availablePresets.length > 0 ? (

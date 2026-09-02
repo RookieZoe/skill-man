@@ -41,6 +41,22 @@ impl AgentRootInspection {
     }
 }
 
+/// Read-only outcome of the Agent Detection root probe (ADR-0020): existence,
+/// resolved identity and readability — nothing is created and directory
+/// contents are never enumerated. Probe failures are `Unavailable`, never
+/// `Absent`: an unreadable or invalid root must not masquerade as missing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentRootProbe {
+    /// The root exists, resolves to a directory and is readable.
+    Present { canonical_path: PathBuf },
+    /// The root could not be verified (permission, I/O, not a directory,
+    /// dangling symlink); the human-readable reason is evidence, not user
+    /// copy.
+    Unavailable { diagnostic: String },
+    /// The root path does not exist (NotFound).
+    Absent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedAgentTargetDirectory {
     pub created: Vec<AgentRootFingerprint>,
@@ -67,6 +83,13 @@ pub trait AgentConfigurationFileSystem: Send + Sync {
         &self,
         configured_path: &Path,
     ) -> Result<AgentRootInspection, AgentConfigurationFileSystemError>;
+
+    /// Zero-write Detection probe of one user-level root; see
+    /// [`AgentRootProbe`] for the closed outcome set.
+    fn probe_root(
+        &self,
+        configured_path: &Path,
+    ) -> Result<AgentRootProbe, AgentConfigurationFileSystemError>;
 
     fn create_target(
         &self,
