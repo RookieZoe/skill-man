@@ -1506,6 +1506,26 @@ pub struct ScanReportSummaryDto {
     pub configured_root_snapshot_fingerprint: String,
     pub started_at_ms: u64,
     pub slow: bool,
+    /// Bounded source classification counts (spec §8.1).
+    pub source_counts: ScanSourceCountsDto,
+}
+
+/// Bounded source classification counts of a terminal Report (spec §8.1):
+/// the four summary cards + attention tallies; candidate detail is paged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanSourceCountsDto {
+    pub git_groups: u64,
+    pub git_groups_conflicted: u64,
+    pub local_candidates: u64,
+    pub conflict_sets: u64,
+    pub conflict_members: u64,
+    pub blocked: u64,
+    pub deferred: u64,
+    pub identity_conflicts: u64,
+    pub already_managed: u64,
+    pub excluded: u64,
+    pub needs_attention: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1594,6 +1614,8 @@ pub enum ScanReportRowDto {
         canonical_path: String,
         /// `completed | failed | unresponsive`.
         state: String,
+        /// Consumer Agents of this Root (id + display name).
+        consumer_agents: Vec<ScanRootAgentDto>,
         counts: ScanCountsDto,
         elapsed_ms: u64,
         slow: bool,
@@ -1626,6 +1648,53 @@ pub enum ScanReportRowDto {
         lock_hint: Box<Option<ScanLockHintDto>>,
         worktree_hint: Option<ScanWorktreeHintDto>,
     },
+    GitSourceGroup {
+        group_seq: u64,
+        provider: String,
+        canonical_repository: String,
+        repository_root: Option<String>,
+        remote_urls_seen: Vec<String>,
+        member_entity_seqs: Vec<u64>,
+        member_paths: Vec<String>,
+        member_names: Vec<String>,
+        lock_claims: Vec<ScanLockClaimDto>,
+        refs: Vec<String>,
+        lock_paths: Vec<String>,
+        /// `candidate | repository_ref_conflict | ownership_split`.
+        status: String,
+        operations: Vec<ScanOperationEligibilityDto>,
+        detail: Option<String>,
+    },
+    SourceVerdict {
+        entity_seq: u64,
+        /// `local | git | conflict_set | identity_conflict | blocked |
+        /// deferred | already_managed | excluded`.
+        verdict: String,
+        canonical_path: String,
+        directory_names: Vec<String>,
+        appearances: u64,
+        file_count: u64,
+        byte_count: u64,
+        tree_hash: Option<String>,
+        lock_claims: Vec<ScanLockClaimDto>,
+        worktree_hints: Vec<ScanWorktreeHintDto>,
+        reason_kind: Option<String>,
+        detail: Option<String>,
+        git_refs: Vec<String>,
+        git_lock_paths: Vec<String>,
+        git_group_seq: Option<u64>,
+        conflict_set_seq: Option<u64>,
+        notes: Vec<String>,
+        operations: Vec<ScanOperationEligibilityDto>,
+    },
+    ConflictSet {
+        set_seq: u64,
+        directory_identity_key: String,
+        directory_name: String,
+        member_entity_seqs: Vec<u64>,
+        member_paths: Vec<String>,
+        winner_entity_seq: Option<u64>,
+    },
     Diagnostic {
         root_index: u32,
         /// `root_failed | root_unresponsive | root_record_missing |
@@ -1634,6 +1703,13 @@ pub enum ScanReportRowDto {
         at: Option<String>,
         detail: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRootAgentDto {
+    pub agent_id: String,
+    pub agent_name: String,
 }
 
 /// Memoized lock fact of one appearance (never the lock body).
@@ -1645,6 +1721,32 @@ pub struct ScanLockHintDto {
     pub fingerprint: String,
     pub faulted: bool,
     pub fault: Option<String>,
+    pub source_type: Option<String>,
+    pub source_url: Option<String>,
+    pub requested_ref: Option<String>,
+    pub skill_path: Option<String>,
+}
+
+/// One enriched applicable lock claim (never the lock body).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanLockClaimDto {
+    pub lock_path: String,
+    pub entry_name: String,
+    pub fingerprint: String,
+    pub source_type: Option<String>,
+    pub source_url: Option<String>,
+    pub requested_ref: Option<String>,
+    pub skill_path: Option<String>,
+}
+
+/// Typed operation eligibility of one candidate (spec §8.1).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanOperationEligibilityDto {
+    pub operation: String,
+    pub allowed: bool,
+    pub closed_reason: Option<String>,
 }
 
 /// Memoized bounded local Git worktree hint of one appearance.
@@ -1668,6 +1770,11 @@ pub enum ScanReportSectionDto {
     Entities,
     Appearances,
     Diagnostics,
+    GitSources,
+    LocalCandidates,
+    ConflictSets,
+    NeedsAttention,
+    Excluded,
 }
 
 impl From<ScanReportSectionDto> for crate::seams::scan_evidence_store::ScanReportSection {
@@ -1685,6 +1792,21 @@ impl From<ScanReportSectionDto> for crate::seams::scan_evidence_store::ScanRepor
             ScanReportSectionDto::Diagnostics => {
                 crate::seams::scan_evidence_store::ScanReportSection::Diagnostics
             }
+            ScanReportSectionDto::GitSources => {
+                crate::seams::scan_evidence_store::ScanReportSection::GitSources
+            }
+            ScanReportSectionDto::LocalCandidates => {
+                crate::seams::scan_evidence_store::ScanReportSection::LocalCandidates
+            }
+            ScanReportSectionDto::ConflictSets => {
+                crate::seams::scan_evidence_store::ScanReportSection::ConflictSets
+            }
+            ScanReportSectionDto::NeedsAttention => {
+                crate::seams::scan_evidence_store::ScanReportSection::NeedsAttention
+            }
+            ScanReportSectionDto::Excluded => {
+                crate::seams::scan_evidence_store::ScanReportSection::Excluded
+            }
         }
     }
 }
@@ -1696,6 +1818,17 @@ impl From<crate::seams::scan_evidence_store::ScanReportSection> for ScanReportSe
             crate::seams::scan_evidence_store::ScanReportSection::Entities => Self::Entities,
             crate::seams::scan_evidence_store::ScanReportSection::Appearances => Self::Appearances,
             crate::seams::scan_evidence_store::ScanReportSection::Diagnostics => Self::Diagnostics,
+            crate::seams::scan_evidence_store::ScanReportSection::GitSources => Self::GitSources,
+            crate::seams::scan_evidence_store::ScanReportSection::LocalCandidates => {
+                Self::LocalCandidates
+            }
+            crate::seams::scan_evidence_store::ScanReportSection::ConflictSets => {
+                Self::ConflictSets
+            }
+            crate::seams::scan_evidence_store::ScanReportSection::NeedsAttention => {
+                Self::NeedsAttention
+            }
+            crate::seams::scan_evidence_store::ScanReportSection::Excluded => Self::Excluded,
         }
     }
 }
@@ -1830,6 +1963,19 @@ impl From<crate::core::scan::CurrentReportView> for CurrentReportDto {
                 configured_root_snapshot_fingerprint: summary.configured_root_snapshot_fingerprint,
                 started_at_ms: summary.started_at_ms,
                 slow: summary.slow,
+                source_counts: ScanSourceCountsDto {
+                    git_groups: summary.source_counts.git_groups,
+                    git_groups_conflicted: summary.source_counts.git_groups_conflicted,
+                    local_candidates: summary.source_counts.local_candidates,
+                    conflict_sets: summary.source_counts.conflict_sets,
+                    conflict_members: summary.source_counts.conflict_members,
+                    blocked: summary.source_counts.blocked,
+                    deferred: summary.source_counts.deferred,
+                    identity_conflicts: summary.source_counts.identity_conflicts,
+                    already_managed: summary.source_counts.already_managed,
+                    excluded: summary.source_counts.excluded,
+                    needs_attention: summary.source_counts.needs_attention,
+                },
             }),
             freshness: match value.freshness {
                 crate::core::scan::ReportFreshness::Current => ReportFreshnessDto::Current,
@@ -1891,6 +2037,14 @@ pub fn scan_report_page_dto(
                         configured_path: root.configured_path.to_string_lossy().into_owned(),
                         canonical_path: root.canonical_path.to_string_lossy().into_owned(),
                         state: scan_root_state_name(root.state).to_owned(),
+                        consumer_agents: root
+                            .consumer_agents
+                            .into_iter()
+                            .map(|agent| ScanRootAgentDto {
+                                agent_id: agent.agent_id,
+                                agent_name: agent.agent_name,
+                            })
+                            .collect(),
                         counts: root.counts.into(),
                         elapsed_ms: root.elapsed_ms,
                         slow: root.slow,
@@ -1953,6 +2107,10 @@ pub fn scan_report_page_dto(
                             fingerprint: hint.fingerprint,
                             faulted: hint.faulted,
                             fault: hint.fault,
+                            source_type: hint.source_type,
+                            source_url: hint.source_url,
+                            requested_ref: hint.requested_ref,
+                            skill_path: hint.skill_path,
                         })),
                         worktree_hint: appearance.worktree_hint.map(|hint| ScanWorktreeHintDto {
                             repository_root: hint.repository_root.to_string_lossy().into_owned(),
@@ -1960,6 +2118,99 @@ pub fn scan_report_page_dto(
                             remote_urls: hint.remote_urls,
                             head_ref: hint.head_ref,
                         }),
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::GitSourceGroup(group) => {
+                    ScanReportRowDto::GitSourceGroup {
+                        group_seq: group.group_seq,
+                        provider: group.provider,
+                        canonical_repository: group.canonical_repository,
+                        repository_root: group
+                            .repository_root
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        remote_urls_seen: group.remote_urls_seen,
+                        member_entity_seqs: group.member_entity_seqs,
+                        member_paths: group
+                            .member_paths
+                            .into_iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                        member_names: group.member_names,
+                        lock_claims: group
+                            .lock_claims
+                            .into_iter()
+                            .map(scan_lock_claim_dto)
+                            .collect(),
+                        refs: group.refs,
+                        lock_paths: group
+                            .lock_paths
+                            .into_iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                        status: group.status,
+                        operations: group
+                            .operations
+                            .into_iter()
+                            .map(scan_operation_eligibility_dto)
+                            .collect(),
+                        detail: group.detail,
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::SourceVerdict(verdict) => {
+                    ScanReportRowDto::SourceVerdict {
+                        entity_seq: verdict.entity_seq,
+                        verdict: verdict.verdict,
+                        canonical_path: verdict.canonical_path.to_string_lossy().into_owned(),
+                        directory_names: verdict.directory_names,
+                        appearances: verdict.appearances,
+                        file_count: verdict.file_count,
+                        byte_count: verdict.byte_count,
+                        tree_hash: verdict.tree_hash,
+                        lock_claims: verdict
+                            .lock_claims
+                            .into_iter()
+                            .map(scan_lock_claim_dto)
+                            .collect(),
+                        worktree_hints: verdict
+                            .worktree_hints
+                            .into_iter()
+                            .map(|hint| ScanWorktreeHintDto {
+                                repository_root: hint.repository_root.to_string_lossy().into_owned(),
+                                gitdir_kind: hint.gitdir_kind,
+                                remote_urls: hint.remote_urls,
+                                head_ref: hint.head_ref,
+                            })
+                            .collect(),
+                        reason_kind: verdict.reason_kind,
+                        detail: verdict.detail,
+                        git_refs: verdict.git_refs,
+                        git_lock_paths: verdict
+                            .git_lock_paths
+                            .into_iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                        git_group_seq: verdict.git_group_seq,
+                        conflict_set_seq: verdict.conflict_set_seq,
+                        notes: verdict.notes,
+                        operations: verdict
+                            .operations
+                            .into_iter()
+                            .map(scan_operation_eligibility_dto)
+                            .collect(),
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::ConflictSet(set) => {
+                    ScanReportRowDto::ConflictSet {
+                        set_seq: set.set_seq,
+                        directory_identity_key: set.directory_identity_key,
+                        directory_name: set.directory_name,
+                        member_entity_seqs: set.member_entity_seqs,
+                        member_paths: set
+                            .member_paths
+                            .into_iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                        winner_entity_seq: set.winner_entity_seq,
                     }
                 }
                 crate::seams::scan_evidence_store::ScanReportRow::Diagnostic(diagnostic) => {
@@ -1975,6 +2226,30 @@ pub fn scan_report_page_dto(
             })
             .collect(),
         next_offset: page.next_offset,
+    }
+}
+
+fn scan_lock_claim_dto(
+    claim: crate::seams::scan_evidence_store::ScanLockClaimRecord,
+) -> ScanLockClaimDto {
+    ScanLockClaimDto {
+        lock_path: claim.lock_path.to_string_lossy().into_owned(),
+        entry_name: claim.entry_name,
+        fingerprint: claim.fingerprint,
+        source_type: claim.source_type,
+        source_url: claim.source_url,
+        requested_ref: claim.requested_ref,
+        skill_path: claim.skill_path,
+    }
+}
+
+fn scan_operation_eligibility_dto(
+    eligibility: crate::seams::scan_evidence_store::ScanOperationEligibility,
+) -> ScanOperationEligibilityDto {
+    ScanOperationEligibilityDto {
+        operation: eligibility.operation,
+        allowed: eligibility.allowed,
+        closed_reason: eligibility.closed_reason,
     }
 }
 

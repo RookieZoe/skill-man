@@ -24,6 +24,7 @@ pub mod engine;
 pub mod mutation;
 pub mod plan;
 pub mod qualifier;
+pub mod classification;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -40,8 +41,10 @@ use crate::seams::installer_lock_store::InstallerLockStore;
 use crate::seams::local_git_probe::LocalGitProbe;
 use crate::seams::scan_evidence_store::{
     CurrentManifestRead, ScanEvidenceCounts, ScanEvidenceStore, ScanEvidenceStoreFactory,
-    ScanFrozenFacts, ScanFrozenRoot, ScanReportManifest, ScanReportPageRead, ScanRunRecord,
+    ScanFrozenFacts, ScanFrozenRoot, ScanReportManifest, ScanReportPageRead, ScanRootAgentRef,
+    ScanRunRecord, ScanSourceCounts,
 };
+use crate::seams::scan_managed_facts::ScanManagedFactsReader;
 use crate::seams::scan_integrity::canonical_json_digest;
 use thiserror::Error;
 
@@ -159,6 +162,9 @@ pub struct ScanReportSummary {
     pub configured_root_snapshot_fingerprint: String,
     pub started_at_ms: u64,
     pub slow: bool,
+    /// Bounded source classification counts (spec §8.1); the candidate
+    /// detail is served by `report_page`, never by this summary.
+    pub source_counts: ScanSourceCounts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,6 +263,8 @@ pub(crate) struct RootProgress {
     pub(crate) slow: bool,
     pub(crate) diagnostic: Option<String>,
     pub(crate) last_progress: Instant,
+    /// Consumer Agents of this Root (coverage rows; spec §7.6).
+    pub(crate) consumer_agents: Vec<ScanRootAgentRef>,
 }
 
 pub(crate) struct RunProgress {
@@ -304,6 +312,7 @@ impl RunProgress {
                     slow: false,
                     diagnostic: root.plan_error,
                     last_progress: started,
+                    consumer_agents: root.consumer_agents.clone(),
                 }
             })
             .collect();
@@ -371,6 +380,12 @@ pub struct ScanCoordinator {
     pub(crate) agent_store: Arc<dyn AgentConfigurationStore>,
     pub(crate) mutation: Arc<ScanMutationCoordinator>,
     pub(crate) app_state: Arc<dyn AppStateStore>,
+    /// Read-only managed Skill facts (Catalog path authority) used by the
+    /// classification pass of a Run (#84; spec §8.2).
+    pub(crate) managed_facts: Arc<dyn ScanManagedFactsReader>,
+    /// The App state directory: an entity inside it is inside a control
+    /// zone (spec §8.2).
+    pub(crate) app_state_path: PathBuf,
     pub(crate) clock: Arc<dyn Clock>,
     /// Zero-progress isolation window per Root (spec §4.10 default 30s);
     /// test composition shortens it to prove the typed Unresponsive path.
@@ -390,6 +405,8 @@ impl ScanCoordinator {
         agent_store: Arc<dyn AgentConfigurationStore>,
         mutation: Arc<ScanMutationCoordinator>,
         app_state: Arc<dyn AppStateStore>,
+        managed_facts: Arc<dyn ScanManagedFactsReader>,
+        app_state_path: PathBuf,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
@@ -401,6 +418,8 @@ impl ScanCoordinator {
             agent_store,
             mutation,
             app_state,
+            managed_facts,
+            app_state_path,
             clock,
             unresponsive_ms: 30_000,
             state: Mutex::new(CoordinatorState {
@@ -882,6 +901,7 @@ impl ScanCoordinator {
                     configured_root_snapshot_fingerprint: manifest.frozen.roots_fingerprint.clone(),
                     started_at_ms: manifest.started_at_ms,
                     slow,
+                    source_counts: manifest.source_counts,
                 }),
                 freshness,
                 stale_reasons,

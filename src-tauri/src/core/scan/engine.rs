@@ -69,8 +69,9 @@ struct EngineShared {
     git_probe: ProbeSemaphore,
     /// Memoized lock discovery per Run (facts, never the lock body).
     lock_report: Mutex<Option<Vec<crate::seams::installer_lock_store::LockFileReport>>>,
-    /// Memoized worktree hints per (entry directory, Root): a descendant
-    /// entry never re-walks the same ancestor chain.
+    /// Memoized worktree hints per (entry path, Root): the probe result
+    /// depends on the exact entry the upward walk starts from, so siblings
+    /// under one Root never share a cached hint.
     worktree_memo:
         Mutex<std::collections::HashMap<(std::path::PathBuf, u32), Option<WorktreeHintMemo>>>,
     /// Deterministic per-Root entry/entity sequence counters.
@@ -124,6 +125,7 @@ impl ProbeSemaphore {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum StoreItem {
     Entry {
         root_index: u32,
@@ -898,7 +900,25 @@ fn finalize(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: Arc<E
             return;
         }
     };
-    let manifest = build_manifest(&coordinator, &slot, index_stats);
+    // Source classification (spec §8.2, ADR-0017): the pure Core rules over
+    // the entity index plus the managed/Catalog facts. Classification is
+    // immutable evidence of the Report — any failure (store write, Catalog
+    // facts, lock discovery) fails the whole Run and keeps the old Report.
+    let classification = match classify_run(&coordinator, &slot) {
+        Ok(output) => output,
+        Err(detail) => {
+            set_state_best_effort(
+                &slot,
+                ScanRunState::Failed,
+                Some(&format!("source classification failed: {detail}")),
+            );
+            let _ = slot.store.remove_run(&slot.record.run_id);
+            coordinator.publish_progress(&slot, true);
+            finish(coordinator, slot);
+            return;
+        }
+    };
+    let manifest = build_manifest(&coordinator, &slot, index_stats, classification.counts);
     match slot.store.publish_report(&slot.record.run_id, &manifest) {
         Ok(()) => {
             set_state_best_effort(&slot, ScanRunState::Completed, None);
@@ -998,6 +1018,7 @@ fn build_manifest(
     coordinator: &ScanCoordinator,
     slot: &RunSlot,
     index_stats: ScanEntityIndexStats,
+    source_counts: crate::seams::scan_evidence_store::ScanSourceCounts,
 ) -> crate::seams::scan_evidence_store::ScanReportManifest {
     let progress = slot.progress_lock();
     let failed_roots = progress
@@ -1017,6 +1038,7 @@ fn build_manifest(
                 ScanRootViewState::Unresponsive => ScanRootState::Unresponsive,
                 _ => ScanRootState::Failed,
             },
+            consumer_agents: root.consumer_agents.clone(),
             counts: root.counts,
             elapsed_ms: root.started.elapsed().as_millis() as u64,
             slow: root.slow,
@@ -1044,6 +1066,7 @@ fn build_manifest(
         trigger: slot.record.trigger.clone(),
         state: state.to_owned(),
         counts,
+        source_counts,
         roots,
         frozen: slot.record.frozen.clone(),
         started_at_ms: slot.record.started_at_ms,
@@ -1084,6 +1107,91 @@ fn build_root_record(
         diagnostic,
         completed_at_ms: slot.record.started_at_ms,
     }
+}
+
+/// The source classification pass of a Run (spec §8.2): reads the entity
+/// rows from the Evidence Store, assembles the Catalog/lock facts through
+/// the Core seams (fail closed on any read error), runs the pure
+/// classifier and persists the immutable classification index. The caller
+/// treats every error here as store-wide: no classification, no Report.
+fn classify_run(
+    coordinator: &ScanCoordinator,
+    slot: &RunSlot,
+) -> Result<
+    crate::core::scan::classification::ScanClassificationOutput,
+    String,
+> {
+    use crate::core::scan::classification::ScanClassificationContext;
+
+    let gate = coordinator.write_gate.snapshot();
+    let bound = match &gate.state {
+        crate::core::write_gate::WriteGateState::Open(home) => home.clone(),
+        other => {
+            return Err(format!(
+                "the Bound Home is not open ({})",
+                super::write_gate_state_summary(other)
+            ));
+        }
+    };
+    let rows = slot
+        .store
+        .classification_rows(&slot.record.run_id)
+        .map_err(|error| error.to_string())?;
+    let managed = coordinator
+        .managed_facts
+        .read()
+        .map_err(|error| error.to_string())?;
+    let lock_reports = coordinator
+        .lock_store
+        .discover()
+        .map_err(|error| error.to_string())?;
+    let progress = slot.progress_lock();
+    let report_complete = progress.counts.failed_roots == 0;
+    drop(progress);
+
+    let mut control_zones = Vec::new();
+    control_zones.push(bound.path.clone());
+    control_zones.extend(slot.record.roots.iter().map(|root| root.canonical_path.clone()));
+    control_zones.push(coordinator.app_state_path.clone());
+    let faulted_lock_roots = lock_reports
+        .iter()
+        .filter_map(|report| {
+            report
+                .fault
+                .as_ref()
+                .map(|fault| (report.path.parent().map(std::path::Path::to_path_buf), fault))
+        })
+        .filter_map(|(root, fault)| root.map(|root| (root, format!("{fault:?}"))))
+        .collect::<Vec<_>>();
+    for report in &lock_reports {
+        if let Some(root) = report.path.parent() {
+            control_zones.push(root.to_path_buf());
+        }
+    }
+    let context = ScanClassificationContext {
+        control_zones,
+        home_skills_path: Some(bound.path.join("skills")),
+        managed_entity_paths: managed
+            .iter()
+            .map(|fact| fact.final_entity_path.clone())
+            .collect(),
+        managed_directory_names: managed
+            .iter()
+            .map(|fact| fact.directory_name.clone())
+            .collect(),
+        faulted_lock_roots,
+        report_complete,
+    };
+    let output = crate::core::scan::classification::classify(rows, &context);
+    slot.store
+        .write_classification(
+            &slot.record.run_id,
+            &output.verdicts,
+            &output.git_groups,
+            &output.conflict_sets,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(output)
 }
 
 fn fail_root_local(
@@ -1197,6 +1305,10 @@ fn lock_hint_for(
                 fingerprint: lock.fingerprint.clone(),
                 faulted: false,
                 fault: None,
+                source_type: Some(entry.source_type.clone()),
+                source_url: Some(entry.source_url.clone()),
+                requested_ref: entry.requested_ref.clone(),
+                skill_path: Some(entry.skill_path.clone()),
             });
         }
         if let Some(fault) = lock
@@ -1210,6 +1322,10 @@ fn lock_hint_for(
                 fingerprint: lock.fingerprint.clone(),
                 faulted: true,
                 fault: Some(fault.reason.clone()),
+                source_type: None,
+                source_url: None,
+                requested_ref: None,
+                skill_path: None,
             });
         }
     }
@@ -1223,8 +1339,7 @@ fn worktree_hint_for(
     canonical: &std::path::Path,
     entry_path: &std::path::Path,
 ) -> Result<Option<ScanWorktreeHintRecord>, String> {
-    let dir = entry_path.parent().unwrap_or(entry_path);
-    let key = (dir.to_path_buf(), root_index);
+    let key = (entry_path.to_path_buf(), root_index);
     if let Some(cached) = engine
         .worktree_memo
         .lock()

@@ -27,6 +27,9 @@ use skill_man_lib::seams::filesystem::{
     FileSystem, FileSystemError, ScannedSkillEntry, TreeScanEntry,
 };
 use skill_man_lib::seams::installer_lock_store::EmptyInstallerLockStore;
+use skill_man_lib::seams::scan_managed_facts::{
+    ManagedSkillPathFact, ScanManagedFactsReader,
+};
 use skill_man_lib::seams::scan_evidence_store::{
     CurrentManifestRead, ScanEvidenceStore, ScanReportCursor, ScanReportRow, ScanReportSection,
     ScanRootCoverageRecord,
@@ -131,6 +134,17 @@ impl AgentConfigurationStore for StubAgentStore {
     }
     fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
         unreachable!("scan never clears project folders")
+    }
+}
+
+/// Test managed facts reader: the classification pass fails closed when no
+/// reader is available, so tests provide a fresh empty one per coordinator
+/// (an unavailable Catalog is also a fail-closed Run failure).
+struct StubManagedFacts;
+
+impl ScanManagedFactsReader for StubManagedFacts {
+    fn read(&self) -> Result<Vec<ManagedSkillPathFact>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -462,6 +476,8 @@ fn setup() -> (
             agent_store,
             mutation.clone(),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -544,6 +560,367 @@ fn manual_rescan_streams_evidence_and_publishes_complete_report() {
     let _ = home.dir.path();
 }
 
+/// Full #84 classification contract over the real engine: Local candidates
+/// (in-place + move-required), an aggregated Git source group from supported
+/// worktree metadata, fixture exclusion and the typed operation eligibility
+/// of a complete Report. (spec §8.2, ADR-0017; no lock file needed — the
+/// worktree hint alone is a source hint inside the control zone.)
+#[test]
+fn classification_verdicts_and_eligibility_of_a_complete_report() {
+    let (home, coordinator, _factory, _mutation) = setup();
+    // Extend the root with a Git worktree repository (supported provider)
+    // and a fixture directory.
+    let root = home.path().join("agent-skills");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let repo_skill = repo.join("repo-skill");
+    std::fs::create_dir_all(&repo_skill).expect("repo skill");
+    std::fs::write(repo_skill.join("SKILL.md"), "# Repo\n").expect("SKILL.md");
+    let gitdir = repo.join(".git");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    std::fs::write(
+        gitdir.join("config"),
+        "[remote \"origin\"]\n\turl = https://github.com/owner/example.git\n",
+    )
+    .expect("git config");
+    let fixture = root.join("fixture-entities").join("fixture-skill");
+    std::fs::create_dir_all(&fixture).expect("fixture");
+    std::fs::write(fixture.join("SKILL.md"), "# Fixture\n").expect("fixture md");
+
+    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    assert!(started.run.is_some());
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    let run = snapshot.run.expect("terminal run retained");
+    assert_eq!(run.state, ScanRunState::Completed);
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.state, skill_man_lib::core::scan::ScanReportState::Complete);
+
+    // Four-card counts: entities under the control zone classify as Local
+    // (move-required) or Git source group; the fixture is Excluded.
+    assert!(report.source_counts.local_candidates >= 2, "{:?}", report.source_counts);
+    assert_eq!(report.source_counts.git_groups, 1, "{:?}", report.source_counts);
+    assert!(report.source_counts.excluded >= 1, "{:?}", report.source_counts);
+    assert_eq!(report.source_counts.conflict_sets, 0);
+
+    // Git group row: provider + canonical repository + the candidate
+    // operation that requires complete coverage (allowed here).
+    let (git_rows, _) = page_section(&coordinator, &report, ScanReportSection::GitSources, 64);
+    assert_eq!(git_rows.len(), 1);
+    match &git_rows[0] {
+        ScanReportRow::GitSourceGroup(group) => {
+            assert_eq!(group.provider, "github");
+            assert_eq!(group.canonical_repository, "https://github.com/owner/example");
+            assert_eq!(group.status, "candidate");
+            let fetch = group
+                .operations
+                .iter()
+                .find(|op| op.operation == "git_fetch_and_manage")
+                .expect("fetch operation");
+            assert!(fetch.allowed);
+            assert!(fetch.closed_reason.is_none());
+        }
+        other => panic!("expected GitSourceGroup, got {other:?}"),
+    }
+
+    // Local candidates: the in-place external link and the move-required
+    // alpha entity; each carries typed eligibility.
+    let (local_rows, _) =
+        page_section(&coordinator, &report, ScanReportSection::LocalCandidates, 64);
+    assert_eq!(local_rows.len(), 2);
+    for row in &local_rows {
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            panic!("expected SourceVerdict, got {row:?}");
+        };
+        assert_eq!(verdict.verdict, "local");
+        assert!(
+            verdict
+                .operations
+                .iter()
+                .any(|op| op.operation == "local_link" || op.operation == "local_link_with_move"),
+            "{:?}",
+            verdict.operations
+        );
+    }
+
+    // Fixture entities are Excluded with no selection control.
+    let (excluded_rows, _) = page_section(&coordinator, &report, ScanReportSection::Excluded, 64);
+    assert!(!excluded_rows.is_empty());
+    for row in &excluded_rows {
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            panic!("expected SourceVerdict for excluded, got {row:?}");
+        };
+        assert_eq!(verdict.verdict, "excluded");
+        assert!(verdict.operations.is_empty());
+    }
+}
+
+/// An Incomplete Report (a failed Root) disables destructive operation
+/// eligibility with the Core closed reason `scan_incomplete`, while the
+/// non-destructive Local Link stays allowed (spec §8.1).
+#[test]
+fn incomplete_report_blocks_destructive_eligibility() {
+    let (home, _coordinator, factory, _mutation) = setup();
+    // A second configured Root whose canonical identity cannot resolve:
+    // its planned Root is Failed and the Report is Incomplete.
+    const BROKEN_PATH: &str = "/definitely/not/a/real/path/scan-root-841";
+    let agent_store = Arc::new(StubAgentStore {
+        roots: vec![
+            StoredGlobalSkillRoot {
+                root_id: "root-0".into(),
+                configured_path: home.path().join("agent-skills"),
+                path_identity_key: "root-0".into(),
+                consumer_agent_ids: vec!["a1".into()],
+                activation_skill_ids: vec![],
+            },
+            StoredGlobalSkillRoot {
+                root_id: "root-1".into(),
+                configured_path: PathBuf::from(BROKEN_PATH),
+                path_identity_key: "root-1".into(),
+                consumer_agent_ids: vec!["a1".into()],
+                activation_skill_ids: vec![],
+            },
+        ],
+        configurations: vec![],
+        version: 2,
+    });
+    let mutation = Arc::new(ScanMutationCoordinator::new());
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory,
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            agent_store,
+            mutation,
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+
+    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    assert!(started.run.is_some());
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    let run = snapshot.run.expect("terminal run retained");
+    assert_eq!(run.state, ScanRunState::Completed);
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.state, skill_man_lib::core::scan::ScanReportState::Incomplete);
+    assert!(report.incomplete);
+    assert!(report.coverage.failed >= 1);
+
+    // Local candidate: the in-place external beta-skill link (outside the
+    // control zone) keeps its non-destructive Local Link eligibility.
+    let (local_rows, _) =
+        page_section(&coordinator, &report, ScanReportSection::LocalCandidates, 64);
+    for row in &local_rows {
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            panic!("expected SourceVerdict, got {row:?}");
+        };
+        for op in &verdict.operations {
+            if op.operation == "local_link" {
+                assert!(op.allowed, "non-destructive Local Link must stay allowed");
+            }
+            if op.operation == "local_link_with_move" {
+                assert!(!op.allowed, "move requires complete coverage");
+                assert_eq!(
+                    op.closed_reason.as_deref(),
+                    Some("scan_incomplete"),
+                    "the Core closed reason is consistent"
+                );
+            }
+        }
+    }
+    // The failed Root diagnostic remains visible in coverage rows.
+    let (root_rows, _) = page_section(&coordinator, &report, ScanReportSection::Roots, 64);
+    assert!(
+        root_rows
+            .iter()
+            .any(|row| matches!(
+                row,
+                ScanReportRow::RootCoverage(root)
+                    if root.state == skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed
+            )),
+        "failed coverage row with diagnostic must persist: {root_rows:?}"
+    );
+}
+
+/// Git source hints from an applicable lock claim (no worktree needed):
+/// the claim's declaration facts become the group's External Ownership
+/// Claim evidence, and the group is aggregated by provider + canonical
+/// repository (§8.2). The claim's `source_type` must agree with the URL.
+#[test]
+fn lock_claim_forms_git_source_group_with_external_ownership_evidence() {
+    let home = BoundTestHome::new();
+    let root = home.path().join("agent-skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    let alpha = root.join("alpha-skill");
+    std::fs::create_dir_all(&alpha).expect("alpha entity");
+    std::fs::write(alpha.join("SKILL.md"), "# Alpha\n").expect("SKILL.md");
+
+    // v3 installer lock declaring the alpha entry from GitHub.
+    let lock_dir = home.path().join(".agents");
+    std::fs::create_dir_all(&lock_dir).expect("lock dir");
+    std::fs::write(
+        lock_dir.join(".skill-lock.json"),
+        r#"{
+  "version": 3,
+  "skills": {
+    "alpha-skill": {
+      "sourceType": "github",
+      "source": "https://github.com/owner/example",
+      "sourceUrl": "https://github.com/owner/example",
+      "skillPath": "skills/alpha-skill",
+      "skillFolderHash": "deadbeef",
+      "ref": "v1.0.0"
+    }
+  }
+}"#,
+    )
+    .expect("lock json");
+
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let mutation = Arc::new(ScanMutationCoordinator::new());
+    let agent_store = Arc::new(StubAgentStore {
+        roots: vec![StoredGlobalSkillRoot {
+            root_id: "root-0".into(),
+            configured_path: root,
+            path_identity_key: "root-0".into(),
+            consumer_agent_ids: vec!["a1".into()],
+            activation_skill_ids: vec![],
+        }],
+        configurations: vec![],
+        version: 1,
+    });
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory,
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(
+                skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore::new(
+                    home.path().to_path_buf(),
+                ),
+            ),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            agent_store,
+            mutation,
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+
+    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    let run = snapshot.run.expect("terminal run retained");
+    assert_eq!(run.state, ScanRunState::Completed);
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.source_counts.git_groups, 1, "{:?}", report.source_counts);
+    let (git_rows, _) = page_section(&coordinator, &report, ScanReportSection::GitSources, 64);
+    match git_rows.first().expect("a git group row") {
+        ScanReportRow::GitSourceGroup(group) => {
+            assert_eq!(group.provider, "github");
+            assert_eq!(group.canonical_repository, "https://github.com/owner/example");
+            assert_eq!(group.status, "candidate");
+            assert_eq!(group.refs, vec!["v1.0.0".to_owned()]);
+            assert_eq!(group.lock_paths.len(), 1);
+            let claim = group.lock_claims.first().expect("external ownership claim");
+            assert_eq!(claim.entry_name, "alpha-skill");
+            assert_eq!(claim.source_type.as_deref(), Some("github"));
+            assert_eq!(claim.skill_path.as_deref(), Some("skills/alpha-skill"));
+        }
+        other => panic!("expected GitSourceGroup, got {other:?}"),
+    }
+}
+
+/// The classification index write fault point (spec §11): a classification
+/// write failure fails the whole Run store-wide and keeps the old Report —
+/// a torn classification is never published.
+#[test]
+fn classification_write_failure_fails_run_and_keeps_old_report() {
+    let home = BoundTestHome::new();
+    let root = home.path().join("agent-skills");
+    std::fs::create_dir_all(&root).expect("root");
+    std::fs::create_dir_all(root.join("alpha-skill")).expect("alpha");
+    std::fs::write(root.join("alpha-skill/SKILL.md"), "# Alpha\n").expect("md");
+
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let mutation = Arc::new(ScanMutationCoordinator::new());
+    let agent_store = Arc::new(StubAgentStore {
+        roots: vec![StoredGlobalSkillRoot {
+            root_id: "root-0".into(),
+            configured_path: root,
+            path_identity_key: "root-0".into(),
+            consumer_agent_ids: vec!["a1".into()],
+            activation_skill_ids: vec![],
+        }],
+        configurations: vec![],
+        version: 1,
+    });
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory.clone(),
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            agent_store,
+            mutation,
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+
+    // First a clean Run publishes a Report (the one that must survive).
+    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let first = coordinator.snapshot();
+    assert_eq!(first.run.as_ref().unwrap().state, ScanRunState::Completed);
+    let first_identity = first
+        .current_report
+        .summary
+        .as_ref()
+        .expect("first report")
+        .content_identity
+        .clone();
+
+    // The next Run fails at the classification write — old Report intact.
+    factory.fail_next(skill_man_lib::seams::scan_evidence_store::fault_points::CLASSIFICATION);
+    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let second = coordinator.snapshot();
+    assert_eq!(
+        second.run.as_ref().unwrap().state,
+        ScanRunState::Failed,
+        "classification failure is store-wide"
+    );
+    assert!(second
+        .run
+        .as_ref()
+        .unwrap()
+        .diagnostic
+        .as_deref()
+        .map(|detail| detail.contains("source classification failed"))
+        .unwrap_or(false));
+    let report = second.current_report.summary.as_ref().expect("old report");
+    assert_eq!(report.content_identity, first_identity, "old Report is kept");
+}
+
 #[test]
 fn failed_root_forms_incomplete_report_with_healthy_root_evidence() {
     let home = BoundTestHome::new();
@@ -586,6 +963,8 @@ fn failed_root_forms_incomplete_report_with_healthy_root_evidence() {
             agent_store,
             mutation,
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -665,6 +1044,8 @@ fn cancel_keeps_the_previous_report_untouched() {
             agent_store,
             mutation,
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(60_000),
@@ -755,6 +1136,8 @@ fn mutation_generation_supersedes_a_running_run() {
             }),
             mutation.clone(),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(60_000),
@@ -838,6 +1221,8 @@ fn zero_progress_root_is_typed_unresponsive_and_isolated() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -918,6 +1303,8 @@ fn repeated_triggers_reuse_the_active_run_single_flight() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(60_000),
@@ -1105,6 +1492,8 @@ fn unresponsive_isolation_keeps_other_roots_scanning() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(800),
@@ -1185,6 +1574,8 @@ fn qualification_write_failure_keeps_report_but_not_qualification() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -1301,6 +1692,8 @@ fn canonical_entity_aggregates_appearances_across_roots() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -1474,6 +1867,8 @@ fn funnel_counts_configured_to_canonical_layers() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),
@@ -1550,6 +1945,8 @@ fn synthetic_large_root_streams_and_pages_bounded() {
             }),
             Arc::new(ScanMutationCoordinator::new()),
             Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
             Arc::new(SystemClock::new()),
         )
         .with_unresponsive_ms(1_000),

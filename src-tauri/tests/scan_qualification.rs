@@ -156,6 +156,7 @@ fn base_manifest(
             roots: 1,
             ..Default::default()
         },
+        source_counts: scan::ScanSourceCounts::default(),
         roots: vec![],
         frozen,
         started_at_ms: now_ms,

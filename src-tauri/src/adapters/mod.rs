@@ -11,6 +11,7 @@ pub mod macos_fs;
 pub mod remote_provider;
 pub mod runtime_catalog;
 pub mod scan_evidence_store;
+pub mod scan_managed_facts;
 pub mod sqlite;
 pub mod system_clock;
 pub mod system_installer_lock_store;

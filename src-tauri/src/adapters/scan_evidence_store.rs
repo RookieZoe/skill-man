@@ -13,11 +13,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::home::BoundHome;
 use crate::seams::scan_evidence_store::{
-    CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord, ScanDiagnosticRecord,
-    ScanEntityIndexStats, ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore,
-    ScanEvidenceStoreError, ScanEvidenceStoreFactory, ScanObjectIdentity, ScanReportCursor,
-    ScanReportManifest, ScanReportPageError, ScanReportPageRead, ScanReportRow, ScanReportSection,
-    ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification, ScanStartupMarker,
+    CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord,
+    ScanClassificationRow, ScanConflictSetRecord, ScanDiagnosticRecord, ScanEntityIndexStats,
+    ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore, ScanEvidenceStoreError,
+    ScanEvidenceStoreFactory, ScanGitSourceGroupRecord, ScanLockClaimRecord, ScanObjectIdentity,
+    ScanReportCursor, ScanReportManifest, ScanReportPageError, ScanReportPageRead, ScanReportRow,
+    ScanReportSection, ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification,
+    ScanSourceVerdictRecord, ScanStartupMarker,
 };
 
 pub const SCAN_DIR_NAME: &str = "scan";
@@ -634,8 +636,176 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 limit,
                 ScanReportRow::Diagnostic,
             )?,
+            ScanReportSection::GitSources => {
+                self.page_file_rows::<ScanGitSourceGroupRecord>(cursor, limit, |record| {
+                    ScanReportRow::GitSourceGroup(Box::new(record))
+                })?
+            }
+            ScanReportSection::LocalCandidates => {
+                self.page_verdict_rows(cursor, limit, |verdict| {
+                    verdict.verdict == "local"
+                })?
+            }
+            ScanReportSection::Excluded => self.page_verdict_rows(cursor, limit, |verdict| {
+                matches!(verdict.verdict.as_str(), "excluded" | "already_managed")
+            })?,
+            ScanReportSection::ConflictSets => {
+                self.page_file_rows::<ScanConflictSetRecord>(cursor, limit, |record| {
+                    ScanReportRow::ConflictSet(Box::new(record))
+                })?
+            }
+            ScanReportSection::NeedsAttention => {
+                self.page_verdict_rows(cursor, limit, |verdict| {
+                    matches!(
+                        verdict.verdict.as_str(),
+                        "blocked" | "deferred" | "identity_conflict"
+                    )
+                })?
+            }
         };
         Ok(ScanReportPageRead { rows, next_offset })
+    }
+
+    fn classification_rows(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ScanClassificationRow>, ScanEvidenceStoreError> {
+        let Some(run) = self.read_run(run_id)? else {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("no run.json for {run_id}"),
+            });
+        };
+        if run.home_id != self.home_id {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("run {run_id} belongs to home {}", run.home_id),
+            });
+        }
+        let entities_path = self.run_dir(run_id).join("entities.jsonl");
+        let entities_file = File::open(&entities_path).map_err(|error| {
+            ScanEvidenceStoreError::io("read canonical Scan entity index", &entities_path, &error)
+        })?;
+        let mut rows: Vec<ScanClassificationRow> = Vec::new();
+        for line in BufReader::new(entities_file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(entity) = serde_json::from_str::<ScanCanonicalEntityRecord>(&line) else {
+                continue;
+            };
+            rows.push(ScanClassificationRow {
+                entity_seq: entity.entity_seq,
+                identity: entity.identity,
+                canonical_path: entity.canonical_path,
+                file_count: entity.file_count,
+                byte_count: entity.byte_count,
+                tree_hash: entity.tree_hash,
+                hash_fault: entity.hash_fault,
+                directory_names: Vec::new(),
+                appearances: entity.appearances,
+                first_root_index: entity.first_root_index,
+                lock_claims: Vec::new(),
+                worktree_hints: Vec::new(),
+            });
+        }
+        // Appearance join: names, enriched lock claims and worktree hints,
+        // deduplicated per entity (deterministic first-seen order).
+        let appearances_path = self.run_dir(run_id).join("appearances.jsonl");
+        let appearances_file = File::open(&appearances_path).map_err(|error| {
+            ScanEvidenceStoreError::io(
+                "read Scan appearance index",
+                &appearances_path,
+                &error,
+            )
+        })?;
+        let mut claim_seen: HashMap<(String, String), ()> = HashMap::new();
+        let mut hint_seen: HashMap<(String, String), ()> = HashMap::new();
+        for line in BufReader::new(appearances_file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(appearance) = serde_json::from_str::<ScanAppearanceRecord>(&line) else {
+                continue;
+            };
+            let Some(entity_seq) = appearance.entity_seq else {
+                continue;
+            };
+            let Some(row) = rows.iter_mut().find(|row| row.entity_seq == entity_seq) else {
+                continue;
+            };
+            if !row.directory_names.iter().any(|name| name == &appearance.name) {
+                row.directory_names.push(appearance.name);
+            }
+            if let Some(claim) = appearance.lock_hint.map(|hint| ScanLockClaimRecord {
+                lock_path: hint.lock_path,
+                entry_name: hint.entry_name,
+                fingerprint: hint.fingerprint,
+                source_type: hint.source_type,
+                source_url: hint.source_url,
+                requested_ref: hint.requested_ref,
+                skill_path: hint.skill_path,
+            }) {
+                let key = (claim.lock_path.display().to_string(), claim.entry_name.clone());
+                if claim_seen.insert(key, ()).is_none() {
+                    row.lock_claims.push(claim);
+                }
+            }
+            if let Some(hint) = appearance.worktree_hint {
+                let key = (
+                    hint.repository_root.display().to_string(),
+                    hint.gitdir_kind.clone(),
+                );
+                if hint_seen.insert(key, ()).is_none() {
+                    row.worktree_hints.push(hint);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    fn write_classification(
+        &self,
+        run_id: &str,
+        verdicts: &[ScanSourceVerdictRecord],
+        git_groups: &[ScanGitSourceGroupRecord],
+        conflict_sets: &[ScanConflictSetRecord],
+    ) -> Result<(), ScanEvidenceStoreError> {
+        let Some(run) = self.read_run(run_id)? else {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("no run.json for {run_id}"),
+            });
+        };
+        if run.home_id != self.home_id || run.run_id != run_id {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("run {run_id} belongs to home {}", run.home_id),
+            });
+        }
+        let verdicts_path = self.run_dir(run_id).join("verdicts.jsonl");
+        let groups_path = self.run_dir(run_id).join("git_groups.jsonl");
+        let sets_path = self.run_dir(run_id).join("conflict_sets.jsonl");
+        fn write_lines<T: serde::Serialize>(
+            records: &[T],
+            path: &Path,
+        ) -> Result<(), ScanEvidenceStoreError> {
+            let mut file = fs::File::create(path).map_err(|error| {
+                ScanEvidenceStoreError::io("write Scan classification index", path, &error)
+            })?;
+            for record in records {
+                let mut line = serde_json::to_vec(record).map_err(|error| {
+                    ScanEvidenceStoreError::Write {
+                        operation: "write Scan classification index",
+                        detail: error.to_string(),
+                    }
+                })?;
+                line.push(b'\n');
+                file.write_all(&line).map_err(|error| {
+                    ScanEvidenceStoreError::io("write Scan classification index", path, &error)
+                })?;
+            }
+            file.flush()
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    ScanEvidenceStoreError::io("flush Scan classification index", path, &error)
+                })
+        }
+        write_lines(verdicts, &verdicts_path)?;
+        write_lines(git_groups, &groups_path)?;
+        write_lines(conflict_sets, &sets_path)
     }
 
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError> {
@@ -802,6 +972,13 @@ impl SystemScanEvidenceStore {
             ScanReportSection::Appearances => "appearances.jsonl",
             ScanReportSection::Diagnostics => "diagnostics.jsonl",
             ScanReportSection::Roots => unreachable!("root rows are manifest-backed"),
+            ScanReportSection::GitSources => "git_groups.jsonl",
+            ScanReportSection::ConflictSets => "conflict_sets.jsonl",
+            ScanReportSection::LocalCandidates
+            | ScanReportSection::NeedsAttention
+            | ScanReportSection::Excluded => {
+                unreachable!("verdict rows use page_verdict_rows")
+            }
         };
         let path = self.run_dir(&cursor.run_id).join(file_name);
         let file = File::open(&path).map_err(|_| ScanReportPageError::NotFound)?;
@@ -832,6 +1009,57 @@ impl SystemScanEvidenceStore {
         }
         let at_end = reader.fill_buf().map(|buf| buf.is_empty()).unwrap_or(true);
         let next_offset = if at_end {
+            None
+        } else {
+            Some(cursor.offset + consumed)
+        };
+        Ok((rows, next_offset))
+    }
+
+    /// Verdict-file paging with a closed predicate (Local candidates /
+    /// Needs attention / Excluded rows all live in `verdicts.jsonl`).
+    fn page_verdict_rows(
+        &self,
+        cursor: &ScanReportCursor,
+        limit: usize,
+        include: impl Fn(&ScanSourceVerdictRecord) -> bool,
+    ) -> Result<(Vec<ScanReportRow>, Option<u64>), ScanReportPageError> {
+        let path = self.run_dir(&cursor.run_id).join("verdicts.jsonl");
+        let file = File::open(&path).map_err(|_| ScanReportPageError::NotFound)?;
+        let mut reader = BufReader::new(file);
+        reader
+            .seek(SeekFrom::Start(cursor.offset))
+            .map_err(|_| ScanReportPageError::NotFound)?;
+        let mut rows = Vec::new();
+        let mut consumed = 0_u64;
+        let mut end_of_file = false;
+        while rows.len() < limit {
+            let mut line = Vec::new();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|_| ScanReportPageError::NotFound)?;
+            if read == 0 {
+                end_of_file = true;
+                break;
+            }
+            consumed += read as u64;
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            if let Ok(record) = serde_json::from_slice::<ScanSourceVerdictRecord>(&line) {
+                if include(&record) {
+                    rows.push(ScanReportRow::SourceVerdict(Box::new(record)));
+                }
+            }
+        }
+        let at_end = reader.fill_buf().map(|buf| buf.is_empty()).unwrap_or(true);
+        let next_offset = if at_end && !end_of_file {
+            // The file ends exactly where the last line was read.
+            None
+        } else if end_of_file {
             None
         } else {
             Some(cursor.offset + consumed)
@@ -979,6 +1207,26 @@ impl ScanEvidenceStore for FaultInjectingScanEvidenceStore {
         self.inner.build_entity_index(run_id)
     }
 
+    fn classification_rows(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ScanClassificationRow>, ScanEvidenceStoreError> {
+        self.inner.classification_rows(run_id)
+    }
+
+    fn write_classification(
+        &self,
+        run_id: &str,
+        verdicts: &[ScanSourceVerdictRecord],
+        git_groups: &[ScanGitSourceGroupRecord],
+        conflict_sets: &[ScanConflictSetRecord],
+    ) -> Result<(), ScanEvidenceStoreError> {
+        self.maybe_fail(crate::seams::scan_evidence_store::fault_points::CLASSIFICATION)?;
+        self.maybe_fail(crate::seams::scan_evidence_store::fault_points::DISK_FULL)?;
+        self.inner
+            .write_classification(run_id, verdicts, git_groups, conflict_sets)
+    }
+
     fn report_page(
         &self,
         cursor: &ScanReportCursor,
@@ -1064,7 +1312,7 @@ mod tests {
     use crate::seams::scan_evidence_store::{
         SCAN_STORE_SCHEMA_VERSION, ScanEvidenceCounts, ScanEvidenceStore, ScanEvidenceStoreFactory,
         ScanFrozenFacts, ScanFrozenRoot, ScanObjectIdentity, ScanReportPageError,
-        ScanRootCoverageRecord, ScanRootState, fault_points,
+        ScanRootCoverageRecord, ScanRootState, ScanSourceCounts, fault_points,
     };
 
     fn home() -> BoundHome {
@@ -1096,6 +1344,7 @@ mod tests {
                 canonical_path: PathBuf::from("/tmp/root"),
                 device: 1,
                 inode: 2,
+                consumer_agents: Vec::new(),
             }],
             started_at_ms: 1000,
         }
@@ -1170,11 +1419,13 @@ mod tests {
                 roots: 1,
                 ..Default::default()
             },
+            source_counts: ScanSourceCounts::default(),
             roots: vec![ScanRootCoverageRecord {
                 index: 0,
                 configured_path: PathBuf::from("/tmp/root"),
                 canonical_path: PathBuf::from("/tmp/root"),
                 state: ScanRootState::Completed,
+                consumer_agents: Vec::new(),
                 counts: ScanEvidenceCounts::default(),
                 elapsed_ms: 5,
                 slow: false,

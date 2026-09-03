@@ -21,6 +21,7 @@ pub mod prepared_catalog;
 pub mod remote_provider;
 pub mod scan_evidence_store;
 pub mod scan_integrity;
+pub mod scan_managed_facts;
 pub mod source;
 pub mod source_promotion_store;
 pub mod source_transition_store;

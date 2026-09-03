@@ -33,10 +33,13 @@ use thiserror::Error;
 
 use crate::core::home::BoundHome;
 
-/// v2: the Report carries canonical entity aggregation (object identity,
-/// entity index, funnel counts, cursor-paginated pages, spec §4.6/§8.1,
-/// ADR-0017). A v1 artifact fails closed as `No cached report`.
-pub const SCAN_STORE_SCHEMA_VERSION: u32 = 2;
+/// v3: the Report carries source classification (§8.2/§8.1, ADR-0017) —
+/// Local candidates, aggregated Git Repository Source hints, Local↔Local
+/// Conflict Sets, typed attention items, Excluded/already-Managed rows and
+/// per-candidate typed operation eligibility, plus the consumer Agents of
+/// every Root coverage row. A v2 artifact fails closed as `No cached
+/// report`.
+pub const SCAN_STORE_SCHEMA_VERSION: u32 = 3;
 pub const SCAN_ARTIFACT_VERSION_PREFIX: &str = "scan-artifact-v1";
 
 /// Generation-bound file-system object identity (vol/device + inode,
@@ -76,6 +79,17 @@ pub struct ScanFrozenRoot {
     pub canonical_path: PathBuf,
     pub device: u64,
     pub inode: u64,
+    /// Configured Agent Configurations consuming this Root (coverage rows
+    /// list them; the id is the durable pointer, the name is Source
+    /// Content).
+    pub consumer_agents: Vec<ScanRootAgentRef>,
+}
+
+/// One Root consumer Agent (spec §7.6 coverage table).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanRootAgentRef {
+    pub agent_id: String,
+    pub agent_name: String,
 }
 
 /// Every counter a Run carries; `roots`/`failed_roots` are Run-level, the
@@ -221,6 +235,13 @@ pub struct ScanLockHintRecord {
     pub fingerprint: String,
     pub faulted: bool,
     pub fault: Option<String>,
+    /// The declaring strict-parse entry facts (never the lock body):
+    /// `source_type`, `source_url`, `requested_ref` and `skill_path`. A
+    /// faulted or structurally-faulted hint carries `None`.
+    pub source_type: Option<String>,
+    pub source_url: Option<String>,
+    pub requested_ref: Option<String>,
+    pub skill_path: Option<String>,
 }
 
 /// Memoized bounded local Git worktree hint (never network): nearest
@@ -331,6 +352,11 @@ pub enum ScanReportSection {
     Entities,
     Appearances,
     Diagnostics,
+    GitSources,
+    LocalCandidates,
+    ConflictSets,
+    NeedsAttention,
+    Excluded,
 }
 
 /// Stable, generation-bound cursor (spec §4.10/ADR-0020): a page read is
@@ -357,6 +383,166 @@ pub enum ScanReportRow {
     Entity(ScanCanonicalEntityRecord),
     Appearance(Box<ScanAppearanceRecord>),
     Diagnostic(ScanDiagnosticRecord),
+    GitSourceGroup(Box<ScanGitSourceGroupRecord>),
+    SourceVerdict(Box<ScanSourceVerdictRecord>),
+    ConflictSet(Box<ScanConflictSetRecord>),
+}
+
+/// One enriched applicable lock claim: the governing lock file, the exact
+/// declaring entry facts and the entry's fingerprint. Claims are the
+/// External Ownership Claim evidence of §8.1 — never the lock body.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanLockClaimRecord {
+    pub lock_path: PathBuf,
+    pub entry_name: String,
+    pub fingerprint: String,
+    pub source_type: Option<String>,
+    pub source_url: Option<String>,
+    pub requested_ref: Option<String>,
+    pub skill_path: Option<String>,
+}
+
+/// Typed operation eligibility of one candidate (spec §8.1): the operation
+/// name is closed (`local_link | local_link_with_move |
+/// git_fetch_and_manage | conflict_winner`); destructive operations are
+/// allowed only with complete coverage, and the Core closed reason
+/// (`scan_incomplete`) is what the presentation disables on — never UI copy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanOperationEligibility {
+    pub operation: String,
+    pub allowed: bool,
+    pub closed_reason: Option<String>,
+}
+
+/// One classified canonical entity of a Report generation (spec §8.1/§8.2).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanSourceVerdictRecord {
+    pub entity_seq: u64,
+    /// `local | git | conflict_set | identity_conflict | blocked |
+    /// deferred | already_managed | excluded`.
+    pub verdict: String,
+    pub canonical_path: PathBuf,
+    /// Directory Identity spellings of the appearances (Source Content).
+    pub directory_names: Vec<String>,
+    pub appearances: u64,
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub tree_hash: Option<String>,
+    pub lock_claims: Vec<ScanLockClaimRecord>,
+    pub worktree_hints: Vec<ScanWorktreeHintRecord>,
+    /// Closed reason kind: `uninterpretable_metadata |
+    /// provenance_contradiction | lock_file_fault | repository_ref_conflict
+    /// | ownership_split | verification_deferred |
+    /// multiple_directory_identities | managed_name_collision`.
+    pub reason_kind: Option<String>,
+    /// Source Content facts of the reason (refs, lock paths, fault detail).
+    pub detail: Option<String>,
+    /// Distinct legacy refs observed for this entity's Git hints.
+    pub git_refs: Vec<String>,
+    /// Distinct governing lock files of this entity's claims.
+    pub git_lock_paths: Vec<PathBuf>,
+    pub git_group_seq: Option<u64>,
+    pub conflict_set_seq: Option<u64>,
+    /// Closed info notes (`git_metadata_not_used | non_git_lock_claim`).
+    pub notes: Vec<String>,
+    pub operations: Vec<ScanOperationEligibility>,
+}
+
+/// One aggregated Git Repository Source hint group of a Report generation
+/// (spec §8.2: aggregate by provider + canonical repository; hints never
+/// constitute a Source Release). A group is a single row; members allow no
+/// per-member Include.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanGitSourceGroupRecord {
+    pub group_seq: u64,
+    /// `github | gitlab | git` (provider kind; the URL host agrees).
+    pub provider: String,
+    /// Normalized canonical repository (spec §8.3); Source Content.
+    pub canonical_repository: String,
+    /// The bounded worktree repository root inside the originating Root.
+    pub repository_root: Option<PathBuf>,
+    pub remote_urls_seen: Vec<String>,
+    pub member_entity_seqs: Vec<u64>,
+    pub member_paths: Vec<PathBuf>,
+    pub member_names: Vec<String>,
+    pub lock_claims: Vec<ScanLockClaimRecord>,
+    /// Distinct legacy refs across the group's claims (a >1 set is a
+    /// Repository Ref Conflict, spec §8.2).
+    pub refs: Vec<String>,
+    /// Distinct governing lock files (a >1 set is a Repository Ownership
+    /// Split, spec §8.2 — zero-write reject).
+    pub lock_paths: Vec<PathBuf>,
+    /// `candidate | repository_ref_conflict | ownership_split`.
+    pub status: String,
+    pub operations: Vec<ScanOperationEligibility>,
+    /// Fact detail of a conflicted status (refs, lock paths).
+    pub detail: Option<String>,
+}
+
+/// One Local↔Local Conflict Set (ADR-0017): same NFC + Unicode casefold
+/// Directory Identity, different canonical entities. No winner until the
+/// user explicitly chooses one.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanConflictSetRecord {
+    pub set_seq: u64,
+    pub directory_identity_key: String,
+    /// Representative display name (Source Content).
+    pub directory_name: String,
+    pub member_entity_seqs: Vec<u64>,
+    pub member_paths: Vec<PathBuf>,
+    /// `None` until the user explicitly picks a winner (default: none).
+    pub winner_entity_seq: Option<u64>,
+}
+
+/// Compact classification input of one canonical entity (built by the store
+/// from the entity/appearance indexes; the Core rules classify it).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanClassificationRow {
+    pub entity_seq: u64,
+    pub identity: ScanObjectIdentity,
+    pub canonical_path: PathBuf,
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub tree_hash: Option<String>,
+    pub hash_fault: Option<String>,
+    pub directory_names: Vec<String>,
+    /// Number of appearances aggregated into this entity.
+    pub appearances: u64,
+    pub first_root_index: u32,
+    /// Enriched lock claims of the entity's appearances (deduplicated by
+    /// `(lock_path, entry_name)`).
+    pub lock_claims: Vec<ScanLockClaimRecord>,
+    pub worktree_hints: Vec<ScanWorktreeHintRecord>,
+}
+
+/// Bounded source classification counts of a terminal Report (spec §8.1):
+/// cards + attention tallies; the candidate detail is paged, never
+/// summarized away here.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanSourceCounts {
+    /// Git Repository Source candidates (groups with status `candidate`).
+    pub git_groups: u64,
+    /// Git groups whose aggregated hints conflict (ref conflict / split).
+    pub git_groups_conflicted: u64,
+    /// Local candidates (entities; includes in-place and move-required).
+    pub local_candidates: u64,
+    /// Local↔Local Conflict Sets (no winner by default).
+    pub conflict_sets: u64,
+    /// Entities inside a Conflict Set.
+    pub conflict_members: u64,
+    /// Typed blocked entities (uninterpretable/contradictory metadata).
+    pub blocked: u64,
+    /// Verification Deferred entities.
+    pub deferred: u64,
+    /// Same entity under multiple Directory Identities.
+    pub identity_conflicts: u64,
+    /// Entities already Managed (Catalog path / Home namespace).
+    pub already_managed: u64,
+    /// Fixture entities.
+    pub excluded: u64,
+    /// Total immediate-attention rows (blocked + deferred + identity
+    /// conflicts + conflicted groups).
+    pub needs_attention: u64,
 }
 
 /// A bounded page of the current Report (spec §4.10): at most `limit`
@@ -384,6 +570,7 @@ pub struct ScanRootCoverageRecord {
     pub configured_path: PathBuf,
     pub canonical_path: PathBuf,
     pub state: ScanRootState,
+    pub consumer_agents: Vec<ScanRootAgentRef>,
     pub counts: ScanEvidenceCounts,
     pub elapsed_ms: u64,
     pub slow: bool,
@@ -403,6 +590,8 @@ pub struct ScanReportManifest {
     /// `complete` | `incomplete`.
     pub state: String,
     pub counts: ScanEvidenceCounts,
+    /// Bounded source classification counts of this Report.
+    pub source_counts: ScanSourceCounts,
     pub roots: Vec<ScanRootCoverageRecord>,
     pub frozen: ScanFrozenFacts,
     pub started_at_ms: u64,
@@ -620,6 +809,26 @@ pub trait ScanEvidenceStore: Send + Sync {
     /// anything unproven is left behind (`ProvenanceMismatch`).
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError>;
 
+    /// Compact classification input of every canonical entity (spec §8.1):
+    /// entity facts plus the aggregated appearance evidence (names, lock
+    /// claims, worktree hints). Fail-closed: no partial rows.
+    fn classification_rows(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ScanClassificationRow>, ScanEvidenceStoreError>;
+
+    /// Persist the classification pass of a Run (spec §8.2): verdicts,
+    /// Git groups and Conflict Sets are written as immutable run-level
+    /// index streams before the manifest switch, so a torn classification
+    /// is never published.
+    fn write_classification(
+        &self,
+        run_id: &str,
+        verdicts: &[ScanSourceVerdictRecord],
+        git_groups: &[ScanGitSourceGroupRecord],
+        conflict_sets: &[ScanConflictSetRecord],
+    ) -> Result<(), ScanEvidenceStoreError>;
+
     /// Startup sweep: remove every temporary Run not referenced by the
     /// current manifest, verifying `home_id + run_id + artifact identity`
     /// per directory. Corrupt current manifest counts as absent (spec §3.6:
@@ -681,6 +890,7 @@ pub mod fault_points {
     pub const RUN_SUPERSEDE: &str = "scan.run.supersede_cleanup";
     pub const ROOT_WATCHDOG: &str = "scan.root.watchdog";
     pub const ENTITY_INDEX: &str = "scan.evidence_store.entity_index";
+    pub const CLASSIFICATION: &str = "scan.evidence_store.classification";
 }
 
 /// Matrix registry used by tests and documentation: every `(name, failure
@@ -725,5 +935,9 @@ pub const FAULT_POINT_MATRIX: &[(&str, &str)] = &[
     (
         fault_points::ENTITY_INDEX,
         "entity index build fails → Run Failed, old Report kept",
+    ),
+    (
+        fault_points::CLASSIFICATION,
+        "classification write fails → Run Failed, old Report kept",
     ),
 ];

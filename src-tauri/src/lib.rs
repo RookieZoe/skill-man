@@ -22,6 +22,7 @@ pub fn run() {
     use crate::adapters::remote_provider::SystemRemoteProvider;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
+    use crate::adapters::scan_managed_facts::SqliteScanManagedFactsReader;
     use crate::adapters::scan_evidence_store::SystemScanEvidenceStoreFactory;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
@@ -432,6 +433,12 @@ pub fn run() {
                 agent_configuration_store.clone(),
                 scan_mutation.clone(),
                 app_state.clone(),
+                Arc::new(SqliteScanManagedFactsReader::new(
+                    write_gate.clone(),
+                    catalog_file_name.clone(),
+                    filesystem.clone(),
+                )),
+                state_dir.clone(),
                 Arc::new(SystemClock::new()),
             ));
             let observation_api = Arc::new(ObservationApi::new(

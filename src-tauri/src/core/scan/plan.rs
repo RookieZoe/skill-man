@@ -12,7 +12,7 @@ use crate::seams::agent_configuration_store::{
     AgentConfigurationStoreSnapshot, StoredGlobalSkillRoot,
 };
 use crate::seams::filesystem::{DirectoryFingerprint, FileSystem};
-use crate::seams::scan_evidence_store::ScanFrozenRoot;
+use crate::seams::scan_evidence_store::{ScanFrozenRoot, ScanRootAgentRef};
 use crate::seams::scan_integrity::canonical_json_digest;
 
 /// One planned Root: either frozen (canonical identity resolved) or
@@ -23,6 +23,9 @@ pub struct PlannedRoot {
     pub configured_path: PathBuf,
     pub frozen: Option<ScanFrozenRoot>,
     pub plan_error: Option<String>,
+    /// Configured Agent Configurations consuming this Root (id + name;
+    /// the name is Source Content).
+    pub consumer_agents: Vec<ScanRootAgentRef>,
 }
 
 /// The frozen identity fingerprint of the whole configured Root snapshot:
@@ -51,11 +54,28 @@ pub fn plan_roots_with_failures(
     filesystem: &dyn FileSystem,
     snapshot: &AgentConfigurationStoreSnapshot,
 ) -> Result<Vec<PlannedRoot>, PlanError> {
+    let agent_names: std::collections::HashMap<&str, &str> = snapshot
+        .configurations
+        .iter()
+        .map(|configuration| (configuration.agent_id.as_str(), configuration.name.as_str()))
+        .collect();
     let mut planned = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (index, root) in snapshot.roots.iter().enumerate() {
         let configured = root.configured_path.clone();
-        match canonical_identity(filesystem, root, index as u32) {
+        let consumer_agents = root
+            .consumer_agent_ids
+            .iter()
+            .filter_map(|agent_id| {
+                agent_names
+                    .get(agent_id.as_str())
+                    .map(|name| ScanRootAgentRef {
+                        agent_id: agent_id.clone(),
+                        agent_name: (*name).to_owned(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        match canonical_identity(filesystem, root, index as u32, consumer_agents.clone()) {
             Ok(identity)
                 if seen.insert((
                     identity.canonical_path.clone(),
@@ -68,16 +88,44 @@ pub fn plan_roots_with_failures(
                     configured_path: configured,
                     frozen: Some(identity),
                     plan_error: None,
+                    consumer_agents,
                 });
             }
             // The same physical Root reached through a second configured
-            // path is scanned once (spec §10.1 "同一物理 Root 一次").
-            Ok(_) => {}
+            // path is scanned once (spec §10.1 "同一物理 Root 一次"); the
+            // second Agent's membership is merged into the single Root's
+            // consumer set for the coverage table (spec §7.6).
+            Ok(identity) => {
+                if let Some(existing) = planned.iter_mut().find(|planned| {
+                    planned
+                        .frozen
+                        .as_ref()
+                        .map(|frozen| {
+                            frozen.index == index as u32
+                                || (frozen.canonical_path == identity.canonical_path
+                                    && frozen.device == identity.device
+                                    && frozen.inode == identity.inode)
+                        })
+                        .unwrap_or(false)
+                }) {
+                    for agent in consumer_agents {
+                        if !existing.consumer_agents.contains(&agent) {
+                            existing.consumer_agents.push(agent.clone());
+                            if let Some(frozen) = existing.frozen.as_mut() {
+                                if !frozen.consumer_agents.contains(&agent) {
+                                    frozen.consumer_agents.push(agent);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Err(PlanError::Canonicalize(error)) => planned.push(PlannedRoot {
                 index: index as u32,
                 configured_path: configured,
                 frozen: None,
                 plan_error: Some(error),
+                consumer_agents,
             }),
         }
     }
@@ -88,6 +136,7 @@ fn canonical_identity(
     filesystem: &dyn FileSystem,
     root: &StoredGlobalSkillRoot,
     index: u32,
+    consumer_agents: Vec<ScanRootAgentRef>,
 ) -> Result<ScanFrozenRoot, PlanError> {
     let canonical = filesystem
         .canonical_directory(&root.configured_path)
@@ -108,6 +157,7 @@ fn canonical_identity(
         canonical_path,
         device,
         inode,
+        consumer_agents,
     })
 }
 
