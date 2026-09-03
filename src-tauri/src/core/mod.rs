@@ -20,6 +20,7 @@ pub mod preferences;
 pub mod scan;
 pub mod source_group_preview;
 pub mod source_promotion;
+pub mod source_tracking_policy;
 pub mod source_transition;
 pub mod source_update;
 pub mod startup;

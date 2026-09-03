@@ -33,6 +33,9 @@ fn command_error(error: SourceGroupPreviewError) -> CommandFailureDto {
         SourceGroupPreviewError::Source(_) | SourceGroupPreviewError::Resolve(_) => {
             PublicErrorDto::SourceUnavailable
         }
+        SourceGroupPreviewError::RemoteProvider(_) | SourceGroupPreviewError::TrackingPolicy(_) => {
+            PublicErrorDto::SourceUnavailable
+        }
     };
     CommandFailureDto {
         error: public_error,

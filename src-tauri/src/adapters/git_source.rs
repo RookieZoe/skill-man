@@ -47,7 +47,28 @@ fn run_git(
     total_seconds: u64,
     stdout_cap: Option<usize>,
 ) -> Result<GitOutput, SourceError> {
-    run_git_impl(args, total_seconds, stdout_cap, None)
+    let result = run_git_impl(args, total_seconds, stdout_cap, None)?;
+    if result.success {
+        return Ok(GitOutput {
+            stdout: result.stdout,
+        });
+    }
+    Err(SourceError::Git(format!(
+        "`git {}` failed ({}): {}",
+        args.iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+        result
+            .exit_code
+            .map_or_else(|| "signal".into(), |code| code.to_string()),
+        result.stderr.trim()
+    )))
 }
 
 fn run_git_to_file(
@@ -55,7 +76,35 @@ fn run_git_to_file(
     total_seconds: u64,
     stdout_path: &Path,
 ) -> Result<GitOutput, SourceError> {
-    run_git_impl(args, total_seconds, None, Some(stdout_path))
+    let result = run_git_impl(args, total_seconds, None, Some(stdout_path))?;
+    if result.success {
+        return Ok(GitOutput {
+            stdout: result.stdout,
+        });
+    }
+    Err(SourceError::Git(format!(
+        "`git {}` failed ({}): {}",
+        args.iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+        result
+            .exit_code
+            .map_or_else(|| "signal".into(), |code| code.to_string()),
+        result.stderr.trim()
+    )))
+}
+
+struct GitRunResult {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: String,
+    exit_code: Option<i32>,
 }
 
 fn run_git_impl(
@@ -63,7 +112,7 @@ fn run_git_impl(
     total_seconds: u64,
     stdout_cap: Option<usize>,
     stdout_path: Option<&Path>,
-) -> Result<GitOutput, SourceError> {
+) -> Result<GitRunResult, SourceError> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(total_seconds);
     let mut command = Command::new("git");
@@ -153,16 +202,12 @@ fn run_git_impl(
                         "git output exceeded the size limit: {summary}"
                     )));
                 }
-                if status.success() {
-                    return Ok(GitOutput { stdout });
-                }
-                return Err(SourceError::Git(format!(
-                    "`git {summary}` failed ({}): {}",
-                    status
-                        .code()
-                        .map_or_else(|| "signal".into(), |code| code.to_string()),
-                    stderr.trim()
-                )));
+                return Ok(GitRunResult {
+                    success: status.success(),
+                    stdout,
+                    stderr,
+                    exit_code: status.code(),
+                });
             }
             Ok(None) => {}
             Err(source) => {
@@ -427,6 +472,86 @@ impl GitSource for SystemGitSource {
         let _ = fs::remove_file(&archive_path);
         result
     }
+
+    fn list_tags(
+        &self,
+        mirror_dir: &Path,
+    ) -> Result<Vec<crate::seams::source::GitTagFact>, SourceError> {
+        let output = run_git(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "for-each-ref",
+                "--format=%(refname:strip=2)%00%(objectname)%00%(*objectname)%00%(creatordate:unix)%0a",
+                "refs/tags",
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            Some(16 * 1024 * 1024),
+        )?;
+        let mut tags = Vec::new();
+        for record in output.stdout.split(|byte| *byte == b'\n') {
+            if record.is_empty() {
+                continue;
+            }
+            let mut fields = record.split(|byte| *byte == 0);
+            let name = fields.next().unwrap_or_default();
+            let object = fields.next().unwrap_or_default();
+            let peeled = fields.next().unwrap_or_default();
+            let created = fields.next().unwrap_or_default();
+            if name.is_empty() || object.is_empty() {
+                continue;
+            }
+            let commit = if peeled.is_empty() { object } else { peeled };
+            let created_epoch_secs = std::str::from_utf8(created)
+                .ok()
+                .and_then(|value| value.trim().parse::<i64>().ok());
+            tags.push(crate::seams::source::GitTagFact {
+                name: String::from_utf8_lossy(name).into_owned(),
+                commit: String::from_utf8_lossy(commit).into_owned(),
+                created_epoch_secs,
+            });
+        }
+        Ok(tags)
+    }
+
+    fn is_ancestor(
+        &self,
+        mirror_dir: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, SourceError> {
+        let ancestor = self
+            .resolve_commit(mirror_dir, ancestor)?
+            .ok_or_else(|| SourceError::Git(format!("the ancestor '{ancestor}' is not present")))?;
+        let descendant = self
+            .resolve_commit(mirror_dir, descendant)?
+            .ok_or_else(|| {
+                SourceError::Git(format!("the descendant '{descendant}' is not present"))
+            })?;
+        let result = run_git_impl(
+            &[
+                "-C",
+                mirror_dir.to_str().unwrap_or("."),
+                "merge-base",
+                "--is-ancestor",
+                &ancestor,
+                &descendant,
+            ],
+            LOCAL_OP_TIMEOUT_SECONDS,
+            Some(4096),
+            None,
+        )?;
+        if result.success {
+            return Ok(true);
+        }
+        if result.exit_code == Some(1) {
+            return Ok(false);
+        }
+        Err(SourceError::Git(format!(
+            "`git merge-base --is-ancestor` failed: {}",
+            result.stderr.trim()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +775,90 @@ mod tests {
         assert!(
             !temp.path().join("staging").join(".one.skill.zip").exists(),
             "the transient archive must be removed"
+        );
+    }
+
+    #[test]
+    fn lists_tags_with_peeled_commits_and_creation_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[("SKILL.md", "---\nname: fixture\n---\n")],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let output = Command::new("git")
+            .args(["tag", "-a", "v1.0.0", "-m", "release one"])
+            .current_dir(&repo)
+            .output()
+            .expect("annotated tag");
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["tag", "lightweight"])
+            .current_dir(&repo)
+            .output()
+            .expect("lightweight tag");
+        assert!(output.status.success());
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("refetch mirror");
+        let tags = source.list_tags(&mirror).expect("list tags");
+        let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
+        assert!(names.contains(&"v1.0.0"));
+        assert!(names.contains(&"lightweight"));
+        for tag in &tags {
+            assert_eq!(tag.commit.len(), 40);
+            assert!(
+                tag.created_epoch_secs.is_some(),
+                "tags carry a creation time"
+            );
+        }
+        let main = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let v1 = tags
+            .iter()
+            .find(|tag| tag.name == "v1.0.0")
+            .expect("v1 tag");
+        assert_eq!(v1.commit, main);
+        assert!(
+            source
+                .is_ancestor(&mirror, "v1.0.0", "main")
+                .expect("ancestor")
+        );
+    }
+
+    #[test]
+    fn ancestry_reports_unrelated_or_future_commits_as_false() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[("SKILL.md", "---\nname: fixture\n---\n")],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let main = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let tag_commit = "0123456789abcdef0123456789abcdef01234567";
+        // A missing ref is a closed error, not a silent "not an ancestor".
+        assert!(
+            source.is_ancestor(&mirror, tag_commit, &main).is_err(),
+            "unknown descent refs fail closed"
+        );
+        assert!(
+            source.is_ancestor(&mirror, "v999.0.0", "main").is_err(),
+            "unknown ancestor refs fail closed"
         );
     }
 }

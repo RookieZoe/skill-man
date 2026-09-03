@@ -1,9 +1,13 @@
-//! Whole Git Repository Source confirmation, recovery and Source Undo.
+//! Whole Git Repository Source confirmation, recovery and Source Undo
+//! (ADR-0018, spec §8.4).
 //!
 //! The preview is deliberately read-only. This service replays that preview
-//! at confirmation, freezes one exact release in a durable journal, and only
-//! then changes Home, the external installer lock and Catalog. The lock's one
-//! full-file CAS is the ownership commit point; no post-CAS path fetches Git.
+//! at confirmation, freezes one exact Source Release (policy facts, resolved
+//! commit and the complete added/current/removed member manifest) in a
+//! durable journal, and only then changes Home, the external installer lock
+//! and Catalog. The lock's one full-file CAS is the ownership commit point;
+//! no post-CAS path fetches Git. Legacy Source Promotion reuses the same
+//! transition machinery with a frozen Legacy audit section (ADR-0014).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,24 +20,31 @@ use crate::core::domain::{SkillId, parse_skill_metadata, skill_identity_key};
 use crate::core::git_source::{git_mirror_path, parse_git_source_input, resolve_git_ref};
 use crate::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreview, SourceGroupPreviewError,
-    SourceGroupPreviewOutcome, SourceGroupPreviewService,
+    SourceGroupPreviewOutcome, SourceGroupPreviewService, SourceTrackingOverride,
 };
 use crate::core::write_gate::WriteGate;
 use crate::seams::clock::{Clock, iso_timestamp, uuid_v4_shape};
 use crate::seams::filesystem::{
     FileSystem, FileSystemError, RemoteParentManifest, SourceTransitionJournal,
-    SourceTransitionJournalMember, SourceTransitionPhase,
+    SourceTransitionJournalMember, SourceTransitionPhase, SourceTransitionRemovedMember,
 };
 use crate::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockReleaseError,
 };
 use crate::seams::source::{GitSource, SourceError};
+use crate::seams::source_promotion_store::{
+    LegacySourcePromotionRecord, SourcePromotionMemberOrigin, SourcePromotionMemberRecord,
+    SourcePromotionRecord, SourcePromotionRemovedMemberRecord, SourcePromotionStore,
+    SourcePromotionStoreError,
+};
 use crate::seams::source_transition_store::{
     SourceTransitionMemberRecord, SourceTransitionRecord, SourceTransitionStore,
     SourceTransitionStoreError,
 };
 
-const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 1;
+const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 2;
+/// The immutable namespace of every Git Source Member snapshot.
+const GIT_SKILLS_NAMESPACE: &str = "skills/git";
 
 struct CleanClaimSet {
     lock_path: PathBuf,
@@ -46,15 +57,30 @@ struct CleanClaimSet {
 pub struct ConfirmSourceTransitionRequest {
     pub source_type: String,
     pub source_url: String,
-    pub tracking_ref: String,
-    /// The Source Group Draft's resolved commit. Confirmation refuses if a
-    /// fresh read-only preview no longer resolves the same immutable release.
+    /// The frozen Source Tracking Policy / override selected at preview.
+    pub tracking_policy: Option<SourceTrackingOverride>,
+    /// The Source Group Draft's selected ref. Confirmation refuses if a
+    /// fresh read-only preview no longer resolves the same immutable
+    /// release.
+    pub expected_selected_ref: String,
+    pub expected_resolved_commit: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmSourcePromotionRequest {
+    /// The unambiguous Legacy parent id; never client-forged facts.
+    pub remote_id: String,
+    pub source_type: String,
+    pub source_url: String,
+    pub tracking_policy: Option<SourceTrackingOverride>,
+    pub expected_selected_ref: String,
     pub expected_resolved_commit: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTransitionResult {
     pub operation_id: String,
+    pub remote_id: String,
     pub release_id: String,
     pub resolved_commit: String,
     pub member_count: u32,
@@ -89,6 +115,8 @@ pub enum SourceTransitionError {
     FileSystem(#[from] FileSystemError),
     #[error(transparent)]
     Store(#[from] SourceTransitionStoreError),
+    #[error(transparent)]
+    PromotionStore(#[from] SourcePromotionStoreError),
 }
 
 /// Core-only orchestration. The client sends only immutable preview facts;
@@ -99,6 +127,7 @@ pub struct SourceTransitionService {
     git_source: Arc<dyn GitSource>,
     lock_store: Arc<dyn InstallerLockStore>,
     store: Arc<dyn SourceTransitionStore>,
+    promotion_store: Arc<dyn SourcePromotionStore>,
     filesystem: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
     configured_library_root: PathBuf,
@@ -125,6 +154,7 @@ impl SourceTransitionService {
             git_source,
             lock_store,
             store,
+            promotion_store: Arc::new(UnavailableSourcePromotionStore),
             filesystem,
             clock,
             configured_library_root: library_root,
@@ -145,14 +175,34 @@ impl SourceTransitionService {
         self
     }
 
+    pub fn with_promotion_store(mut self, store: Arc<dyn SourcePromotionStore>) -> Self {
+        self.promotion_store = store;
+        self
+    }
+
     pub fn confirm(
         &self,
         request: ConfirmSourceTransitionRequest,
     ) -> Result<SourceTransitionResult, SourceTransitionError> {
         self.ensure_writes_ready()?;
-        let preview = self.refresh_preview(&request)?;
-        if preview.resolved_commit != request.expected_resolved_commit {
+        let preview = self.refresh_preview(
+            &request.source_type,
+            &request.source_url,
+            &request.tracking_policy,
+        )?;
+        if preview.policy.selected_ref != request.expected_selected_ref
+            || preview.policy.resolved_commit != request.expected_resolved_commit
+        {
             return Err(SourceTransitionError::PreviewStale);
+        }
+        if self
+            .store
+            .existing_current_members(&preview.source_url)?
+            .is_some()
+        {
+            return Err(SourceTransitionError::Validation(
+                "the Git Repository Source is already managed; use Update".into(),
+            ));
         }
         let library_root = self.active_library_root()?;
         let claims = self.clean_claim_set(&preview)?;
@@ -170,18 +220,21 @@ impl SourceTransitionService {
             release_id: release_id.clone(),
             provider: preview.provider.clone(),
             canonical_url: preview.source_url.clone(),
-            tracking_ref: preview.tracking_ref.clone(),
-            resolved_commit: preview.resolved_commit.clone(),
+            tracking_mode: preview.policy.mode.clone(),
+            tracking_value: preview.policy.value.clone(),
+            selection_kind: preview.policy.selection_kind.clone(),
+            selected_ref: preview.policy.selected_ref.clone(),
+            resolved_commit: preview.policy.resolved_commit.clone(),
             target_manifest: Some(RemoteParentManifest {
                 schema_version: 1,
                 remote_id: remote_id.clone(),
                 canonical_url: preview.source_url.clone(),
                 provider: Some(preview.provider.clone()),
-                tracking_mode: None,
-                tracking_value: None,
-                current_selected_ref: None,
+                tracking_mode: Some(preview.policy.mode.clone()),
+                tracking_value: preview.policy.value.clone(),
+                current_selected_ref: Some(preview.policy.selected_ref.clone()),
                 current_release_id: Some(release_id.clone()),
-                aliases: Vec::new(),
+                aliases: preview.aliases.clone(),
                 created_at: iso_timestamp(self.clock.unix_epoch_nanos()),
             }),
             lock_path: claims.lock_path,
@@ -190,39 +243,50 @@ impl SourceTransitionService {
             members: preview
                 .members
                 .iter()
-                .map(|member| SourceTransitionJournalMember {
-                    skill_id: self.next_uuid(),
-                    directory_name: member.directory_name.clone(),
-                    identity_key: skill_identity_key(&member.directory_name),
-                    display_name: member.display_name.clone(),
-                    description: member.description.clone(),
-                    canonical_entity: claims
-                        .canonical_entities
-                        .get(&member.directory_name)
-                        .cloned()
-                        .expect("clean source claims cover every preview member"),
-                    staged_root: library_root
-                        .join("staging")
-                        .join(&operation_id)
-                        .join(&member.directory_name),
-                    isolated_path: None,
-                    staged_snapshot: None,
-                    final_entity_path: library_root.join("skills").join(&member.directory_name),
-                    skill_path: member.skill_path.clone(),
-                    tree_hash: String::new(),
-                    provider_hash: None,
+                .map(|member| {
+                    let skill_id = self.next_uuid();
+                    SourceTransitionJournalMember {
+                        skill_id: skill_id.clone(),
+                        directory_name: member.directory_name.clone(),
+                        identity_key: member.directory_identity_key.clone(),
+                        display_name: member.display_name.clone(),
+                        description: member.description.clone(),
+                        canonical_entity: claims
+                            .canonical_entities
+                            .get(&member.directory_name)
+                            .cloned()
+                            .expect("clean source claims cover every preview member"),
+                        staged_root: library_root
+                            .join("staging")
+                            .join(&operation_id)
+                            .join(&member.directory_name),
+                        isolated_path: None,
+                        staged_snapshot: None,
+                        namespace_path: git_member_namespace_path(
+                            &library_root,
+                            &remote_id,
+                            &skill_id,
+                        ),
+                        skill_path: member.skill_path.clone(),
+                        tree_hash: String::new(),
+                        provider_hash: None,
+                        action: crate::seams::filesystem::SourceTransitionMemberAction::Added,
+                    }
                 })
                 .collect(),
+            removed_members: Vec::new(),
+            promotion_legacy: None,
         };
         self.filesystem
             .write_source_transition_journal(&library_root, &journal)?;
 
-        let result = self.apply_confirmed_transition(&library_root, &preview, &mut journal);
+        let result = self.apply_confirmed_transition(&library_root, &mut journal);
         match result {
             Ok(snapshot_version) => Ok(SourceTransitionResult {
                 operation_id,
+                remote_id,
                 release_id,
-                resolved_commit: preview.resolved_commit,
+                resolved_commit: preview.policy.resolved_commit,
                 member_count: u32::try_from(journal.members.len()).map_err(|_| {
                     SourceTransitionError::Validation("too many source members".into())
                 })?,
@@ -244,6 +308,179 @@ impl SourceTransitionService {
                 Err(error)
             }
             Err(error) => Err(self.block_for_recovery("continue Source Transition", error)),
+        }
+    }
+
+    pub fn confirm_promotion(
+        &self,
+        request: ConfirmSourcePromotionRequest,
+    ) -> Result<SourceTransitionResult, SourceTransitionError> {
+        self.ensure_writes_ready()?;
+        let legacy = self
+            .promotion_store
+            .read_legacy_source_promotion(&request.remote_id)
+            .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
+        if legacy.remote_id != request.remote_id || legacy.canonical_url != request.source_url {
+            return Err(SourceTransitionError::Validation(
+                "the Legacy parent does not match the requested source".into(),
+            ));
+        }
+        if self
+            .store
+            .existing_current_members(&legacy.canonical_url)?
+            .is_some()
+        {
+            return Err(SourceTransitionError::Validation(
+                "the Legacy parent is already a Git Repository Source".into(),
+            ));
+        }
+        let preview = self.refresh_preview(
+            &request.source_type,
+            &legacy.canonical_url,
+            &request.tracking_policy,
+        )?;
+        if preview.policy.selected_ref != request.expected_selected_ref
+            || preview.policy.resolved_commit != request.expected_resolved_commit
+        {
+            return Err(SourceTransitionError::PreviewStale);
+        }
+        let library_root = self.active_library_root()?;
+        let claims = self.clean_claim_set(&preview)?;
+        let operation_id = self.next_operation_id();
+        let release_id = format!("source-release-{operation_id}");
+
+        // Match the discovered release against the frozen Legacy members by
+        // exact repository-relative `skill_path` (no rewrite/rename guessing).
+        let legacy_by_path = legacy
+            .members
+            .iter()
+            .map(|member| (member.skill_path.as_str(), member))
+            .collect::<BTreeMap<_, _>>();
+        let target_paths = preview
+            .members
+            .iter()
+            .map(|member| member.skill_path.as_str())
+            .collect::<BTreeSet<_>>();
+        let removed_legacy = legacy
+            .members
+            .iter()
+            .filter(|member| !target_paths.contains(member.skill_path.as_str()))
+            .collect::<Vec<_>>();
+
+        let staging_root = library_root.join("staging").join(&operation_id);
+        let mut members = Vec::with_capacity(preview.members.len());
+        for member in &preview.members {
+            let (skill_id, action) = match legacy_by_path.get(member.skill_path.as_str()) {
+                Some(legacy_member) => (
+                    legacy_member.skill_id.clone(),
+                    crate::seams::filesystem::SourceTransitionMemberAction::Current,
+                ),
+                None => (
+                    SkillId(self.next_uuid()),
+                    crate::seams::filesystem::SourceTransitionMemberAction::Added,
+                ),
+            };
+            members.push(SourceTransitionJournalMember {
+                skill_id: skill_id.0.clone(),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.directory_identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                canonical_entity: claims
+                    .canonical_entities
+                    .get(&member.directory_name)
+                    .cloned()
+                    .expect("clean source claims cover every preview member"),
+                staged_root: staging_root.join(&member.directory_name),
+                isolated_path: None,
+                staged_snapshot: None,
+                namespace_path: git_member_namespace_path(
+                    &library_root,
+                    &legacy.remote_id,
+                    &skill_id.0,
+                ),
+                skill_path: member.skill_path.clone(),
+                tree_hash: String::new(),
+                provider_hash: None,
+                action,
+            });
+        }
+        let removed_members = removed_legacy
+            .into_iter()
+            .map(|member| SourceTransitionRemovedMember {
+                skill_id: member.skill_id.0.clone(),
+                directory_name: member.directory_name.clone(),
+                skill_path: member.skill_path.clone(),
+                legacy_path: member.final_entity_path.clone(),
+                tree_hash: member.current_baseline_hash.clone(),
+                isolated_path: None,
+            })
+            .collect();
+        let mut journal = SourceTransitionJournal {
+            version: SOURCE_TRANSITION_JOURNAL_VERSION,
+            operation_id: operation_id.clone(),
+            phase: SourceTransitionPhase::Planned,
+            staging_operation_root: staging_root.clone(),
+            staging_fingerprint: None,
+            remote_id: legacy.remote_id.clone(),
+            release_id: release_id.clone(),
+            provider: preview.provider.clone(),
+            canonical_url: preview.source_url.clone(),
+            tracking_mode: preview.policy.mode.clone(),
+            tracking_value: preview.policy.value.clone(),
+            selection_kind: preview.policy.selection_kind.clone(),
+            selected_ref: preview.policy.selected_ref.clone(),
+            resolved_commit: preview.policy.resolved_commit.clone(),
+            target_manifest: Some(RemoteParentManifest {
+                schema_version: 1,
+                remote_id: legacy.remote_id.clone(),
+                canonical_url: preview.source_url.clone(),
+                provider: Some(preview.provider.clone()),
+                tracking_mode: Some(preview.policy.mode.clone()),
+                tracking_value: preview.policy.value.clone(),
+                current_selected_ref: Some(preview.policy.selected_ref.clone()),
+                current_release_id: Some(release_id.clone()),
+                aliases: legacy.aliases.clone(),
+                created_at: iso_timestamp(self.clock.unix_epoch_nanos()),
+            }),
+            lock_path: claims.lock_path,
+            lock_fingerprint: claims.lock_fingerprint,
+            lock_entries: claims.lock_entries,
+            members,
+            removed_members,
+            promotion_legacy: Some(legacy),
+        };
+        self.filesystem
+            .write_source_transition_journal(&library_root, &journal)?;
+
+        let result = self.apply_confirmed_transition(&library_root, &mut journal);
+        match result {
+            Ok(snapshot_version) => Ok(SourceTransitionResult {
+                operation_id,
+                remote_id: journal.remote_id.clone(),
+                release_id,
+                resolved_commit: preview.policy.resolved_commit,
+                member_count: u32::try_from(journal.members.len()).map_err(|_| {
+                    SourceTransitionError::Validation("too many source members".into())
+                })?,
+                snapshot_version,
+                undo_available: true,
+            }),
+            Err(error)
+                if matches!(
+                    journal.phase,
+                    SourceTransitionPhase::Planned
+                        | SourceTransitionPhase::MembersStaged
+                        | SourceTransitionPhase::SourceIsolated
+                        | SourceTransitionPhase::DestinationsReserved
+                ) =>
+            {
+                self.rollback_pre_commit(&library_root, &mut journal)?;
+                self.filesystem
+                    .finish_source_transition_journal(&library_root, &journal.operation_id)?;
+                Err(error)
+            }
+            Err(error) => Err(self.block_for_recovery("continue Source Promotion", error)),
         }
     }
 
@@ -338,6 +575,13 @@ impl SourceTransitionService {
                 self.filesystem.discard_isolated_source(isolated)?;
             }
         }
+        for removed in &journal.removed_members {
+            if let Some(isolated) = &removed.isolated_path
+                && self.filesystem.path_is_directory(isolated)?
+            {
+                self.filesystem.discard_isolated_source(isolated)?;
+            }
+        }
         self.discard_transition_staging(&library_root, &journal)?;
         self.filesystem
             .finish_source_transition_journal(&library_root, operation_id)?;
@@ -346,14 +590,16 @@ impl SourceTransitionService {
 
     fn refresh_preview(
         &self,
-        request: &ConfirmSourceTransitionRequest,
+        source_type: &str,
+        source_url: &str,
+        tracking_policy: &Option<SourceTrackingOverride>,
     ) -> Result<SourceGroupPreview, SourceTransitionError> {
         let outcome = self
             .preview
             .fetch_latest_and_manage(FetchLatestAndManageRequest {
-                source_type: request.source_type.clone(),
-                source_url: request.source_url.clone(),
-                tracking_ref: Some(request.tracking_ref.clone()),
+                source_type: source_type.into(),
+                source_url: source_url.into(),
+                tracking_policy: tracking_policy.clone(),
             })?;
         match outcome {
             SourceGroupPreviewOutcome::Preview(preview) => Ok(preview),
@@ -371,7 +617,6 @@ impl SourceTransitionService {
     fn apply_confirmed_transition(
         &self,
         library_root: &Path,
-        preview: &SourceGroupPreview,
         journal: &mut SourceTransitionJournal,
     ) -> Result<u64, SourceTransitionError> {
         let operation_fingerprint = self
@@ -393,9 +638,9 @@ impl SourceTransitionService {
                     source,
                 })
             })?;
-        let mut spec = parse_git_source_input(&preview.source_url)
+        let mut spec = parse_git_source_input(&journal.canonical_url)
             .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
-        spec.requested_ref = Some(preview.tracking_ref.clone());
+        spec.requested_ref = Some(journal.selected_ref.clone());
         let mirror = git_mirror_path(temporary_mirror_root.path(), &spec.url);
         let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
         let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)
@@ -436,12 +681,23 @@ impl SourceTransitionService {
             self.filesystem
                 .write_source_transition_journal(library_root, journal)?;
         }
+        // Freeze the removed legacy member tree facts before isolation.
+        for index in 0..journal.removed_members.len() {
+            let snapshot = self
+                .filesystem
+                .staged_tree_snapshot(&journal.removed_members[index].legacy_path)?;
+            journal.removed_members[index].tree_hash = snapshot.content_hash.clone();
+        }
         journal.phase = SourceTransitionPhase::MembersStaged;
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
 
         let record = record_from_journal(journal)?;
-        self.store.validate_new_source_transition(&record)?;
+        let promotion_record = promotion_record_from_journal(journal)?;
+        match &promotion_record {
+            None => self.store.validate_new_source_transition(&record)?,
+            Some(promotion) => self.promotion_store.validate_source_promotion(promotion)?,
+        }
         self.ensure_external_trees_match(journal)?;
         for index in 0..journal.members.len() {
             {
@@ -451,6 +707,23 @@ impl SourceTransitionService {
                         .isolate_external_source(&member.canonical_entity, &journal.operation_id)?,
                 );
             }
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
+        }
+        for index in 0..journal.removed_members.len() {
+            let isolated = self
+                .filesystem
+                .isolate_external_source(
+                    &journal.removed_members[index].legacy_path,
+                    &journal.operation_id,
+                )
+                .map_err(|error| {
+                    SourceTransitionError::Validation(format!(
+                        "the removed legacy member '{}' cannot be isolated: {error}",
+                        journal.removed_members[index].directory_name
+                    ))
+                })?;
+            journal.removed_members[index].isolated_path = Some(isolated);
             self.filesystem
                 .write_source_transition_journal(library_root, journal)?;
         }
@@ -482,7 +755,11 @@ impl SourceTransitionService {
             .write_source_transition_journal(library_root, journal)?;
 
         self.publish_members(library_root, journal)?;
-        let snapshot_version = self.store.commit_source_transition(record)?;
+        self.discard_removed_legacy_entities(journal)?;
+        let snapshot_version = match promotion_record {
+            None => self.store.commit_source_transition(record)?,
+            Some(promotion) => self.promotion_store.commit_source_promotion(promotion)?,
+        };
         journal.phase = SourceTransitionPhase::ManagedCommitted;
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
@@ -500,8 +777,13 @@ impl SourceTransitionService {
         journal: &mut SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         self.publish_members(library_root, journal)?;
+        self.discard_removed_legacy_entities(journal)?;
         let record = record_from_journal(journal)?;
-        self.store.commit_source_transition(record)?;
+        let promotion_record = promotion_record_from_journal(journal)?;
+        let _ = match promotion_record {
+            None => self.store.commit_source_transition(record)?,
+            Some(promotion) => self.promotion_store.commit_source_promotion(promotion)?,
+        };
         self.freeze_target_manifest_for_recovery(library_root, journal)?;
         self.write_current_source_manifest(library_root, journal)?;
         journal.phase = SourceTransitionPhase::Finalized;
@@ -510,6 +792,13 @@ impl SourceTransitionService {
         self.verify_final_source(journal)?;
         for member in &journal.members {
             if let Some(isolated) = &member.isolated_path
+                && self.filesystem.path_is_directory(isolated)?
+            {
+                self.filesystem.discard_isolated_source(isolated)?;
+            }
+        }
+        for removed in &journal.removed_members {
+            if let Some(isolated) = &removed.isolated_path
                 && self.filesystem.path_is_directory(isolated)?
             {
                 self.filesystem.discard_isolated_source(isolated)?;
@@ -533,13 +822,10 @@ impl SourceTransitionService {
                     member.directory_name
                 ))
             })?;
-            if self
-                .filesystem
-                .path_is_directory(&member.final_entity_path)?
-            {
+            if self.filesystem.path_is_directory(&member.namespace_path)? {
                 let final_snapshot = self
                     .filesystem
-                    .staged_tree_snapshot(&member.final_entity_path)?;
+                    .staged_tree_snapshot(&member.namespace_path)?;
                 if final_snapshot.content_hash != member.tree_hash {
                     return Err(SourceTransitionError::RecoveryRequired(format!(
                         "the Home member '{}' does not match the frozen Source Release",
@@ -554,13 +840,39 @@ impl SourceTransitionService {
                         member.directory_name
                     )));
                 }
-                self.filesystem.install_staged_skill(
+                self.install_git_snapshot(
                     &member.staged_root,
-                    &member.final_entity_path,
+                    &member.namespace_path,
                     library_root,
                     &journal.operation_id,
                     expected,
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The removed legacy entities are gone from Home after the commit
+    /// point; their isolated copies stay until the Undo window closes.
+    fn discard_removed_legacy_entities(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for removed in &journal.removed_members {
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(format!(
+                    "the removed legacy member '{}' has no isolated copy",
+                    removed.directory_name
+                ))
+            })?;
+            if self.filesystem.path_is_directory(isolated)? {
+                continue;
+            }
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the removed legacy member '{}' is still present",
+                    removed.directory_name
+                )));
             }
         }
         Ok(())
@@ -571,18 +883,14 @@ impl SourceTransitionService {
         library_root: &Path,
         journal: &mut SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
-        if journal.phase == SourceTransitionPhase::DestinationsReserved {
+        if journal.phase == SourceTransitionPhase::DestinationsReserved
+            || journal.phase == SourceTransitionPhase::SourceIsolated
+        {
             for member in journal.members.iter().rev() {
-                if !self
-                    .filesystem
-                    .path_is_occupied(&member.final_entity_path)?
-                {
+                if !self.namespace_occupied(&member.namespace_path)? {
                     continue;
                 }
-                if !self
-                    .filesystem
-                    .path_is_directory(&member.final_entity_path)?
-                {
+                if !self.filesystem.path_is_directory(&member.namespace_path)? {
                     return Err(self.block_for_recovery(
                         "roll back Source Transition",
                         format!(
@@ -593,7 +901,7 @@ impl SourceTransitionService {
                 }
                 let snapshot = self
                     .filesystem
-                    .staged_tree_snapshot(&member.final_entity_path)?;
+                    .staged_tree_snapshot(&member.namespace_path)?;
                 if snapshot.content_hash != member.tree_hash {
                     return Err(self.block_for_recovery(
                         "roll back Source Transition",
@@ -604,7 +912,7 @@ impl SourceTransitionService {
                     ));
                 }
                 self.filesystem
-                    .remove_directory_verified(&member.final_entity_path)?;
+                    .remove_directory_verified(&member.namespace_path)?;
             }
         }
         for member in journal.members.iter_mut().rev() {
@@ -619,6 +927,18 @@ impl SourceTransitionService {
             }
             member.isolated_path = None;
         }
+        for removed in journal.removed_members.iter_mut().rev() {
+            if let Some(isolated) = &removed.isolated_path
+                && self.filesystem.path_is_directory(isolated)?
+            {
+                self.filesystem.restore_isolated_source(
+                    isolated,
+                    &removed.legacy_path,
+                    &removed.tree_hash,
+                )?;
+            }
+            removed.isolated_path = None;
+        }
         journal.phase = SourceTransitionPhase::Planned;
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
@@ -632,7 +952,13 @@ impl SourceTransitionService {
     ) -> Result<u64, SourceTransitionError> {
         self.validate_journal_layout(library_root, journal)?;
         let record = record_from_journal(journal)?;
-        let catalog_is_committed = self.store.source_transition_is_committed(&record)?;
+        let promotion_record = promotion_record_from_journal(journal)?;
+        let catalog_is_committed = match &promotion_record {
+            None => self.store.source_transition_is_committed(&record)?,
+            Some(promotion) => self
+                .promotion_store
+                .source_promotion_is_committed(promotion)?,
+        };
         // Revalidate the entire conditional Undo after the durable Undoing
         // cursor exists and immediately before Catalog mutation. A changed
         // Home path, external path, lock or preservation copy is never
@@ -641,21 +967,20 @@ impl SourceTransitionService {
             self.preflight_undo(journal)?;
         }
         let snapshot_version = if catalog_is_committed {
-            self.store.undo_source_transition(&record)?
+            match &promotion_record {
+                None => self.store.undo_source_transition(&record)?,
+                Some(promotion) => self
+                    .promotion_store
+                    .undo_source_promotion(promotion, &promotion.legacy)?,
+            }
         } else {
             0
         };
         self.filesystem
             .remove_remote_parent_manifest(&library_root.join("remotes"), &journal.remote_id)?;
         for member in &journal.members {
-            if self
-                .filesystem
-                .path_is_occupied(&member.final_entity_path)?
-            {
-                if !self
-                    .filesystem
-                    .path_is_directory(&member.final_entity_path)?
-                {
+            if self.namespace_occupied(&member.namespace_path)? {
+                if !self.filesystem.path_is_directory(&member.namespace_path)? {
                     return Err(self.block_for_recovery(
                         "complete Source Undo",
                         format!(
@@ -666,7 +991,7 @@ impl SourceTransitionService {
                 }
                 let final_snapshot = self
                     .filesystem
-                    .staged_tree_snapshot(&member.final_entity_path)?;
+                    .staged_tree_snapshot(&member.namespace_path)?;
                 if final_snapshot.content_hash != member.tree_hash {
                     return Err(self.block_for_recovery(
                         "complete Source Undo",
@@ -674,7 +999,17 @@ impl SourceTransitionService {
                     ));
                 }
                 self.filesystem
-                    .remove_directory_verified(&member.final_entity_path)?;
+                    .remove_directory_verified(&member.namespace_path)?;
+            }
+            // The empty remote namespace directory is part of the source's
+            // owned state; a clean Undo removes it with the members.
+            if let Some(first) = journal.members.first() {
+                if let Some(remote_directory) = first.namespace_path.parent() {
+                    if self.filesystem.list_directory(remote_directory)?.is_empty() {
+                        self.filesystem
+                            .remove_directory_verified(remote_directory)?;
+                    }
+                }
             }
             let isolated = member.isolated_path.as_ref().ok_or_else(|| {
                 SourceTransitionError::RecoveryRequired(format!(
@@ -730,6 +1065,52 @@ impl SourceTransitionService {
                 )?;
             }
         }
+        for removed in &journal.removed_members {
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Undo journal has no preservation copy for removed member '{}'",
+                    removed.directory_name
+                ))
+            })?;
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                if self.filesystem.path_is_directory(isolated)?
+                    || !self.filesystem.path_is_directory(&removed.legacy_path)?
+                {
+                    return Err(self.block_for_recovery(
+                        "complete Source Undo",
+                        format!(
+                            "the removed legacy member '{}' is occupied",
+                            removed.directory_name
+                        ),
+                    ));
+                }
+                let snapshot = self.filesystem.staged_tree_snapshot(&removed.legacy_path)?;
+                if snapshot.content_hash != removed.tree_hash {
+                    return Err(self.block_for_recovery(
+                        "complete Source Undo",
+                        format!(
+                            "the removed legacy member '{}' changed",
+                            removed.directory_name
+                        ),
+                    ));
+                }
+            } else {
+                if !self.filesystem.path_is_directory(isolated)? {
+                    return Err(self.block_for_recovery(
+                        "complete Source Undo",
+                        format!(
+                            "the preservation copy for removed member '{}' is missing",
+                            removed.directory_name
+                        ),
+                    ));
+                }
+                self.filesystem.restore_isolated_source(
+                    isolated,
+                    &removed.legacy_path,
+                    &removed.tree_hash,
+                )?;
+            }
+        }
         // A crash may happen after the atomic restore but before this journal
         // can be archived. The live complete claim set proves that exact
         // sub-step already happened, so recovery skips a second restore;
@@ -749,7 +1130,14 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         let record = record_from_journal(journal)?;
-        if !self.store.source_transition_is_committed(&record)? {
+        let promotion_record = promotion_record_from_journal(journal)?;
+        let committed = match &promotion_record {
+            None => self.store.source_transition_is_committed(&record)?,
+            Some(promotion) => self
+                .promotion_store
+                .source_promotion_is_committed(promotion)?,
+        };
+        if !committed {
             return Err(SourceTransitionError::Validation(
                 "the Source Release no longer matches the result window".into(),
             ));
@@ -766,10 +1154,7 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
-            if !self
-                .filesystem
-                .path_is_directory(&member.final_entity_path)?
-            {
+            if !self.filesystem.path_is_directory(&member.namespace_path)? {
                 return Err(SourceTransitionError::Validation(format!(
                     "the Managed Skill '{}' is no longer a directory",
                     member.directory_name
@@ -777,7 +1162,7 @@ impl SourceTransitionService {
             }
             let final_snapshot = self
                 .filesystem
-                .staged_tree_snapshot(&member.final_entity_path)?;
+                .staged_tree_snapshot(&member.namespace_path)?;
             if final_snapshot.content_hash != member.tree_hash {
                 return Err(SourceTransitionError::Validation(format!(
                     "the Managed Skill '{}' changed after confirmation",
@@ -798,7 +1183,47 @@ impl SourceTransitionService {
                 )));
             }
         }
+        for removed in &journal.removed_members {
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::Validation(format!(
+                    "the removed legacy member '{}' reappeared",
+                    removed.directory_name
+                )));
+            }
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::Validation(format!(
+                    "the preservation copy for removed member '{}' is unavailable",
+                    removed.directory_name
+                ))
+            })?;
+            let snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
+            if snapshot.content_hash != removed.tree_hash {
+                return Err(SourceTransitionError::Validation(format!(
+                    "the preservation copy for removed member '{}' changed",
+                    removed.directory_name
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Occupancy probe for the immutable namespace that treats a namespace
+    /// whose hierarchy is not a directory (`ENOTDIR`/`ENOENT` during a
+    /// workspace-level collision) as unoccupied; the later install/snapshot
+    /// checks still fail closed on the real state.
+    fn namespace_occupied(&self, path: &Path) -> Result<bool, SourceTransitionError> {
+        match self.filesystem.path_is_occupied(path) {
+            Ok(occupied) => Ok(occupied),
+            Err(FileSystemError::Io { source, .. })
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn reserve_member_destinations(
@@ -807,10 +1232,7 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         for member in &journal.members {
-            if self
-                .filesystem
-                .path_is_occupied(&member.final_entity_path)?
-            {
+            if self.namespace_occupied(&member.namespace_path)? {
                 return Err(SourceTransitionError::PreviewStale);
             }
             let expected = member.staged_snapshot.as_ref().ok_or_else(|| {
@@ -823,9 +1245,9 @@ impl SourceTransitionService {
             if staged_snapshot.content_hash != expected.content_hash {
                 return Err(SourceTransitionError::PreviewStale);
             }
-            self.filesystem.install_staged_skill(
+            self.install_git_snapshot(
                 &member.staged_root,
-                &member.final_entity_path,
+                &member.namespace_path,
                 library_root,
                 &journal.operation_id,
                 expected,
@@ -839,10 +1261,7 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         for member in &journal.members {
-            if self
-                .filesystem
-                .path_is_occupied(&member.final_entity_path)?
-            {
+            if self.namespace_occupied(&member.namespace_path)? {
                 return Err(SourceTransitionError::PreviewStale);
             }
         }
@@ -854,15 +1273,12 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         for member in &journal.members {
-            if !self
-                .filesystem
-                .path_is_directory(&member.final_entity_path)?
-            {
+            if !self.filesystem.path_is_directory(&member.namespace_path)? {
                 return Err(SourceTransitionError::PreviewStale);
             }
             let snapshot = self
                 .filesystem
-                .staged_tree_snapshot(&member.final_entity_path)?;
+                .staged_tree_snapshot(&member.namespace_path)?;
             if snapshot.content_hash != member.tree_hash {
                 return Err(SourceTransitionError::PreviewStale);
             }
@@ -904,6 +1320,18 @@ impl SourceTransitionService {
                 return Err(SourceTransitionError::PreviewStale);
             }
         }
+        for removed in &journal.removed_members {
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(format!(
+                    "the isolated removed member '{}' is missing from the journal",
+                    removed.directory_name
+                ))
+            })?;
+            let snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
+            if snapshot.content_hash != removed.tree_hash {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+        }
         Ok(())
     }
 
@@ -937,11 +1365,19 @@ impl SourceTransitionService {
             }
             let snapshot = self
                 .filesystem
-                .staged_tree_snapshot(&member.final_entity_path)?;
+                .staged_tree_snapshot(&member.namespace_path)?;
             if snapshot.content_hash != member.tree_hash {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "Managed Skill '{}' does not match the fixed Source Release",
                     member.directory_name
+                )));
+            }
+        }
+        for removed in &journal.removed_members {
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "removed legacy member '{}' reappeared after the commit point",
+                    removed.directory_name
                 )));
             }
         }
@@ -977,9 +1413,9 @@ impl SourceTransitionService {
                 remote_id: journal.remote_id.clone(),
                 canonical_url: journal.canonical_url.clone(),
                 provider: Some(journal.provider.clone()),
-                tracking_mode: None,
-                tracking_value: None,
-                current_selected_ref: None,
+                tracking_mode: Some(journal.tracking_mode.clone()),
+                tracking_value: journal.tracking_value.clone(),
+                current_selected_ref: Some(journal.selected_ref.clone()),
                 current_release_id: Some(journal.release_id.clone()),
                 aliases: Vec::new(),
                 created_at: iso_timestamp(self.clock.unix_epoch_nanos()),
@@ -1045,9 +1481,11 @@ impl SourceTransitionService {
             ));
         }
         for entry in &entries {
-            if expected.get(&entry.name) != Some(&entry.skill_path)
-                || entry.requested_ref.as_deref().unwrap_or("HEAD") != preview.tracking_ref
-            {
+            // The lock-declared ref is a legacy hint (Repository Ref Conflict
+            // is handled at preview); the exact CAS only needs every claim of
+            // this repository to be released together. The claimed member
+            // identity must still match the frozen source.
+            if expected.get(&entry.name) != Some(&entry.skill_path) {
                 return Err(SourceTransitionError::Validation(format!(
                     "external lock entry '{}' does not match the fixed source release",
                     entry.name
@@ -1215,6 +1653,7 @@ impl SourceTransitionService {
         }
         for member in &journal.members {
             if !is_safe_source_transition_member_name(&member.directory_name)
+                || !is_safe_source_transition_member_name(&member.skill_id)
                 || member.identity_key != skill_identity_key(&member.directory_name)
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
@@ -1229,8 +1668,8 @@ impl SourceTransitionService {
                 )));
             };
             if member.staged_root != staging_root.join(&member.directory_name)
-                || member.final_entity_path
-                    != library_root.join("skills").join(&member.directory_name)
+                || member.namespace_path
+                    != git_member_namespace_path(library_root, &journal.remote_id, &member.skill_id)
                 || member.canonical_entity != external_root.join(&member.directory_name)
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
@@ -1261,13 +1700,44 @@ impl SourceTransitionService {
                     claim.name
                 ))
             })?;
-            if claim.skill_path != member.skill_path
-                || source.url != journal.canonical_url
-                || claim.requested_ref.as_deref().unwrap_or("HEAD") != journal.tracking_ref
-            {
+            if claim.skill_path != member.skill_path || source.url != journal.canonical_url {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "the Source Transition journal claim '{}' changed repository facts",
                     claim.name
+                )));
+            }
+        }
+        for removed in &journal.removed_members {
+            if !is_safe_source_transition_member_name(&removed.directory_name)
+                || !is_safe_source_transition_member_name(&removed.skill_id)
+                || !removed.legacy_path.starts_with(library_root)
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Transition journal removed member '{}' escapes its Legacy root",
+                    removed.directory_name
+                )));
+            }
+            let expected_isolated = removed
+                .legacy_path
+                .parent()
+                .ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "removed member path has no parent".into(),
+                    )
+                })?
+                .join(format!(
+                    ".skill-man-source-transition-{}-{}",
+                    journal.operation_id, removed.directory_name
+                ));
+            let expected_isolated = self
+                .filesystem
+                .normalize_configured_path(&expected_isolated)?;
+            if let Some(isolated_path) = &removed.isolated_path
+                && self.filesystem.normalize_configured_path(isolated_path)? != expected_isolated
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Transition journal removal isolation path for '{}' escapes its root",
+                    removed.directory_name
                 )));
             }
         }
@@ -1350,6 +1820,35 @@ impl SourceTransitionService {
         self.write_gate.mark_blocked();
         SourceTransitionError::RecoveryRequired(format!("{context}: {error}"))
     }
+
+    /// Install one staged snapshot into the immutable namespace. `expect` is
+    /// the frozen staged snapshot (tree hash + file/byte counts) so a
+    /// concurrent change after staging is a pre-CAS stale error.
+    fn install_git_snapshot(
+        &self,
+        staged_root: &Path,
+        namespace_path: &Path,
+        library_root: &Path,
+        operation_id: &str,
+        expected: &crate::seams::filesystem::StagedTreeSnapshot,
+    ) -> Result<(), SourceTransitionError> {
+        self.filesystem.install_git_member_snapshot(
+            staged_root,
+            namespace_path,
+            library_root,
+            operation_id,
+            expected,
+        )?;
+        Ok(())
+    }
+}
+
+/// The immutable snapshot path of one Git member (ADR-0018 §Home 与 Catalog).
+fn git_member_namespace_path(library_root: &Path, remote_id: &str, skill_id: &str) -> PathBuf {
+    library_root
+        .join(GIT_SKILLS_NAMESPACE)
+        .join(remote_id)
+        .join(skill_id)
 }
 
 fn is_safe_source_transition_member_name(name: &str) -> bool {
@@ -1367,6 +1866,57 @@ enum LockClaimState {
     Released,
 }
 
+/// Fail-closed default: promotion needs a real Legacy reader.
+struct UnavailableSourcePromotionStore;
+
+impl SourcePromotionStore for UnavailableSourcePromotionStore {
+    fn read_legacy_source_promotion(
+        &self,
+        _remote_id: &str,
+    ) -> Result<LegacySourcePromotionRecord, SourcePromotionStoreError> {
+        Err(SourcePromotionStoreError::Unavailable(
+            "no Legacy Source Promotion store is configured".into(),
+        ))
+    }
+
+    fn validate_source_promotion(
+        &self,
+        _record: &SourcePromotionRecord,
+    ) -> Result<(), SourcePromotionStoreError> {
+        Err(SourcePromotionStoreError::Unavailable(
+            "no Legacy Source Promotion store is configured".into(),
+        ))
+    }
+
+    fn commit_source_promotion(
+        &self,
+        _record: SourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        Err(SourcePromotionStoreError::Unavailable(
+            "no Legacy Source Promotion store is configured".into(),
+        ))
+    }
+
+    fn source_promotion_is_committed(
+        &self,
+        _record: &SourcePromotionRecord,
+    ) -> Result<bool, SourcePromotionStoreError> {
+        Err(SourcePromotionStoreError::Unavailable(
+            "no Legacy Source Promotion store is configured".into(),
+        ))
+    }
+
+    fn undo_source_promotion(
+        &self,
+        _record: &SourcePromotionRecord,
+        _legacy: &LegacySourcePromotionRecord,
+    ) -> Result<u64, SourcePromotionStoreError> {
+        Err(SourcePromotionStoreError::Unavailable(
+            "no Legacy Source Promotion store is configured".into(),
+        ))
+    }
+}
+
 fn record_from_journal(
     journal: &SourceTransitionJournal,
 ) -> Result<SourceTransitionRecord, SourceTransitionError> {
@@ -1375,33 +1925,171 @@ fn record_from_journal(
             .members
             .iter()
             .any(|member| member.tree_hash.is_empty() || member.staged_snapshot.is_none())
+        || journal
+            .removed_members
+            .iter()
+            .any(|member| member.tree_hash.is_empty())
     {
         return Err(SourceTransitionError::RecoveryRequired(
             "the Source Transition journal is missing frozen staged member facts".into(),
         ));
     }
-    Ok(SourceTransitionRecord {
-        remote_id: journal.remote_id.clone(),
-        provider: journal.provider.clone(),
-        canonical_url: journal.canonical_url.clone(),
-        tracking_ref: journal.tracking_ref.clone(),
-        release_id: journal.release_id.clone(),
-        resolved_commit: journal.resolved_commit.clone(),
-        members: journal
-            .members
-            .iter()
-            .map(|member| SourceTransitionMemberRecord {
+    match &journal.promotion_legacy {
+        None => Ok(SourceTransitionRecord {
+            remote_id: journal.remote_id.clone(),
+            provider: journal.provider.clone(),
+            canonical_url: journal.canonical_url.clone(),
+            aliases: Vec::new(),
+            tracking_mode: journal.tracking_mode.clone(),
+            tracking_value: journal.tracking_value.clone(),
+            selection_kind: journal.selection_kind.clone(),
+            selected_ref: journal.selected_ref.clone(),
+            release_id: journal.release_id.clone(),
+            resolved_commit: journal.resolved_commit.clone(),
+            members: journal_member_records(journal),
+        }),
+        Some(legacy) => Ok(SourceTransitionRecord {
+            remote_id: journal.remote_id.clone(),
+            provider: journal.provider.clone(),
+            canonical_url: journal.canonical_url.clone(),
+            aliases: legacy.aliases.clone(),
+            tracking_mode: journal.tracking_mode.clone(),
+            tracking_value: journal.tracking_value.clone(),
+            selection_kind: journal.selection_kind.clone(),
+            selected_ref: journal.selected_ref.clone(),
+            release_id: journal.release_id.clone(),
+            resolved_commit: journal.resolved_commit.clone(),
+            members: journal_member_records(journal),
+        }),
+    }
+}
+
+fn journal_member_records(journal: &SourceTransitionJournal) -> Vec<SourceTransitionMemberRecord> {
+    journal
+        .members
+        .iter()
+        .map(|member| SourceTransitionMemberRecord {
+            skill_id: SkillId(member.skill_id.clone()),
+            directory_name: member.directory_name.clone(),
+            identity_key: member.identity_key.clone(),
+            display_name: member.display_name.clone(),
+            description: member.description.clone(),
+            storage_relpath: format!(
+                "{GIT_SKILLS_NAMESPACE}/{}/{}",
+                journal.remote_id, member.skill_id
+            ),
+            skill_path: member.skill_path.clone(),
+            tree_hash: member.tree_hash.clone(),
+            provider_hash: member.provider_hash.clone(),
+        })
+        .collect()
+}
+
+/// Build the v9 Promotion record from a frozen journal. The complete target
+/// release members map to `Legacy`/`New` by journal action; removed legacy
+/// members carry their frozen audit entity.
+pub(crate) fn promotion_record_from_journal(
+    journal: &SourceTransitionJournal,
+) -> Result<Option<SourcePromotionRecord>, SourceTransitionError> {
+    let Some(legacy) = &journal.promotion_legacy else {
+        return Ok(None);
+    };
+    let record = record_from_journal(journal)?;
+    let _ = &record;
+    let removed_members = journal
+        .removed_members
+        .iter()
+        .map(|removed| {
+            let legacy_entity = legacy
+                .members
+                .iter()
+                .find(|member| member.skill_id.0 == removed.skill_id)
+                .cloned()
+                .ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(format!(
+                        "the removed member '{}' has no frozen legacy audit",
+                        removed.directory_name
+                    ))
+                })?;
+            Ok(SourcePromotionRemovedMemberRecord {
+                skill_id: SkillId(removed.skill_id.clone()),
+                directory_name: removed.directory_name.clone(),
+                legacy_entity,
+            })
+        })
+        .collect::<Result<Vec<_>, SourceTransitionError>>()?;
+    let members = journal
+        .members
+        .iter()
+        .map(|member| {
+            let legacy_entity = member
+                .action
+                .eq(&crate::seams::filesystem::SourceTransitionMemberAction::Current)
+                .then(|| {
+                    legacy
+                        .members
+                        .iter()
+                        .find(|entry| entry.skill_id.0 == member.skill_id)
+                        .cloned()
+                })
+                .flatten();
+            SourcePromotionMemberRecord {
+                origin: if member
+                    .action
+                    .eq(&crate::seams::filesystem::SourceTransitionMemberAction::Current)
+                {
+                    SourcePromotionMemberOrigin::Legacy
+                } else {
+                    SourcePromotionMemberOrigin::New
+                },
                 skill_id: SkillId(member.skill_id.clone()),
                 directory_name: member.directory_name.clone(),
                 identity_key: member.identity_key.clone(),
                 display_name: member.display_name.clone(),
                 description: member.description.clone(),
-                library_entry_path: member.final_entity_path.clone(),
-                final_entity_path: member.final_entity_path.clone(),
+                storage_relpath: format!(
+                    "{GIT_SKILLS_NAMESPACE}/{}/{}",
+                    journal.remote_id, member.skill_id
+                ),
                 skill_path: member.skill_path.clone(),
                 tree_hash: member.tree_hash.clone(),
                 provider_hash: member.provider_hash.clone(),
-            })
+                legacy_entity,
+            }
+        })
+        .collect();
+    Ok(Some(SourcePromotionRecord {
+        remote_id: journal.remote_id.clone(),
+        provider: journal.provider.clone(),
+        canonical_url: journal.canonical_url.clone(),
+        tracking_mode: journal.tracking_mode.clone(),
+        tracking_value: journal.tracking_value.clone(),
+        selection_kind: journal.selection_kind.clone(),
+        selected_ref: journal.selected_ref.clone(),
+        release_id: journal.release_id.clone(),
+        resolved_commit: journal.resolved_commit.clone(),
+        operation_id: journal.operation_id.clone(),
+        legacy: legacy.clone(),
+        legacy_member_ids: legacy
+            .members
+            .iter()
+            .map(|member| member.skill_id.clone())
             .collect(),
-    })
+        members,
+        removed_members,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_namespace_paths_are_stable_by_remote_and_skill_id() {
+        let library = Path::new("/Library/skill-man");
+        assert_eq!(
+            git_member_namespace_path(library, "remote-1", "skill-2"),
+            PathBuf::from("/Library/skill-man/skills/git/remote-1/skill-2")
+        );
+    }
 }

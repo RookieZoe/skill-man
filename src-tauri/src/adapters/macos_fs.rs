@@ -1334,6 +1334,114 @@ impl FileSystem for MacOsFileSystem {
             })
     }
 
+    fn install_git_member_snapshot(
+        &self,
+        staged_skill_path: &Path,
+        namespace_path: &Path,
+        library_root: &Path,
+        operation_id: &str,
+        expected_staged_tree: &StagedTreeSnapshot,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let staging_root = library_root.join("staging");
+        let git_namespace_root = library_root.join("skills/git");
+        let staged_skill_path = self.normalize_configured_path(staged_skill_path)?;
+        let namespace_path = self.normalize_configured_path(namespace_path)?;
+        if !staged_skill_path.starts_with(&staging_root)
+            || namespace_path.parent().and_then(|parent| parent.parent())
+                != Some(git_namespace_root.as_path())
+            || namespace_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| name.is_empty() || name.contains('/'))
+        {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: namespace_path,
+            });
+        }
+        if staged_tree_snapshot_at(&staged_skill_path)? != *expected_staged_tree {
+            return Err(FileSystemError::Io {
+                operation: "verify staged Git member before install",
+                path: staged_skill_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the staged member changed after preview",
+                ),
+            });
+        }
+        if fs::symlink_metadata(&namespace_path).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "preflight stable Git member path",
+                path: namespace_path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the Git member snapshot is occupied",
+                ),
+            });
+        }
+        // The two-level namespace (`<remote_id>/<skill_id>`) is created so a
+        // fresh source never crosses an existing member directory.
+        fs::create_dir_all(&git_namespace_root).map_err(|source| FileSystemError::Io {
+            operation: "create Git member namespace",
+            path: git_namespace_root.clone(),
+            source,
+        })?;
+        let remote_directory = namespace_path
+            .parent()
+            .expect("validated parent")
+            .to_path_buf();
+        fs::create_dir_all(&remote_directory).map_err(|source| FileSystemError::Io {
+            operation: "create Git member remote namespace",
+            path: remote_directory,
+            source,
+        })?;
+        let temporary_path = namespace_path
+            .parent()
+            .expect("validated parent")
+            .join(format!(
+                ".{}.new-{operation_id}",
+                namespace_path
+                    .file_name()
+                    .expect("validated name")
+                    .to_string_lossy()
+            ));
+        if fs::symlink_metadata(&temporary_path).is_ok() {
+            return Err(FileSystemError::Io {
+                operation: "preflight temporary Git member path",
+                path: temporary_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "the temporary Git member path is occupied",
+                ),
+            });
+        }
+        fs::rename(&staged_skill_path, &temporary_path).map_err(|source| FileSystemError::Io {
+            operation: "move staged Git member to temporary path",
+            path: staged_skill_path.clone(),
+            source,
+        })?;
+        if let Err(source) = fs::rename(&temporary_path, &namespace_path) {
+            if let Err(compensation) = fs::rename(&temporary_path, &staged_skill_path) {
+                return Err(FileSystemError::Io {
+                    operation: "restore staged Git member after install failure",
+                    path: temporary_path,
+                    source: compensation,
+                });
+            }
+            return Err(FileSystemError::Io {
+                operation: "move staged Git member to stable namespace path",
+                path: namespace_path,
+                source,
+            });
+        }
+        self.directory_fingerprint(&namespace_path)
+            .map_err(|error| FileSystemError::RecoveryRequired {
+                operation: "fingerprint Git member snapshot",
+                path: namespace_path.clone(),
+                message: format!("Git member snapshot fingerprint failed: {error}"),
+            })
+    }
+
     fn discard_staging(
         &self,
         staging_operation_root: &Path,
@@ -4738,7 +4846,7 @@ const REMOTE_PARENT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const HANDOFF_JOURNAL_VERSION: u32 = 1;
 /// The durable whole-source journal schema written for Git Repository
 /// Source transitions. It stays distinct from legacy per-Skill handoff.
-const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 1;
+const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 2;
 
 fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;

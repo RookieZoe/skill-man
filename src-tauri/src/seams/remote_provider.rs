@@ -61,6 +61,18 @@ pub struct AnchorResolution {
     pub original_install_commit_known: bool,
 }
 
+/// One provider Release fact for Source Tracking Policy evaluation
+/// (ADR-0018). Providers without a formal Release concept report an empty
+/// list; the policy then falls back to tags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderReleaseFact {
+    pub tag_name: String,
+    pub is_prerelease: bool,
+    pub is_draft: bool,
+    /// Provider publish time, epoch nanoseconds; `None` sorts as oldest.
+    pub published_at: Option<u128>,
+}
+
 /// The provider facts the Core combines into a closed-loop verdict.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteTreeFacts {
@@ -108,6 +120,18 @@ pub trait RemoteProvider: Send + Sync {
         request: &RemoteRequest,
         workspace: &Path,
     ) -> Result<RemoteTreeFacts, RemoteProviderError>;
+
+    /// The provider's formal Releases for `canonical_url`, newest first is
+    /// not required (the policy sorts deterministically). Generic Git
+    /// providers have no releases and return an empty list; a provider
+    /// outage is a `Deferred` availability fact and never a silent fallback.
+    fn list_releases(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Vec<ProviderReleaseFact>, RemoteProviderError> {
+        let _ = canonical_url;
+        Ok(Vec::new())
+    }
 }
 
 /// Fail-closed default: no remote verification can fabricate evidence until

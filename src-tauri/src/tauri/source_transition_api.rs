@@ -66,9 +66,9 @@ fn command_error(error: SourceTransitionError) -> CommandFailureDto {
         SourceTransitionError::FileSystem(
             crate::seams::filesystem::FileSystemError::RecoveryRequired { .. },
         ) => PublicErrorDto::RecoveryRequired,
-        SourceTransitionError::FileSystem(_) | SourceTransitionError::Store(_) => {
-            PublicErrorDto::StateUnavailable
-        }
+        SourceTransitionError::FileSystem(_)
+        | SourceTransitionError::Store(_)
+        | SourceTransitionError::PromotionStore(_) => PublicErrorDto::StateUnavailable,
     };
     CommandFailureDto {
         error: public_error,

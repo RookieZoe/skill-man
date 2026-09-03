@@ -545,10 +545,38 @@ pub struct SourceTransitionJournalMember {
     pub isolated_path: Option<PathBuf>,
     pub staged_root: PathBuf,
     pub staged_snapshot: Option<StagedTreeSnapshot>,
-    pub final_entity_path: PathBuf,
+    /// The immutable namespace snapshot
+    /// (`<Library>/skills/git/<remote_id>/<skill_id>`, ADR-0018).
+    pub namespace_path: PathBuf,
     pub skill_path: String,
     pub tree_hash: String,
     pub provider_hash: Option<String>,
+    /// `Added` enters the Library with this release; `Current` reuses the
+    /// stable skill_id of the source's existing member (a promotion keeps a
+    /// legacy member with the same `skill_path`).
+    pub action: SourceTransitionMemberAction,
+}
+
+/// One `Current`/`Removed` member of the frozen complete manifest (ADR-0018
+/// source-level lifecycle). For a clean transition both lists stay empty;
+/// a Legacy Source Promotion freezes the matched/removed legacy members here.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceTransitionMemberAction {
+    Added,
+    Current,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceTransitionRemovedMember {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub skill_path: String,
+    /// The legacy Home entity path; absent from the target release.
+    pub legacy_path: PathBuf,
+    pub tree_hash: String,
+    pub isolated_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -563,7 +591,10 @@ pub struct SourceTransitionJournal {
     pub release_id: String,
     pub provider: String,
     pub canonical_url: String,
-    pub tracking_ref: String,
+    pub tracking_mode: String,
+    pub tracking_value: Option<String>,
+    pub selection_kind: String,
+    pub selected_ref: String,
     pub resolved_commit: String,
     /// The exact managed-source manifest is frozen before the ownership CAS.
     /// Older journals predate Source Releases and recover through the
@@ -574,6 +605,14 @@ pub struct SourceTransitionJournal {
     pub lock_fingerprint: String,
     pub lock_entries: Vec<crate::seams::installer_lock_store::LockEntry>,
     pub members: Vec<SourceTransitionJournalMember>,
+    /// Every legacy member absent from the target release (a Promotion
+    /// only; a clean transition has none).
+    #[serde(default)]
+    pub removed_members: Vec<SourceTransitionRemovedMember>,
+    /// Frozen Legacy audit for a Source Promotion; recovered Undo restores
+    /// the exact pre-Promotion Catalog state from these bytes.
+    #[serde(default)]
+    pub promotion_legacy: Option<crate::seams::source_promotion_store::LegacySourcePromotionRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -746,6 +785,36 @@ pub trait FileSystem: Send + Sync {
         operation_id: &str,
         expected_staged_tree: &StagedTreeSnapshot,
     ) -> Result<DirectoryFingerprint, FileSystemError>;
+
+    /// Install one staged member snapshot into the immutable Git member
+    /// namespace `<library_root>/skills/git/<remote_id>/<skill_id>`
+    /// (ADR-0018). The namespace path is validated against the derived Git
+    /// namespace exactly like `install_staged_skill` validates the flat
+    /// allocation.
+    fn install_git_member_snapshot(
+        &self,
+        staged_skill_path: &Path,
+        namespace_path: &Path,
+        library_root: &Path,
+        operation_id: &str,
+        expected_staged_tree: &StagedTreeSnapshot,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = (
+            staged_skill_path,
+            namespace_path,
+            library_root,
+            operation_id,
+            expected_staged_tree,
+        );
+        Err(FileSystemError::Io {
+            operation: "install Git member snapshot",
+            path: namespace_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Git member snapshot install is not supported by this filesystem",
+            ),
+        })
+    }
 
     fn discard_staging(
         &self,

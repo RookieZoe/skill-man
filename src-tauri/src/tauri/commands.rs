@@ -39,11 +39,10 @@ use crate::tauri_adapter::dto::{
     PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, PublicErrorDto, RecoveryResultDto,
     RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
     RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
-    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionDraftDto,
-    SourcePromotionResultDto, SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto,
-    SourceTransitionResultDto, SourceUndoResultDto, StartRescanRequestDto, StartupInfoDto,
-    UndoAdoptRequestDto, UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto,
-    UpdateResultDto,
+    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionResultDto,
+    SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
+    SourceUndoResultDto, StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto,
+    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -176,7 +175,7 @@ pub fn fetch_latest_and_manage(
 pub fn preview_source_promotion(
     state: State<'_, SourcePromotionApi>,
     request: PreviewSourcePromotionRequestDto,
-) -> Result<SourcePromotionDraftDto, CommandFailureDto> {
+) -> Result<crate::tauri_adapter::dto::SourcePromotionDraftOutcomeDto, CommandFailureDto> {
     state.preview(request)
 }
 
@@ -223,7 +222,7 @@ pub fn finalize_source_promotion(
 pub fn preview_source_update(
     state: State<'_, SourceUpdateApi>,
     request: PreviewSourcePromotionRequestDto,
-) -> Result<SourcePromotionDraftDto, CommandFailureDto> {
+) -> Result<crate::tauri_adapter::dto::SourceUpdateDraftDto, CommandFailureDto> {
     state.preview(request)
 }
 
@@ -231,22 +230,9 @@ pub fn preview_source_update(
 pub fn confirm_source_update(
     state: State<'_, SourceUpdateApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    request: ConfirmSourcePromotionRequestDto,
-) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-    let result = state.confirm(request);
-    if result.is_ok() {
-        mutation.bump();
-    }
-    result
-}
-
-#[tauri::command]
-pub fn finalize_source_update(
-    state: State<'_, SourceUpdateApi>,
-    mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    request: SourceTransitionOperationRequestDto,
+    request: crate::tauri_adapter::dto::SourceUpdateConfirmRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    let result = state.finalize(request);
+    let result = state.confirm(request);
     if result.is_ok() {
         mutation.bump();
     }

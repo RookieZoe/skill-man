@@ -29,8 +29,9 @@ import type {
   SourceKind,
   SourceGroupPreviewOutcome,
   SourcePromotionDraft,
+  SourcePromotionDraftOutcome,
+  SourceUpdateDraft,
   SourcePromotionResult,
-  SourcePromotionResolution,
   SourceTransitionResult,
   StartupAgent,
 } from "../../app/catalog-client";
@@ -47,7 +48,6 @@ import {
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
-import { SourcePromotionFlow } from "./SourcePromotionFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
@@ -88,11 +88,13 @@ interface LibraryDeskProps {
   linkImportActivity: "idle" | "discovering" | "applying";
   sourceGroupType: GitRepositorySourceType;
   sourceGroupUrl: string;
-  sourceGroupRef: string;
+  sourceGroupPolicyMode: string;
+  sourceGroupPolicyValue: string;
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
+  sourcePromotionOutcome: SourcePromotionDraftOutcome | null;
+  sourceUpdateDraft: SourceUpdateDraft | null;
   sourceTransitionResult: SourceTransitionResult | null;
   sourcePromotionActive: boolean;
-  sourceUpdateActive: boolean;
   sourcePromotionDraft: SourcePromotionDraft | null;
   sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
@@ -126,13 +128,12 @@ interface LibraryDeskProps {
   onOpenImportedSkill: () => void;
   onSourceGroupTypeChange: (sourceType: GitRepositorySourceType) => void;
   onSourceGroupUrlChange: (sourceUrl: string) => void;
-  onSourceGroupRefChange: (trackingRef: string) => void;
+  onSourceGroupPolicyChange: (mode: string, value: string) => void;
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
   onPreviewSourcePromotion: (remoteId: string) => void;
   onPreviewSourceUpdate: (remoteId: string) => void;
-  onConfirmSourcePromotion: (resolutions: SourcePromotionResolution[]) => void;
-  onUndoSourcePromotion: () => void;
+  onConfirmSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
   onOpenAdopt: () => void;
   onRescanAdopt: () => void;
@@ -189,11 +190,13 @@ export function LibraryDesk({
   linkImportActivity,
   sourceGroupType,
   sourceGroupUrl,
-  sourceGroupRef,
+  sourceGroupPolicyMode,
+  sourceGroupPolicyValue,
   sourceGroupOutcome,
+  sourcePromotionOutcome,
+  sourceUpdateDraft,
   sourceTransitionResult,
   sourcePromotionActive,
-  sourceUpdateActive,
   sourcePromotionDraft,
   sourcePromotionResult,
   sourceGroupError,
@@ -218,13 +221,13 @@ export function LibraryDesk({
   onOpenImportedSkill,
   onSourceGroupTypeChange,
   onSourceGroupUrlChange,
-  onSourceGroupRefChange,
+  onSourceGroupPolicyChange,
   onConfirmSourceTransition,
   onUndoSourceTransition,
   onPreviewSourcePromotion,
   onPreviewSourceUpdate,
   onConfirmSourcePromotion,
-  onUndoSourcePromotion,
+
   onFetchLatestAndManage,
   isAdoptOpen,
   adoptReport,
@@ -570,11 +573,13 @@ export function LibraryDesk({
           activity={linkImportActivity}
           sourceGroupType={sourceGroupType}
           sourceGroupUrl={sourceGroupUrl}
-          sourceGroupRef={sourceGroupRef}
+          sourceGroupPolicyMode={sourceGroupPolicyMode}
+          sourceGroupPolicyValue={sourceGroupPolicyValue}
           sourceGroupOutcome={sourceGroupOutcome}
+          sourcePromotionOutcome={sourcePromotionOutcome}
+          sourceUpdateDraft={sourceUpdateDraft}
           sourceTransitionResult={sourceTransitionResult}
           sourcePromotionActive={sourcePromotionActive}
-          sourceUpdateActive={sourceUpdateActive}
           sourcePromotionDraft={sourcePromotionDraft}
           sourcePromotionResult={sourcePromotionResult}
           sourceGroupError={sourceGroupError}
@@ -586,12 +591,11 @@ export function LibraryDesk({
           onOpenImportedSkill={onOpenImportedSkill}
           onSourceGroupTypeChange={onSourceGroupTypeChange}
           onSourceGroupUrlChange={onSourceGroupUrlChange}
-          onSourceGroupRefChange={onSourceGroupRefChange}
+          onSourceGroupPolicyChange={onSourceGroupPolicyChange}
           onFetchLatestAndManage={onFetchLatestAndManage}
           onConfirmSourceTransition={onConfirmSourceTransition}
           onUndoSourceTransition={onUndoSourceTransition}
           onConfirmSourcePromotion={onConfirmSourcePromotion}
-          onUndoSourcePromotion={onUndoSourcePromotion}
         />
       ) : null}
       {isOnboardingOpen ? (
@@ -995,11 +999,13 @@ function LinkImportSheet({
   activity,
   sourceGroupType,
   sourceGroupUrl,
-  sourceGroupRef,
+  sourceGroupPolicyMode,
+  sourceGroupPolicyValue,
   sourceGroupOutcome,
+  sourcePromotionOutcome,
+  sourceUpdateDraft,
   sourceTransitionResult,
   sourcePromotionActive,
-  sourceUpdateActive,
   sourcePromotionDraft,
   sourcePromotionResult,
   sourceGroupError,
@@ -1011,12 +1017,11 @@ function LinkImportSheet({
   onOpenImportedSkill,
   onSourceGroupTypeChange,
   onSourceGroupUrlChange,
-  onSourceGroupRefChange,
+  onSourceGroupPolicyChange,
   onFetchLatestAndManage,
   onConfirmSourceTransition,
   onUndoSourceTransition,
   onConfirmSourcePromotion,
-  onUndoSourcePromotion,
 }: {
   kind: ImportKind;
   preview: LinkImportPreview | null;
@@ -1025,11 +1030,13 @@ function LinkImportSheet({
   activity: "idle" | "discovering" | "applying";
   sourceGroupType: GitRepositorySourceType;
   sourceGroupUrl: string;
-  sourceGroupRef: string;
+  sourceGroupPolicyMode: string;
+  sourceGroupPolicyValue: string;
   sourceGroupOutcome: SourceGroupPreviewOutcome | null;
+  sourcePromotionOutcome: SourcePromotionDraftOutcome | null;
+  sourceUpdateDraft: SourceUpdateDraft | null;
   sourceTransitionResult: SourceTransitionResult | null;
   sourcePromotionActive: boolean;
-  sourceUpdateActive: boolean;
   sourcePromotionDraft: SourcePromotionDraft | null;
   sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
@@ -1041,12 +1048,11 @@ function LinkImportSheet({
   onOpenImportedSkill: () => void;
   onSourceGroupTypeChange: (sourceType: GitRepositorySourceType) => void;
   onSourceGroupUrlChange: (sourceUrl: string) => void;
-  onSourceGroupRefChange: (trackingRef: string) => void;
+  onSourceGroupPolicyChange: (mode: string, value: string) => void;
   onFetchLatestAndManage: () => void;
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
-  onConfirmSourcePromotion: (resolutions: SourcePromotionResolution[]) => void;
-  onUndoSourcePromotion: () => void;
+  onConfirmSourcePromotion: () => void;
 }) {
   const { t } = useLocale();
   const [sourcePath, setSourcePath] = useState("");
@@ -1154,40 +1160,31 @@ function LinkImportSheet({
           <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
         ) : null}
         {isGit ? (
-          <>
-            {sourcePromotionActive ? (
-              <SourcePromotionFlow
-                draft={sourcePromotionDraft}
-                result={sourcePromotionResult}
-                error={sourceGroupError}
-                activity={sourceGroupActivity}
-                onConfirm={onConfirmSourcePromotion}
-                onUndo={onUndoSourcePromotion}
-                onClose={onClose}
-                initialFocusRef={primaryButton}
-                mode={sourceUpdateActive ? "update" : "promotion"}
-              />
-            ) : (
-              <>
-                <SourceGroupPreviewFlow
-                  sourceType={sourceGroupType}
-                  sourceUrl={sourceGroupUrl}
-                  trackingRef={sourceGroupRef}
-                  outcome={sourceGroupOutcome}
-                  result={sourceTransitionResult}
-                  error={sourceGroupError}
-                  activity={sourceGroupActivity}
-                  onSourceTypeChange={onSourceGroupTypeChange}
-                  onSourceUrlChange={onSourceGroupUrlChange}
-                  onTrackingRefChange={onSourceGroupRefChange}
-                  onFetch={onFetchLatestAndManage}
-                  onConfirm={onConfirmSourceTransition}
-                  onUndo={onUndoSourceTransition}
-                  onClose={onClose}
-                />
-              </>
-            )}
-          </>
+          <SourceGroupPreviewFlow
+            sourceType={sourceGroupType}
+            sourceUrl={sourceGroupUrl}
+            policyMode={sourceGroupPolicyMode}
+            policyValue={sourceGroupPolicyValue}
+            outcome={sourceGroupOutcome}
+            promotionDraft={sourcePromotionDraft}
+            promotionOutcome={sourcePromotionOutcome}
+            updateDraft={sourceUpdateDraft}
+            result={
+              sourcePromotionActive
+                ? sourcePromotionResult
+                : sourceTransitionResult
+            }
+            error={sourceGroupError}
+            activity={sourceGroupActivity}
+            onSourceTypeChange={onSourceGroupTypeChange}
+            onSourceUrlChange={onSourceGroupUrlChange}
+            onSourceGroupPolicyChange={onSourceGroupPolicyChange}
+            onFetch={onFetchLatestAndManage}
+            onConfirm={onConfirmSourceTransition}
+            onConfirmPromotion={onConfirmSourcePromotion}
+            onUndo={onUndoSourceTransition}
+            onClose={onClose}
+          />
         ) : result ? (
           <>
             <div className="activation-sheet-heading">

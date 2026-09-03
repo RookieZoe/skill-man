@@ -43,8 +43,10 @@ import type {
   SkillSummary,
   SourceGroupPreviewOutcome,
   SourcePromotionDraft,
+  SourcePromotionDraftOutcome,
+  SourceTrackingPolicy,
+  SourceUpdateDraft,
   SourcePromotionResult,
-  SourcePromotionResolution,
   SourceTransitionResult,
   StartupAgent,
 } from "./catalog-client";
@@ -239,7 +241,10 @@ export function App({ client }: AppProps) {
   const [sourceGroupType, setSourceGroupType] =
     useState<GitRepositorySourceType>("github");
   const [sourceGroupUrl, setSourceGroupUrl] = useState("");
-  const [sourceGroupRef, setSourceGroupRef] = useState("");
+  const [sourceGroupPolicyMode, setSourceGroupPolicyMode] = useState(
+    "auto_release_tag_head",
+  );
+  const [sourceGroupPolicyValue, setSourceGroupPolicyValue] = useState("");
   const [sourceGroupOutcome, setSourceGroupOutcome] =
     useState<SourceGroupPreviewOutcome | null>(null);
   const [sourceTransitionResult, setSourceTransitionResult] =
@@ -249,6 +254,10 @@ export function App({ client }: AppProps) {
   >(null);
   const [sourcePromotionDraft, setSourcePromotionDraft] =
     useState<SourcePromotionDraft | null>(null);
+  const [sourcePromotionOutcome, setSourcePromotionOutcome] =
+    useState<SourcePromotionDraftOutcome | null>(null);
+  const [sourceUpdateDraft, setSourceUpdateDraft] =
+    useState<SourceUpdateDraft | null>(null);
   const [sourcePromotionResult, setSourcePromotionResult] =
     useState<SourcePromotionResult | null>(null);
   const [sourceUpdateActive, setSourceUpdateActive] = useState(false);
@@ -513,12 +522,14 @@ export function App({ client }: AppProps) {
     setLinkImportError(null);
     setSourceGroupType("github");
     setSourceGroupUrl("");
-    setSourceGroupRef("");
+    setSourceGroupPolicyMode("auto_release_tag_head");
+    setSourceGroupPolicyValue("");
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -526,11 +537,23 @@ export function App({ client }: AppProps) {
     setIsLinkImportOpen(true);
   }
 
+  function sourceGroupTrackingPolicy(): SourceTrackingPolicy | null {
+    const mode = sourceGroupPolicyMode;
+    const value = sourceGroupPolicyValue.trim();
+    const needsValue =
+      mode === "prerelease_channel" ||
+      mode === "fixed_tag" ||
+      mode === "fixed_commit" ||
+      mode === "branch";
+    if (!needsValue) return { mode, value: null };
+    return value ? { mode, value } : null;
+  }
+
   async function fetchLatestAndManage(
     request: FetchLatestAndManageRequest = {
       sourceType: sourceGroupType,
       sourceUrl: sourceGroupUrl,
-      trackingRef: sourceGroupRef.trim() || null,
+      trackingPolicy: sourceGroupTrackingPolicy(),
     },
     preloadedPreview?: Promise<SourceGroupPreviewOutcome>,
   ) {
@@ -541,6 +564,7 @@ export function App({ client }: AppProps) {
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     try {
       const outcome = preloadedPreview
@@ -563,8 +587,10 @@ export function App({ client }: AppProps) {
     return {
       sourceType: source.sourceType,
       sourceUrl: source.sourceUrl,
-      trackingRef:
-        source.trackingRefs.length === 1 ? source.trackingRefs[0] : null,
+      trackingPolicy:
+        source.trackingRefs.length === 1
+          ? { mode: "branch", value: source.trackingRefs[0] }
+          : null,
     };
   }
 
@@ -572,7 +598,7 @@ export function App({ client }: AppProps) {
     return JSON.stringify([
       request.sourceType,
       request.sourceUrl,
-      request.trackingRef,
+      request.trackingPolicy,
     ]);
   }
 
@@ -604,7 +630,7 @@ export function App({ client }: AppProps) {
     if (adoptActivity !== "idle") return;
     const request = adoptSourceRequest(source);
     const preloadedPreview = preloadAdoptSourcePreview(request);
-    const trackingRef = request.trackingRef ?? "";
+    const trackingPolicy = request.trackingPolicy;
 
     adoptRunId.current += 1;
     setIsAdoptOpen(false);
@@ -621,12 +647,14 @@ export function App({ client }: AppProps) {
     setImportKind("git");
     setSourceGroupType(source.sourceType);
     setSourceGroupUrl(source.sourceUrl);
-    setSourceGroupRef(trackingRef);
+    setSourceGroupPolicyMode(trackingPolicy?.mode ?? "auto_release_tag_head");
+    setSourceGroupPolicyValue(trackingPolicy?.value ?? "");
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -674,6 +702,7 @@ export function App({ client }: AppProps) {
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -692,8 +721,14 @@ export function App({ client }: AppProps) {
       const result = await client.confirmSourceTransition({
         sourceType: sourceGroupType,
         sourceUrl: preview.sourceUrl,
-        trackingRef: preview.trackingRef,
-        expectedResolvedCommit: preview.resolvedCommit,
+        trackingPolicy: preview.policy.mode
+          ? {
+              mode: preview.policy.mode,
+              value: preview.policy.value,
+            }
+          : null,
+        expectedSelectedRef: preview.policy.selectedRef,
+        expectedResolvedCommit: preview.policy.resolvedCommit,
       });
       if (runId !== sourceGroupRunId.current) return;
       const snapshot = await client.listSkills(filter);
@@ -721,13 +756,22 @@ export function App({ client }: AppProps) {
     setSourcePromotionRemoteId(remoteId);
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("fetching");
     setIsLinkImportOpen(true);
     try {
-      const draft = await client.previewSourcePromotion(remoteId);
-      if (runId === sourceGroupRunId.current) setSourcePromotionDraft(draft);
+      const outcome = await client.previewSourcePromotion(
+        remoteId,
+        sourceGroupTrackingPolicy(),
+      );
+      if (runId === sourceGroupRunId.current) {
+        setSourcePromotionDraft(
+          outcome.kind === "draft" ? outcome.draft : null,
+        );
+        setSourcePromotionOutcome(outcome.kind === "draft" ? null : outcome);
+      }
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
         setSourceGroupError(readError(reason, t));
@@ -749,13 +793,16 @@ export function App({ client }: AppProps) {
     setSourcePromotionRemoteId(remoteId);
     setSourceUpdateActive(true);
     setSourcePromotionDraft(null);
+    setSourcePromotionOutcome(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("fetching");
     setIsLinkImportOpen(true);
     try {
       const draft = await client.previewSourceUpdate(remoteId);
-      if (runId === sourceGroupRunId.current) setSourcePromotionDraft(draft);
+      if (runId === sourceGroupRunId.current) {
+        setSourceUpdateDraft(draft);
+      }
     } catch (reason) {
       if (runId === sourceGroupRunId.current)
         setSourceGroupError(readError(reason, t));
@@ -764,22 +811,24 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function confirmSourcePromotion(
-    resolutions: SourcePromotionResolution[],
-  ) {
+  async function confirmSourcePromotion() {
     if (!sourcePromotionDraft) return;
     const runId = ++sourceGroupRunId.current;
     setSourceGroupActivity("confirming");
     setSourceGroupError(null);
     try {
-      const request = {
-        remoteId: sourcePromotionDraft.remoteId,
-        expectedResolvedCommit: sourcePromotionDraft.resolvedCommit,
-        resolutions,
-      };
       const result = sourceUpdateActive
-        ? await client.confirmSourceUpdate(request)
-        : await client.confirmSourcePromotion(request);
+        ? await client.confirmSourceUpdate({
+            remoteId: sourcePromotionDraft.remoteId,
+          })
+        : await client.confirmSourcePromotion({
+            remoteId: sourcePromotionDraft.remoteId,
+            sourceType: sourceGroupType,
+            sourceUrl: sourcePromotionDraft.sourceUrl,
+            trackingPolicy: sourceGroupTrackingPolicy(),
+            expectedSelectedRef: sourcePromotionDraft.policy.selectedRef,
+            expectedResolvedCommit: sourcePromotionDraft.policy.resolvedCommit,
+          });
       const snapshot = await client.listSkills(filter);
       if (runId !== sourceGroupRunId.current) return;
       setSkills(snapshot.items);
@@ -1486,12 +1535,14 @@ export function App({ client }: AppProps) {
         linkImportActivity={linkImportActivity}
         sourceGroupType={sourceGroupType}
         sourceGroupUrl={sourceGroupUrl}
-        sourceGroupRef={sourceGroupRef}
+        sourceGroupPolicyMode={sourceGroupPolicyMode}
+        sourceGroupPolicyValue={sourceGroupPolicyValue}
         sourceGroupOutcome={sourceGroupOutcome}
         sourceTransitionResult={sourceTransitionResult}
         sourcePromotionActive={sourcePromotionRemoteId !== null}
-        sourceUpdateActive={sourceUpdateActive}
         sourcePromotionDraft={sourcePromotionDraft}
+        sourcePromotionOutcome={sourcePromotionOutcome}
+        sourceUpdateDraft={sourceUpdateDraft}
         sourcePromotionResult={sourcePromotionResult}
         sourceGroupError={sourceGroupError}
         sourceGroupActivity={sourceGroupActivity}
@@ -1513,8 +1564,10 @@ export function App({ client }: AppProps) {
           setSourceGroupOutcome(null);
           setSourceGroupError(null);
         }}
-        onSourceGroupRefChange={(trackingRef) => {
-          setSourceGroupRef(trackingRef);
+        onSourceGroupPolicyChange={(mode, value) => {
+          setSourceGroupPolicyMode(mode);
+          setSourceGroupPolicyValue(value);
+          setSourceGroupOutcome(null);
           setSourceGroupError(null);
         }}
         onFetchLatestAndManage={fetchLatestAndManage}
@@ -1523,7 +1576,6 @@ export function App({ client }: AppProps) {
         onPreviewSourcePromotion={previewSourcePromotion}
         onPreviewSourceUpdate={previewSourceUpdate}
         onConfirmSourcePromotion={confirmSourcePromotion}
-        onUndoSourcePromotion={undoSourcePromotion}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}
