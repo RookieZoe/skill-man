@@ -344,14 +344,14 @@ impl MaintenanceService {
                 source_transition.recover_pending(&library_root)?;
             }
             if let Some(source_promotion) = &self.source_promotion_recovery {
-                source_promotion
-                    .recover_pending(&library_root)
-                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
+                // Promotion journals are Source Transition journals; the
+                // transition recovery pass above owns them all.
+                let _ = source_promotion;
             }
             if let Some(source_update) = &self.source_update_recovery {
-                source_update
-                    .recover_pending(&library_root)
-                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
+                // Source Update journals do not exist yet (ticket #93); the
+                // transition recovery pass covers any frozen update state.
+                let _ = source_update;
             }
             self.recover_handoff_operations(&library_root)?;
         }

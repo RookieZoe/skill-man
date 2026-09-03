@@ -381,7 +381,7 @@ test("preloads an Adopt Git Repository Source and reuses it when management open
   const requests: Array<{
     sourceType: string;
     sourceUrl: string;
-    trackingRef: string | null;
+    trackingPolicy: { mode: string; value: string | null } | null;
   }> = [];
   client.scanAdopt = async () => ({
     ...evidenceReport([]),
@@ -419,7 +419,7 @@ test("preloads an Adopt Git Repository Source and reuses it when management open
     {
       sourceType: "github",
       sourceUrl: "https://github.com/acme/skills",
-      trackingRef: "main",
+      trackingPolicy: { mode: "branch", value: "main" },
     },
   ]);
 
@@ -428,14 +428,21 @@ test("preloads an Adopt Git Repository Source and reuses it when management open
     preview: {
       provider: "github",
       sourceUrl: "https://github.com/acme/skills",
-      trackingRef: "main",
-      resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+      aliases: [],
+      policy: {
+        mode: "branch",
+        value: "main",
+        selectionKind: "branch",
+        selectedRef: "main",
+        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+      },
       members: [
         {
           directoryName: "alpha",
           displayName: "Alpha",
           description: "The repository member",
           skillPath: "alpha",
+          action: "added",
           treeSummary: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
       ],
@@ -470,7 +477,7 @@ test("retries an Adopt Git Repository Source after its background preview fails"
   const requests: Array<{
     sourceType: string;
     sourceUrl: string;
-    trackingRef: string | null;
+    trackingPolicy: { mode: string; value: string | null } | null;
   }> = [];
   client.scanAdopt = async () => ({
     ...evidenceReport([]),

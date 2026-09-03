@@ -510,6 +510,36 @@ impl SourceUpdateStore for RuntimeCatalogStore {
 }
 
 impl SourceTransitionStore for RuntimeCatalogStore {
+    fn existing_current_members(
+        &self,
+        canonical_url: &str,
+    ) -> Result<
+        Option<Vec<crate::seams::source_transition_store::ExistingSourceMember>>,
+        SourceTransitionStoreError,
+    > {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().existing_current_members(canonical_url)
+    }
+
+    fn existing_source(
+        &self,
+        remote_id: &str,
+    ) -> Result<
+        Option<crate::seams::source_transition_store::ExistingSourceFacts>,
+        SourceTransitionStoreError,
+    > {
+        if !self.is_writable() {
+            return Err(SourceTransitionStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().existing_source(remote_id)
+    }
+
     fn validate_new_source_transition(
         &self,
         record: &SourceTransitionRecord,

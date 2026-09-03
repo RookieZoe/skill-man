@@ -10,8 +10,14 @@ const preview: SourceGroupPreviewOutcome = {
   preview: {
     provider: "github",
     sourceUrl: "https://github.com/acme/repository",
-    trackingRef: "main",
-    resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+    aliases: [],
+    policy: {
+      mode: "branch",
+      value: "main",
+      selectionKind: "branch",
+      selectedRef: "main",
+      resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+    },
     members: [
       {
         directoryName: "root",
@@ -19,6 +25,7 @@ const preview: SourceGroupPreviewOutcome = {
         description: "The repository root member",
         skillPath: "",
         treeSummary: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        action: "added",
       },
       {
         directoryName: "nested",
@@ -26,6 +33,7 @@ const preview: SourceGroupPreviewOutcome = {
         description: "A nested member",
         skillPath: "packages/nested",
         treeSummary: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        action: "added",
       },
     ],
     externalOwnershipClaims: [
@@ -48,16 +56,21 @@ function renderFlow(outcome: SourceGroupPreviewOutcome | null) {
     <SourceGroupPreviewFlow
       sourceType="github"
       sourceUrl="https://github.com/acme/repository"
-      trackingRef=""
+      policyMode="branch"
+      policyValue="main"
       outcome={outcome}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
       result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
-      onTrackingRefChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
       onFetch={vi.fn()}
       onConfirm={vi.fn()}
+      onConfirmPromotion={vi.fn()}
       onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
@@ -121,16 +134,21 @@ test("blocks replacement before confirmation when a source member has no externa
     <SourceGroupPreviewFlow
       sourceType="github"
       sourceUrl="https://github.com/acme/repository"
-      trackingRef="main"
+      policyMode="branch"
+      policyValue="main"
       outcome={incomplete}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
       result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
-      onTrackingRefChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
       onFetch={vi.fn()}
       onConfirm={onConfirm}
+      onConfirmPromotion={vi.fn()}
       onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
@@ -154,10 +172,15 @@ test("offers only whole-source Undo in the completed result window", async () =>
     <SourceGroupPreviewFlow
       sourceType="github"
       sourceUrl="https://github.com/acme/repository"
-      trackingRef="main"
+      policyMode="branch"
+      policyValue="main"
       outcome={preview}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
       result={{
         operationId: "source-transition-1",
+        remoteId: "remote-1",
         releaseId: "source-release-1",
         resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
         memberCount: 2,
@@ -168,9 +191,10 @@ test("offers only whole-source Undo in the completed result window", async () =>
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
-      onTrackingRefChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
       onFetch={vi.fn()}
       onConfirm={vi.fn()}
+      onConfirmPromotion={vi.fn()}
       onUndo={onUndo}
       onClose={vi.fn()}
     />,
@@ -187,13 +211,14 @@ test("offers only whole-source Undo in the completed result window", async () =>
 
 test("requires a ref choice before re-fetching a typed ref conflict", async () => {
   const user = userEvent.setup();
-  const onTrackingRefChange = vi.fn();
+  const onPolicyChange = vi.fn();
   const onFetch = vi.fn();
   const { rerender } = render(
     <SourceGroupPreviewFlow
       sourceType="git"
       sourceUrl="https://example.com/acme/repository.git"
-      trackingRef=""
+      policyMode="branch"
+      policyValue=""
       outcome={{
         kind: "repository_ref_conflict",
         conflict: {
@@ -203,14 +228,18 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
           externalOwnershipClaims: [],
         },
       }}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
       result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
-      onTrackingRefChange={onTrackingRefChange}
+      onSourceGroupPolicyChange={onPolicyChange}
       onFetch={onFetch}
       onConfirm={vi.fn()}
+      onConfirmPromotion={vi.fn()}
       onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
@@ -224,7 +253,8 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
     <SourceGroupPreviewFlow
       sourceType="git"
       sourceUrl="https://example.com/acme/repository.git"
-      trackingRef="release"
+      policyMode="branch"
+      policyValue="release"
       outcome={{
         kind: "repository_ref_conflict",
         conflict: {
@@ -234,20 +264,24 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
           externalOwnershipClaims: [],
         },
       }}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
       result={null}
       error={null}
       activity="idle"
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
-      onTrackingRefChange={onTrackingRefChange}
+      onSourceGroupPolicyChange={onPolicyChange}
       onFetch={onFetch}
       onConfirm={vi.fn()}
+      onConfirmPromotion={vi.fn()}
       onUndo={vi.fn()}
       onClose={vi.fn()}
     />,
   );
   await user.click(screen.getByRole("button", { name: "Fetch selected ref" }));
 
-  expect(onTrackingRefChange).toHaveBeenCalledWith("release");
+  expect(onPolicyChange).toHaveBeenCalledWith("branch", "release");
   expect(onFetch).toHaveBeenCalledOnce();
 });

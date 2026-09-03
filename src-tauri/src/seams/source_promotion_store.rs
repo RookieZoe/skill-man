@@ -1,9 +1,13 @@
-//! Read-only Legacy Per-Skill Git State facts for Source Promotion.
+//! Read-only Legacy Per-Skill Git State facts and the atomic Promotion
+//! commit (ADR-0014, spec §8.3).
 //!
-//! This seam deliberately exposes neither a generic SQL handle nor a write
-//! operation.  Promotion first assembles a Source Group Draft from these
-//! immutable-at-read facts; the later source-level commit has a separate
-//! transaction seam.
+//! A Promotion is a Source Transition from an unambiguous Legacy parent. It
+//! re-fetches a complete Source Release through the same policy flow; old
+//! per-Skill refs, commits, anchors and baselines are audit/conflict
+//! evidence only and are never published as current release truth. No
+//! rename/mapping is guessed: a Legacy member is Current only when its
+//! `skill_path` exactly matches a discovered member; everything else is
+//! Added or Removed.
 
 use std::path::PathBuf;
 
@@ -18,6 +22,8 @@ pub struct LegacySourcePromotionRecord {
     pub canonical_url: String,
     pub aliases: Vec<String>,
     pub created_at: String,
+    /// The single legacy tracking ref (audit only; the new release is
+    /// discovered by policy/override).
     pub tracking_ref: String,
     /// Present only when the record represents a managed Source Update. A
     /// Legacy Source Promotion has no current Source Release to freeze.
@@ -68,7 +74,9 @@ pub struct SourcePromotionActivationRecord {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourcePromotionMemberOrigin {
+    /// Reuses the legacy skill_id and keeps its identity.
     Legacy,
+    /// A fresh member of the discovered release.
     New,
 }
 
@@ -80,45 +88,46 @@ pub struct SourcePromotionMemberRecord {
     pub identity_key: String,
     pub display_name: String,
     pub description: String,
-    pub final_entity_path: PathBuf,
+    /// `<Home>/skills/git/<remote_id>/<skill_id>`.
+    pub storage_relpath: String,
     pub skill_path: String,
-    pub remote_baseline_hash: String,
-    pub current_baseline_hash: String,
-    pub health: Health,
+    pub tree_hash: String,
+    pub provider_hash: Option<String>,
+    /// Legacy facts frozen for Undo when `origin` is `Legacy`.
+    #[serde(default)]
+    pub legacy_entity: Option<LegacySourcePromotionMemberRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum SourcePromotionRemovedMemberRecord {
-    Remove {
-        skill_id: SkillId,
-    },
-    LocalLink {
-        skill_id: SkillId,
-        final_entity_path: PathBuf,
-    },
+pub struct SourcePromotionRemovedMemberRecord {
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    /// Legacy audit facts frozen for Undo.
+    pub legacy_entity: LegacySourcePromotionMemberRecord,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourcePromotionRecord {
-    /// Existing stable parent id.  A Promotion must never allocate another.
+    /// Existing stable parent id. A Promotion must never allocate another.
     pub remote_id: String,
     pub provider: String,
     pub canonical_url: String,
-    pub tracking_ref: String,
+    pub tracking_mode: String,
+    pub tracking_value: Option<String>,
+    pub selection_kind: String,
+    pub selected_ref: String,
     pub release_id: String,
     pub resolved_commit: String,
     /// The immutable operation id also keys the durable legacy audit.
     pub operation_id: String,
-    /// Frozen Legacy facts rechecked at Catalog commit. They remain audit
-    /// evidence only; no field is copied into current release truth.
+    /// Frozen Legacy facts rechecked at Catalog commit. They remain journal
+    /// audit only; nothing is copied into current release truth.
     pub legacy: LegacySourcePromotionRecord,
     /// Exact legacy binding ids observed before filesystem work begins.
     pub legacy_member_ids: Vec<SkillId>,
-    /// The complete target Source Release, including existing/mapped and new
-    /// Source Members.
+    /// The complete target Source Release.
     pub members: Vec<SourcePromotionMemberRecord>,
-    /// Every legacy member absent from the target release, each explicitly
-    /// Removed or converted to a Local Link.
+    /// Every legacy member absent from the target release.
     pub removed_members: Vec<SourcePromotionRemovedMemberRecord>,
 }
 
@@ -130,20 +139,20 @@ pub enum SourcePromotionStoreError {
     Unavailable(String),
 }
 
-/// The promotion entry point accepts only a durable parent id.  The adapter
+/// The promotion entry point accepts only a durable parent id. The adapter
 /// proves that it is still a Legacy parent with a single ref and a complete
-/// per-Skill member set; Core never accepts legacy parent/member facts from a
-/// client DTO.
+/// per-Skill member set; Core never accepts legacy parent/member facts from
+/// a client DTO.
 pub trait SourcePromotionStore: Send + Sync {
     fn read_legacy_source_promotion(
         &self,
         remote_id: &str,
     ) -> Result<LegacySourcePromotionRecord, SourcePromotionStoreError>;
 
-    /// Preflight and atomically commit one full Source Promotion.  The final
+    /// Preflight and atomically commit one full Source Promotion. The final
     /// transaction rechecks the exact Legacy member set, retains `remote_id`,
     /// creates the repository/release facts, and converts every source member
-    /// together.  No individual legacy binding can be promoted alone.
+    /// together. No individual legacy binding can be promoted alone.
     fn validate_source_promotion(
         &self,
         record: &SourcePromotionRecord,

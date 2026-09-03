@@ -5,6 +5,7 @@ use std::sync::Arc;
 use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreviewOutcome, SourceGroupPreviewService,
+    SourceTrackingOverride,
 };
 use skill_man_lib::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockFileReport,
@@ -83,6 +84,22 @@ impl GitSource for FixtureGitSource {
     ) -> Result<(), SourceError> {
         self.inner
             .stage_skill(mirror_dir, commit, skill_path, destination)
+    }
+
+    fn list_tags(
+        &self,
+        mirror_dir: &Path,
+    ) -> Result<Vec<skill_man_lib::seams::source::GitTagFact>, SourceError> {
+        self.inner.list_tags(mirror_dir)
+    }
+
+    fn is_ancestor(
+        &self,
+        mirror_dir: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, SourceError> {
+        self.inner.is_ancestor(mirror_dir, ancestor, descendant)
     }
 }
 
@@ -164,7 +181,10 @@ fn fetch_latest_and_manage_previews_every_discovered_member_without_writing_a_dr
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "https://example.com/acme/source/".into(),
-            tracking_ref: Some("main".into()),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
         })
         .expect("read-only source preview");
 
@@ -172,7 +192,8 @@ fn fetch_latest_and_manage_previews_every_discovered_member_without_writing_a_dr
         panic!("a single unambiguous source should preview");
     };
     assert_eq!(preview.provider, "git");
-    assert_eq!(preview.tracking_ref, "main");
+    assert_eq!(preview.policy.selected_ref, "main");
+    assert_eq!(preview.policy.selection_kind, "branch");
     assert_eq!(preview.members.len(), 2);
     assert_eq!(
         preview
@@ -218,7 +239,7 @@ fn legacy_ref_conflict_requires_selection_before_fetching_or_writing() {
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "https://example.com/acme/source/".into(),
-            tracking_ref: None,
+            tracking_policy: None,
         })
         .expect("conflict is a typed read-only result");
 
@@ -248,14 +269,16 @@ fn ownership_split_refuses_confirmation_without_fetching_or_writing() {
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "https://example.com/acme/source.git".into(),
-            tracking_ref: Some("main".into()),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
         })
         .expect("split is a typed read-only result");
 
     let SourceGroupPreviewOutcome::RepositoryOwnershipSplit(split) = outcome else {
         panic!("ownership split must refuse confirmation");
     };
-    assert_eq!(split.tracking_ref, "main");
     assert_eq!(split.lock_paths.len(), 2);
     assert!(
         !workspace.path().join("home").exists(),
@@ -273,7 +296,10 @@ fn generic_source_requires_https_before_creating_a_cache_entry() {
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "http://example.com/acme/source.git".into(),
-            tracking_ref: Some("main".into()),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
         })
         .expect_err("generic non-HTTPS sources are not supported");
 
@@ -305,10 +331,148 @@ fn symlinked_skill_documents_refuse_a_partial_source_release() {
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "https://example.com/acme/source".into(),
-            tracking_ref: Some("main".into()),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
         })
         .expect_err("an unsafe member must not be silently omitted");
 
     assert!(error.to_string().contains("symlinked SKILL.md"));
     assert!(!home.join("cache").exists(), "no Home cache may be created");
+}
+
+#[test]
+fn default_policy_selects_the_highest_stable_semver_tag_when_no_release_exists() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let repo = committed_repo(workspace.path());
+    git(&repo, &["tag", "v1.2.0"]);
+    git(&repo, &["tag", "v2.0.0"]);
+    git(&repo, &["tag", "v3.0.0-beta.1"]);
+    git(&repo, &["tag", "not-a-version"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let outcome = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: None,
+        })
+        .expect("default policy preview");
+
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("a clean single source should preview");
+    };
+    assert_eq!(preview.policy.mode, "auto_release_tag_head");
+    assert_eq!(preview.policy.selection_kind, "semver_tag");
+    assert_eq!(preview.policy.selected_ref, "v2.0.0");
+    assert!(preview.policy.resolved_commit.len() == 40);
+    assert_eq!(preview.members.len(), 2);
+}
+
+#[test]
+fn explicit_fixed_tag_override_selects_the_requested_release() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let repo = committed_repo(workspace.path());
+    git(&repo, &["tag", "v1.2.0"]);
+    git(&repo, &["tag", "v2.0.0"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let outcome = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "fixed_tag".into(),
+                value: Some("v1.2.0".into()),
+            }),
+        })
+        .expect("fixed tag preview");
+
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("a fixed tag always previews one release");
+    };
+    assert_eq!(preview.policy.selection_kind, "fixed_tag");
+    assert_eq!(preview.policy.selected_ref, "v1.2.0");
+}
+
+#[test]
+fn default_policy_falls_back_to_head_when_no_tag_is_reachable() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let repo = committed_repo(workspace.path());
+    // An ordinary tag on an orphan branch is never reachable from the
+    // default branch, so the reachable ordinary-tag step must skip it.
+    git(&repo, &["checkout", "-q", "-b", "orphan"]);
+    write_file(
+        &repo,
+        "orphan/SKILL.md",
+        "---\nname: Orphan\n---\n# Orphan\n",
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "orphan"]);
+    git(&repo, &["tag", "orphan-release"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let outcome = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: None,
+        })
+        .expect("HEAD fallback preview");
+
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("a source with only unreachable tags still previews");
+    };
+    assert_eq!(preview.policy.selection_kind, "head");
+    assert_eq!(preview.policy.selected_ref, "HEAD");
+    assert_eq!(preview.members.len(), 2);
+}
+
+#[test]
+fn prerelease_channel_requires_an_explicit_channel_or_fails_closed() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let repo = committed_repo(workspace.path());
+    git(&repo, &["tag", "v2.0.0-rc.1"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let error = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "prerelease_channel".into(),
+                value: Some("beta".into()),
+            }),
+        })
+        .expect_err("an unfulfilled channel must stay closed");
+
+    assert!(
+        error.to_string().contains("prerelease"),
+        "the channel failure is a typed policy error"
+    );
+    let outcome = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "prerelease_channel".into(),
+                value: Some("rc".into()),
+            }),
+        })
+        .expect("matching channel preview");
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("a matching channel previews its release");
+    };
+    assert_eq!(preview.policy.selection_kind, "prerelease_channel");
+    assert_eq!(preview.policy.selected_ref, "v2.0.0-rc.1");
 }

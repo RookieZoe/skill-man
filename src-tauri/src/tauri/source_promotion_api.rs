@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::core::source_promotion::{SourcePromotionError, SourcePromotionService};
 use crate::tauri_adapter::dto::{
     CommandFailureDto, ConfirmSourcePromotionRequestDto, DiagnosticDto,
-    PreviewSourcePromotionRequestDto, PublicErrorDto, SourcePromotionDraftDto,
+    PreviewSourcePromotionRequestDto, PublicErrorDto, SourcePromotionDraftOutcomeDto,
     SourcePromotionResultDto, SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto,
 };
 
@@ -19,9 +19,9 @@ impl SourcePromotionApi {
     pub fn preview(
         &self,
         request: PreviewSourcePromotionRequestDto,
-    ) -> Result<SourcePromotionDraftDto, CommandFailureDto> {
+    ) -> Result<SourcePromotionDraftOutcomeDto, CommandFailureDto> {
         self.service
-            .preview(&request.remote_id)
+            .preview(&request.remote_id, request.tracking_policy.map(Into::into))
             .map(Into::into)
             .map_err(command_error)
     }
@@ -58,15 +58,10 @@ impl SourcePromotionApi {
 
 fn command_error(error: SourcePromotionError) -> CommandFailureDto {
     let public_error = match &error {
-        SourcePromotionError::Validation(_)
-        | SourcePromotionError::Draft(_)
-        | SourcePromotionError::OwnershipConflict => PublicErrorDto::Validation,
+        SourcePromotionError::Validation(_) => PublicErrorDto::Validation,
         SourcePromotionError::Store(_) => PublicErrorDto::CatalogUnavailable,
-        SourcePromotionError::Preview(_) | SourcePromotionError::Source(_) => {
-            PublicErrorDto::SourceUnavailable
-        }
-        SourcePromotionError::FileSystem(_) => PublicErrorDto::StateUnavailable,
-        SourcePromotionError::RecoveryRequired(_) => PublicErrorDto::RecoveryRequired,
+        SourcePromotionError::Preview(_) => PublicErrorDto::SourceUnavailable,
+        SourcePromotionError::Transition(_) => PublicErrorDto::StateUnavailable,
     };
     CommandFailureDto {
         error: public_error,
@@ -82,7 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_closed_legacy_promotion_error_stays_typed_at_the_tauri_boundary() {
+    fn an_unpromotable_legacy_state_stays_typed_at_the_tauri_boundary() {
         let failure = command_error(SourcePromotionError::Validation("bad legacy state".into()));
         assert_eq!(failure.error, PublicErrorDto::Validation);
         assert_eq!(

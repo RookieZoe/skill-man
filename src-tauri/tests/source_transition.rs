@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::Connection;
 use skill_man_lib::adapters::git_source::SystemGitSource;
@@ -10,6 +10,7 @@ use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore;
 use skill_man_lib::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreviewOutcome, SourceGroupPreviewService,
+    SourceTrackingOverride,
 };
 use skill_man_lib::core::source_transition::{
     ConfirmSourceTransitionRequest, SourceTransitionError, SourceTransitionService,
@@ -19,7 +20,8 @@ use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::installer_lock_store::InstallerLockStore;
 use skill_man_lib::seams::source::{GitFetchReport, GitSource, GitTreeEntry, SourceError};
 use skill_man_lib::seams::source_transition_store::{
-    SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
+    ExistingSourceFacts, ExistingSourceMember, SourceTransitionRecord, SourceTransitionStore,
+    SourceTransitionStoreError,
 };
 
 struct FixtureGitSource {
@@ -133,6 +135,22 @@ impl GitSource for FixtureGitSource {
         self.inner
             .stage_skill(mirror_dir, commit, skill_path, destination)
     }
+
+    fn list_tags(
+        &self,
+        mirror_dir: &Path,
+    ) -> Result<Vec<skill_man_lib::seams::source::GitTagFact>, SourceError> {
+        self.inner.list_tags(mirror_dir)
+    }
+
+    fn is_ancestor(
+        &self,
+        mirror_dir: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, SourceError> {
+        self.inner.is_ancestor(mirror_dir, ancestor, descendant)
+    }
 }
 
 #[derive(Default)]
@@ -145,21 +163,6 @@ impl Clock for FixtureClock {
 
     fn unix_epoch_nanos(&self) -> u128 {
         1_725_000_000_000_000_000
-    }
-}
-
-#[derive(Default)]
-struct AdvancingClock {
-    ticks: AtomicUsize,
-}
-
-impl Clock for AdvancingClock {
-    fn monotonic_millis(&self) -> u128 {
-        self.ticks.fetch_add(1, Ordering::SeqCst) as u128
-    }
-
-    fn unix_epoch_nanos(&self) -> u128 {
-        1_725_000_000_000_000_000 + self.ticks.fetch_add(1, Ordering::SeqCst) as u128
     }
 }
 
@@ -178,6 +181,20 @@ impl FailOnceSourceStore {
 }
 
 impl SourceTransitionStore for FailOnceSourceStore {
+    fn existing_current_members(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Option<Vec<ExistingSourceMember>>, SourceTransitionStoreError> {
+        self.inner.existing_current_members(canonical_url)
+    }
+
+    fn existing_source(
+        &self,
+        remote_id: &str,
+    ) -> Result<Option<ExistingSourceFacts>, SourceTransitionStoreError> {
+        self.inner.existing_source(remote_id)
+    }
+
     fn validate_new_source_transition(
         &self,
         record: &SourceTransitionRecord,
@@ -348,7 +365,10 @@ fn confirmation(fixture: &Fixture) -> ConfirmSourceTransitionRequest {
         .fetch_latest_and_manage(FetchLatestAndManageRequest {
             source_type: "git".into(),
             source_url: "https://example.com/acme/source".into(),
-            tracking_ref: Some("main".into()),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
         })
         .expect("preview");
     let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
@@ -358,8 +378,12 @@ fn confirmation(fixture: &Fixture) -> ConfirmSourceTransitionRequest {
     ConfirmSourceTransitionRequest {
         source_type: "git".into(),
         source_url: preview.source_url,
-        tracking_ref: preview.tracking_ref,
-        expected_resolved_commit: preview.resolved_commit,
+        tracking_policy: Some(SourceTrackingOverride {
+            mode: "branch".into(),
+            value: Some("main".into()),
+        }),
+        expected_selected_ref: preview.policy.selected_ref,
+        expected_resolved_commit: preview.policy.resolved_commit,
     }
 }
 
@@ -384,188 +408,261 @@ fn service_with_locks(
     )
 }
 
-/// The closed pre-v9 write path (ticket #91) commits nothing: the single
-/// Catalog transaction is rolled back when it reaches the retired v7-shaped
-/// columns, so every source-related table stays empty.
-fn assert_no_partial_source(fixture: &Fixture) {
-    let connection =
-        Connection::open(fixture.library.join("skill-man.sqlite3")).expect("Catalog connection");
-    let empty = |table: &str| {
-        connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap_or_else(|error| panic!("count rows in {table}: {error}"))
-            == 0
-    };
-    for table in [
-        "git_repository_sources",
-        "remote_source_parents",
-        "git_source_releases",
-        "git_source_release_members",
-        "git_source_members",
-        "skills",
-    ] {
-        assert!(
-            empty(table),
-            "the closed commit left no partial source in {table}"
-        );
-    }
+fn open_catalog(fixture: &Fixture) -> Connection {
+    Connection::open(fixture.library.join("skill-man.sqlite3")).expect("Catalog connection")
 }
 
-/// Every pre-v9 Source Transition / Source Update / Source Promotion write
-/// path is closed on the v9 contract (ticket #91); #92 restores them.
-fn assert_closed_confirm(fixture: &Fixture) {
-    let transition = service(fixture, fixture.catalog.clone());
-    let result = transition.confirm(confirmation(fixture));
-    assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
-    );
-    assert_no_partial_source(fixture);
+fn count(connection: &Connection, table: &str) -> i64 {
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or_else(|error| panic!("count rows in {table}: {error}"))
+}
+
+fn namespace_members(fixture: &Fixture, remote_id: &str) -> PathBuf {
+    fixture.library.join("skills/git").join(remote_id)
 }
 
 #[test]
 fn confirms_and_undoes_the_complete_source_in_one_release() {
     let fixture = fixture();
     let transition = service(&fixture, fixture.catalog.clone());
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let result = transition.confirm(confirmation(&fixture));
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("v9 transition");
+
+    assert_eq!(result.member_count, 2);
+    assert!(result.undo_available);
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "remote_source_parents"), 1);
+    assert_eq!(count(&connection, "git_repository_sources"), 1);
+    assert_eq!(count(&connection, "git_source_releases"), 1);
+    assert_eq!(count(&connection, "git_source_release_members"), 2);
+    assert_eq!(count(&connection, "git_source_members"), 2);
+    assert_eq!(count(&connection, "skills"), 2);
+    let source: (String, String, String, String) = connection
+        .query_row(
+            "SELECT tracking_mode, tracking_value, current_selected_ref, current_release_id
+             FROM git_repository_sources",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("source row");
+    assert_eq!(source.0, "branch");
+    assert_eq!(source.1, "main");
+    assert_eq!(source.2, "main");
+    assert!(source.3.starts_with("source-release-"));
+    let selection_kind: String = connection
+        .query_row(
+            "SELECT selection_kind FROM git_source_releases",
+            [],
+            |row| row.get(0),
+        )
+        .expect("release row");
+    assert_eq!(selection_kind, "branch");
+    let storage: Vec<String> = connection
+        .prepare("SELECT storage_relpath FROM git_source_members ORDER BY skill_path")
+        .expect("members")
+        .query_map([], |row| row.get(0))
+        .expect("map")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect");
+    assert_eq!(storage.len(), 2);
     assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
+        storage
+            .iter()
+            .all(|path| { path.starts_with(&format!("skills/git/{}/", result.remote_id)) })
     );
-    assert_no_partial_source(&fixture);
-    // The closed confirm still freezes its journal before the failed Catalog
-    // commit, and the single Claim-CAS releases the lock on that path.
+    drop(connection);
+
+    // Immutable namespace snapshots exist under skills/git/<remote_id>/<skill_id>.
+    let namespace = namespace_members(&fixture, &result.remote_id);
+    let member_ids: Vec<String> = open_catalog(&fixture)
+        .prepare("SELECT skill_id FROM git_source_members ORDER BY skill_path")
+        .expect("ids")
+        .query_map([], |row| row.get(0))
+        .expect("map")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("ids");
+    for skill_id in member_ids {
+        assert!(
+            namespace.join(&skill_id).is_dir(),
+            "namespace snapshot for {skill_id} must be published"
+        );
+    }
+    // The single full-file CAS released both claims.
+    assert!(
+        fixture.locks.discover().expect("read released lock")[0]
+            .entries
+            .is_empty(),
+        "one CAS released both claims"
+    );
+    // The manifest freezes policy + selected ref + release.
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .library
+                .join("remotes")
+                .join(&result.remote_id)
+                .join("source.json"),
+        )
+        .expect("source manifest"),
+    )
+    .expect("parse manifest");
+    assert_eq!(manifest["trackingMode"], "branch");
+    assert_eq!(manifest["trackingValue"], "main");
+    assert_eq!(manifest["currentSelectedRef"], "main");
+    assert_eq!(manifest["currentReleaseId"], result.release_id.clone());
+
+    // Source Undo restores the whole source, the lock and the external
+    // entities without touching other Home state.
+    let undo = transition
+        .undo(&result.operation_id)
+        .expect("v9 source undo");
+    assert_eq!(undo.member_count, 2);
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "remote_source_parents"), 0);
+    assert_eq!(count(&connection, "git_repository_sources"), 0);
+    assert_eq!(count(&connection, "git_source_releases"), 0);
+    assert_eq!(count(&connection, "skills"), 0);
+    drop(connection);
+    assert!(
+        !namespace_members(&fixture, &result.remote_id).exists(),
+        "the namespace tree is removed on Undo"
+    );
+    assert!(
+        fixture
+            .home
+            .join(".agents/skills/source/SKILL.md")
+            .is_file()
+    );
+    assert!(fixture.home.join(".agents/skills/beta/SKILL.md").is_file());
     assert_eq!(
+        fixture.locks.discover().expect("read restored lock")[0]
+            .entries
+            .len(),
+        2,
+        "Undo restores the exact claim set"
+    );
+    assert!(
         fixture
             .filesystem
             .list_source_transition_journals(&fixture.library)
-            .expect("frozen journal")
-            .len(),
-        1
+            .expect("journal cleanup")
+            .is_empty()
     );
+}
+
+#[test]
+fn second_confirmation_is_closed_to_update_until_ticket_93() {
+    let fixture = fixture();
+    let transition = service(&fixture, fixture.catalog.clone());
+    transition
+        .confirm(confirmation(&fixture))
+        .expect("first transition");
+    let error = transition
+        .confirm(confirmation(&fixture))
+        .expect_err("a managed source never re-enters Fetch Latest and Manage");
+    let matches_closed = matches!(
+        &error,
+        SourceTransitionError::Validation(message) if message.contains("already managed")
+    );
+    assert!(
+        matches_closed,
+        "a whole-source Update belongs to ticket #93: {error}"
+    );
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "git_repository_sources"), 1);
+    assert_eq!(count(&connection, "skills"), 2);
+    drop(connection);
     assert_eq!(
-        fixture.locks.discover().expect("read released lock")[0]
+        fixture.locks.discover().expect("lock")[0].entries.len(),
+        0,
+        "the managed source's claims stay released"
+    );
+}
+
+#[test]
+fn journal_freezes_policy_manifest_and_namespace_before_the_commit_point() {
+    let fixture = fixture();
+    let transition = service(&fixture, fixture.catalog.clone());
+    transition
+        .confirm(confirmation(&fixture))
+        .expect("transition");
+    let journal = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .expect("frozen journal")
+        .into_iter()
+        .next()
+        .expect("one journal");
+    assert_eq!(journal.version, 2);
+    assert_eq!(journal.tracking_mode, "branch");
+    assert_eq!(journal.tracking_value.as_deref(), Some("main"));
+    assert_eq!(journal.selection_kind, "branch");
+    assert_eq!(journal.selected_ref, "main");
+    assert_eq!(journal.members.len(), 2);
+    for member in &journal.members {
+        assert!(member.tree_hash.starts_with("tree-sha256-v1:"));
+        assert!(
+            member
+                .namespace_path
+                .starts_with(fixture.library.join("skills/git").join(&journal.remote_id))
+        );
+        assert_eq!(
+            member.namespace_path.to_string_lossy(),
+            format!(
+                "{}/skills/git/{}/{}",
+                fixture.library.to_string_lossy(),
+                journal.remote_id,
+                member.skill_id
+            )
+        );
+    }
+}
+
+#[test]
+fn confirmation_refuses_a_home_destination_before_releasing_external_ownership() {
+    let fixture = fixture();
+    // A plain file at the namespace root makes every member destination
+    // unresolvable before the ownership CAS.
+    std::fs::create_dir_all(fixture.library.join("skills")).expect("skills root");
+    std::fs::write(fixture.library.join("skills/git"), "occupied").expect("occupant file");
+    let transition = service(&fixture, fixture.catalog.clone());
+
+    let error = transition
+        .confirm(confirmation(&fixture))
+        .expect_err("a Home destination collision is pre-CAS stale evidence");
+
+    assert!(
+        matches!(
+            error,
+            SourceTransitionError::Source(_)
+                | SourceTransitionError::Validation(_)
+                | SourceTransitionError::FileSystem(_)
+        ),
+        "unexpected error: {error}"
+    );
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "git_repository_sources"), 0);
+    assert_eq!(count(&connection, "skills"), 0);
+    drop(connection);
+    assert_eq!(
+        fixture.locks.discover().expect("lock after rejection")[0]
             .entries
             .len(),
-        0,
-        "one CAS released both claims"
+        2,
+        "the one source lock remains untouched before its CAS",
     );
-}
-
-#[test]
-fn source_update_rejects_a_release_that_changed_after_the_complete_draft() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_advances_every_member_to_one_new_complete_release() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_requires_and_applies_modified_and_removed_member_resolutions() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_reports_external_reappearance_as_ownership_conflict() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_fails_closed_for_a_faulted_installer_lock() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_refuses_an_external_entity_reappearance_without_a_lock() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn ordinary_remove_never_restores_a_reappeared_external_owner() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_refuses_a_manifest_that_is_not_the_current_source_release() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_backfills_a_manifest_for_a_preexisting_managed_source() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_refuses_a_current_member_set_that_disagrees_with_its_release() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_rechecks_an_external_declaration_before_staging() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_rechecks_an_external_declaration_after_staging() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_update_recovery_refuses_a_tampered_current_baseline() {
-    let fixture = fixture();
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    assert_closed_confirm(&fixture);
-}
-
-#[test]
-fn source_transition_freezes_the_manifest_before_verifying_it() {
-    let fixture = fixture();
-    let transition = SourceTransitionService::new(
-        fixture.preview.clone(),
-        fixture.source.clone(),
-        fixture.locks.clone(),
-        fixture.catalog.clone(),
-        fixture.filesystem.clone(),
-        Arc::new(AdvancingClock::default()),
-        fixture.library.clone(),
-        fixture.home.clone(),
-    );
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let result = transition.confirm(confirmation(&fixture));
     assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
+        fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .expect("journal cleanup")
+            .is_empty(),
+        "journal remains after a pre-CAS refusal: {error}"
     );
-    assert_no_partial_source(&fixture);
 }
 
 #[test]
@@ -602,72 +699,21 @@ fn post_cas_failure_recovers_only_the_frozen_journal_without_refetching() {
         fixture.library.clone(),
         fixture.home.clone(),
     );
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let error = recovery.recover_pending(&fixture.library);
-    assert!(
-        error.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
-    );
-    assert_no_partial_source(&fixture);
-    assert_eq!(
-        fixture
-            .filesystem
-            .list_source_transition_journals(&fixture.library)
-            .expect("frozen journal preserved")
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn confirmation_refuses_a_home_destination_before_releasing_external_ownership() {
-    let fixture = fixture();
-    write_file(
-        &fixture.library.join("skills/source"),
-        "SKILL.md",
-        "# Existing Home occupant\n",
-    );
-    let transition = service(&fixture, fixture.catalog.clone());
-
-    let error = transition
-        .confirm(confirmation(&fixture))
-        .expect_err("a Home destination collision is pre-CAS stale evidence");
-
-    assert!(matches!(error, SourceTransitionError::PreviewStale));
-    assert!(
-        fixture
-            .home
-            .join(".agents/skills/source/SKILL.md")
-            .is_file()
-    );
-    assert!(fixture.home.join(".agents/skills/beta/SKILL.md").is_file());
-    assert_eq!(
-        fixture.locks.discover().expect("lock after rejection")[0]
-            .entries
-            .len(),
-        2,
-        "the one source lock remains untouched before its CAS",
-    );
+    recovery
+        .recover_pending(&fixture.library)
+        .expect("roll forward the frozen journal");
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "git_repository_sources"), 1);
+    assert_eq!(count(&connection, "git_source_releases"), 1);
+    assert_eq!(count(&connection, "skills"), 2);
+    drop(connection);
     assert!(
         fixture
             .filesystem
             .list_source_transition_journals(&fixture.library)
-            .expect("journal cleanup")
+            .expect("finished journal")
             .is_empty()
     );
-}
-
-#[test]
-fn undo_rechecks_external_occupancy_before_mutating_the_catalog() {
-    let fixture = fixture();
-    let transition = service(&fixture, fixture.catalog.clone());
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let result = transition.confirm(confirmation(&fixture));
-    assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
-    );
-    assert_no_partial_source(&fixture);
 }
 
 #[test]
@@ -775,46 +821,40 @@ fn recovery_refuses_a_frozen_claim_replaced_under_its_original_key() {
 }
 
 #[test]
-fn undo_recovery_converges_after_catalog_delete_and_partial_external_restore() {
+fn undo_rechecks_external_occupancy_before_mutating_the_catalog() {
     let fixture = fixture();
     let transition = service(&fixture, fixture.catalog.clone());
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let result = transition.confirm(confirmation(&fixture));
-    assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
-    );
-    assert_no_partial_source(&fixture);
-    let journal = fixture
-        .filesystem
-        .list_source_transition_journals(&fixture.library)
-        .expect("frozen journal")
-        .into_iter()
-        .next()
-        .expect("one frozen journal");
-    // The closed confirm leaves the frozen journal at OwnershipReleased and
-    // blocks the write gate: product Undo is refused while recovery is
-    // pending, and the result is never in an undoable window.
-    let undo = transition.undo(&journal.operation_id);
-    assert!(matches!(
-        undo,
-        Err(SourceTransitionError::RecoveryRequired(_))
-    ));
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("transition");
+    // A concurrent external owner reappears before Undo.
+    std::fs::create_dir_all(fixture.home.join(".agents/skills/source")).expect("reappear");
+    std::fs::write(
+        fixture.home.join(".agents/skills/source/SKILL.md"),
+        "---\nname: Source Root\n---\n# external\n",
+    )
+    .expect("external bytes");
+
+    let error = transition
+        .undo(&result.operation_id)
+        .expect_err("an occupied external location blocks the whole Undo");
+
+    assert!(matches!(error, SourceTransitionError::Validation(_)));
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "git_repository_sources"), 1);
+    assert_eq!(count(&connection, "skills"), 2);
+    drop(connection);
 }
 
 #[test]
 fn recovery_refuses_a_journal_isolation_path_outside_the_derived_source_root() {
     let fixture = fixture();
-    let transition = service(&fixture, fixture.catalog.clone());
-    // pre-v9 flow closed by ticket #91; restored as the immutable transition by #92.
-    let result = transition.confirm(confirmation(&fixture));
-    assert!(
-        result.is_err(),
-        "closed on the v9 contract (ticket #91); restored by #92"
-    );
-    assert_no_partial_source(&fixture);
-    // The closed confirm still freezes its journal before the failed Catalog
-    // commit, so the recovery validation sees a real journal to reject.
+    let flaky: Arc<dyn SourceTransitionStore> =
+        Arc::new(FailOnceSourceStore::new(fixture.catalog.clone(), true));
+    let transition = service(&fixture, flaky.clone());
+    transition
+        .confirm(confirmation(&fixture))
+        .expect_err("leave a post-CAS journal for recovery validation");
     let journal = fixture
         .filesystem
         .list_source_transition_journals(&fixture.library)
@@ -848,7 +888,7 @@ fn recovery_refuses_a_journal_isolation_path_outside_the_derived_source_root() {
         fixture.preview.clone(),
         Arc::new(NoFetchGitSource),
         fixture.locks.clone(),
-        fixture.catalog.clone(),
+        flaky,
         fixture.filesystem.clone(),
         Arc::new(FixtureClock),
         fixture.library.clone(),
@@ -897,5 +937,34 @@ fn journal_writes_refuse_a_symlinked_operations_root() {
             .next()
             .is_none(),
         "the descriptor-relative journal writer never followed the symlink"
+    );
+}
+
+#[test]
+fn repository_rename_and_path_aliases_never_move_the_storage_path() {
+    let fixture = fixture();
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("transition");
+    // The storage path is keyed by remote_id + skill_id only: neither the
+    // canonical URL nor a future alias affects it.
+    let expected: Vec<String> = open_catalog(&fixture)
+        .prepare("SELECT storage_relpath FROM git_source_members ORDER BY skill_path")
+        .expect("members")
+        .query_map([], |row| row.get(0))
+        .expect("map")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("paths");
+    assert_eq!(expected.len(), 2);
+    assert!(
+        expected
+            .iter()
+            .all(|path| path.starts_with(&format!("skills/git/{}/", result.remote_id))),
+        "every storage path is keyed by the stable remote_id"
+    );
+    assert!(
+        expected.iter().all(|path| path.matches('/').count() == 3),
+        "storage paths are exactly skills/git/<remote_id>/<skill_id>"
     );
 }

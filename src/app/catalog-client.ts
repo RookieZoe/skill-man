@@ -1097,10 +1097,15 @@ export interface GitImportSelectionResult {
 
 export type GitRepositorySourceType = "github" | "gitlab" | "git";
 
+export interface SourceTrackingPolicy {
+  mode: string;
+  value: string | null;
+}
+
 export interface FetchLatestAndManageRequest {
   sourceType: GitRepositorySourceType;
   sourceUrl: string;
-  trackingRef: string | null;
+  trackingPolicy: SourceTrackingPolicy | null;
 }
 
 export interface ExternalOwnershipClaim {
@@ -1109,19 +1114,30 @@ export interface ExternalOwnershipClaim {
   requestedRef: string;
 }
 
+export type SourceGroupMemberAction = "added" | "current";
+
 export interface SourceGroupMember {
   directoryName: string;
   displayName: string;
   description: string;
   skillPath: string;
   treeSummary: string;
+  action: SourceGroupMemberAction;
+}
+
+export interface SourceGroupPolicyFacts {
+  mode: string;
+  value: string | null;
+  selectionKind: string;
+  selectedRef: string;
+  resolvedCommit: string;
 }
 
 export interface SourceGroupPreview {
   provider: string;
   sourceUrl: string;
-  trackingRef: string;
-  resolvedCommit: string;
+  aliases: string[];
+  policy: SourceGroupPolicyFacts;
   members: SourceGroupMember[];
   externalOwnershipClaims: ExternalOwnershipClaim[];
 }
@@ -1136,7 +1152,6 @@ export interface RepositoryRefConflict {
 export interface RepositoryOwnershipSplit {
   provider: string;
   sourceUrl: string;
-  trackingRef: string;
   lockPaths: string[];
   externalOwnershipClaims: ExternalOwnershipClaim[];
 }
@@ -1149,12 +1164,14 @@ export type SourceGroupPreviewOutcome =
 export interface ConfirmSourceTransitionRequest {
   sourceType: GitRepositorySourceType;
   sourceUrl: string;
-  trackingRef: string;
+  trackingPolicy: SourceTrackingPolicy | null;
+  expectedSelectedRef: string;
   expectedResolvedCommit: string;
 }
 
 export interface SourceTransitionResult {
   operationId: string;
+  remoteId: string;
   releaseId: string;
   resolvedCommit: string;
   memberCount: number;
@@ -1168,51 +1185,48 @@ export interface SourceUndoResult {
   snapshotVersion: number;
 }
 
-export type SourcePromotionMemberState =
-  | "update_to_target"
-  | "modified_member_resolution_required"
-  | "upstream_member_removed";
+export type SourcePromotionMemberState = "added" | "current";
 
-export interface SourcePromotionExistingMemberDraft {
-  skillId: string;
-  directoryName: string;
+export interface SourcePromotionDraftMember {
   skillPath: string;
-  modified: boolean;
+  directoryName: string;
+  directoryIdentityKey: string;
+  displayName: string;
+  description: string;
+  treeSummary: string;
   state: SourcePromotionMemberState;
 }
 
-export interface SourcePromotionTargetMemberDraft {
-  member: SourceGroupMember;
-  legacySkillId: string | null;
+export interface SourcePromotionRemovedMember {
+  skillId: string;
+  directoryName: string;
+  skillPath: string;
 }
 
 export interface SourcePromotionDraft {
   remoteId: string;
   provider: string;
-  canonicalUrl: string;
-  trackingRef: string;
-  resolvedCommit: string;
-  existingMembers: SourcePromotionExistingMemberDraft[];
-  targetMembers: SourcePromotionTargetMemberDraft[];
+  sourceUrl: string;
+  aliases: string[];
+  policy: SourceGroupPolicyFacts;
+  members: SourcePromotionDraftMember[];
+  removedMembers: SourcePromotionRemovedMember[];
+  legacyMemberCount: number;
+  externalOwnershipClaims: ExternalOwnershipClaim[];
 }
 
-export type ModifiedMemberResolution = "keep_modified" | "replace_with_target";
-
-export type UpstreamMemberRemovedResolution =
-  | { kind: "remove" }
-  | { kind: "local_link"; targetDirectory: string }
-  | { kind: "explicit_member_mapping"; targetSkillPath: string };
-
-export interface SourcePromotionResolution {
-  skillId: string;
-  modified: ModifiedMemberResolution | null;
-  removed: UpstreamMemberRemovedResolution | null;
-}
+export type SourcePromotionDraftOutcome =
+  | { kind: "draft"; draft: SourcePromotionDraft }
+  | { kind: "repository_ref_conflict"; conflict: RepositoryRefConflict }
+  | { kind: "repository_ownership_split"; split: RepositoryOwnershipSplit };
 
 export interface ConfirmSourcePromotionRequest {
   remoteId: string;
+  sourceType: GitRepositorySourceType;
+  sourceUrl: string;
+  trackingPolicy: SourceTrackingPolicy | null;
+  expectedSelectedRef: string;
   expectedResolvedCommit: string;
-  resolutions: SourcePromotionResolution[];
 }
 
 export interface SourcePromotionResult {
@@ -1225,10 +1239,33 @@ export interface SourcePromotionResult {
   undoAvailable: boolean;
 }
 
-export type SourceUpdateDraft = SourcePromotionDraft;
-export type SourceUpdateResolution = SourcePromotionResolution;
-export type ConfirmSourceUpdateRequest = ConfirmSourcePromotionRequest;
-export type SourceUpdateResult = Omit<SourcePromotionResult, "undoAvailable">;
+export type SourceUpdateMemberState = "current" | "added" | "removed";
+
+export interface SourceUpdateDraftMember {
+  skillId: string;
+  skillPath: string;
+  directoryName: string;
+  directoryIdentityKey: string;
+  displayName: string;
+  description: string;
+  treeSummary: string;
+  state: SourceUpdateMemberState;
+}
+
+export interface SourceUpdateDraft {
+  remoteId: string;
+  provider: string;
+  sourceUrl: string;
+  aliases: string[];
+  policy: SourceGroupPolicyFacts;
+  members: SourceUpdateDraftMember[];
+}
+
+export interface ConfirmSourceUpdateRequest {
+  remoteId: string;
+}
+
+export type SourceUpdateResult = SourcePromotionResult;
 
 export interface UpdateCheckItem {
   skillId: string;
@@ -1610,7 +1647,10 @@ export interface CatalogClient {
   fetchLatestAndManage(
     request: FetchLatestAndManageRequest,
   ): Promise<SourceGroupPreviewOutcome>;
-  previewSourcePromotion(remoteId: string): Promise<SourcePromotionDraft>;
+  previewSourcePromotion(
+    remoteId: string,
+    trackingPolicy: SourceTrackingPolicy | null,
+  ): Promise<SourcePromotionDraftOutcome>;
   confirmSourcePromotion(
     request: ConfirmSourcePromotionRequest,
   ): Promise<SourcePromotionResult>;
@@ -1895,9 +1935,9 @@ const tauriCatalogClient: CatalogClient = {
       request,
     });
   },
-  previewSourcePromotion(remoteId) {
-    return invoke<SourcePromotionDraft>("preview_source_promotion", {
-      request: { remoteId },
+  previewSourcePromotion(remoteId, trackingPolicy) {
+    return invoke<SourcePromotionDraftOutcome>("preview_source_promotion", {
+      request: { remoteId, trackingPolicy },
     });
   },
   confirmSourcePromotion(request) {

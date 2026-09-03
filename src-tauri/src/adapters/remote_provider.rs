@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::seams::installer_lock_store::LockEntry;
 use crate::seams::remote_provider::{
-    AnchorResolution, RefDisposition, RemoteKind, RemoteProvider, RemoteProviderError,
-    RemoteRequest, RemoteTreeFacts,
+    AnchorResolution, ProviderReleaseFact, RefDisposition, RemoteKind, RemoteProvider,
+    RemoteProviderError, RemoteRequest, RemoteTreeFacts,
 };
 use crate::seams::source::{GitFetchReport, GitSource};
 
@@ -25,6 +25,8 @@ use crate::seams::source::{GitFetchReport, GitSource};
 /// commits. Exhaustion is a fail-closed Provenance Conflict, never a guess.
 const MAX_ANCHOR_WALK_COMMITS: usize = 2000;
 const LOCAL_GIT_TIMEOUT_SECONDS: u64 = 60;
+const RELEASE_API_CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const RELEASE_API_TOTAL_TIMEOUT_SECONDS: u64 = 30;
 
 pub struct SystemRemoteProvider {
     git: Arc<dyn GitSource>,
@@ -413,6 +415,54 @@ impl RemoteProvider for SystemRemoteProvider {
             default_branch,
         })
     }
+
+    fn list_releases(
+        &self,
+        canonical_url: &str,
+    ) -> Result<Vec<ProviderReleaseFact>, RemoteProviderError> {
+        let Some((endpoint, kind)) = provider_release_endpoint(canonical_url) else {
+            return Ok(Vec::new());
+        };
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(RELEASE_API_CONNECT_TIMEOUT_SECONDS))
+            .timeout(Duration::from_secs(RELEASE_API_TOTAL_TIMEOUT_SECONDS))
+            .user_agent("skill-man")
+            .build()
+            .map_err(|error| {
+                RemoteProviderError::Deferred(format!(
+                    "the provider Release client cannot start: {error}"
+                ))
+            })?;
+        let response = client.get(&endpoint).send().map_err(|error| {
+            RemoteProviderError::Deferred(format!(
+                "provider Releases for '{canonical_url}' are unavailable: {error}"
+            ))
+        })?;
+        if !response.status().is_success() {
+            return Err(RemoteProviderError::Deferred(format!(
+                "provider Releases for '{canonical_url}' returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let payload = response.bytes().map_err(|error| {
+            RemoteProviderError::Deferred(format!(
+                "provider Releases for '{canonical_url}' could not be read: {error}"
+            ))
+        })?;
+        match kind {
+            "github" => parse_github_releases(&payload).map_err(|message| {
+                RemoteProviderError::Deferred(format!(
+                    "provider Releases for '{canonical_url}' are unparsable: {message}"
+                ))
+            }),
+            "gitlab" => parse_gitlab_releases(&payload).map_err(|message| {
+                RemoteProviderError::Deferred(format!(
+                    "provider Releases for '{canonical_url}' are unparsable: {message}"
+                ))
+            }),
+            _ => Ok(Vec::new()),
+        }
+    }
 }
 
 fn validate_ref(reference: &str) -> Result<(), RemoteProviderError> {
@@ -569,6 +619,157 @@ pub fn normalize_url(raw: &str, kind: RemoteKind) -> Result<String, RemoteProvid
 /// enforce a provider host; embedded credentials are still rejected.
 pub fn normalize_catalog_url(raw: &str) -> Result<String, RemoteProviderError> {
     normalize_url(raw, RemoteKind::GenericGit)
+}
+
+/// The provider Release API endpoint for a canonical repository URL:
+/// `(endpoint, kind)` for GitHub and GitLab, `None` for generic providers
+/// that have no formal Release concept.
+pub fn provider_release_endpoint(canonical_url: &str) -> Option<(String, &'static str)> {
+    let rest = canonical_url.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.to_ascii_lowercase();
+    let components = path
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    match host.as_str() {
+        "github.com" if components.len() >= 2 => Some((
+            format!(
+                "https://api.github.com/repos/{}/{}/releases?per_page=100",
+                components[0], components[1]
+            ),
+            "github",
+        )),
+        "gitlab.com" if !components.is_empty() => {
+            let project = components.join("/");
+            Some((
+                format!("https://gitlab.com/api/v4/projects/{project}/releases"),
+                "gitlab",
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn parse_github_releases(payload: &[u8]) -> Result<Vec<ProviderReleaseFact>, String> {
+    let releases: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|error| error.to_string())?;
+    let releases = releases
+        .as_array()
+        .ok_or_else(|| "the GitHub Releases response is not an array".to_string())?;
+    releases
+        .iter()
+        .map(|release| {
+            let tag_name = release
+                .get("tag_name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "a GitHub release has no tag_name".to_string())?
+                .to_owned();
+            let is_prerelease = release
+                .get("prerelease")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let is_draft = release
+                .get("draft")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let published_at = release
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .and_then(parse_iso8601_epoch_nanos);
+            Ok(ProviderReleaseFact {
+                tag_name,
+                is_prerelease,
+                is_draft,
+                published_at,
+            })
+        })
+        .collect()
+}
+
+fn parse_gitlab_releases(payload: &[u8]) -> Result<Vec<ProviderReleaseFact>, String> {
+    let releases: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|error| error.to_string())?;
+    let releases = releases
+        .as_array()
+        .ok_or_else(|| "the GitLab Releases response is not an array".to_string())?;
+    releases
+        .iter()
+        .map(|release| {
+            let tag_name = release
+                .get("tag_name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "a GitLab release has no tag_name".to_string())?
+                .to_owned();
+            let published_at = release
+                .get("released_at")
+                .and_then(|value| value.as_str())
+                .and_then(parse_iso8601_epoch_nanos);
+            Ok(ProviderReleaseFact {
+                tag_name,
+                is_prerelease: false,
+                is_draft: false,
+                published_at,
+            })
+        })
+        .collect()
+}
+
+/// Parse an RFC 3339 instant into epoch nanoseconds; `None` when the format
+/// is not a closed, known instant.
+fn parse_iso8601_epoch_nanos(value: &str) -> Option<u128> {
+    let value = value
+        .strip_suffix('Z')
+        .or_else(|| value.strip_suffix("+00:00"))
+        .unwrap_or(value);
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<u64>().ok()?;
+    let day = date_parts.next()?.parse::<u64>().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (time, fraction) = time
+        .split_once('.')
+        .map_or((time, None), |(time, fraction)| (time, Some(fraction)));
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u64>().ok()?;
+    let minute = time_parts.next()?.parse::<u64>().ok()?;
+    let second = time_parts.next()?.parse::<u64>().ok()?;
+    if time_parts.next().is_some() || hour > 23 || minute > 59 || second > 59 || year < 1970 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let days = u64::try_from(days).expect("calendar days fit in u64");
+    let seconds =
+        days.wrapping_mul(86_400) + hour.wrapping_mul(3_600) + minute.wrapping_mul(60) + second;
+    let nanos = u128::from(seconds).wrapping_mul(1_000_000_000)
+        + fraction
+            .map(|fraction| {
+                let digits = fraction.chars().take(9).collect::<String>();
+                let mut digits = digits;
+                while digits.len() < 9 {
+                    digits.push('0');
+                }
+                digits.parse::<u128>().unwrap_or(0)
+            })
+            .unwrap_or(0);
+    Some(nanos)
+}
+
+/// Days since the Unix epoch (proleptic Gregorian).
+fn days_from_civil(year: i64, month: u64, day: u64) -> Option<u128> {
+    // Jan/Feb belong to the previous civil year for the doy formula.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_prime = (month as i64 - 3).rem_euclid(12);
+    let day_of_year = (153 * month_prime + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    u128::try_from(era * 146_097 + day_of_era - 719_468).ok()
 }
 
 /// The installer CLI's local skill hash (skills CLI `local-lock.ts`): SHA-256
@@ -1309,5 +1510,63 @@ mod tests {
         fs::remove_file(tree.join("link.md")).expect("remove symlink");
         let again = cli_skill_folder_hash(&tree).expect("cli hash again");
         assert_eq!(hash, again);
+    }
+
+    #[test]
+    fn provider_release_endpoints_map_only_formal_provider_kinds() {
+        assert_eq!(
+            provider_release_endpoint("https://github.com/acme/skills"),
+            Some((
+                "https://api.github.com/repos/acme/skills/releases?per_page=100".into(),
+                "github"
+            ))
+        );
+        assert_eq!(
+            provider_release_endpoint("https://gitlab.com/acme/skills"),
+            Some((
+                "https://gitlab.com/api/v4/projects/acme/skills/releases".into(),
+                "gitlab"
+            ))
+        );
+        assert_eq!(
+            provider_release_endpoint("https://example.com/acme/skills"),
+            None,
+            "generic Git has no provider Release API"
+        );
+    }
+
+    #[test]
+    fn parses_github_release_facts() {
+        let payload = br#"[
+          {"tag_name": "v1.0.0", "draft": false, "prerelease": false, "published_at": "2020-07-22T20:02:20.738Z"},
+          {"tag_name": "v2.0.0-beta.1", "draft": false, "prerelease": true, "published_at": "2021-01-05T00:00:00Z"},
+          {"tag_name": "v9.9.9", "draft": true, "prerelease": false, "published_at": "2021-02-02T00:00:00Z"},
+          {"tag_name": "no-date", "draft": false, "prerelease": false, "published_at": null}
+        ]"#;
+        let facts = parse_github_releases(payload).expect("parse releases");
+        assert_eq!(facts.len(), 4);
+        assert_eq!(facts[0].tag_name, "v1.0.0");
+        assert!(!facts[0].is_prerelease && !facts[0].is_draft);
+        assert!(facts[1].is_prerelease);
+        assert!(facts[2].is_draft);
+        assert_eq!(facts[0].published_at, Some(1_595_448_140_738_000_000));
+        assert_eq!(facts[3].published_at, None);
+    }
+
+    #[test]
+    fn parses_gitlab_release_facts_without_draft_or_prerelease_flags() {
+        let payload = br#"[{"tag_name": "v3.0.0", "released_at": "2022-01-01T00:00:00.000Z"}]"#;
+        let facts = parse_gitlab_releases(payload).expect("parse releases");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].tag_name, "v3.0.0");
+        assert!(!facts[0].is_prerelease && !facts[0].is_draft);
+        assert_eq!(facts[0].published_at, Some(1_640_995_200_000_000_000));
+    }
+
+    #[test]
+    fn malformed_release_payloads_fail_closed() {
+        assert!(parse_github_releases(br#"{"nope": true}"#).is_err());
+        assert!(parse_github_releases(br#"[{"tag_name": ""}]"#).is_err());
+        assert!(parse_gitlab_releases(b"not json").is_err());
     }
 }

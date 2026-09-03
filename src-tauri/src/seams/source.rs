@@ -55,6 +55,17 @@ pub struct GitFetchReport {
     pub default_branch: Option<String>,
 }
 
+/// One tag fact of a fetched mirror (spec §8.2: ordinary tags are ordered by
+/// creation time and ref name for the default Source Tracking Policy).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitTagFact {
+    pub name: String,
+    /// The tag's commit after peeling any annotated tag object.
+    pub commit: String,
+    /// Tag creator (annotated) or commit author date, epoch seconds.
+    pub created_epoch_secs: Option<i64>,
+}
+
 /// Transport-level Git operations behind the Source seam. The adapter
 /// fetches into a mirror the Core owns under `<Library>/cache/git/`;
 /// it never writes Library or Agent paths itself.
@@ -96,4 +107,26 @@ pub trait GitSource: Send + Sync {
         skill_path: &str,
         destination: &Path,
     ) -> Result<(), SourceError>;
+
+    /// Enumerate every tag of the mirror, peeled to its commit.
+    fn list_tags(&self, mirror_dir: &Path) -> Result<Vec<GitTagFact>, SourceError> {
+        let _ = mirror_dir;
+        Err(SourceError::Git(
+            "tag enumeration is not supported by this Git adapter".into(),
+        ))
+    }
+
+    /// True when `ancestor` of `mirror_dir` is an ancestor of `descendant`.
+    /// Both refs must resolve; unrelated commits are not ancestors.
+    fn is_ancestor(
+        &self,
+        mirror_dir: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, SourceError> {
+        let _ = (mirror_dir, ancestor, descendant);
+        Err(SourceError::Git(
+            "ancestry checks are not supported by this Git adapter".into(),
+        ))
+    }
 }

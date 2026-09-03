@@ -32,12 +32,12 @@ use crate::core::observation::{
 };
 use crate::core::source_group_preview::{
     ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
-    RepositoryRefConflict, SourceGroupMember, SourceGroupPreview, SourceGroupPreviewOutcome,
+    RepositoryRefConflict, SourceGroupMember, SourceGroupMemberAction, SourceGroupPreview,
+    SourceGroupPreviewOutcome, SourceTrackingOverride,
 };
 use crate::core::source_promotion::{
-    ConfirmSourcePromotionRequest, ModifiedMemberResolution, SourcePromotionDraft,
-    SourcePromotionExistingMemberDraft, SourcePromotionMemberState, SourcePromotionResolution,
-    SourcePromotionResult, SourcePromotionTargetMemberDraft, UpstreamMemberRemovedResolution,
+    ConfirmSourcePromotionRequest, SourcePromotionDraft, SourcePromotionDraftOutcome,
+    SourcePromotionMemberState,
 };
 use crate::core::source_transition::{
     ConfirmSourceTransitionRequest, SourceTransitionResult, SourceUndoResult,
@@ -103,14 +103,30 @@ impl From<GitSourceCapabilityReport> for GitSourceCapabilityReportDto {
     }
 }
 
-// -- Fetch Latest and Manage Source Group Preview (ADR-0014, spec §8.4) --
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchLatestAndManageRequestDto {
     pub source_type: String,
     pub source_url: String,
-    pub tracking_ref: Option<String>,
+    /// The user-confirmed Source Tracking Policy / override. `None` applies
+    /// the default `auto_release_tag_head` policy.
+    pub tracking_policy: Option<SourceTrackingPolicyDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTrackingPolicyDto {
+    pub mode: String,
+    pub value: Option<String>,
+}
+
+impl From<SourceTrackingPolicyDto> for SourceTrackingOverride {
+    fn from(value: SourceTrackingPolicyDto) -> Self {
+        Self {
+            mode: value.mode,
+            value: value.value,
+        }
+    }
 }
 
 impl From<FetchLatestAndManageRequestDto> for FetchLatestAndManageRequest {
@@ -118,7 +134,7 @@ impl From<FetchLatestAndManageRequestDto> for FetchLatestAndManageRequest {
         Self {
             source_type: value.source_type,
             source_url: value.source_url,
-            tracking_ref: value.tracking_ref,
+            tracking_policy: value.tracking_policy.map(Into::into),
         }
     }
 }
@@ -141,6 +157,22 @@ impl From<ExternalOwnershipClaim> for ExternalOwnershipClaimDto {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceGroupMemberActionDto {
+    Added,
+    Current,
+}
+
+impl From<SourceGroupMemberAction> for SourceGroupMemberActionDto {
+    fn from(value: SourceGroupMemberAction) -> Self {
+        match value {
+            SourceGroupMemberAction::Added => Self::Added,
+            SourceGroupMemberAction::Current => Self::Current,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceGroupMemberDto {
@@ -149,6 +181,7 @@ pub struct SourceGroupMemberDto {
     pub description: String,
     pub skill_path: String,
     pub tree_summary: String,
+    pub action: SourceGroupMemberActionDto,
 }
 
 impl From<SourceGroupMember> for SourceGroupMemberDto {
@@ -159,8 +192,19 @@ impl From<SourceGroupMember> for SourceGroupMemberDto {
             description: value.description,
             skill_path: value.skill_path,
             tree_summary: value.tree_summary,
+            action: value.action.into(),
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceGroupPolicyFactsDto {
+    pub mode: String,
+    pub value: Option<String>,
+    pub selection_kind: String,
+    pub selected_ref: String,
+    pub resolved_commit: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -168,8 +212,8 @@ impl From<SourceGroupMember> for SourceGroupMemberDto {
 pub struct SourceGroupPreviewDto {
     pub provider: String,
     pub source_url: String,
-    pub tracking_ref: String,
-    pub resolved_commit: String,
+    pub aliases: Vec<String>,
+    pub policy: SourceGroupPolicyFactsDto,
     pub members: Vec<SourceGroupMemberDto>,
     pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
 }
@@ -179,8 +223,14 @@ impl From<SourceGroupPreview> for SourceGroupPreviewDto {
         Self {
             provider: value.provider,
             source_url: value.source_url,
-            tracking_ref: value.tracking_ref,
-            resolved_commit: value.resolved_commit,
+            aliases: value.aliases,
+            policy: SourceGroupPolicyFactsDto {
+                mode: value.policy.mode,
+                value: value.policy.value,
+                selection_kind: value.policy.selection_kind,
+                selected_ref: value.policy.selected_ref,
+                resolved_commit: value.policy.resolved_commit,
+            },
             members: value.members.into_iter().map(Into::into).collect(),
             external_ownership_claims: value
                 .external_ownership_claims
@@ -220,7 +270,6 @@ impl From<RepositoryRefConflict> for RepositoryRefConflictDto {
 pub struct RepositoryOwnershipSplitDto {
     pub provider: String,
     pub source_url: String,
-    pub tracking_ref: String,
     pub lock_paths: Vec<String>,
     pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
 }
@@ -230,7 +279,6 @@ impl From<RepositoryOwnershipSplit> for RepositoryOwnershipSplitDto {
         Self {
             provider: value.provider,
             source_url: value.source_url,
-            tracking_ref: value.tracking_ref,
             lock_paths: value
                 .lock_paths
                 .into_iter()
@@ -273,70 +321,47 @@ impl From<SourceGroupPreviewOutcome> for SourceGroupPreviewOutcomeDto {
     }
 }
 
-// -- Legacy Source Promotion Draft (ADR-0014, spec §8.3) --
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSourcePromotionRequestDto {
     pub remote_id: String,
+    pub tracking_policy: Option<SourceTrackingPolicyDto>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourcePromotionMemberStateDto {
-    UpdateToTarget,
-    ModifiedMemberResolutionRequired,
-    UpstreamMemberRemoved,
+    Added,
+    Current,
 }
 
 impl From<SourcePromotionMemberState> for SourcePromotionMemberStateDto {
     fn from(value: SourcePromotionMemberState) -> Self {
         match value {
-            SourcePromotionMemberState::UpdateToTarget => Self::UpdateToTarget,
-            SourcePromotionMemberState::ModifiedMemberResolutionRequired => {
-                Self::ModifiedMemberResolutionRequired
-            }
-            SourcePromotionMemberState::UpstreamMemberRemoved => Self::UpstreamMemberRemoved,
+            SourcePromotionMemberState::Added => Self::Added,
+            SourcePromotionMemberState::Current => Self::Current,
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SourcePromotionExistingMemberDraftDto {
-    pub skill_id: String,
-    pub directory_name: String,
+pub struct SourcePromotionDraftMemberDto {
     pub skill_path: String,
-    pub modified: bool,
+    pub directory_name: String,
+    pub directory_identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    pub tree_summary: String,
     pub state: SourcePromotionMemberStateDto,
 }
 
-impl From<SourcePromotionExistingMemberDraft> for SourcePromotionExistingMemberDraftDto {
-    fn from(value: SourcePromotionExistingMemberDraft) -> Self {
-        Self {
-            skill_id: value.member.skill_id.0,
-            directory_name: value.member.directory_name,
-            skill_path: value.member.skill_path,
-            modified: value.member.current_tree_hash != value.member.current_baseline_hash,
-            state: value.state.into(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SourcePromotionTargetMemberDraftDto {
-    pub member: SourceGroupMemberDto,
-    pub legacy_skill_id: Option<String>,
-}
-
-impl From<SourcePromotionTargetMemberDraft> for SourcePromotionTargetMemberDraftDto {
-    fn from(value: SourcePromotionTargetMemberDraft) -> Self {
-        Self {
-            member: value.member.into(),
-            legacy_skill_id: value.legacy_skill_id.map(|id| id.0),
-        }
-    }
+pub struct SourcePromotionRemovedMemberDto {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub skill_path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -344,11 +369,13 @@ impl From<SourcePromotionTargetMemberDraft> for SourcePromotionTargetMemberDraft
 pub struct SourcePromotionDraftDto {
     pub remote_id: String,
     pub provider: String,
-    pub canonical_url: String,
-    pub tracking_ref: String,
-    pub resolved_commit: String,
-    pub existing_members: Vec<SourcePromotionExistingMemberDraftDto>,
-    pub target_members: Vec<SourcePromotionTargetMemberDraftDto>,
+    pub source_url: String,
+    pub aliases: Vec<String>,
+    pub policy: SourceGroupPolicyFactsDto,
+    pub members: Vec<SourcePromotionDraftMemberDto>,
+    pub removed_members: Vec<SourcePromotionRemovedMemberDto>,
+    pub legacy_member_count: u32,
+    pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
 }
 
 impl From<SourcePromotionDraft> for SourcePromotionDraftDto {
@@ -356,67 +383,76 @@ impl From<SourcePromotionDraft> for SourcePromotionDraftDto {
         Self {
             remote_id: value.remote_id,
             provider: value.provider,
-            canonical_url: value.canonical_url,
-            tracking_ref: value.tracking_ref,
-            resolved_commit: value.resolved_commit,
-            existing_members: value.existing_members.into_iter().map(Into::into).collect(),
-            target_members: value.target_members.into_iter().map(Into::into).collect(),
+            source_url: value.source_url,
+            aliases: value.aliases,
+            policy: SourceGroupPolicyFactsDto {
+                mode: value.policy.mode,
+                value: value.policy.value,
+                selection_kind: value.policy.selection_kind,
+                selected_ref: value.policy.selected_ref,
+                resolved_commit: value.policy.resolved_commit,
+            },
+            members: value
+                .members
+                .into_iter()
+                .map(|member| SourcePromotionDraftMemberDto {
+                    skill_path: member.skill_path,
+                    directory_name: member.directory_name,
+                    directory_identity_key: member.directory_identity_key,
+                    display_name: member.display_name,
+                    description: member.description,
+                    tree_summary: member.tree_summary,
+                    state: match member.state {
+                        SourcePromotionMemberState::Added => SourcePromotionMemberStateDto::Added,
+                        SourcePromotionMemberState::Current => {
+                            SourcePromotionMemberStateDto::Current
+                        }
+                    },
+                })
+                .collect(),
+            removed_members: value
+                .removed_members
+                .into_iter()
+                .map(|member| SourcePromotionRemovedMemberDto {
+                    skill_id: member.skill_id,
+                    directory_name: member.directory_name,
+                    skill_path: member.skill_path,
+                })
+                .collect(),
+            legacy_member_count: value.legacy.members.len() as u32,
+            external_ownership_claims: value
+                .external_ownership_claims
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModifiedMemberResolutionDto {
-    KeepModified,
-    ReplaceWithTarget,
-}
-
-impl From<ModifiedMemberResolutionDto> for ModifiedMemberResolution {
-    fn from(value: ModifiedMemberResolutionDto) -> Self {
-        match value {
-            ModifiedMemberResolutionDto::KeepModified => Self::KeepModified,
-            ModifiedMemberResolutionDto::ReplaceWithTarget => Self::ReplaceWithTarget,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum UpstreamMemberRemovedResolutionDto {
-    Remove,
-    LocalLink { target_directory: String },
-    ExplicitMemberMapping { target_skill_path: String },
+pub enum SourcePromotionDraftOutcomeDto {
+    Draft { draft: SourcePromotionDraftDto },
+    RepositoryRefConflict { conflict: RepositoryRefConflictDto },
+    RepositoryOwnershipSplit { split: RepositoryOwnershipSplitDto },
 }
 
-impl From<UpstreamMemberRemovedResolutionDto> for UpstreamMemberRemovedResolution {
-    fn from(value: UpstreamMemberRemovedResolutionDto) -> Self {
+impl From<SourcePromotionDraftOutcome> for SourcePromotionDraftOutcomeDto {
+    fn from(value: SourcePromotionDraftOutcome) -> Self {
         match value {
-            UpstreamMemberRemovedResolutionDto::Remove => Self::Remove,
-            UpstreamMemberRemovedResolutionDto::LocalLink { target_directory } => {
-                Self::LocalLink { target_directory }
+            SourcePromotionDraftOutcome::Draft(draft) => Self::Draft {
+                draft: (*draft).into(),
+            },
+            SourcePromotionDraftOutcome::RepositoryRefConflict(conflict) => {
+                Self::RepositoryRefConflict {
+                    conflict: conflict.into(),
+                }
             }
-            UpstreamMemberRemovedResolutionDto::ExplicitMemberMapping { target_skill_path } => {
-                Self::ExplicitMemberMapping { target_skill_path }
+            SourcePromotionDraftOutcome::RepositoryOwnershipSplit(split) => {
+                Self::RepositoryOwnershipSplit {
+                    split: split.into(),
+                }
             }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourcePromotionResolutionDto {
-    pub skill_id: String,
-    pub modified: Option<ModifiedMemberResolutionDto>,
-    pub removed: Option<UpstreamMemberRemovedResolutionDto>,
-}
-
-impl From<SourcePromotionResolutionDto> for SourcePromotionResolution {
-    fn from(value: SourcePromotionResolutionDto) -> Self {
-        Self {
-            skill_id: crate::core::domain::SkillId(value.skill_id),
-            modified: value.modified.map(Into::into),
-            removed: value.removed.map(Into::into),
         }
     }
 }
@@ -425,16 +461,23 @@ impl From<SourcePromotionResolutionDto> for SourcePromotionResolution {
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmSourcePromotionRequestDto {
     pub remote_id: String,
+    pub source_type: String,
+    pub source_url: String,
+    /// The frozen Source Tracking Policy / override selected at preview.
+    pub tracking_policy: Option<SourceTrackingPolicyDto>,
+    pub expected_selected_ref: String,
     pub expected_resolved_commit: String,
-    pub resolutions: Vec<SourcePromotionResolutionDto>,
 }
 
 impl From<ConfirmSourcePromotionRequestDto> for ConfirmSourcePromotionRequest {
     fn from(value: ConfirmSourcePromotionRequestDto) -> Self {
         Self {
             remote_id: value.remote_id,
+            source_type: value.source_type,
+            source_url: value.source_url,
+            tracking_policy: value.tracking_policy.map(Into::into),
+            expected_selected_ref: value.expected_selected_ref,
             expected_resolved_commit: value.expected_resolved_commit,
-            resolutions: value.resolutions.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -451,8 +494,8 @@ pub struct SourcePromotionResultDto {
     pub undo_available: bool,
 }
 
-impl From<SourcePromotionResult> for SourcePromotionResultDto {
-    fn from(value: SourcePromotionResult) -> Self {
+impl From<SourceTransitionResult> for SourcePromotionResultDto {
+    fn from(value: SourceTransitionResult) -> Self {
         Self {
             operation_id: value.operation_id,
             remote_id: value.remote_id,
@@ -473,10 +516,8 @@ pub struct SourcePromotionUndoResultDto {
     pub snapshot_version: u64,
 }
 
-impl From<crate::core::source_promotion::SourcePromotionUndoResult>
-    for SourcePromotionUndoResultDto
-{
-    fn from(value: crate::core::source_promotion::SourcePromotionUndoResult) -> Self {
+impl From<SourceUndoResult> for SourcePromotionUndoResultDto {
+    fn from(value: SourceUndoResult) -> Self {
         Self {
             operation_id: value.operation_id,
             member_count: value.member_count,
@@ -485,14 +526,14 @@ impl From<crate::core::source_promotion::SourcePromotionUndoResult>
     }
 }
 
-// -- Git Repository Source Transition (ADR-0014, spec §8.4) --
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmSourceTransitionRequestDto {
     pub source_type: String,
     pub source_url: String,
-    pub tracking_ref: String,
+    /// The frozen Source Tracking Policy / override selected at preview.
+    pub tracking_policy: Option<SourceTrackingPolicyDto>,
+    pub expected_selected_ref: String,
     pub expected_resolved_commit: String,
 }
 
@@ -501,22 +542,18 @@ impl From<ConfirmSourceTransitionRequestDto> for ConfirmSourceTransitionRequest 
         Self {
             source_type: value.source_type,
             source_url: value.source_url,
-            tracking_ref: value.tracking_ref,
+            tracking_policy: value.tracking_policy.map(Into::into),
+            expected_selected_ref: value.expected_selected_ref,
             expected_resolved_commit: value.expected_resolved_commit,
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceTransitionOperationRequestDto {
-    pub operation_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceTransitionResultDto {
     pub operation_id: String,
+    pub remote_id: String,
     pub release_id: String,
     pub resolved_commit: String,
     pub member_count: u32,
@@ -528,6 +565,7 @@ impl From<SourceTransitionResult> for SourceTransitionResultDto {
     fn from(value: SourceTransitionResult) -> Self {
         Self {
             operation_id: value.operation_id,
+            remote_id: value.remote_id,
             release_id: value.release_id,
             resolved_commit: value.resolved_commit,
             member_count: value.member_count,
@@ -553,6 +591,92 @@ impl From<SourceUndoResult> for SourceUndoResultDto {
             snapshot_version: value.snapshot_version,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransitionOperationRequestDto {
+    pub operation_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceUpdateMemberStateDto {
+    Current,
+    Added,
+    Removed,
+}
+
+impl From<crate::core::source_update::SourceUpdateMemberState> for SourceUpdateMemberStateDto {
+    fn from(value: crate::core::source_update::SourceUpdateMemberState) -> Self {
+        match value {
+            crate::core::source_update::SourceUpdateMemberState::Current => Self::Current,
+            crate::core::source_update::SourceUpdateMemberState::Added => Self::Added,
+            crate::core::source_update::SourceUpdateMemberState::Removed => Self::Removed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpdateDraftMemberDto {
+    pub skill_id: String,
+    pub skill_path: String,
+    pub directory_name: String,
+    pub directory_identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    pub tree_summary: String,
+    pub state: SourceUpdateMemberStateDto,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpdateDraftDto {
+    pub remote_id: String,
+    pub provider: String,
+    pub source_url: String,
+    pub aliases: Vec<String>,
+    pub policy: SourceGroupPolicyFactsDto,
+    pub members: Vec<SourceUpdateDraftMemberDto>,
+}
+
+impl From<crate::core::source_update::SourceUpdateDraft> for SourceUpdateDraftDto {
+    fn from(value: crate::core::source_update::SourceUpdateDraft) -> Self {
+        Self {
+            remote_id: value.remote_id,
+            provider: value.provider,
+            source_url: value.source_url,
+            aliases: value.aliases,
+            policy: SourceGroupPolicyFactsDto {
+                mode: value.policy.mode,
+                value: value.policy.value,
+                selection_kind: value.policy.selection_kind,
+                selected_ref: value.policy.selected_ref,
+                resolved_commit: value.policy.resolved_commit,
+            },
+            members: value
+                .members
+                .into_iter()
+                .map(|member| SourceUpdateDraftMemberDto {
+                    skill_id: member.skill_id,
+                    skill_path: member.skill_path,
+                    directory_name: member.directory_name,
+                    directory_identity_key: member.directory_identity_key,
+                    display_name: member.display_name,
+                    description: member.description,
+                    tree_summary: member.tree_summary,
+                    state: member.state.into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpdateConfirmRequestDto {
+    pub remote_id: String,
 }
 
 // -- Skill Man application Update (ADR-0006) --
@@ -4812,14 +4936,22 @@ mod tests {
             SourceGroupPreview {
                 provider: "github".into(),
                 source_url: "https://github.com/acme/source".into(),
-                tracking_ref: "main".into(),
-                resolved_commit: "a".repeat(40),
+                aliases: Vec::new(),
+                policy: crate::core::source_group_preview::SourceGroupPolicyFacts {
+                    mode: "auto_release_tag_head".into(),
+                    value: None,
+                    selection_kind: "head".into(),
+                    selected_ref: "HEAD".into(),
+                    resolved_commit: "a".repeat(40),
+                },
                 members: vec![SourceGroupMember {
                     directory_name: "skill-a".into(),
+                    directory_identity_key: crate::core::domain::skill_identity_key("skill-a"),
                     display_name: "Skill A".into(),
                     description: "A complete member".into(),
                     skill_path: "skills/skill-a".into(),
                     tree_summary: "3 files".into(),
+                    action: SourceGroupMemberAction::Added,
                 }],
                 external_ownership_claims: vec![claim.clone()],
             },
@@ -4836,7 +4968,6 @@ mod tests {
             SourceGroupPreviewOutcome::RepositoryOwnershipSplit(RepositoryOwnershipSplit {
                 provider: "git".into(),
                 source_url: "https://example.com/acme/source".into(),
-                tracking_ref: "main".into(),
                 lock_paths: vec![
                     PathBuf::from("/locks/one.lock.json"),
                     PathBuf::from("/locks/two.lock.json"),
@@ -4852,14 +4983,21 @@ mod tests {
                 "preview": {
                     "provider": "github",
                     "sourceUrl": "https://github.com/acme/source",
-                    "trackingRef": "main",
-                    "resolvedCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aliases": [],
+                    "policy": {
+                        "mode": "auto_release_tag_head",
+                        "value": null,
+                        "selectionKind": "head",
+                        "selectedRef": "HEAD",
+                        "resolvedCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    },
                     "members": [{
                         "directoryName": "skill-a",
                         "displayName": "Skill A",
                         "description": "A complete member",
                         "skillPath": "skills/skill-a",
-                        "treeSummary": "3 files"
+                        "treeSummary": "3 files",
+                        "action": "added"
                     }],
                     "externalOwnershipClaims": [{
                         "lockPath": "/locks/source.lock.json",
@@ -4892,7 +5030,6 @@ mod tests {
                 "split": {
                     "provider": "git",
                     "sourceUrl": "https://example.com/acme/source",
-                    "trackingRef": "main",
                     "lockPaths": ["/locks/one.lock.json", "/locks/two.lock.json"],
                     "externalOwnershipClaims": [{
                         "lockPath": "/locks/source.lock.json",

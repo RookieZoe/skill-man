@@ -85,17 +85,17 @@ pub fn run() {
         confirm_source_transition, confirm_source_update, continue_candidate,
         create_agent_directory, discover_file_import, discover_file_import_collection,
         discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
-        finalize_source_promotion, finalize_source_transition, finalize_source_update,
-        get_agent_management_snapshot, get_bootstrap_snapshot, get_fixture_recovery_preview,
-        get_git_source_capability, get_locale_snapshot, get_observation_page,
-        get_observation_snapshot, get_scan_report_page, inspect_skill, install_app_update,
-        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_abandon,
-        plan_adopt, plan_create_agent_configuration, plan_delete_agent_configuration,
-        plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
-        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_link_import,
-        plan_remove_skill, plan_restore, plan_skill_updates, prepare_existing_home_recovery,
-        prepare_home, preview_source_promotion, preview_source_update, reconnect_same_home,
-        refresh_activation_health, refresh_detection, refresh_startup_probe,
+
+        finalize_source_promotion, finalize_source_transition, get_agent_management_snapshot,
+        get_bootstrap_snapshot, get_fixture_recovery_preview, get_git_source_capability,
+        get_locale_snapshot, get_observation_page, get_observation_snapshot, get_scan_report_page, inspect_skill,
+        install_app_update, list_safety_snapshots, list_skills, load_preferences,
+        pin_skill_updates, plan_abandon, plan_adopt, plan_create_agent_configuration,
+        plan_delete_agent_configuration, plan_delete_safety_snapshot,
+        plan_edit_agent_configuration, plan_file_import, plan_file_import_selection,
+        plan_file_reinstall, plan_fixture_recovery, plan_link_import, plan_remove_skill,
+        plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
+        preview_source_promotion, preview_source_update, reconnect_same_home, refresh_detection,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
         scan_adopt, set_locale_selection, start_rescan, startup_info, undo_adopt,
         undo_source_promotion, undo_source_transition, update_preferences,
@@ -485,20 +485,10 @@ pub fn run() {
             let source_group_preview = Arc::new(SourceGroupPreviewService::new(
                 Arc::new(SystemGitSource::new()),
                 Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
-            ));
-            let source_promotion = Arc::new(SourcePromotionService::new(
-                source_group_preview.clone(),
-                Arc::new(SystemGitSource::new()),
-                runtime_store.clone(),
-                filesystem.clone(),
-                Arc::new(SystemClock::new()),
-                resolved_library_root.clone(),
             )
-            .with_write_gate(write_gate.clone())
-            .with_home_context(write_gate.clone())
-            .with_lock_store(Arc::new(SystemInstallerLockStore::new(
-                home_directory.clone(),
-            ))));
+            .with_remote_provider(Arc::new(SystemRemoteProvider::new(Arc::new(
+                SystemGitSource::new(),
+            )))));
             let source_transition = Arc::new(
                 SourceTransitionService::new(
                     source_group_preview.clone(),
@@ -511,24 +501,18 @@ pub fn run() {
                     home_directory.clone(),
                 )
                 .with_write_gate(write_gate.clone())
-                .with_home_context(write_gate.clone()),
-            );
-            let source_update = Arc::new(
-                SourceUpdateService::new(
-                    source_group_preview.clone(),
-                    Arc::new(SystemGitSource::new()),
-                    runtime_store.clone(),
-                    filesystem.clone(),
-                    Arc::new(SystemClock::new()),
-                    resolved_library_root.clone(),
-                    home_directory.clone(),
-                )
-                .with_write_gate(write_gate.clone())
                 .with_home_context(write_gate.clone())
-                .with_lock_store(Arc::new(SystemInstallerLockStore::new(
-                    home_directory.clone(),
-                ))),
+                .with_promotion_store(runtime_store.clone()),
             );
+            let source_promotion = Arc::new(SourcePromotionService::new(
+                source_group_preview.clone(),
+                runtime_store.clone(),
+                source_transition.clone(),
+            ));
+            let source_update = Arc::new(SourceUpdateService::new(
+                source_group_preview.clone(),
+                runtime_store.clone(),
+            ));
             app.manage(SourceGroupPreviewApi::new(source_group_preview));
             app.manage(SourcePromotionApi::new(source_promotion.clone()));
             app.manage(SourceTransitionApi::new(source_transition.clone()));
@@ -666,7 +650,6 @@ pub fn run() {
             finalize_source_promotion,
             preview_source_update,
             confirm_source_update,
-            finalize_source_update,
             confirm_source_transition,
             undo_source_transition,
             finalize_source_transition,
