@@ -602,7 +602,7 @@ function ExternalClaims({ claims }: { claims: ExternalOwnershipClaim[] }) {
             </dt>
             <dd>
               <code>{claim.lockPath}</code>
-              {` · ${claim.requestedRef}`}
+              {t("library.source_group.claim_ref", { ref: claim.requestedRef })}
             </dd>
           </div>
         ))}
