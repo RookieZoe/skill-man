@@ -541,7 +541,12 @@ pub struct SourceTransitionJournalMember {
     pub identity_key: String,
     pub display_name: String,
     pub description: String,
-    pub canonical_entity: PathBuf,
+    /// The external canonical entity (the installer's directory). A new
+    /// Source Member without an external declaration has none (a Promotion
+    /// add follows the lock only when the installer claimed the same
+    /// directory name).
+    #[serde(default)]
+    pub canonical_entity: Option<PathBuf>,
     pub isolated_path: Option<PathBuf>,
     pub staged_root: PathBuf,
     pub staged_snapshot: Option<StagedTreeSnapshot>,

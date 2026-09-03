@@ -859,27 +859,6 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function undoSourcePromotion() {
-    if (!sourcePromotionResult) return;
-    const runId = ++sourceGroupRunId.current;
-    setSourceGroupActivity("undoing");
-    setSourceGroupError(null);
-    try {
-      await client.undoSourcePromotion(sourcePromotionResult.operationId);
-      const snapshot = await client.listSkills(filter);
-      if (runId !== sourceGroupRunId.current) return;
-      setSkills(snapshot.items);
-      setSourcePromotionResult(null);
-      setSourcePromotionDraft(null);
-    } catch (reason) {
-      if (runId === sourceGroupRunId.current) {
-        setSourceGroupError(readError(reason, t));
-      }
-    } finally {
-      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
-    }
-  }
-
   async function undoSourceTransition() {
     if (!sourceTransitionResult) return;
     const runId = ++sourceGroupRunId.current;

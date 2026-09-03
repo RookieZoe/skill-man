@@ -205,7 +205,7 @@ impl SourceTransitionService {
             ));
         }
         let library_root = self.active_library_root()?;
-        let claims = self.clean_claim_set(&preview)?;
+        let claims = self.clean_claim_set(&preview, true)?;
         let operation_id = self.next_operation_id();
         let remote_id = self.next_uuid();
         let release_id = format!("source-release-{operation_id}");
@@ -254,8 +254,7 @@ impl SourceTransitionService {
                         canonical_entity: claims
                             .canonical_entities
                             .get(&member.directory_name)
-                            .cloned()
-                            .expect("clean source claims cover every preview member"),
+                            .cloned(),
                         staged_root: library_root
                             .join("staging")
                             .join(&operation_id)
@@ -345,7 +344,7 @@ impl SourceTransitionService {
             return Err(SourceTransitionError::PreviewStale);
         }
         let library_root = self.active_library_root()?;
-        let claims = self.clean_claim_set(&preview)?;
+        let claims = self.clean_claim_set(&preview, false)?;
         let operation_id = self.next_operation_id();
         let release_id = format!("source-release-{operation_id}");
 
@@ -389,8 +388,7 @@ impl SourceTransitionService {
                 canonical_entity: claims
                     .canonical_entities
                     .get(&member.directory_name)
-                    .cloned()
-                    .expect("clean source claims cover every preview member"),
+                    .cloned(),
                 staged_root: staging_root.join(&member.directory_name),
                 isolated_path: None,
                 staged_snapshot: None,
@@ -702,10 +700,12 @@ impl SourceTransitionService {
         for index in 0..journal.members.len() {
             {
                 let member = &mut journal.members[index];
-                member.isolated_path = Some(
-                    self.filesystem
-                        .isolate_external_source(&member.canonical_entity, &journal.operation_id)?,
-                );
+                if let Some(canonical_entity) = &member.canonical_entity {
+                    member.isolated_path = Some(
+                        self.filesystem
+                            .isolate_external_source(canonical_entity, &journal.operation_id)?,
+                    );
+                }
             }
             self.filesystem
                 .write_source_transition_journal(library_root, journal)?;
@@ -919,11 +919,16 @@ impl SourceTransitionService {
             if let Some(isolated) = &member.isolated_path
                 && self.filesystem.path_is_directory(isolated)?
             {
-                self.filesystem.restore_isolated_source(
-                    isolated,
-                    &member.canonical_entity,
-                    &member.tree_hash,
-                )?;
+                match &member.canonical_entity {
+                    Some(canonical_entity) => {
+                        self.filesystem.restore_isolated_source(
+                            isolated,
+                            canonical_entity,
+                            &member.tree_hash,
+                        )?;
+                    }
+                    None => self.filesystem.discard_isolated_source(isolated)?,
+                }
             }
             member.isolated_path = None;
         }
@@ -1011,58 +1016,69 @@ impl SourceTransitionService {
                     }
                 }
             }
-            let isolated = member.isolated_path.as_ref().ok_or_else(|| {
-                SourceTransitionError::RecoveryRequired(format!(
-                    "the Source Undo journal has no external copy for '{}'",
-                    member.directory_name
-                ))
-            })?;
-            if self.filesystem.path_is_occupied(&member.canonical_entity)? {
-                // A previous recovery may already have restored this member.
-                // Only accept that idempotent state when the preserved copy
-                // has gone and the canonical tree is exactly frozen; an
-                // occupied path while its preservation copy remains is a
-                // concurrent external owner and must remain locked.
-                if self.filesystem.path_is_directory(isolated)?
-                    || !self
-                        .filesystem
-                        .path_is_directory(&member.canonical_entity)?
-                {
-                    return Err(self.block_for_recovery(
-                        "complete Source Undo",
-                        format!(
-                            "the external source location for '{}' is occupied",
+            match &member.canonical_entity {
+                Some(canonical_entity) => {
+                    let isolated = member.isolated_path.as_ref().ok_or_else(|| {
+                        SourceTransitionError::RecoveryRequired(format!(
+                            "the Source Undo journal has no external copy for '{}'",
                             member.directory_name
-                        ),
-                    ));
+                        ))
+                    })?;
+                    if self.filesystem.path_is_occupied(canonical_entity)? {
+                        // A previous recovery may already have restored this
+                        // member. Only accept that idempotent state when the
+                        // preserved copy has gone and the canonical tree is
+                        // exactly frozen; an occupied path while its
+                        // preservation copy remains is a concurrent external
+                        // owner and must remain locked.
+                        if self.filesystem.path_is_directory(isolated)?
+                            || !self.filesystem.path_is_directory(canonical_entity)?
+                        {
+                            return Err(self.block_for_recovery(
+                                "complete Source Undo",
+                                format!(
+                                    "the external source location for '{}' is occupied",
+                                    member.directory_name
+                                ),
+                            ));
+                        }
+                        let canonical_snapshot =
+                            self.filesystem.staged_tree_snapshot(canonical_entity)?;
+                        if canonical_snapshot.content_hash != member.tree_hash {
+                            return Err(self.block_for_recovery(
+                                "complete Source Undo",
+                                format!(
+                                    "the external source location for '{}' changed",
+                                    member.directory_name
+                                ),
+                            ));
+                        }
+                    } else {
+                        if !self.filesystem.path_is_directory(isolated)? {
+                            return Err(self.block_for_recovery(
+                                "complete Source Undo",
+                                format!(
+                                    "the external preservation copy for '{}' is missing",
+                                    member.directory_name
+                                ),
+                            ));
+                        }
+                        self.filesystem.restore_isolated_source(
+                            isolated,
+                            canonical_entity,
+                            &member.tree_hash,
+                        )?;
+                    }
                 }
-                let canonical_snapshot = self
-                    .filesystem
-                    .staged_tree_snapshot(&member.canonical_entity)?;
-                if canonical_snapshot.content_hash != member.tree_hash {
-                    return Err(self.block_for_recovery(
-                        "complete Source Undo",
-                        format!(
-                            "the external source location for '{}' changed",
-                            member.directory_name
-                        ),
-                    ));
+                None => {
+                    // A freshly added source member has no external entity;
+                    // its isolated copy (if any) is discarded with the undo.
+                    if let Some(isolated) = &member.isolated_path
+                        && self.filesystem.path_is_directory(isolated)?
+                    {
+                        self.filesystem.discard_isolated_source(isolated)?;
+                    }
                 }
-            } else {
-                if !self.filesystem.path_is_directory(isolated)? {
-                    return Err(self.block_for_recovery(
-                        "complete Source Undo",
-                        format!(
-                            "the external preservation copy for '{}' is missing",
-                            member.directory_name
-                        ),
-                    ));
-                }
-                self.filesystem.restore_isolated_source(
-                    isolated,
-                    &member.canonical_entity,
-                    &member.tree_hash,
-                )?;
             }
         }
         for removed in &journal.removed_members {
@@ -1148,7 +1164,9 @@ impl SourceTransitionService {
             ));
         }
         for member in &journal.members {
-            if self.filesystem.path_is_occupied(&member.canonical_entity)? {
+            if let Some(canonical_entity) = &member.canonical_entity
+                && self.filesystem.path_is_occupied(canonical_entity)?
+            {
                 return Err(SourceTransitionError::Validation(format!(
                     "the external source location for '{}' is occupied",
                     member.directory_name
@@ -1169,18 +1187,14 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
-            let isolated = member.isolated_path.as_ref().ok_or_else(|| {
-                SourceTransitionError::Validation(format!(
-                    "the external preservation copy for '{}' is unavailable",
-                    member.directory_name
-                ))
-            })?;
-            let isolated_snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
-            if isolated_snapshot.content_hash != member.tree_hash {
-                return Err(SourceTransitionError::Validation(format!(
-                    "the external preservation copy for '{}' changed",
-                    member.directory_name
-                )));
+            if let Some(isolated) = &member.isolated_path {
+                let isolated_snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
+                if isolated_snapshot.content_hash != member.tree_hash {
+                    return Err(SourceTransitionError::Validation(format!(
+                        "the external preservation copy for '{}' changed",
+                        member.directory_name
+                    )));
+                }
             }
         }
         for removed in &journal.removed_members {
@@ -1291,9 +1305,10 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         for member in &journal.members {
-            let snapshot = self
-                .filesystem
-                .staged_tree_snapshot(&member.canonical_entity)?;
+            let Some(canonical_entity) = &member.canonical_entity else {
+                continue;
+            };
+            let snapshot = self.filesystem.staged_tree_snapshot(canonical_entity)?;
             if snapshot.content_hash != member.tree_hash {
                 return Err(SourceTransitionError::Validation(format!(
                     "the external member '{}' does not match the frozen Source Release",
@@ -1309,6 +1324,10 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
         for member in &journal.members {
+            if member.canonical_entity.is_none() {
+                // A member without an external declaration is never isolated.
+                continue;
+            }
             let isolated = member.isolated_path.as_ref().ok_or_else(|| {
                 SourceTransitionError::RecoveryRequired(format!(
                     "the isolated external member '{}' is missing from the journal",
@@ -1354,9 +1373,8 @@ impl SourceTransitionService {
             ));
         }
         for member in &journal.members {
-            if self
-                .filesystem
-                .path_is_directory(&member.canonical_entity)?
+            if let Some(canonical_entity) = &member.canonical_entity
+                && self.filesystem.path_is_directory(canonical_entity)?
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "external source '{}' reappeared after the ownership commit point",
@@ -1429,6 +1447,7 @@ impl SourceTransitionService {
     fn clean_claim_set(
         &self,
         preview: &SourceGroupPreview,
+        require_exact_member_set: bool,
     ) -> Result<CleanClaimSet, SourceTransitionError> {
         let reports = self.lock_store.discover()?;
         let relevant = reports
@@ -1472,24 +1491,28 @@ impl SourceTransitionService {
             .iter()
             .map(|entry| entry.name.clone())
             .collect::<BTreeSet<_>>();
-        if entries.len() != expected.len()
-            || names.len() != expected.len()
-            || names != expected.keys().cloned().collect()
-        {
-            return Err(SourceTransitionError::Validation(
-                "the external lock does not claim the complete source member set".into(),
-            ));
-        }
-        for entry in &entries {
-            // The lock-declared ref is a legacy hint (Repository Ref Conflict
-            // is handled at preview); the exact CAS only needs every claim of
-            // this repository to be released together. The claimed member
-            // identity must still match the frozen source.
-            if expected.get(&entry.name) != Some(&entry.skill_path) {
-                return Err(SourceTransitionError::Validation(format!(
-                    "external lock entry '{}' does not match the fixed source release",
-                    entry.name
-                )));
+        // A clean transition requires the claims to exactly cover the
+        // discovered member set (each member's external entity is what the
+        // installer claimed). A Promotion releases whatever the legacy
+        // installer claimed for this repository — old member paths may have
+        // disappeared upstream (removed) or be absent locally: the single
+        // CAS still must release every claim as one exact file update.
+        if require_exact_member_set {
+            if entries.len() != expected.len()
+                || names.len() != expected.len()
+                || names != expected.keys().cloned().collect()
+            {
+                return Err(SourceTransitionError::Validation(
+                    "the external lock does not claim the complete source member set".into(),
+                ));
+            }
+            for entry in &entries {
+                if expected.get(&entry.name) != Some(&entry.skill_path) {
+                    return Err(SourceTransitionError::Validation(format!(
+                        "external lock entry '{}' does not match the fixed source release",
+                        entry.name
+                    )));
+                }
             }
         }
         let canonical_entities = entries
@@ -1661,16 +1684,18 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
-            let Some(claim) = claims.get(member.directory_name.as_str()) else {
-                return Err(SourceTransitionError::RecoveryRequired(format!(
-                    "the Source Transition journal member '{}' has no frozen lock claim",
-                    member.directory_name
-                )));
-            };
+            let claim = claims.get(member.directory_name.as_str()).cloned();
+            let expected_canonical = external_root.join(&member.directory_name);
             if member.staged_root != staging_root.join(&member.directory_name)
                 || member.namespace_path
                     != git_member_namespace_path(library_root, &journal.remote_id, &member.skill_id)
-                || member.canonical_entity != external_root.join(&member.directory_name)
+                || match (&member.canonical_entity, &claim) {
+                    (Some(canonical_entity), Some(_)) => canonical_entity != &expected_canonical,
+                    // A member without an external declaration may not claim
+                    // one; a claimed member must carry its canonical entity.
+                    (Some(_), None) | (None, Some(_)) => true,
+                    (None, None) => false,
+                }
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "the Source Transition journal member '{}' escapes its owned path",
@@ -1694,23 +1719,27 @@ impl SourceTransitionService {
                     isolated_path.display(),
                 )));
             }
-            let source = parse_git_source_input(&claim.source_url).map_err(|_| {
-                SourceTransitionError::RecoveryRequired(format!(
-                    "the Source Transition journal claim '{}' has an invalid source",
-                    claim.name
-                ))
-            })?;
-            if claim.skill_path != member.skill_path || source.url != journal.canonical_url {
-                return Err(SourceTransitionError::RecoveryRequired(format!(
-                    "the Source Transition journal claim '{}' changed repository facts",
-                    claim.name
-                )));
+            if let Some(claim) = &claim {
+                let source = parse_git_source_input(&claim.source_url).map_err(|_| {
+                    SourceTransitionError::RecoveryRequired(format!(
+                        "the Source Transition journal claim '{}' has an invalid source",
+                        claim.name
+                    ))
+                })?;
+                if claim.skill_path != member.skill_path || source.url != journal.canonical_url {
+                    return Err(SourceTransitionError::RecoveryRequired(format!(
+                        "the Source Transition journal claim '{}' changed repository facts",
+                        claim.name
+                    )));
+                }
             }
         }
         for removed in &journal.removed_members {
+            // Removed legacy entities live in the external Skills root (the
+            // legacy installer's tree), never under the managed library.
             if !is_safe_source_transition_member_name(&removed.directory_name)
                 || !is_safe_source_transition_member_name(&removed.skill_id)
-                || !removed.legacy_path.starts_with(library_root)
+                || !removed.legacy_path.starts_with(&external_root)
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "the Source Transition journal removed member '{}' escapes its Legacy root",
