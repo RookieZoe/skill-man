@@ -533,10 +533,11 @@ pub fn run() {
                     resolved_library_root.clone(),
                 )
                 .with_write_gate(write_gate.clone())
-                .with_home_context(write_gate.clone()),
+                .with_home_context(write_gate.clone())
+                .with_app_state_dir(state_dir.clone()),
             );
             app.manage(crate::tauri_adapter::source_lifecycle_api::SourceLifecycleApi::new(
-                source_lifecycle,
+                source_lifecycle.clone(),
             ));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
@@ -546,6 +547,7 @@ pub fn run() {
                     .with_source_transition_recovery(source_transition)
                     .with_source_promotion_recovery(source_promotion)
                     .with_source_update_recovery(source_update)
+                    .with_source_lifecycle_recovery(source_lifecycle)
                     .begin_startup(),
             ));
             app.manage(ImportApi::new(import_service));

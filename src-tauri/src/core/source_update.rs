@@ -164,12 +164,21 @@ impl SourceUpdateService {
         } else {
             "git"
         };
+        // An Update without an explicit override re-evaluates the source's own
+        // persisted Source Tracking Policy; only the initial Adopt path uses
+        // the `auto_release_tag_head` default (spec §8.4).
+        let effective_policy = tracking_policy.or_else(|| {
+            Some(crate::core::source_group_preview::SourceTrackingOverride {
+                mode: current.tracking_mode.clone(),
+                value: current.tracking_value.clone(),
+            })
+        });
         let outcome = self
             .preview
             .fetch_latest_and_manage(FetchLatestAndManageRequest {
                 source_type: source_type.into(),
                 source_url: canonical_url,
-                tracking_policy,
+                tracking_policy: effective_policy,
             })?;
         let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
             return Err(SourceUpdateError::Validation(

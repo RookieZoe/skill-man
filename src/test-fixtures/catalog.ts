@@ -409,7 +409,9 @@ export function createFixtureCatalogClient(
       throw new Error("restore is not available in the fixture client");
     },
     async createLocalSourceCopy() {
-      throw new Error("local source copy is not available in the fixture client");
+      throw new Error(
+        "local source copy is not available in the fixture client",
+      );
     },
     async removeGitSource() {
       throw new Error("source remove is not available in the fixture client");

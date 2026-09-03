@@ -16,7 +16,7 @@ use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::adapters::system_installer_lock_store::SystemInstallerLockStore;
-use skill_man_lib::core::domain::Health;
+use skill_man_lib::core::domain::{Health, SkillId};
 use skill_man_lib::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreviewOutcome, SourceGroupPreviewService,
     SourceTrackingOverride,
@@ -25,7 +25,9 @@ use skill_man_lib::core::source_lifecycle::{SourceLifecycleError, SourceLifecycl
 use skill_man_lib::core::source_transition::{
     ConfirmSourceTransitionRequest, SourceTransitionError, SourceTransitionService,
 };
-use skill_man_lib::core::source_update::{SourceUpdateError, SourceUpdateService};
+use skill_man_lib::core::source_update::{
+    SourceUpdateError, SourceUpdateMemberState, SourceUpdateService,
+};
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::{
     FileSystem, LocalCopyJournal, LocalCopyPhase, RemoveSourceActivationJournal,
@@ -34,8 +36,8 @@ use skill_man_lib::seams::filesystem::{
 };
 use skill_man_lib::seams::source::{GitFetchReport, GitSource, GitTreeEntry, SourceError};
 use skill_man_lib::seams::source_update_store::{
-    LocalSourceCopyRecord, SourceUpdateCurrentSource, SourceUpdateRecord, SourceUpdateStore,
-    SourceUpdateStoreError,
+    LocalSourceCopyRecord, SourceMemberPresence, SourceUpdateCurrentSource, SourceUpdateRecord,
+    SourceUpdateStore, SourceUpdateStoreError,
 };
 
 const FIXTURE_URL: &str = "https://example.com/acme/source";
@@ -188,6 +190,7 @@ impl Clock for FixtureClock {
 
 struct Fixture {
     _workspace: tempfile::TempDir,
+    repository: PathBuf,
     library: PathBuf,
     home: PathBuf,
     export_root: PathBuf,
@@ -284,6 +287,7 @@ fn fixture() -> Fixture {
     ));
     Fixture {
         _workspace: workspace,
+        repository,
         library,
         home,
         export_root,
@@ -456,6 +460,10 @@ impl SourceUpdateStore for FailOnceRemoveStore {
         record: &LocalSourceCopyRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
         self.inner.register_local_copy(record)
+    }
+
+    fn local_copy_is_registered(&self, destination: &Path) -> Result<bool, SourceUpdateStoreError> {
+        self.inner.local_copy_is_registered(destination)
     }
 
     fn source_remove_facts(
@@ -997,4 +1005,355 @@ fn verify_all_members_flags_drift_and_blocks_update_until_restored() {
         .expect("member health")
         .expect("alpha health");
     assert_eq!(health, Health::Healthy);
+}
+
+// ---- Update policy reuse, reappear, new-Enable gate and Remove gating ---
+
+#[test]
+fn update_reuses_persisted_policy_and_reappearing_members_recover() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let beta_id = member_id_by_path(&fixture, &remote_id, "skills/beta");
+
+    // An Update without an explicit override re-evaluates the source's
+    // persisted branch policy instead of falling back to the auto default.
+    let draft = fixture
+        .update
+        .preview(&remote_id, None)
+        .expect("update preview reuses the persisted policy");
+    assert_eq!(draft.policy.mode, "branch");
+    assert_eq!(draft.policy.value.as_deref(), Some("main"));
+
+    // The remote drops beta: the update must tombstone it.
+    git(&fixture.repository, &["rm", "-r", "-q", "skills/beta"]);
+    git(
+        &fixture.repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "drop beta",
+        ],
+    );
+    let draft = fixture
+        .update
+        .preview(&remote_id, None)
+        .expect("update preview after drop");
+    let beta = draft
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/beta")
+        .expect("beta in draft");
+    assert_eq!(beta.state, SourceUpdateMemberState::Removed);
+    assert_eq!(beta.skill_id, beta_id, "removal keeps the stable id");
+    let tombstone_result = fixture
+        .update
+        .confirm(
+            &remote_id,
+            None,
+            draft.policy.selected_ref.clone(),
+            draft.policy.resolved_commit.clone(),
+        )
+        .expect("confirm tombstone");
+    let after = read_current(&fixture, &remote_id);
+    let beta = after
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/beta")
+        .expect("beta tombstone row");
+    assert_eq!(beta.presence, SourceMemberPresence::Absent);
+    assert_eq!(beta.health, Health::Broken);
+    assert_eq!(beta.skill_id.0, beta_id);
+    assert!(
+        !fixture.library.join(&beta.storage_relpath).exists(),
+        "the vanished snapshot is deleted"
+    );
+    // New-Enable gate refuses a tombstoned member.
+    let error = fixture
+        .update
+        .ensure_new_enable_allowed(&SkillId(beta_id.clone()))
+        .expect_err("tombstoned member cannot be enabled");
+    assert!(
+        matches!(error, SourceUpdateError::Validation(_)),
+        "expected tombstone Validation, got {error:?}"
+    );
+
+    // Service-level Update Undo restores the exact previous state.
+    fixture
+        .update
+        .undo(&tombstone_result.operation_id)
+        .expect("source Update Undo");
+    let after_undo = read_current(&fixture, &remote_id);
+    let beta = after_undo
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/beta")
+        .expect("beta after undo");
+    assert_eq!(beta.presence, SourceMemberPresence::Current);
+    assert_eq!(beta.health, Health::Healthy);
+    assert_eq!(beta.skill_id.0, beta_id);
+
+    // beta reappears at the same skillPath: the original stable id and
+    // storage path are reused and health recovers to Healthy.
+    write_file(
+        &fixture.repository,
+        "skills/beta/SKILL.md",
+        "---\nname: Source Beta\n---\n# Beta v2\n",
+    );
+    git(&fixture.repository, &["add", "-A"]);
+    git(
+        &fixture.repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "reappear beta",
+        ],
+    );
+    let draft = fixture
+        .update
+        .preview(&remote_id, None)
+        .expect("update preview after reappear");
+    let beta = draft
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/beta")
+        .expect("beta reappeared");
+    assert_eq!(
+        beta.skill_id, beta_id,
+        "reappearance reuses the stable skill_id"
+    );
+    fixture
+        .update
+        .confirm(
+            &remote_id,
+            None,
+            draft.policy.selected_ref.clone(),
+            draft.policy.resolved_commit.clone(),
+        )
+        .expect("confirm reappear");
+    let after = read_current(&fixture, &remote_id);
+    let beta = after
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/beta")
+        .expect("beta current");
+    assert_eq!(beta.presence, SourceMemberPresence::Current);
+    assert_eq!(beta.health, Health::Healthy);
+    assert_eq!(beta.skill_id.0, beta_id);
+    assert!(
+        fixture.library.join(&beta.storage_relpath).is_dir(),
+        "the namespace is republished at the original storage path"
+    );
+    fixture
+        .update
+        .ensure_new_enable_allowed(&SkillId(beta_id))
+        .expect("reappeared member passes the new-Enable gate");
+}
+
+#[test]
+fn ensure_new_enable_allowed_rejects_mismatch_and_passes_for_non_git() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let alpha_id = member_id_by_path(&fixture, &remote_id, "skills/alpha");
+    fixture
+        .update
+        .ensure_new_enable_allowed(&SkillId(alpha_id.clone()))
+        .expect("healthy member passes the new-Enable gate");
+    // Unknown / non-Git skill ids have no snapshot gate.
+    fixture
+        .update
+        .ensure_new_enable_allowed(&SkillId("unknown-skill".into()))
+        .expect("non-Git skills are not gated");
+
+    let alpha = member_namespace(&fixture, &remote_id, "skills/alpha");
+    write_file(&alpha, "SKILL.md", "---\nname: Drifted\n---\ndrifted\n");
+    fixture.update.verify_all_members().expect("verify drift");
+    let error = fixture
+        .update
+        .ensure_new_enable_allowed(&SkillId(alpha_id))
+        .expect_err("mismatch blocks new Enable");
+    assert!(
+        matches!(error, SourceUpdateError::SourceSnapshotMismatch),
+        "expected SourceSnapshotMismatch, got {error:?}"
+    );
+}
+
+#[test]
+fn remove_source_is_refused_under_snapshot_mismatch() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let alpha = member_namespace(&fixture, &remote_id, "skills/alpha");
+    write_file(&alpha, "SKILL.md", "drifted bytes");
+    fixture.update.verify_all_members().expect("verify drift");
+    let error = fixture
+        .lifecycle
+        .remove_source(&remote_id)
+        .expect_err("Remove must be refused under Snapshot Mismatch");
+    assert!(
+        matches!(error, SourceLifecycleError::SourceSnapshotMismatch),
+        "expected SourceSnapshotMismatch, got {error:?}"
+    );
+    let connection = open_catalog(&fixture);
+    assert_eq!(count(&connection, "git_repository_sources"), 1);
+    assert_eq!(count(&connection, "skills"), 2);
+}
+
+// ---- Lifecycle crash recovery at the remaining commit points ------------
+
+#[test]
+fn local_copy_rolls_back_a_pre_commit_crash_journal() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let alpha = member_namespace(&fixture, &remote_id, "skills/alpha");
+    let destination = fixture.export_root.join("copy-alpha");
+    let operation_id = "source-transition-local-copy-crash-1";
+    // The real isolation staging name (hidden handoff copy contract).
+    let staged = fixture
+        .export_root
+        .join(format!(".skill-man-source-transition-{operation_id}-alpha"));
+    let snapshot = fixture
+        .filesystem
+        .staged_tree_snapshot(&alpha)
+        .expect("alpha bytes");
+    fixture
+        .filesystem
+        .copy_tree_verified(&alpha, &staged)
+        .expect("staged bytes");
+    let current = read_current(&fixture, &remote_id);
+    let member = current
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/alpha")
+        .expect("alpha member")
+        .clone();
+    fixture
+        .filesystem
+        .write_source_lifecycle_journal(
+            &fixture.library,
+            &SourceLifecycleJournal::LocalCopy(LocalCopyJournal {
+                version: 1,
+                operation_id: operation_id.into(),
+                phase: LocalCopyPhase::Copied,
+                remote_id: remote_id.clone(),
+                skill_id: member.skill_id.0.clone(),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                source_path: alpha,
+                destination: destination.clone(),
+                staged_path: staged.clone(),
+                content_hash: snapshot.content_hash.clone(),
+            }),
+        )
+        .expect("freeze crash journal");
+    fixture
+        .lifecycle
+        .recover_lifecycle(&fixture.library)
+        .expect("pre-commit Local Copy crash rolls back");
+    assert!(!staged.exists(), "the staged copy is discarded");
+    assert!(
+        !destination.exists(),
+        "no half-copy destination after rollback"
+    );
+    let connection = open_catalog(&fixture);
+    assert_eq!(
+        count(&connection, "skills"),
+        2,
+        "no Local Source registered"
+    );
+    let operations = fixture.library.join("operations");
+    let pending = std::fs::read_dir(&operations)
+        .expect("operations root")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("source-transition-local-copy-")
+        })
+        .count();
+    assert_eq!(pending, 0, "the crash journal is closed after rollback");
+}
+
+#[test]
+fn restore_roll_forward_commits_member_health_after_a_restored_phase_crash() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let alpha = member_namespace(&fixture, &remote_id, "skills/alpha");
+    let current = read_current(&fixture, &remote_id);
+    let member = current
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/alpha")
+        .expect("alpha member")
+        .clone();
+    let alpha_id = member.skill_id.0.clone();
+    // The crash happened after the bytes were installed (journal at
+    // Restored) but before the catalog health commit: health is stale.
+    fixture
+        .catalog
+        .set_source_member_health(
+            &remote_id,
+            &[(SkillId(alpha_id.clone()), Health::SourceSnapshotMismatch)],
+        )
+        .expect("health mismatch");
+    let operation_id = "source-transition-restore-crash-1";
+    let staging_operation_root = fixture.library.join("staging").join(operation_id);
+    let fingerprint = fixture
+        .filesystem
+        .create_adopt_staging_operation(&fixture.library, operation_id)
+        .expect("staging operation");
+    let release_hash = stored_tree_hash(&fixture, &remote_id, "skills/alpha");
+    fixture
+        .filesystem
+        .write_source_lifecycle_journal(
+            &fixture.library,
+            &SourceLifecycleJournal::Restore(RestoreSourceJournal {
+                version: 1,
+                operation_id: operation_id.into(),
+                phase: RestoreSourcePhase::Restored,
+                remote_id: remote_id.clone(),
+                release_id: current.current_release_id.clone(),
+                resolved_commit: current.resolved_commit.clone(),
+                staging_operation_root,
+                staging_fingerprint: Some(fingerprint),
+                members: vec![RestoreSourceMember {
+                    skill_id: alpha_id.clone(),
+                    directory_name: member.directory_name.clone(),
+                    skill_path: member.skill_path.clone(),
+                    namespace_path: alpha.clone(),
+                    staged_root: fixture
+                        .library
+                        .join("staging")
+                        .join(operation_id)
+                        .join(&member.directory_name),
+                    release_tree_hash: release_hash,
+                    observed_tree_hash: "mismatch-observed".into(),
+                    staged_snapshot: None,
+                    backup_path: None,
+                    restored: true,
+                }],
+            }),
+        )
+        .expect("freeze restored journal");
+    fixture
+        .lifecycle
+        .recover_lifecycle(&fixture.library)
+        .expect("Restored-phase crash rolls forward");
+    let (_, health) = fixture
+        .catalog
+        .member_health(&SkillId(alpha_id))
+        .expect("member health")
+        .expect("alpha health");
+    assert_eq!(
+        health,
+        Health::Healthy,
+        "roll-forward also commits the catalog health flip"
+    );
 }

@@ -152,6 +152,8 @@ export function errorMessageKey(error: PublicError | string): MessageKey {
       return "error.disk_full";
     case "modified":
       return "error.modified";
+    case "source_snapshot_mismatch":
+      return "error.source_snapshot_mismatch";
     case "stale_update":
       return "app.update_error.stale_update";
     case "update_cancelled":

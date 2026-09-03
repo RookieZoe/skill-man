@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState, type Ref } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 
 import type {
   AppUpdatePanelState,
@@ -251,6 +258,15 @@ export function LibraryDesk({
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
     layoutModeForWidth(window.innerWidth),
   );
+  // Git Source Members have no independent Remove (ADR-0018); their
+  // lifecycle entry is the whole-source Remove on the source group card.
+  const gitMemberSkillIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const source of gitSourceCapability?.sources ?? []) {
+      for (const member of source.members) ids.add(member.skillId);
+    }
+    return ids;
+  }, [gitSourceCapability]);
   const [surface, setSurface] = useState<"library" | "agents">("library");
   const [agentOverlayOpen, setAgentOverlayOpen] = useState(false);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
@@ -480,6 +496,7 @@ export function LibraryDesk({
               onOpenRelocate={onOpenRelocate}
               removePanel={removePanel}
               onOpenRemove={onOpenRemove}
+              gitMemberSkillIds={gitMemberSkillIds}
             />
             <div
               className="agent-drawer"
@@ -788,6 +805,7 @@ function SkillDetailPanel({
   onOpenRelocate,
   removePanel,
   onOpenRemove,
+  gitMemberSkillIds,
 }: {
   detail: SkillDetail | null;
   error: string | null;
@@ -796,8 +814,10 @@ function SkillDetailPanel({
   onOpenRelocate: () => void;
   removePanel: RemovePanelState;
   onOpenRemove: () => void;
+  gitMemberSkillIds: Set<string>;
 }) {
   const { t, locale } = useLocale();
+  const isGitMember = detail ? gitMemberSkillIds.has(detail.id) : false;
   return (
     <main
       id="skill-detail"
@@ -823,18 +843,20 @@ function SkillDetailPanel({
               onOpenRelocate={onOpenRelocate}
             />
           ) : null}
-          <div className="detail-actions">
-            <button
-              type="button"
-              className="toolbar-button danger-button"
-              disabled={
-                removePanel.isOpen || removePanel.activity === "planning"
-              }
-              onClick={onOpenRemove}
-            >
-              {t("library.detail.remove")}
-            </button>
-          </div>
+          {!isGitMember ? (
+            <div className="detail-actions">
+              <button
+                type="button"
+                className="toolbar-button danger-button"
+                disabled={
+                  removePanel.isOpen || removePanel.activity === "planning"
+                }
+                onClick={onOpenRemove}
+              >
+                {t("library.detail.remove")}
+              </button>
+            </div>
+          ) : null}
           <dl className="metadata-grid">
             <div>
               <dt>{t("library.detail.source")}</dt>

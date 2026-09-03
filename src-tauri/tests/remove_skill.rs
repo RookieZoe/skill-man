@@ -569,3 +569,60 @@ fn retrying_recovery_after_repair_unlocks_writes() {
         .plan_remove(&skill_id)
         .expect("writes are unlocked after a successful retry");
 }
+
+#[test]
+fn plan_remove_rejects_git_source_members() {
+    let harness = harness();
+    // Real v9 Git Repository Source facts: a member of a managed source.
+    harness.home.with_sql("seed git member", |connection| {
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                VALUES ('remote-git-1', 'https://example.com/acme/source', '2026-08-01T00:00:00Z');
+                INSERT INTO skills (
+                    id, directory_name, directory_identity_key, display_name, description,
+                    source_kind, library_entry_path, final_entity_path,
+                    health, created_at, updated_at
+                ) VALUES (
+                    'git-member-1', 'alpha', 'alpha', 'Alpha', 'Git member.',
+                    'remote_install', 'skills/git/remote-git-1/git-member-1',
+                    'skills/git/remote-git-1/git-member-1', 'healthy',
+                    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+                );
+                INSERT INTO git_source_releases (
+                    release_id, remote_id, selection_kind, selected_ref,
+                    resolved_commit, discovered_at
+                ) VALUES (
+                    'release-git-1', 'remote-git-1', 'branch', 'main',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '2026-08-01T00:00:00Z'
+                );
+                INSERT INTO git_source_release_members (
+                    release_id, skill_id, skill_path, directory_name,
+                    directory_identity_key, tree_hash
+                ) VALUES (
+                    'release-git-1', 'git-member-1', 'skills/alpha', 'alpha',
+                    'alpha', 'tree-a'
+                );
+                INSERT INTO git_source_members (
+                    skill_id, remote_id, skill_path, storage_relpath, presence,
+                    first_seen_release_id, last_seen_release_id,
+                    last_checked_at, last_updated_at
+                ) VALUES (
+                    'git-member-1', 'remote-git-1', 'skills/alpha',
+                    'skills/git/remote-git-1/git-member-1', 'current',
+                    'release-git-1', 'release-git-1', unixepoch('now'), unixepoch('now')
+                );
+                "#,
+            )
+            .expect("seed git member");
+    });
+    let error = harness
+        .maintenance
+        .plan_remove(&SkillId("git-member-1".into()))
+        .expect_err("Git Source Members cannot be removed individually");
+    assert!(
+        matches!(error, MaintenanceError::Validation(_)),
+        "expected Validation, got {error:?}"
+    );
+}

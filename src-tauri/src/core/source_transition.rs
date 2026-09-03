@@ -555,11 +555,16 @@ impl SourceTransitionService {
         } else {
             "git"
         };
-        let preview = self.refresh_preview(
-            source_type,
-            &current.canonical_url,
-            &request.tracking_policy,
-        )?;
+        // An Update without an explicit override re-evaluates the source's
+        // own persisted Source Tracking Policy (spec §8.4).
+        let effective_policy = request.tracking_policy.clone().or_else(|| {
+            Some(crate::core::source_group_preview::SourceTrackingOverride {
+                mode: current.tracking_mode.clone(),
+                value: current.tracking_value.clone(),
+            })
+        });
+        let preview =
+            self.refresh_preview(source_type, &current.canonical_url, &effective_policy)?;
         if preview.policy.selected_ref != request.expected_selected_ref
             || preview.policy.resolved_commit != request.expected_resolved_commit
         {
@@ -1371,7 +1376,32 @@ impl SourceTransitionService {
             previous_selected_ref: previous.selected_ref.clone(),
             previous_resolved_commit: previous.resolved_commit.clone(),
             previous_members,
-            members: Vec::new(),
+            members: journal
+                .members
+                .iter()
+                .map(|member| SourceUpdateMemberRecord {
+                    skill_id: SkillId(member.skill_id.clone()),
+                    directory_name: member.directory_name.clone(),
+                    identity_key: member.identity_key.clone(),
+                    display_name: member.display_name.clone(),
+                    description: member.description.clone(),
+                    storage_relpath: format!(
+                        "skills/git/{}/{}",
+                        journal.remote_id, member.skill_id
+                    ),
+                    skill_path: member.skill_path.clone(),
+                    tree_hash: member.tree_hash.clone(),
+                    provider_hash: member.provider_hash.clone(),
+                    origin: match member.action {
+                        crate::seams::filesystem::SourceTransitionMemberAction::Current => {
+                            crate::seams::source_update_store::SourceUpdateMemberOrigin::Existing
+                        }
+                        crate::seams::filesystem::SourceTransitionMemberAction::Added => {
+                            crate::seams::source_update_store::SourceUpdateMemberOrigin::New
+                        }
+                    },
+                })
+                .collect(),
             removed_members: journal
                 .removed_members
                 .iter()
@@ -3219,6 +3249,15 @@ impl SourceUpdateStore for UnavailableSourceUpdateStore {
         &self,
         _record: &crate::seams::source_update_store::LocalSourceCopyRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn local_copy_is_registered(
+        &self,
+        _destination: &std::path::Path,
+    ) -> Result<bool, SourceUpdateStoreError> {
         Err(SourceUpdateStoreError::Unavailable(
             "no Source Update store is configured".into(),
         ))

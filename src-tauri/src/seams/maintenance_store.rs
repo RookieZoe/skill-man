@@ -151,6 +151,11 @@ pub trait MaintenanceStore: ActivationStore {
         skill_id: &SkillId,
     ) -> Result<Option<RemoveTarget>, MaintenanceStoreError>;
 
+    /// Whether the Skill is a Git Source Member. Git members have no
+    /// independent Remove; the whole Git Repository Source is the only
+    /// Remove unit (ADR-0018, spec §8.3).
+    fn is_git_source_member(&self, skill_id: &SkillId) -> Result<bool, MaintenanceStoreError>;
+
     /// Delete the Skill row in one transaction; activations and source
     /// tables cascade with the row. Returns the new snapshot version.
     fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError>;

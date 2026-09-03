@@ -253,6 +253,13 @@ pub trait SourceUpdateStore: Send + Sync {
         record: &LocalSourceCopyRecord,
     ) -> Result<u64, SourceUpdateStoreError>;
 
+    /// Whether a Local Source already points at this destination (a
+    /// roll-forward probe for Create Local Source Copy recovery).
+    fn local_copy_is_registered(
+        &self,
+        destination: &std::path::Path,
+    ) -> Result<bool, SourceUpdateStoreError>;
+
     /// Frozen whole-source Remove facts (member ids + desired Activation
     /// entries) for the filesystem journal.
     fn source_remove_facts(

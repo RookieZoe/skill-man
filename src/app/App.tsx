@@ -822,8 +822,7 @@ export function App({ client }: AppProps) {
           message: readError(reason, t),
         });
     } finally {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionActivity(false);
+      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
     }
   }
 
@@ -858,8 +857,7 @@ export function App({ client }: AppProps) {
           message: readError(reason, t),
         });
     } finally {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionActivity(false);
+      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
     }
   }
 
@@ -884,8 +882,7 @@ export function App({ client }: AppProps) {
           message: readError(reason, t),
         });
     } finally {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionActivity(false);
+      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
     }
   }
 

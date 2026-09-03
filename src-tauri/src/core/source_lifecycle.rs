@@ -75,6 +75,7 @@ pub struct SourceLifecycleService {
     clock: Arc<dyn Clock>,
     configured_library_root: PathBuf,
     home_context: Option<Arc<WriteGate>>,
+    app_state_dir: Option<PathBuf>,
     write_gate: Arc<WriteGate>,
     next_id: AtomicU64,
 }
@@ -95,6 +96,7 @@ impl SourceLifecycleService {
             clock,
             configured_library_root: library_root,
             home_context: None,
+            app_state_dir: None,
             write_gate: Arc::new(WriteGate::open_for_tests()),
             next_id: AtomicU64::new(1),
         }
@@ -107,6 +109,14 @@ impl SourceLifecycleService {
 
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
         self.home_context = Some(home_context);
+        self
+    }
+
+    /// The App-level state directory (`~/Library/Application Support/
+    /// skill-man-state`): a Local Source Copy must never land there
+    /// (spec §8.3, ticket #93 criterion 6).
+    pub fn with_app_state_dir(mut self, app_state_dir: PathBuf) -> Self {
+        self.app_state_dir = Some(app_state_dir);
         self
     }
 
@@ -340,6 +350,34 @@ impl SourceLifecycleService {
                     "the selected Git Repository Source is no longer complete".into(),
                 )
             })?;
+        // Spec §8.2: a Snapshot Mismatch blocks ordinary source writes;
+        // only read-only view, Disable, Create Local Source Copy and
+        // explicit Restore stay available. Remove is not exempt.
+        for member in current
+            .members
+            .iter()
+            .filter(|member| member.presence == SourceMemberPresence::Current)
+        {
+            let namespace = library_root.join(&member.storage_relpath);
+            let observed = match self.observed_hash(&namespace) {
+                Ok(hash) => hash,
+                Err(SourceLifecycleError::FileSystem(FileSystemError::Io { source, .. }))
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    String::new()
+                }
+                Err(error) => return Err(error),
+            };
+            if observed != member.tree_hash.clone().unwrap_or_default() {
+                return Err(SourceLifecycleError::SourceSnapshotMismatch);
+            }
+            if member.health == Health::SourceSnapshotMismatch {
+                return Err(SourceLifecycleError::SourceSnapshotMismatch);
+            }
+        }
         let facts = self
             .transition
             .update_store_handle()
@@ -426,8 +464,18 @@ impl SourceLifecycleService {
                     self.filesystem
                         .finish_source_lifecycle_journal(library_root, &restore.operation_id)?;
                 }
-                SourceLifecycleJournal::LocalCopy(local) => {
+                SourceLifecycleJournal::LocalCopy(local)
+                    if matches!(local.phase, LocalCopyPhase::Registered) =>
+                {
                     self.finish_local_copy_after_crash(library_root, local)?;
+                }
+                SourceLifecycleJournal::LocalCopy(local) => {
+                    // The catalog registration never happened (or the rename
+                    // did not): rolling back restores a clean state and
+                    // closes the journal instead of blocking forever.
+                    self.rollback_local_copy(library_root, local)?;
+                    self.filesystem
+                        .finish_source_lifecycle_journal(library_root, &local.operation_id)?;
                 }
                 SourceLifecycleJournal::RemoveSource(remove)
                     if matches!(
@@ -693,6 +741,18 @@ impl SourceLifecycleService {
                 self.filesystem.discard_isolated_source(backup)?;
             }
         }
+        // The byte-level commit point passed (the journal was already at
+        // Restored/Committed), so the catalog health commit that follows
+        // the install must roll forward too; otherwise the member stays
+        // `source_snapshot_mismatch` until the next startup verification.
+        let health = journal
+            .members
+            .iter()
+            .map(|member| (SkillId(member.skill_id.clone()), Health::Healthy))
+            .collect::<Vec<_>>();
+        self.transition
+            .update_store_handle()
+            .set_source_member_health(&journal.remote_id, &health)?;
         self.filesystem.discard_staging(
             &journal.staging_operation_root,
             library_root,
@@ -750,6 +810,13 @@ impl SourceLifecycleService {
         if destination.starts_with(&library_root) {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy destination must be outside the Skill Man Home".into(),
+            ));
+        }
+        if let Some(app_state_dir) = &self.app_state_dir
+            && destination.starts_with(app_state_dir)
+        {
+            return Err(SourceLifecycleError::Validation(
+                "the Local Source Copy destination must be outside the App state directory".into(),
             ));
         }
         for forbidden in &current.forbidden_local_link_roots {
@@ -876,6 +943,39 @@ impl SourceLifecycleService {
                     journal.directory_name
                 ),
             ));
+        }
+        // The rename passed but the catalog registration may not have: a
+        // Local Source that has no row is not a registered Local Source.
+        if !self
+            .transition
+            .update_store_handle()
+            .local_copy_is_registered(&journal.destination)?
+        {
+            let directory_name = journal
+                .destination
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .ok_or_else(|| {
+                    SourceLifecycleError::Validation(
+                        "the Local Source Copy destination has no directory name".into(),
+                    )
+                })?;
+            self.transition.update_store_handle().register_local_copy(
+                &crate::seams::source_update_store::LocalSourceCopyRecord {
+                    skill_id: SkillId(self.next_uuid()),
+                    directory_name,
+                    identity_key: skill_identity_key(
+                        &journal
+                            .destination
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                    ),
+                    display_name: journal.display_name.clone(),
+                    description: journal.description.clone(),
+                    final_entity_path: journal.destination.clone(),
+                },
+            )?;
         }
         self.filesystem
             .finish_source_lifecycle_journal(_library_root, &journal.operation_id)?;

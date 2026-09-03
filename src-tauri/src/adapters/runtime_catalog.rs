@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::adapters::sqlite::SqliteCatalogStore;
@@ -558,6 +558,12 @@ impl SourceUpdateStore for RuntimeCatalogStore {
         self.require().register_local_copy(record)
     }
 
+    fn local_copy_is_registered(&self, destination: &Path) -> Result<bool, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .local_copy_is_registered(destination)
+    }
+
     fn source_remove_facts(
         &self,
         remote_id: &str,
@@ -1094,6 +1100,15 @@ impl MaintenanceStore for RuntimeCatalogStore {
             ));
         }
         self.require().remove_target(skill_id)
+    }
+
+    fn is_git_source_member(&self, skill_id: &SkillId) -> Result<bool, MaintenanceStoreError> {
+        if !self.is_writable() {
+            return Err(MaintenanceStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().is_git_source_member(skill_id)
     }
 
     fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError> {

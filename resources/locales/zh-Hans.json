@@ -712,6 +712,7 @@
   "error.target_mismatch": "目标在预览后发生了变化。请重新检查后重试。",
   "error.disk_full": "磁盘可用空间不足。",
   "error.modified": "内容在预览后发生了变化。请重新检查。",
+  "error.source_snapshot_mismatch": "Git 来源成员快照与当前来源 Release 不一致。请先执行“恢复当前来源 Release”再继续。",
   "error.bootstrap_unavailable": "Skill Man 无法启动。",
   "library.activation_preview.compat_custom": "自定义智能体的兼容性未知。请明确确认此启用项。",
   "library.activation_preview.compat_mismatch": "Codex frontmatter 名称 “{name}” 与目录身份 “{directory}” 不一致。请明确确认此启用项。",

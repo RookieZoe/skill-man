@@ -4,7 +4,7 @@
 //! member/path facts from a client. All commits are one SQLite transaction.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Transaction;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -1109,6 +1109,25 @@ impl SourceUpdateStore for SqliteCatalogStore {
         let snapshot_version = bump_snapshot(&transaction)?;
         transaction.commit().map_err(update_sql_error)?;
         Ok(snapshot_version)
+    }
+
+    fn local_copy_is_registered(&self, destination: &Path) -> Result<bool, SourceUpdateStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let path_text = destination.to_string_lossy().into_owned();
+        connection
+            .query_row(
+                "SELECT 1 FROM skills
+                  WHERE source_kind = 'link' AND final_entity_path = ?1
+                  LIMIT 1",
+                [&path_text],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(update_sql_error)
     }
 
     fn source_remove_facts(

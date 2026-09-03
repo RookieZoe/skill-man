@@ -712,6 +712,7 @@
   "error.target_mismatch": "The target changed after the preview. Review it and retry.",
   "error.disk_full": "Not enough free space on the disk.",
   "error.modified": "The content changed after the preview. Review it again.",
+  "error.source_snapshot_mismatch": "The Git Source Member snapshots no longer match the current Source Release. Restore Current Source Release before continuing.",
   "error.bootstrap_unavailable": "Skill Man could not start.",
   "library.activation_preview.compat_custom": "Custom Agent compatibility is unknown. Confirm this Activation explicitly.",
   "library.activation_preview.compat_mismatch": "Codex frontmatter name “{name}” differs from directory identity “{directory}”. Confirm this Activation explicitly.",

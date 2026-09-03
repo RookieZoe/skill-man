@@ -27,10 +27,7 @@ export interface GitSourceCapabilityReport {
   sources: GitSourceCapabilitySource[];
 }
 export type Health =
-  | "healthy"
-  | "broken"
-  | "modified"
-  | "source_snapshot_mismatch";
+  "healthy" | "broken" | "modified" | "source_snapshot_mismatch";
 export type AgentKind = "claude_preset" | "codex_preset" | "custom";
 export type Compatibility = "verified" | "unknown";
 

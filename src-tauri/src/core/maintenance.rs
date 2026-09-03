@@ -1043,6 +1043,14 @@ impl MaintenanceService {
         let Some(target) = self.store.remove_target(skill_id)? else {
             return Err(MaintenanceError::SkillNotFound(skill_id.0.clone()));
         };
+        // ADR-0018 / §8.3: Git Source Members have no independent Remove;
+        // the whole Git Repository Source is the only Remove unit. The
+        // source group card owns the lifecycle entry (source_lifecycle.rs).
+        if self.store.is_git_source_member(skill_id)? {
+            return Err(MaintenanceError::Validation(
+                "Git Source Members have no independent Remove; remove the whole Git Repository Source from its source group".into(),
+            ));
+        }
         let activations = self.store.activation_baselines_for_skill(skill_id)?;
         for activation in &activations {
             match self

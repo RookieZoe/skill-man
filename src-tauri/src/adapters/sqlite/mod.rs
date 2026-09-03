@@ -1089,6 +1089,22 @@ impl SqliteCatalogStore {
             .map_err(sqlite_maintenance_error)
     }
 
+    /// Git Source Member check (ADR-0018): a member of a Git Repository
+    /// Source has no independent Remove.
+    pub fn is_git_source_member(&self, skill_id: &SkillId) -> Result<bool, MaintenanceStoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| MaintenanceStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .query_row(
+                "SELECT 1 FROM git_source_members WHERE skill_id = ?1",
+                [&skill_id.0],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(sqlite_maintenance_error)
+    }
+
     /// Delete the Skill row; activations, file_sources and remote_sources
     /// cascade with the row (§5.4), and the operation audit lives in the
     /// archived Remove journal instead.
