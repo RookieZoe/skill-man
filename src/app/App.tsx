@@ -17,13 +17,6 @@ import {
   type MessageKey,
 } from "../features/locale/messages";
 import type {
-  AdoptEvidenceReport,
-  AdoptGitSource,
-  AdoptPlan,
-  AdoptResult,
-  AdoptSelection,
-  AdoptUndoResult,
-  ModifiedBranch,
   AppPreferences,
   AvailableAppUpdate,
   CatalogClient,
@@ -92,25 +85,6 @@ type OperationCopy = Readonly<{
   title: MessageKey;
   detail: MessageKey;
 }>;
-
-const ADOPT_OPERATION_COPIES = {
-  scanning: {
-    title: "library.adopt.rescanning",
-    detail: "operation.detail.adopt.scan",
-  },
-  planning: {
-    title: "library.adopt.planning",
-    detail: "operation.detail.adopt.plan",
-  },
-  applying: {
-    title: "library.adopt.adopting",
-    detail: "operation.detail.adopt.apply",
-  },
-  undoing: {
-    title: "library.adopt.undoing",
-    detail: "operation.detail.adopt.undo",
-  },
-} as const satisfies Record<string, OperationCopy>;
 
 const LINK_IMPORT_OPERATION_COPIES = {
   discovering: {
@@ -230,8 +204,9 @@ export function App({ client }: AppProps) {
   >(null);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
-  const [onboardingReport, setOnboardingReport] =
-    useState<AdoptEvidenceReport | null>(null);
+  const [onboardingScanCount, setOnboardingScanCount] = useState<number | null>(
+    null,
+  );
   const [onboardingActivity, setOnboardingActivity] = useState<
     "idle" | "checking" | "scanning"
   >("idle");
@@ -281,27 +256,6 @@ export function App({ client }: AppProps) {
     result: null,
     error: null,
   });
-  const [isAdoptOpen, setIsAdoptOpen] = useState(false);
-  const [adoptReport, setAdoptReport] = useState<AdoptEvidenceReport | null>(
-    null,
-  );
-  const [adoptSelections, setAdoptSelections] = useState<
-    Record<string, AdoptSelection>
-  >({});
-  const [adoptPlan, setAdoptPlan] = useState<AdoptPlan | null>(null);
-  const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
-  const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
-  const [adoptError, setAdoptError] = useState<string | null>(null);
-  const [adoptErrorHeading, setAdoptErrorHeading] = useState<MessageKey>(
-    "app.notice.scan_failed",
-  );
-  const [adoptActivity, setAdoptActivity] = useState<
-    "idle" | "scanning" | "planning" | "applying" | "undoing"
-  >("idle");
-  const adoptRunId = useRef(0);
-  const adoptSourcePreviewCache = useRef<
-    Map<string, Promise<SourceGroupPreviewOutcome>>
-  >(new Map());
   const [linkImportPreview, setLinkImportPreview] =
     useState<LinkImportPreview | null>(null);
   const [linkImportResult, setLinkImportResult] =
@@ -581,74 +535,28 @@ export function App({ client }: AppProps) {
     }
   }
 
-  function adoptSourceRequest(
-    source: AdoptGitSource,
-  ): FetchLatestAndManageRequest {
-    return {
-      sourceType: source.sourceType,
-      sourceUrl: source.sourceUrl,
-      trackingPolicy:
-        source.trackingRefs.length === 1
-          ? { mode: "branch", value: source.trackingRefs[0] }
-          : null,
-    };
-  }
-
-  function sourcePreviewKey(request: FetchLatestAndManageRequest) {
-    return JSON.stringify([
-      request.sourceType,
-      request.sourceUrl,
-      request.trackingPolicy,
-    ]);
-  }
-
-  function preloadAdoptSourcePreview(request: FetchLatestAndManageRequest) {
-    const key = sourcePreviewKey(request);
-    const cached = adoptSourcePreviewCache.current.get(key);
-    if (cached) return cached;
-    const preview = client.fetchLatestAndManage(request);
-    adoptSourcePreviewCache.current.set(key, preview);
-    void preview.catch(() => {
-      // A transient background failure must not turn into a permanently
-      // cached preview error. The explicit management action retries it.
-      if (adoptSourcePreviewCache.current.get(key) === preview) {
-        adoptSourcePreviewCache.current.delete(key);
-      }
-    });
-    return preview;
-  }
-
-  function preloadAdoptGitSources(sources: AdoptGitSource[]) {
-    for (const source of sources) {
-      void preloadAdoptSourcePreview(adoptSourceRequest(source)).catch(
-        () => undefined,
-      );
+  /**
+   * Git Repository Source handoff (spec §8.1): the scan candidate group is
+   * handed to the source modules (#92 — Source Tracking Policy + immutable
+   * Source Transition); the worktree HEAD/dirty bytes/old lock facts of the
+   * report never synthesize a plan here.
+   */
+  function manageGitGroup(
+    sourceType: GitRepositorySourceType,
+    sourceUrl: string,
+  ) {
+    if (sourceGroupActivity !== "idle" || linkImportActivity !== "idle") {
+      return;
     }
-  }
-
-  function manageAdoptGitSource(source: AdoptGitSource) {
-    if (adoptActivity !== "idle") return;
-    const request = adoptSourceRequest(source);
-    const preloadedPreview = preloadAdoptSourcePreview(request);
-    const trackingPolicy = request.trackingPolicy;
-
-    adoptRunId.current += 1;
-    setIsAdoptOpen(false);
-    setAdoptPlan(null);
-    setAdoptResult(null);
-    setAdoptUndo(null);
-    setAdoptError(null);
-    setAdoptSelections({});
-
     linkImportRunId.current += 1;
     setLinkImportPreview(null);
     setLinkImportResult(null);
     setLinkImportError(null);
     setImportKind("git");
-    setSourceGroupType(source.sourceType);
-    setSourceGroupUrl(source.sourceUrl);
-    setSourceGroupPolicyMode(trackingPolicy?.mode ?? "auto_release_tag_head");
-    setSourceGroupPolicyValue(trackingPolicy?.value ?? "");
+    setSourceGroupType(sourceType);
+    setSourceGroupUrl(sourceUrl);
+    setSourceGroupPolicyMode("auto_release_tag_head");
+    setSourceGroupPolicyValue("");
     setSourceGroupOutcome(null);
     setSourceTransitionResult(null);
     setSourcePromotionRemoteId(null);
@@ -660,7 +568,11 @@ export function App({ client }: AppProps) {
     setSourceGroupActivity("idle");
     setIsLinkImportOpen(true);
 
-    void fetchLatestAndManage(request, preloadedPreview);
+    void fetchLatestAndManage({
+      sourceType,
+      sourceUrl,
+      trackingPolicy: null,
+    });
   }
 
   async function closeImport() {
@@ -1030,188 +942,6 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function openAdopt() {
-    adoptRunId.current += 1;
-    setIsAdoptOpen(true);
-    adoptSourcePreviewCache.current.clear();
-    setAdoptReport(null);
-    setAdoptSelections({});
-    setAdoptPlan(null);
-    setAdoptResult(null);
-    setAdoptUndo(null);
-    setAdoptError(null);
-    setAdoptErrorHeading("app.notice.scan_failed");
-    const runId = adoptRunId.current;
-    setAdoptActivity("scanning");
-    try {
-      const report = await client.scanAdopt();
-      if (runId !== adoptRunId.current) return;
-      setAdoptReport(report);
-      preloadAdoptGitSources(report.gitSources);
-    } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
-    } finally {
-      if (runId === adoptRunId.current) setAdoptActivity("idle");
-    }
-  }
-
-  function toggleAdoptCandidate(canonicalEntity: string, checked: boolean) {
-    setAdoptSelections((selections) => {
-      const next = { ...selections };
-      if (checked) {
-        const existing = next[canonicalEntity];
-        next[canonicalEntity] = {
-          canonicalEntity,
-          agentIds: existing?.agentIds ?? [],
-          // The recommendation is to keep the current bytes; the branch
-          // choice never replaces the user's Include action (spec §8.2).
-          modifiedBranch: existing?.modifiedBranch ?? "keep_current",
-        };
-      } else {
-        delete next[canonicalEntity];
-      }
-      return next;
-    });
-  }
-
-  function setAdoptModifiedBranch(
-    canonicalEntity: string,
-    modifiedBranch: ModifiedBranch,
-  ) {
-    setAdoptSelections((selections) => {
-      const existing = selections[canonicalEntity];
-      if (!existing) return selections;
-      return {
-        ...selections,
-        [canonicalEntity]: { ...existing, modifiedBranch },
-      };
-    });
-  }
-
-  async function rescanAdopt() {
-    const runId = ++adoptRunId.current;
-    adoptSourcePreviewCache.current.clear();
-    setAdoptPlan(null);
-    setAdoptError(null);
-    setAdoptErrorHeading("app.notice.scan_failed");
-    setAdoptActivity("scanning");
-    try {
-      const report = await client.scanAdopt();
-      if (runId !== adoptRunId.current) return;
-      setAdoptReport(report);
-      preloadAdoptGitSources(report.gitSources);
-      setAdoptSelections({});
-    } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
-    } finally {
-      if (runId === adoptRunId.current) setAdoptActivity("idle");
-    }
-  }
-
-  async function planAdopt() {
-    const selections = Object.values(adoptSelections);
-    if (selections.length === 0) return;
-    const runId = ++adoptRunId.current;
-    setAdoptActivity("planning");
-    setAdoptError(null);
-    setAdoptErrorHeading("app.notice.preview_failed");
-    try {
-      const plan = await client.planAdopt(
-        adoptReport?.generation ?? 0,
-        selections,
-      );
-      if (runId !== adoptRunId.current) {
-        await client.cancelAdopt(plan.planToken).catch(() => undefined);
-        return;
-      }
-      setAdoptPlan(plan);
-    } catch (reason) {
-      if (runId === adoptRunId.current) setAdoptError(readError(reason, t));
-    } finally {
-      if (runId === adoptRunId.current) setAdoptActivity("idle");
-    }
-  }
-
-  async function applyAdopt() {
-    if (!adoptPlan?.canApply) return;
-    const runId = ++adoptRunId.current;
-    setAdoptActivity("applying");
-    setAdoptError(null);
-    setAdoptErrorHeading("app.notice.adopt_failed");
-    try {
-      const result = await client.applyAdopt(adoptPlan.planToken);
-      setAdoptPlan(null);
-      setAdoptResult(result);
-      try {
-        const snapshot = await client.listSkills(filter);
-        setSkills(snapshot.items);
-      } catch (reason) {
-        setAdoptErrorHeading("app.notice.refresh_failed");
-        setAdoptError(
-          t("app.notice.adopt_refresh_failed", {
-            detail: readError(reason, t),
-          }),
-        );
-      }
-    } catch (reason) {
-      setAdoptPlan(null);
-      setAdoptError(readError(reason, t));
-    } finally {
-      if (runId === adoptRunId.current) setAdoptActivity("idle");
-    }
-  }
-
-  async function undoAdopt() {
-    if (!adoptResult?.operationId) return;
-    const runId = ++adoptRunId.current;
-    setAdoptActivity("undoing");
-    setAdoptError(null);
-    setAdoptErrorHeading("app.notice.undo_failed");
-    try {
-      const undo = await client.undoAdopt(adoptResult.operationId);
-      setAdoptUndo(undo);
-      try {
-        const snapshot = await client.listSkills(filter);
-        setSkills(snapshot.items);
-      } catch (reason) {
-        setAdoptErrorHeading("app.notice.refresh_failed");
-        setAdoptError(
-          t("app.notice.undo_refresh_failed", {
-            detail: readError(reason, t),
-          }),
-        );
-      }
-    } catch (reason) {
-      setAdoptError(readError(reason, t));
-    } finally {
-      if (runId === adoptRunId.current) setAdoptActivity("idle");
-    }
-  }
-
-  async function closeAdopt() {
-    if (adoptActivity === "applying" || adoptActivity === "undoing") return;
-    adoptRunId.current += 1;
-    const planToken = adoptPlan?.planToken;
-    const operationId =
-      adoptResult?.operationId && adoptResult.undoAvailable && !adoptUndo
-        ? adoptResult.operationId
-        : null;
-    setIsAdoptOpen(false);
-    setAdoptReport(null);
-    setAdoptSelections({});
-    setAdoptPlan(null);
-    setAdoptResult(null);
-    setAdoptUndo(null);
-    setAdoptError(null);
-    setAdoptActivity("idle");
-    if (planToken) {
-      await client.cancelAdopt(planToken).catch(() => undefined);
-    }
-    if (operationId) {
-      await client.finalizeAdopt(operationId).catch(() => undefined);
-    }
-  }
-
   // -- Preferences (spec §10.2, strictly four) --
 
   async function togglePreference(updates: PreferenceUpdates) {
@@ -1371,7 +1101,7 @@ export function App({ client }: AppProps) {
       await client.completeOnboarding();
       setIsOnboardingOpen(false);
       setOnboardingStep(0);
-      setOnboardingReport(null);
+      setOnboardingScanCount(null);
     } catch (reason) {
       setOnboardingError(readError(reason, t));
     }
@@ -1395,13 +1125,33 @@ export function App({ client }: AppProps) {
       return;
     }
     if (onboardingStep === 1) {
-      // Step 3: the first-run full scan is read-only and never adopts.
+      // Step 3: the first-run full Rescan uses the same Report contract as
+      // the manual Rescan (spec §8.1): zero configuration, zero selection,
+      // Skip or Cancel are always available and nothing is adopted here.
       setOnboardingActivity("scanning");
       setOnboardingError(null);
       setOnboardingStep(2);
       try {
-        const report = await client.scanAdopt();
-        setOnboardingReport(report);
+        await client.startRescan("onboarding");
+        // Wait for the terminal Report: the shared evidence contract.
+        let scanCount: number | null = null;
+        const deadline = Date.now() + 120_000;
+        while (Date.now() < deadline) {
+          const snapshot = await client.getObservationSnapshot();
+          const run = snapshot.scanRun;
+          const report = snapshot.currentReport?.summary ?? null;
+          const active =
+            run !== null &&
+            ["queued", "running", "cancelling"].includes(run.state);
+          if (!active && report) {
+            scanCount = report.sourceCounts.localCandidates;
+            break;
+          }
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, 400);
+          await promise;
+        }
+        setOnboardingScanCount(scanCount);
       } catch (reason) {
         setOnboardingStep(1);
         setOnboardingError(readError(reason, t));
@@ -1427,35 +1177,7 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function finishOnboardingWithAdopt() {
-    if (!onboardingReport) return;
-    const report = onboardingReport;
-    setOnboardingError(null);
-    try {
-      await client.completeOnboarding();
-    } catch (reason) {
-      setOnboardingError(readError(reason, t));
-      return;
-    }
-    setIsOnboardingOpen(false);
-    setOnboardingStep(0);
-    // Guide into Adopt with the scan results already loaded (spec §8.7);
-    // viewing is never selecting, so nothing is pre-included.
-    adoptSourcePreviewCache.current.clear();
-    setAdoptReport(report);
-    preloadAdoptGitSources(report.gitSources);
-    setAdoptSelections({});
-    setAdoptPlan(null);
-    setAdoptResult(null);
-    setAdoptUndo(null);
-    setAdoptError(null);
-    setAdoptActivity("idle");
-    setIsAdoptOpen(true);
-    setOnboardingReport(null);
-  }
-
   const activeOperations = [
-    operationFromActivity("adopt", adoptActivity, ADOPT_OPERATION_COPIES, t),
     operationFromActivity(
       "link-import",
       linkImportActivity,
@@ -1567,24 +1289,7 @@ export function App({ client }: AppProps) {
         onOpenRemove={openRemove}
         onCloseRemove={closeRemove}
         onApplyRemove={applyRemove}
-        isAdoptOpen={isAdoptOpen}
-        adoptReport={adoptReport}
-        adoptSelections={adoptSelections}
-        adoptPlan={adoptPlan}
-        adoptResult={adoptResult}
-        adoptUndo={adoptUndo}
-        adoptError={adoptError}
-        adoptErrorHeading={adoptErrorHeading}
-        adoptActivity={adoptActivity}
-        onOpenAdopt={openAdopt}
-        onRescanAdopt={rescanAdopt}
-        onToggleAdoptCandidate={toggleAdoptCandidate}
-        onSetAdoptBranch={setAdoptModifiedBranch}
-        onPlanAdopt={planAdopt}
-        onApplyAdopt={applyAdopt}
-        onUndoAdopt={undoAdopt}
-        onCloseAdopt={closeAdopt}
-        onManageAdoptGitSource={manageAdoptGitSource}
+        onManageGitGroup={manageGitGroup}
         isPreferencesOpen={isPreferencesOpen}
         preferences={preferences}
         preferencesWarning={preferencesWarning}
@@ -1594,7 +1299,7 @@ export function App({ client }: AppProps) {
         onboardingStep={onboardingStep}
         onboardingAgents={startupAgents}
         onboardingLibraryPath={onboardingLibraryPath}
-        onboardingReport={onboardingReport}
+        onboardingScanCount={onboardingScanCount}
         onboardingActivity={onboardingActivity}
         onboardingError={onboardingError}
         onOpenPreferences={() => setIsPreferencesOpen(true)}
@@ -1607,7 +1312,6 @@ export function App({ client }: AppProps) {
         onCompleteOnboarding={completeOnboarding}
         onAdvanceOnboarding={advanceOnboarding}
         onCreateAgentDirectory={createOnboardingAgentDirectory}
-        onFinishOnboardingWithAdopt={finishOnboardingWithAdopt}
       />
       {activeOperations.length > 0 ? (
         <OperationStatusWindow

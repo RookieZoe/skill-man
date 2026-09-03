@@ -3871,6 +3871,21 @@ impl ImportStore for SqliteCatalogStore {
 }
 
 impl AdoptStore for SqliteCatalogStore {
+    fn snapshot_version(&self) -> u64 {
+        let connection = match self.connection.lock() {
+            Ok(connection) => connection,
+            Err(_) => return 0,
+        };
+        let value: i64 = connection
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        u64::try_from(value).unwrap_or(0)
+    }
+
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
         self.connection
             .lock()

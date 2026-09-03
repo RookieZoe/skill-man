@@ -899,11 +899,6 @@ export function createFixtureCatalogClient(
         "Skill Updates are not available in the preview fixture",
       );
     },
-    async scanAdopt() {
-      return fixtureUnsupported(
-        "Adopt is not available in the preview fixture",
-      );
-    },
     async planAdopt() {
       return fixtureUnsupported(
         "Adopt is not available in the preview fixture",
@@ -961,6 +956,11 @@ export function createFixtureCatalogClient(
       );
     },
     publishScanReport(summary, pages) {
+      // Publishing a terminal Report closes any in-flight Run exactly like
+      // production (a Run publishes atomically and becomes terminal).
+      if (fixtureScanRun) {
+        fixtureScanRun = { ...fixtureScanRun, state: "completed" };
+      }
       fixtureCurrentReport.summary = summary;
       fixtureCurrentReport.freshness = "current";
       fixtureCurrentReport.staleReasons = [];

@@ -85,6 +85,11 @@ pub enum AdoptStoreError {
 }
 
 pub trait AdoptStore: Send + Sync {
+    /// The current Catalog snapshot version (generation): any Catalog write
+    /// after an Adopt plan was frozen makes the plan stale (spec §4.6
+    /// plan/apply revalidation). Read-only; never a write authority.
+    fn snapshot_version(&self) -> u64;
+
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError>;
 
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError>;

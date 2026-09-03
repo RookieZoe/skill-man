@@ -781,6 +781,10 @@ impl ImportStore for RuntimeCatalogStore {
 }
 
 impl AdoptStore for RuntimeCatalogStore {
+    fn snapshot_version(&self) -> u64 {
+        <Self as crate::seams::catalog_store::CatalogStore>::snapshot_version(self)
+    }
+
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
         if !self.is_writable() {
             return Err(AdoptStoreError::Unavailable(
@@ -1210,7 +1214,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let store =
             RuntimeCatalogStore::closed(Arc::new(MacOsFileSystem::new(dir.path().to_path_buf())));
-        assert_eq!(store.snapshot_version(), 0);
+        assert_eq!(
+            <RuntimeCatalogStore as crate::seams::catalog_store::CatalogStore>::snapshot_version(
+                &store
+            ),
+            0
+        );
         assert!(matches!(
             store.list(CatalogFilter::All),
             Err(CatalogStoreError::Unavailable(_))

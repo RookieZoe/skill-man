@@ -201,6 +201,21 @@ pub struct CurrentReportView {
     pub stale_reasons: Vec<StaleReason>,
 }
 
+/// Generation-bound evidence of one canonical entity of the current
+/// Report (spec §4.6 Adopt plan input): the canonical entity record, its
+/// classified source verdict and every aggregated appearance with the
+/// full bounded chain. Valid only while the Report identity is current.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanEntityEvidence {
+    pub entity: crate::seams::scan_evidence_store::ScanCanonicalEntityRecord,
+    pub verdict: crate::seams::scan_evidence_store::ScanSourceVerdictRecord,
+    pub appearances: Vec<crate::seams::scan_evidence_store::ScanAppearanceRecord>,
+    /// The manifest's Root coverage rows: consumer Agents of every
+    /// appearance Root (activation attribution of the plan step).
+    pub roots: Vec<crate::seams::scan_evidence_store::ScanRootCoverageRecord>,
+}
+
+
 /// The scan slice of the Observation snapshot (bounded).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanCoordinatorSnapshot {
@@ -658,6 +673,69 @@ impl ScanCoordinator {
                     ScanError::ReportPageNotFound
                 }
             })
+    }
+
+    /// The unique read contract for one canonical entity of the current
+    /// Report (spec §4.6): the entity, its classified verdict and every
+    /// appearance are served only while the exact Report identity is
+    /// current; a manifest switch, corrupt manifest or missing artifact
+    /// returns typed stale/not-found — never evidence of another Report
+    /// (fail closed, ADR-0020).
+    pub fn entity_evidence(
+        &self,
+        report_content_identity: &str,
+        generation: u64,
+        entity_seq: u64,
+    ) -> Result<ScanEntityEvidence, ScanError> {
+        let gate = self.write_gate.snapshot();
+        let bound = match &gate.state {
+            WriteGateState::Open(home) => home.clone(),
+            other => {
+                return Err(ScanError::NotWritable(
+                    write_gate_state_summary(other).to_string(),
+                ));
+            }
+        };
+        let store = self
+            .factory
+            .store_for(&bound)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        let current = store
+            .current_manifest()
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        let manifest = match current {
+            crate::seams::scan_evidence_store::CurrentManifestRead::Report(manifest)
+                if manifest.content_identity == report_content_identity
+                    && manifest.generation == generation =>
+            {
+                manifest
+            }
+            crate::seams::scan_evidence_store::CurrentManifestRead::Report(manifest) => {
+                return Err(ScanError::ReportPageStale(manifest.generation));
+            }
+            crate::seams::scan_evidence_store::CurrentManifestRead::Absent
+            | crate::seams::scan_evidence_store::CurrentManifestRead::Corrupt => {
+                return Err(ScanError::ReportPageNotFound);
+            }
+        };
+        let run_id = manifest.run_id.clone();
+        let entity = store
+            .read_entity(&run_id, entity_seq)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?
+            .ok_or(ScanError::ReportPageNotFound)?;
+        let verdict = store
+            .read_verdict(&run_id, entity_seq)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?
+            .ok_or(ScanError::ReportPageNotFound)?;
+        let appearances = store
+            .read_appearances(&run_id, entity_seq)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        Ok(ScanEntityEvidence {
+            entity,
+            verdict,
+            appearances,
+            roots: manifest.roots.clone(),
+        })
     }
 
     /// The 250 ms / phase-change progress publisher.

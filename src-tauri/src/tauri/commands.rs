@@ -9,7 +9,7 @@ use crate::tauri_adapter::app_update_api::AppUpdateApi;
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    AbandonPreviewDto, ActivationHealthReportDto, AdoptEvidenceReportDto, AdoptPlanDto,
+    AbandonPreviewDto, ActivationHealthReportDto, AdoptPlanDto,
     AdoptResultDto, AdoptUndoResultDto, AgentConfigurationApplyResultDto,
     AgentConfigurationPlanDto, AgentManagementSnapshotDto, AppPreferencesDto, AppUpdateCheckDto,
     ApplyAbandonRequestDto, ApplyAdoptRequestDto, ApplyAgentConfigurationPlanRequestDto,
@@ -750,13 +750,6 @@ pub async fn pin_skill_updates(
     request: PinSkillUpdatesRequestDto,
 ) -> Result<(), CommandFailureDto> {
     state.pin_skill_updates(request)
-}
-
-#[tauri::command]
-pub async fn scan_adopt(
-    state: State<'_, AdoptApi>,
-) -> Result<AdoptEvidenceReportDto, CommandFailureDto> {
-    state.scan_adopt()
 }
 
 #[tauri::command]

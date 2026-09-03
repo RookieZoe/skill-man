@@ -97,7 +97,7 @@ pub fn run() {
         preview_source_promotion, preview_source_update, reconnect_same_home,
         refresh_activation_health, refresh_detection, refresh_startup_probe,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        scan_adopt, set_locale_selection, start_rescan, startup_info, undo_adopt,
+        set_locale_selection, start_rescan, startup_info, undo_adopt,
         undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
@@ -549,16 +549,10 @@ pub fn run() {
                 )
                 .with_write_gate(write_gate.clone())
                 .with_home_context(write_gate.clone())
-                // The evidence ledger's lock discovery and remote
-                // verification seams (spec §4.6): strict v3 parse and
-                // fingerprint plus GitHub/GitLab/generic HTTPS Git
-                // providers, all read-only during scan/plan.
-                .with_lock_store(Arc::new(SystemInstallerLockStore::new(
-                    home_directory,
-                )))
-                .with_remote_provider(Arc::new(SystemRemoteProvider::new(
-                    Arc::new(SystemGitSource::new()),
-                ))),
+                // The Adopt plan surface consumes the terminal Scan Report
+                // through the Observation and Scan Module (spec §4.6); no
+                // in-memory report and no remote verification is owned here.
+                .with_scan_coordinator(scan_coordinator.clone()),
             ));
             app.manage(StartupApi::new(
                 PreferencesService::new(preferences_store.clone()),
@@ -697,7 +691,6 @@ pub fn run() {
             plan_skill_updates,
             apply_skill_updates,
             pin_skill_updates,
-            scan_adopt,
             plan_adopt,
             apply_adopt,
             undo_adopt,

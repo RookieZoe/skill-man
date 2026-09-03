@@ -367,6 +367,12 @@ export type PublicError =
   | { code: "scan_run_not_found" }
   | { code: "scan_report_not_found" }
   | { code: "scan_report_stale"; currentGeneration: number }
+  | {
+      code: "adopt_eligibility";
+      closedCode: string;
+      entitySeq: number;
+      detail: string | null;
+    }
   | { code: "internal" };
 
 export interface SkillSummary {
@@ -795,6 +801,9 @@ export type ScanReportRow =
     }
   | {
       kind: "source_verdict";
+      /** Opaque generation-bound entity reference (spec §4.6): the
+       * presentation passes it back verbatim, never interprets it. */
+      entityRef: string;
       entitySeq: number;
       verdict:
         | "local"
@@ -828,6 +837,9 @@ export type ScanReportRow =
       directoryIdentityKey: string;
       directoryName: string;
       memberEntitySeqs: number[];
+      /** Opaque generation-bound entity references, index-aligned with
+       * `memberEntitySeqs` (spec §4.6). */
+      memberEntityRefs: string[];
       memberPaths: string[];
       winnerEntitySeq: number | null;
     }
@@ -1334,45 +1346,6 @@ export interface UpdateResult {
   items: UpdateItemResult[];
 }
 
-export type AdoptVerdict =
-  | "local"
-  | "verified"
-  | "modified"
-  | "conflict"
-  | "deferred"
-  | "blocked"
-  | "excluded";
-
-export type ChainFault =
-  | { kind: "dangling"; at: string }
-  | { kind: "cycle"; at: string }
-  | { kind: "hop_limit"; at: string }
-  | { kind: "non_utf8"; at: string }
-  | { kind: "read_failed"; at: string; detail: string }
-  | { kind: "not_directory"; at: string }
-  | { kind: "identity_replaced"; at: string };
-
-export type LockFileFault =
-  | { kind: "not_utf8" }
-  | { kind: "invalid_json"; detail: string }
-  | { kind: "unsupported_version"; version: number }
-  | { kind: "duplicate_key"; key: string };
-
-export type AdoptVerdictReason =
-  | { kind: "no_lock" }
-  | { kind: "duplicate_lock_owner"; otherLockPath: string }
-  | { kind: "lock_file_fault"; lockPath: string; fault: LockFileFault }
-  | { kind: "lock_entry_fault"; lockPath: string; reason: string }
-  | { kind: "entity_not_at_installer_root"; expected: string }
-  | { kind: "remote_conflict"; detail: string }
-  | { kind: "identity_conflict"; names: string[] }
-  | { kind: "library_conflict"; directoryName: string }
-  | { kind: "ownership_conflict"; managedDirectoryName: string }
-  | { kind: "remote_unavailable"; detail: string }
-  | { kind: "chain_fault"; fault: ChainFault }
-  | { kind: "unreadable_entity"; detail: string }
-  | { kind: "fixture_entity" };
-
 export interface EvidenceChainHop {
   path: string;
   kind: "directory" | "symlink";
@@ -1382,140 +1355,49 @@ export interface EvidenceChainHop {
   inode: number;
 }
 
-export interface EvidenceChain {
-  entryPath: string;
-  entryDevice: number;
-  entryInode: number;
-  hops: EvidenceChainHop[];
-  finalEntity: string | null;
-  fault: ChainFault | null;
-}
-
+/** One plan-item appearance with its full bounded multi-hop chain (spec
+ * §8.1: every hop is presented). */
 export interface AdoptAppearanceEvidence {
   entryPath: string;
   kind: "real_directory" | "symlink";
-  agentId: string | null;
-  shared: boolean;
   originalTarget: string | null;
-  chain: EvidenceChain;
+  chain: EvidenceChainHop[];
 }
 
-/** The strict lock entry as raw Source Content (spec §6.3). */
-export interface LockEntry {
-  name: string;
-  sourceType: string;
-  source: string;
-  sourceUrl: string;
-  requestedRef: string | null;
-  skillPath: string;
-  skillFolderHash: string;
-  installedAt: string | null;
-  updatedAt: string | null;
-  pluginName: string | null;
+/** One Activation pair of a plan item (entry path → target path). */
+export interface AdoptActivation {
+  entryPath: string;
+  targetPath: string;
 }
 
-export interface AdoptLockEvidence {
-  lockPath: string;
-  lockFingerprint: string;
-  entryName: string;
-  entry: LockEntry | null;
-  entryFault: string | null;
-  fileFault: LockFileFault | null;
+/**
+ * Closed Adopt actions (spec §4.6): the only planable operations of the
+ * terminal Scan Report surface are the keep-in-place Local Link and an
+ * explicit Conflict Set winner.
+ */
+export type AdoptAction = "local_link" | "conflict_winner";
+
+/** One explicit selection of the report plan request. */
+export interface AdoptReportSelection {
+  entityRef: string;
+  action: AdoptAction;
 }
-
-export interface AdoptRemoteEvidence {
-  canonicalUrl: string;
-  requestedRef: string;
-  refKind: "head" | "branch" | "tag" | "commit";
-  anchorCommit: string;
-  originalInstallCommitKnown: boolean;
-  skillPath: string;
-  providerHash: string;
-  providerHashMatched: boolean;
-  remoteTreeHash: string;
-  localTreeHash: string;
-  treesMatch: boolean;
-  defaultBranch: string | null;
-}
-
-export interface AdoptLockFile {
-  path: string;
-  fingerprint: string;
-  byteLen: number;
-  version: number;
-  fault: LockFileFault | null;
-  entryNames: string[];
-  entryFaults: { name: string; reason: string }[];
-}
-
-export interface AdoptEvidenceCandidate {
-  canonicalEntity: string;
-  directoryName: string;
-  directoryNames: string[];
-  appearances: AdoptAppearanceEvidence[];
-  verdict: AdoptVerdict;
-  reason: AdoptVerdictReason | null;
-  lock: AdoptLockEvidence | null;
-  remote: AdoptRemoteEvidence | null;
-  localTreeHash: string | null;
-  requiresRelocation: boolean;
-  selectable: boolean;
-  adoptable: boolean;
-  conflict: LibraryConflict | null;
-  suggestedAgentIds: string[];
-}
-
-/** A supported Git repository discovered during an Adopt scan. */
-export interface AdoptGitSource {
-  sourceType: GitRepositorySourceType;
-  sourceUrl: string;
-  trackingRefs: string[];
-  externalOwnershipClaims: ExternalOwnershipClaim[];
-}
-
-export interface AdoptEvidenceReport {
-  generation: number;
-  candidates: AdoptEvidenceCandidate[];
-  gitSources: AdoptGitSource[];
-  lockFiles: AdoptLockFile[];
-  truncated: boolean;
-}
-
-export type ModifiedBranch =
-  "keep_current" | "discard_to_anchor" | "convert_to_local_link";
-
-export interface AdoptSelection {
-  canonicalEntity: string;
-  agentIds: string[];
-  modifiedBranch?: ModifiedBranch;
-}
-
-export interface AdoptTargetAgent {
-  agentId: string;
-  name: string;
-}
-
-export type AdoptPlanIntent =
-  | "local_link"
-  | "local_link_with_move"
-  | "remote_install_keep_current"
-  | "remote_install_discard_modified"
-  | "remote_install_convert_to_link";
 
 export interface AdoptPlanItem {
+  entityRef: string;
+  action: AdoptAction;
   directoryName: string;
   canonicalEntity: string;
-  intent: AdoptPlanIntent;
   finalEntityPath: string;
   appearances: AdoptAppearanceEvidence[];
-  targetAgents: AdoptTargetAgent[];
+  activations: AdoptActivation[];
   applyable: boolean;
   error: string | null;
 }
 
 export interface AdoptPlan {
   planToken: string;
-  evidenceGeneration: number;
+  reportGeneration: number;
   items: AdoptPlanItem[];
   canApply: boolean;
 }
@@ -1674,10 +1556,9 @@ export interface CatalogClient {
     abandonChanges: boolean,
   ): Promise<UpdateResult>;
   pinSkillUpdates(skillIds: string[]): Promise<void>;
-  scanAdopt(): Promise<AdoptEvidenceReport>;
   planAdopt(
-    evidenceGeneration: number,
-    selections: AdoptSelection[],
+    reportGeneration: number,
+    selections: AdoptReportSelection[],
   ): Promise<AdoptPlan>;
   applyAdopt(planToken: string): Promise<AdoptResult>;
   undoAdopt(operationId: string): Promise<AdoptUndoResult>;
@@ -1999,12 +1880,9 @@ const tauriCatalogClient: CatalogClient = {
       request: { skillIds },
     });
   },
-  scanAdopt() {
-    return invoke<AdoptEvidenceReport>("scan_adopt");
-  },
-  planAdopt(evidenceGeneration, selections) {
+  planAdopt(reportGeneration, selections) {
     return invoke<AdoptPlan>("plan_adopt", {
-      request: { evidenceGeneration, selections },
+      request: { reportGeneration, selections },
     });
   },
   applyAdopt(planToken) {

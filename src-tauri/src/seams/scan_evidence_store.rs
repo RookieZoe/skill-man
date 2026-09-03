@@ -804,6 +804,35 @@ pub trait ScanEvidenceStore: Send + Sync {
         limit: usize,
     ) -> Result<ScanReportPageRead, ScanReportPageError>;
 
+    /// One canonical entity record of a Run by its generation-bound
+    /// entity sequence. The immutable index streams never change after the
+    /// manifest switch, so a read is stable for the lifetime of the
+    /// Report. `None` means the sequence does not exist in this Run (never
+    /// a guess).
+    fn read_entity(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanCanonicalEntityRecord>, ScanEvidenceStoreError>;
+
+    /// One classified source verdict of a Run by entity sequence. `None`
+    /// means the entity has no verdict (failed classification must never
+    /// be read as a Local candidate).
+    fn read_verdict(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanSourceVerdictRecord>, ScanEvidenceStoreError>;
+
+    /// Every appearance of a Run aggregated into one canonical entity
+    /// (deterministic first-seen order), with the full bounded chain, the
+    /// memoized hints and the frozen object identity.
+    fn read_appearances(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Vec<ScanAppearanceRecord>, ScanEvidenceStoreError>;
+
     /// Remove one temporary Run artifact, keeping `current.json` untouched.
     /// Only the Run whose `run.json` matches `(home_id, run_id)` is removed;
     /// anything unproven is left behind (`ProvenanceMismatch`).

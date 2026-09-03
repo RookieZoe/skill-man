@@ -164,6 +164,49 @@ impl SystemScanEvidenceStore {
         })?;
         self.write_string_atomic(path, &json, operation)
     }
+
+    /// Prove the Run belongs to this Home before any indexed read.
+    fn verify_run_home(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError> {
+        let Some(run) = self.read_run(run_id)? else {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("no run.json for {run_id}"),
+            });
+        };
+        if run.home_id != self.home_id {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("run {run_id} belongs to home {}", run.home_id),
+            });
+        }
+        Ok(())
+    }
+
+    /// First record of an immutable index stream matching the predicate,
+    /// or `None`. A torn/unparseable line is skipped (the index is only
+    /// published after a complete manifest switch).
+    fn read_index_record<T>(
+        &self,
+        run_id: &str,
+        file_name: &str,
+        matches: impl Fn(&T) -> bool,
+    ) -> Result<Option<T>, ScanEvidenceStoreError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let path = self.run_dir(run_id).join(file_name);
+        let file = File::open(&path).map_err(|error| {
+            ScanEvidenceStoreError::io("read Scan index", &path, &error)
+        })?;
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(record) = serde_json::from_str::<T>(&line) else {
+                continue;
+            };
+            if matches(&record) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl ScanEvidenceStore for SystemScanEvidenceStore {
@@ -664,20 +707,56 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         Ok(ScanReportPageRead { rows, next_offset })
     }
 
+    fn read_entity(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanCanonicalEntityRecord>, ScanEvidenceStoreError> {
+        self.verify_run_home(run_id)?;
+        self.read_index_record::<ScanCanonicalEntityRecord>(run_id, "entities.jsonl", |record| {
+            record.entity_seq == entity_seq
+        })
+    }
+
+    fn read_verdict(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanSourceVerdictRecord>, ScanEvidenceStoreError> {
+        self.verify_run_home(run_id)?;
+        self.read_index_record::<ScanSourceVerdictRecord>(run_id, "verdicts.jsonl", |record| {
+            record.entity_seq == entity_seq
+        })
+    }
+
+    fn read_appearances(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Vec<ScanAppearanceRecord>, ScanEvidenceStoreError> {
+        self.verify_run_home(run_id)?;
+        let path = self.run_dir(run_id).join("appearances.jsonl");
+        let file = File::open(&path).map_err(|error| {
+            ScanEvidenceStoreError::io("read Scan appearance index", &path, &error)
+        })?;
+        let mut rows = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(record) = serde_json::from_str::<ScanAppearanceRecord>(&line) else {
+                continue;
+            };
+            if record.entity_seq == Some(entity_seq) {
+                rows.push(record);
+            }
+        }
+        Ok(rows)
+    }
+
     fn classification_rows(
         &self,
         run_id: &str,
     ) -> Result<Vec<ScanClassificationRow>, ScanEvidenceStoreError> {
-        let Some(run) = self.read_run(run_id)? else {
-            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
-                detail: format!("no run.json for {run_id}"),
-            });
-        };
-        if run.home_id != self.home_id {
-            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
-                detail: format!("run {run_id} belongs to home {}", run.home_id),
-            });
-        }
+        self.verify_run_home(run_id)?;
         let entities_path = self.run_dir(run_id).join("entities.jsonl");
         let entities_file = File::open(&entities_path).map_err(|error| {
             ScanEvidenceStoreError::io("read canonical Scan entity index", &entities_path, &error)
@@ -1235,6 +1314,30 @@ impl ScanEvidenceStore for FaultInjectingScanEvidenceStore {
         self.inner.report_page(cursor, limit)
     }
 
+    fn read_entity(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanCanonicalEntityRecord>, ScanEvidenceStoreError> {
+        self.inner.read_entity(run_id, entity_seq)
+    }
+
+    fn read_verdict(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Option<ScanSourceVerdictRecord>, ScanEvidenceStoreError> {
+        self.inner.read_verdict(run_id, entity_seq)
+    }
+
+    fn read_appearances(
+        &self,
+        run_id: &str,
+        entity_seq: u64,
+    ) -> Result<Vec<ScanAppearanceRecord>, ScanEvidenceStoreError> {
+        self.inner.read_appearances(run_id, entity_seq)
+    }
+
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError> {
         self.maybe_fail(crate::seams::scan_evidence_store::fault_points::RUN_CANCEL)?;
         self.inner.remove_run(run_id)
@@ -1705,6 +1808,152 @@ mod tests {
             .unwrap();
         assert_eq!(continued.rows.len(), 1);
         assert!(continued.next_offset.is_none());
+    }
+
+    #[test]
+    fn entity_read_contracts_serve_generation_bound_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = home();
+        let store = store(&temp, &home);
+        let run_id = "run-1";
+        store.create_run(&run_record(&home, run_id)).unwrap();
+        let identity_a = ScanObjectIdentity {
+            device: 1,
+            inode: 100,
+        };
+        // Two canonical entities; entity 1 has two appearances (alpha via
+        // symlink chain, beta direct), entity 2 one appearance.
+        store
+            .append_entry(run_id, "r0", &entry_with_identity(1, "alpha", identity_a))
+            .unwrap();
+        store
+            .append_entry(run_id, "r0", &entry_with_identity(2, "beta", identity_a))
+            .unwrap();
+        store
+            .append_entry(
+                run_id,
+                "r0",
+                &entry_with_identity(
+                    3,
+                    "gamma",
+                    ScanObjectIdentity {
+                        device: 1,
+                        inode: 200,
+                    },
+                ),
+            )
+            .unwrap();
+        for (seq, name) in [(1, "alpha"), (2, "beta"), (3, "gamma")] {
+            let identity = if seq == 3 {
+                ScanObjectIdentity {
+                    device: 1,
+                    inode: 200,
+                }
+            } else {
+                identity_a
+            };
+            store
+                .append_entity(
+                    run_id,
+                    "r0",
+                    &entity_record(seq, name, identity),
+                )
+                .unwrap();
+        }
+        store
+            .write_root(run_id, &root_record(0, ScanRootState::Completed))
+            .unwrap();
+        store.build_entity_index(run_id).unwrap();
+        let verdicts = vec![
+            ScanSourceVerdictRecord {
+                entity_seq: 1,
+                verdict: "local".into(),
+                canonical_path: PathBuf::from("/tmp/alpha"),
+                directory_names: vec!["alpha".into(), "beta".into()],
+                appearances: 2,
+                file_count: 3,
+                byte_count: 10,
+                tree_hash: Some("tree-1".into()),
+                lock_claims: Vec::new(),
+                worktree_hints: Vec::new(),
+                reason_kind: None,
+                detail: None,
+                git_refs: Vec::new(),
+                git_lock_paths: Vec::new(),
+                git_group_seq: None,
+                conflict_set_seq: None,
+                notes: Vec::new(),
+                operations: Vec::new(),
+            },
+            ScanSourceVerdictRecord {
+                entity_seq: 2,
+                verdict: "excluded".into(),
+                canonical_path: PathBuf::from("/tmp/gamma"),
+                directory_names: vec!["gamma".into()],
+                appearances: 1,
+                file_count: 1,
+                byte_count: 1,
+                tree_hash: None,
+                lock_claims: Vec::new(),
+                worktree_hints: Vec::new(),
+                reason_kind: None,
+                detail: None,
+                git_refs: Vec::new(),
+                git_lock_paths: Vec::new(),
+                git_group_seq: None,
+                conflict_set_seq: None,
+                notes: Vec::new(),
+                operations: Vec::new(),
+            },
+        ];
+        store
+            .write_classification(run_id, &verdicts, &[], &[])
+            .unwrap();
+        let manifest = manifest(&home, run_id, "complete");
+        store.publish_report(run_id, &manifest).unwrap();
+
+        // Entity 1: recorded facts + verdict + BOTH appearances (identical
+        // object identity aggregates under one canonical row).
+        let entity = store.read_entity(run_id, 1).unwrap().expect("entity 1");
+        assert_eq!(
+            entity.canonical_path,
+            PathBuf::from("/tmp/root/alpha"),
+            "the first appearance's final entity is the representative path"
+        );
+        assert_eq!(entity.appearances, 2);
+        let verdict = store.read_verdict(run_id, 1).unwrap().expect("verdict 1");
+        assert_eq!(verdict.verdict, "local");
+        let appearances = store.read_appearances(run_id, 1).unwrap();
+        assert_eq!(appearances.len(), 2, "both alpha + beta appearances");
+        assert_eq!(
+            appearances
+                .iter()
+                .map(|row| row.entity_seq)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(1)]
+        );
+        // Entity 2: its own verdict, not entity 1's.
+        let verdict = store.read_verdict(run_id, 2).unwrap().expect("verdict 2");
+        assert_eq!(verdict.verdict, "excluded");
+        assert_eq!(store.read_appearances(run_id, 2).unwrap().len(), 1);
+        // A sequence that never existed is None, never a guess.
+        assert!(store.read_entity(run_id, 99).unwrap().is_none());
+        assert!(store.read_verdict(run_id, 99).unwrap().is_none());
+        assert!(store.read_appearances(run_id, 99).unwrap().is_empty());
+        // The reads are generation-bound and provenance-checked: a
+        // different home can never read another Home's index.
+        let other_home = BoundHome::test_value(
+            "aaaaaaaa-1234-4000-8000-000000000000",
+            std::path::PathBuf::from("/tmp/other-home"),
+        );
+        let other = SystemScanEvidenceStore::new(
+            temp.path().join("scan"),
+            other_home.home_id.0.clone(),
+        );
+        assert!(matches!(
+            other.read_entity(run_id, 1),
+            Err(ScanEvidenceStoreError::ProvenanceMismatch { .. })
+        ));
     }
 
     #[test]

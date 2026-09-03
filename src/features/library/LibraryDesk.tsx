@@ -7,13 +7,6 @@ import type {
   RemovePanelState,
 } from "../../app/App";
 import type {
-  AdoptEvidenceReport,
-  AdoptGitSource,
-  AdoptPlan,
-  AdoptResult,
-  AdoptSelection,
-  AdoptUndoResult,
-  ModifiedBranch,
   AppPreferences,
   CatalogClient,
   CatalogFilter,
@@ -35,7 +28,6 @@ import type {
   SourceTransitionResult,
   StartupAgent,
 } from "../../app/catalog-client";
-import { EvidenceLedger } from "../adopt/EvidenceLedger";
 import { AgentManagement } from "../agents/AgentManagement";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
@@ -109,15 +101,6 @@ interface LibraryDeskProps {
   onOpenRemove: () => void;
   onCloseRemove: () => void;
   onApplyRemove: () => void;
-  isAdoptOpen: boolean;
-  adoptReport: AdoptEvidenceReport | null;
-  adoptSelections: Record<string, AdoptSelection>;
-  adoptPlan: AdoptPlan | null;
-  adoptResult: AdoptResult | null;
-  adoptUndo: AdoptUndoResult | null;
-  adoptError: string | null;
-  adoptErrorHeading: MessageKey;
-  adoptActivity: "idle" | "scanning" | "planning" | "applying" | "undoing";
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
   onOpenLinkImport: () => void;
@@ -135,18 +118,12 @@ interface LibraryDeskProps {
   onPreviewSourceUpdate: (remoteId: string) => void;
   onConfirmSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
-  onOpenAdopt: () => void;
-  onRescanAdopt: () => void;
-  onToggleAdoptCandidate: (canonicalEntity: string, checked: boolean) => void;
-  onSetAdoptBranch: (
-    canonicalEntity: string,
-    modifiedBranch: ModifiedBranch,
+  /** Git Repository Source handoff: the scan group opens the source
+   * management surface (#92 Source Tracking Policy + immutable Transition). */
+  onManageGitGroup: (
+    sourceType: GitRepositorySourceType,
+    sourceUrl: string,
   ) => void;
-  onPlanAdopt: () => void;
-  onApplyAdopt: () => void;
-  onUndoAdopt: () => void;
-  onCloseAdopt: () => void;
-  onManageAdoptGitSource: (source: AdoptGitSource) => void;
   isPreferencesOpen: boolean;
   preferences: AppPreferences | null;
   preferencesWarning: PreferencesWarning | null;
@@ -156,7 +133,7 @@ interface LibraryDeskProps {
   onboardingStep: number;
   onboardingAgents: StartupAgent[];
   onboardingLibraryPath: string | null;
-  onboardingReport: AdoptEvidenceReport | null;
+  onboardingScanCount: number | null;
   onboardingActivity: "idle" | "checking" | "scanning";
   onboardingError: string | null;
   onOpenPreferences: () => void;
@@ -169,7 +146,6 @@ interface LibraryDeskProps {
   onCompleteOnboarding: () => void;
   onAdvanceOnboarding: () => void;
   onCreateAgentDirectory: (agentId: string) => void;
-  onFinishOnboardingWithAdopt: () => void;
 }
 
 export function LibraryDesk({
@@ -229,24 +205,7 @@ export function LibraryDesk({
   onConfirmSourcePromotion,
 
   onFetchLatestAndManage,
-  isAdoptOpen,
-  adoptReport,
-  adoptSelections,
-  adoptPlan,
-  adoptResult,
-  adoptUndo,
-  adoptError,
-  adoptErrorHeading,
-  adoptActivity,
-  onOpenAdopt,
-  onRescanAdopt,
-  onToggleAdoptCandidate,
-  onSetAdoptBranch,
-  onPlanAdopt,
-  onApplyAdopt,
-  onUndoAdopt,
-  onCloseAdopt,
-  onManageAdoptGitSource,
+  onManageGitGroup,
   isPreferencesOpen,
   preferences,
   preferencesWarning,
@@ -256,7 +215,7 @@ export function LibraryDesk({
   onboardingStep,
   onboardingAgents,
   onboardingLibraryPath,
-  onboardingReport,
+  onboardingScanCount,
   onboardingActivity,
   onboardingError,
   onOpenPreferences,
@@ -269,7 +228,6 @@ export function LibraryDesk({
   onCompleteOnboarding,
   onAdvanceOnboarding,
   onCreateAgentDirectory,
-  onFinishOnboardingWithAdopt,
 }: LibraryDeskProps) {
   const { t } = useLocale();
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
@@ -290,7 +248,6 @@ export function LibraryDesk({
     isLinkImportOpen ||
     relocatePanel.isOpen ||
     removePanel.isOpen ||
-    isAdoptOpen ||
     isOnboardingOpen ||
     isPreferencesOpen;
   const hasAppUpdateOverlay =
@@ -427,7 +384,6 @@ export function LibraryDesk({
           promotionTrigger.current = null;
           onOpenLinkImport();
         }}
-        onAdopt={onOpenAdopt}
         onOpenPreferences={onOpenPreferences}
       />
       <div className="notice-region">
@@ -526,7 +482,10 @@ export function LibraryDesk({
             </div>
           </div>
         )}
-        <ScanEvidenceLedger client={client} />
+        <ScanEvidenceLedger
+          client={client}
+          onManageGitGroup={onManageGitGroup}
+        />
       </div>
       {relocatePanel.isOpen ? (
         <RelocateSheet
@@ -542,26 +501,6 @@ export function LibraryDesk({
           panel={removePanel}
           onApply={onApplyRemove}
           onClose={onCloseRemove}
-        />
-      ) : null}
-      {isAdoptOpen ? (
-        <EvidenceLedger
-          report={adoptReport}
-          selections={adoptSelections}
-          plan={adoptPlan}
-          result={adoptResult}
-          undo={adoptUndo}
-          error={adoptError}
-          errorHeading={adoptErrorHeading}
-          activity={adoptActivity}
-          onToggle={onToggleAdoptCandidate}
-          onSetBranch={onSetAdoptBranch}
-          onRescan={onRescanAdopt}
-          onPlan={onPlanAdopt}
-          onApply={onApplyAdopt}
-          onUndo={onUndoAdopt}
-          onClose={onCloseAdopt}
-          onManageGitSource={onManageAdoptGitSource}
         />
       ) : null}
       {isLinkImportOpen ? (
@@ -603,13 +542,12 @@ export function LibraryDesk({
           step={onboardingStep}
           agents={onboardingAgents}
           libraryPath={onboardingLibraryPath}
-          report={onboardingReport}
+          scanCount={onboardingScanCount}
           activity={onboardingActivity}
           error={onboardingError}
           onSkip={onCompleteOnboarding}
           onAdvance={onAdvanceOnboarding}
           onCreateDirectory={onCreateAgentDirectory}
-          onFinishWithAdopt={onFinishOnboardingWithAdopt}
         />
       ) : null}
       {isPreferencesOpen ? (
@@ -642,7 +580,6 @@ function Toolbar({
   agentDrawerOpen,
   onToggleAgentDrawer,
   onImport,
-  onAdopt,
   onOpenPreferences,
 }: {
   surface: "library" | "agents";
@@ -651,7 +588,6 @@ function Toolbar({
   agentDrawerOpen: boolean;
   onToggleAgentDrawer: () => void;
   onImport: () => void;
-  onAdopt: () => void;
   onOpenPreferences: () => void;
 }) {
   const { t } = useLocale();
@@ -695,9 +631,6 @@ function Toolbar({
           <>
             <button type="button" className="toolbar-button" disabled>
               {t("library.toolbar.health_check")}
-            </button>
-            <button type="button" className="toolbar-button" onClick={onAdopt}>
-              {t("library.toolbar.adopt")}
             </button>
             {layoutMode === "mid" ? (
               <button
@@ -1393,24 +1326,24 @@ function OnboardingSheet({
   step,
   agents,
   libraryPath,
-  report,
+  scanCount,
   activity,
   error,
   onSkip,
   onAdvance,
   onCreateDirectory,
-  onFinishWithAdopt,
 }: {
   step: number;
   agents: StartupAgent[];
   libraryPath: string | null;
-  report: AdoptEvidenceReport | null;
+  /** The shared Scan Report contract: Local candidate count only (the full
+   * evidence ledger lives on the Library Desk). */
+  scanCount: number | null;
   activity: "idle" | "checking" | "scanning";
   error: string | null;
   onSkip: () => void;
   onAdvance: () => void;
   onCreateDirectory: (agentId: string) => void;
-  onFinishWithAdopt: () => void;
 }) {
   const { t, tPlural } = useLocale();
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -1421,7 +1354,6 @@ function OnboardingSheet({
     activity === "checking"
       ? t("library.onboarding.checking")
       : t("library.onboarding.scanning");
-  const candidates = report?.candidates ?? [];
 
   useLayoutEffect(() => {
     if (step === 2 && !isBusy) advanceButton.current?.focus();
@@ -1519,40 +1451,12 @@ function OnboardingSheet({
         ) : null}
         {step === 2 ? (
           <div className="onboarding-scan">
-            {!isScanning && report ? (
+            {!isScanning && scanCount !== null ? (
               <>
                 <p role="status">
-                  {tPlural("library.onboarding.untracked", candidates.length)}
+                  {tPlural("library.onboarding.untracked", scanCount)}
                 </p>
-                <ul className="onboarding-untracked-list">
-                  {candidates.map((candidate) => (
-                    <li key={candidate.canonicalEntity}>
-                      <span className="onboarding-untracked-copy">
-                        <strong>{candidate.directoryName}</strong>
-                        <span className="candidate-path">
-                          {candidate.canonicalEntity}
-                        </span>
-                      </span>
-                      <span
-                        className={`onboarding-untracked-verdict adopt-verdict-${candidate.verdict}`}
-                      >
-                        <span>
-                          {t(
-                            `library.adopt.verdict.${candidate.verdict}` as MessageKey,
-                          )}
-                        </span>
-                        {candidate.requiresRelocation ? (
-                          <span className="onboarding-untracked-note">
-                            {t("library.adopt.relocation_required")}
-                          </span>
-                        ) : (
-                          ""
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                {candidates.length === 0 ? (
+                {scanCount === 0 ? (
                   <p role="status">{t("library.onboarding.none")}</p>
                 ) : null}
               </>
@@ -1585,17 +1489,15 @@ function OnboardingSheet({
               {t("library.onboarding.continue")}
             </button>
           ) : (
-            <>
-              <button
-                ref={advanceButton}
-                type="button"
-                className="activation-confirm-button"
-                disabled={!report || isBusy}
-                onClick={onFinishWithAdopt}
-              >
-                {t("library.onboarding.review_adopt")}
-              </button>
-            </>
+            <button
+              ref={advanceButton}
+              type="button"
+              className="activation-confirm-button"
+              disabled={isBusy || scanCount === null}
+              onClick={onSkip}
+            >
+              {t("library.onboarding.finish")}
+            </button>
           )}
         </div>
       </section>

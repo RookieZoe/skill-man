@@ -78,6 +78,7 @@ const GIT_GROUP_ROW: ScanReportRow = {
 
 const LOCAL_ROW: ScanReportRow = {
   kind: "source_verdict",
+  entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@2",
   entitySeq: 2,
   verdict: "local",
   canonicalPath: "/dev/projects/my-skill",
@@ -100,6 +101,7 @@ const LOCAL_ROW: ScanReportRow = {
 
 const LOCAL_MOVE_ROW: ScanReportRow = {
   kind: "source_verdict",
+  entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@3",
   entitySeq: 3,
   verdict: "local",
   canonicalPath: "/home/agent-skills/plain",
@@ -128,6 +130,7 @@ const LOCAL_MOVE_ROW: ScanReportRow = {
 
 const ATTENTION_ROW: ScanReportRow = {
   kind: "source_verdict",
+  entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@4",
   entitySeq: 4,
   verdict: "blocked",
   canonicalPath: "/home/agent-skills/broken",
@@ -150,6 +153,7 @@ const ATTENTION_ROW: ScanReportRow = {
 
 const EXCLUDED_ROW: ScanReportRow = {
   kind: "source_verdict",
+  entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@5",
   entitySeq: 5,
   verdict: "already_managed",
   canonicalPath: "/dev/projects/managed",
@@ -176,6 +180,10 @@ const CONFLICT_SET_ROW: ScanReportRow = {
   directoryIdentityKey: "skill",
   directoryName: "skill",
   memberEntitySeqs: [1, 2],
+  memberEntityRefs: [
+    "scan-report-v1:home:fixture-report-4:4:complete@4@1",
+    "scan-report-v1:home:fixture-report-4:4:complete@4@2",
+  ],
   memberPaths: ["/dev/projects/skill-a", "/dev/projects/skill-b"],
   winnerEntitySeq: null,
 };

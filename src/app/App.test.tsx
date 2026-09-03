@@ -4,67 +4,10 @@ import { expect, test } from "vitest";
 
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 import type {
-  AdoptEvidenceCandidate,
-  AdoptEvidenceReport,
+  ScanReportRow,
   SourceGroupPreviewOutcome,
 } from "./catalog-client";
 import { App } from "./App";
-
-function evidenceCandidate(
-  canonicalEntity: string,
-  overrides: Partial<AdoptEvidenceCandidate> = {},
-): AdoptEvidenceCandidate {
-  const directoryName = canonicalEntity.split("/").pop() ?? canonicalEntity;
-  return {
-    canonicalEntity,
-    directoryName,
-    directoryNames: [directoryName],
-    appearances: [
-      {
-        entryPath: canonicalEntity,
-        kind: "real_directory",
-        agentId: "claude-code",
-        shared: false,
-        originalTarget: null,
-        chain: {
-          entryPath: canonicalEntity,
-          entryDevice: 1,
-          entryInode: 1,
-          hops: [],
-          finalEntity: canonicalEntity,
-          fault: null,
-        },
-      },
-    ],
-    verdict: "local",
-    reason: { kind: "no_lock" },
-    lock: null,
-    remote: null,
-    localTreeHash: "tree-sha256-v1:abc",
-    requiresRelocation: false,
-    selectable: true,
-    adoptable: true,
-    conflict: null,
-    suggestedAgentIds: [],
-    ...overrides,
-  };
-}
-
-function evidenceReport(candidates: AdoptEvidenceCandidate[]): {
-  generation: number;
-  truncated: boolean;
-  lockFiles: never[];
-  candidates: AdoptEvidenceCandidate[];
-  gitSources: never[];
-} {
-  return {
-    generation: 1,
-    truncated: false,
-    lockFiles: [],
-    candidates,
-    gitSources: [],
-  };
-}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -77,93 +20,6 @@ function deferred<T>() {
     resolve,
     reject,
   };
-}
-
-function createAdoptableFixtureCatalogClient() {
-  const client = createFixtureCatalogClient();
-  const canonicalEntity = "~/.claude/skills/prompt-linter";
-  client.scanAdopt = async () => ({
-    generation: 1,
-    truncated: false,
-    lockFiles: [],
-    gitSources: [],
-    candidates: [
-      {
-        canonicalEntity,
-        directoryName: "prompt-linter",
-        directoryNames: ["prompt-linter"],
-        appearances: [
-          {
-            entryPath: canonicalEntity,
-            kind: "real_directory",
-            agentId: "claude-code",
-            shared: false,
-            originalTarget: null,
-            chain: {
-              entryPath: canonicalEntity,
-              entryDevice: 1,
-              entryInode: 1,
-              hops: [],
-              finalEntity: canonicalEntity,
-              fault: null,
-            },
-          },
-        ],
-        verdict: "local",
-        reason: { kind: "no_lock" },
-        lock: null,
-        remote: null,
-        localTreeHash: "tree-sha256-v1:abc",
-        requiresRelocation: false,
-        selectable: true,
-        adoptable: true,
-        conflict: null,
-        suggestedAgentIds: [],
-      },
-    ],
-  });
-  client.planAdopt = async () => ({
-    planToken: "fixture-adopt-plan",
-    evidenceGeneration: 1,
-    items: [
-      {
-        directoryName: "prompt-linter",
-        canonicalEntity,
-        intent: "local_link",
-        finalEntityPath: canonicalEntity,
-        appearances: [],
-        targetAgents: [],
-        applyable: true,
-        error: null,
-      },
-    ],
-    canApply: true,
-  });
-  client.applyAdopt = async () => ({
-    operationId: "fixture-adopt-operation",
-    items: [
-      {
-        skillId: "prompt-linter",
-        directoryName: "prompt-linter",
-        adopted: true,
-        error: null,
-      },
-    ],
-    snapshotVersion: 8,
-    undoAvailable: true,
-  });
-  client.undoAdopt = async (operationId) => ({
-    operationId,
-    items: [
-      {
-        directoryName: "prompt-linter",
-        undone: true,
-        error: null,
-      },
-    ],
-    snapshotVersion: 9,
-  });
-  return client;
 }
 
 test("opens the Library Desk with a selected Skill and Target-scoped placeholder", async () => {
@@ -374,462 +230,6 @@ test("switches the Import sheet to Install Git Skills and reports a source rejec
   ).not.toBeInTheDocument();
 });
 
-test("preloads an Adopt Git Repository Source and reuses it when management opens", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  const remotePreview = deferred<SourceGroupPreviewOutcome>();
-  const requests: Array<{
-    sourceType: string;
-    sourceUrl: string;
-    trackingPolicy: { mode: string; value: string | null } | null;
-  }> = [];
-  client.scanAdopt = async () => ({
-    ...evidenceReport([]),
-    gitSources: [
-      {
-        sourceType: "github",
-        sourceUrl: "https://github.com/acme/skills",
-        trackingRefs: ["main"],
-        externalOwnershipClaims: [
-          {
-            lockPath: "~/.agents/.skill-lock.json",
-            entryName: "alpha",
-            requestedRef: "main",
-          },
-        ],
-      },
-    ],
-  });
-  client.fetchLatestAndManage = async (request) => {
-    requests.push(request);
-    return remotePreview.promise;
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  await screen.findByRole("button", { name: "Install Git Skills" });
-  await waitFor(() => expect(requests).toHaveLength(1));
-  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
-
-  expect(
-    screen.getByRole("dialog", { name: "Import from Git" }),
-  ).toBeInTheDocument();
-  expect(requests).toEqual([
-    {
-      sourceType: "github",
-      sourceUrl: "https://github.com/acme/skills",
-      trackingPolicy: { mode: "branch", value: "main" },
-    },
-  ]);
-
-  remotePreview.resolve({
-    kind: "preview",
-    preview: {
-      provider: "github",
-      sourceUrl: "https://github.com/acme/skills",
-      aliases: [],
-      policy: {
-        mode: "branch",
-        value: "main",
-        selectionKind: "branch",
-        selectedRef: "main",
-        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
-      },
-      members: [
-        {
-          directoryName: "alpha",
-          displayName: "Alpha",
-          description: "The repository member",
-          skillPath: "alpha",
-          action: "added",
-          treeSummary: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        },
-      ],
-      externalOwnershipClaims: [
-        {
-          lockPath: "~/.agents/.skill-lock.json",
-          entryName: "alpha",
-          requestedRef: "main",
-        },
-      ],
-    },
-  });
-  expect(
-    await screen.findByText("Complete Source Release"),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Link local folder" }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Install Git Skills" }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "Use latest remote release" }),
-  ).toBeEnabled();
-});
-
-test("retries an Adopt Git Repository Source after its background preview fails", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  const failedPreview = deferred<SourceGroupPreviewOutcome>();
-  const retryPreview = deferred<SourceGroupPreviewOutcome>();
-  const requests: Array<{
-    sourceType: string;
-    sourceUrl: string;
-    trackingPolicy: { mode: string; value: string | null } | null;
-  }> = [];
-  client.scanAdopt = async () => ({
-    ...evidenceReport([]),
-    gitSources: [
-      {
-        sourceType: "github",
-        sourceUrl: "https://github.com/acme/skills",
-        trackingRefs: ["main"],
-        externalOwnershipClaims: [
-          {
-            lockPath: "~/.agents/.skill-lock.json",
-            entryName: "alpha",
-            requestedRef: "main",
-          },
-        ],
-      },
-    ],
-  });
-  client.fetchLatestAndManage = async (request) => {
-    requests.push(request);
-    return requests.length === 1 ? failedPreview.promise : retryPreview.promise;
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const manage = await screen.findByRole("button", {
-    name: "Install Git Skills",
-  });
-  await waitFor(() => expect(requests).toHaveLength(1));
-  await act(async () => {
-    failedPreview.reject(new Error("temporary remote failure"));
-    await Promise.resolve();
-  });
-
-  await user.click(manage);
-  await waitFor(() => expect(requests).toHaveLength(2));
-  expect(
-    screen.getByRole("dialog", { name: "Import from Git" }),
-  ).toBeInTheDocument();
-});
-
-test("does not surface legacy per-Skill Update controls for a remote Install", async () => {
-  const user = userEvent.setup();
-  render(<App client={createFixtureCatalogClient()} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "media-xray" }));
-  expect(
-    await screen.findByRole("heading", { name: "media-xray" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("heading", { name: "Updates" }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Check for updates" }),
-  ).not.toBeInTheDocument();
-});
-
-test("opens the Adopt sheet and reports a fixture rejection", async () => {
-  const user = userEvent.setup();
-  render(<App client={createFixtureCatalogClient()} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  expect(
-    screen.getByRole("dialog", { name: "Adopt untracked Skills" }),
-  ).toBeInTheDocument();
-  const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Scan failed");
-  expect(alert).toHaveTextContent("not available in the preview fixture");
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(
-    screen.queryByRole("dialog", { name: "Adopt untracked Skills" }),
-  ).not.toBeInTheDocument();
-});
-
-test("shows operation content while an Adopt scan is running", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  const scanned = deferred<AdoptEvidenceReport>();
-  client.scanAdopt = () => scanned.promise;
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-
-  const operationWindow = await screen.findByRole("region", {
-    name: "Current activity",
-  });
-  expect(
-    within(operationWindow).getByRole("heading", { name: "Scanning" }),
-  ).toBeInTheDocument();
-  expect(operationWindow).toHaveTextContent(
-    "Reading configured Agent and shared Skill directories.",
-  );
-  expect(
-    within(operationWindow).getByRole("progressbar", { name: "Scanning" }),
-  ).toBeInTheDocument();
-
-  await act(async () => {
-    scanned.resolve(evidenceReport([]));
-  });
-  await waitFor(() =>
-    expect(
-      screen.queryByRole("region", { name: "Current activity" }),
-    ).not.toBeInTheDocument(),
-  );
-});
-
-test("labels an Adopt preview failure separately from a scan failure", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  client.scanAdopt = async () =>
-    evidenceReport([evidenceCandidate("~/.claude/skills/prompt-linter")]);
-  client.planAdopt = async () => {
-    throw {
-      code: "validation",
-      message: "The selected Skill could not be previewed.",
-    };
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
-  const preview = within(dialog).getByRole("button", {
-    name: "Preview Adopt",
-  });
-  await waitFor(() => expect(preview).toBeEnabled());
-  await user.click(preview);
-
-  const alert = await within(dialog).findByRole("alert");
-  expect(alert).toHaveTextContent("Preview failed");
-  expect(alert).not.toHaveTextContent("Scan failed");
-  expect(alert).toHaveTextContent("The selected Skill could not be previewed.");
-});
-
-test("leaves an unsafe Adopt candidate unselected and shows its scan reason", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  client.scanAdopt = async () =>
-    evidenceReport([
-      evidenceCandidate("~/.agents/skills/ask-matt", {
-        verdict: "blocked",
-        reason: {
-          kind: "chain_fault",
-          fault: {
-            kind: "read_failed",
-            at: "~/.agents/skills/ask-matt",
-            detail:
-              "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
-          },
-        },
-        selectable: false,
-        adoptable: false,
-        suggestedAgentIds: ["claude-code", "codex"],
-      }),
-    ]);
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-
-  expect(
-    within(dialog).getByRole("checkbox", { name: "Include" }),
-  ).toBeDisabled();
-  expect(dialog).toHaveTextContent(
-    "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
-  );
-  expect(
-    within(dialog).getByRole("button", { name: "Preview Adopt" }),
-  ).toBeDisabled();
-});
-
-test("keeps a completed Adopt undoable and finalizable when Library refresh fails", async () => {
-  const user = userEvent.setup();
-  const client = createAdoptableFixtureCatalogClient();
-  const listSkills = client.listSkills.bind(client);
-  const applyAdopt = client.applyAdopt.bind(client);
-  let applied = false;
-  let finalizedOperationId: string | null = null;
-  client.applyAdopt = async (planToken) => {
-    const result = await applyAdopt(planToken);
-    applied = true;
-    return result;
-  };
-  client.listSkills = async (filter) => {
-    if (applied) {
-      throw new Error("Library snapshot unavailable.");
-    }
-    return listSkills(filter);
-  };
-  client.finalizeAdopt = async (operationId) => {
-    finalizedOperationId = operationId;
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
-  const previewButton = within(dialog).getByRole("button", {
-    name: "Preview Adopt",
-  });
-  await waitFor(() => expect(previewButton).toBeEnabled());
-  await user.click(previewButton);
-  await user.click(
-    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
-  );
-
-  expect(
-    await screen.findByRole("heading", { name: "1 of 1 Skills adopted" }),
-  ).toBeInTheDocument();
-  const alert = screen.getByRole("alert");
-  expect(alert).toHaveTextContent("Refresh failed");
-  expect(alert).toHaveTextContent(
-    "Adopt completed, but the Library refresh failed: Library snapshot unavailable.",
-  );
-  expect(
-    screen.getByRole("button", { name: "Undo this batch" }),
-  ).toBeInTheDocument();
-
-  await user.click(screen.getByRole("button", { name: "Close" }));
-  await waitFor(() =>
-    expect(finalizedOperationId).toBe("fixture-adopt-operation"),
-  );
-});
-
-test("keeps a completed Undo when Library refresh fails", async () => {
-  const user = userEvent.setup();
-  const client = createAdoptableFixtureCatalogClient();
-  const listSkills = client.listSkills.bind(client);
-  const undoAdopt = client.undoAdopt.bind(client);
-  let undone = false;
-  client.undoAdopt = async (operationId) => {
-    const result = await undoAdopt(operationId);
-    undone = true;
-    return result;
-  };
-  client.listSkills = async (filter) => {
-    if (undone) {
-      throw new Error("Library snapshot unavailable after Undo.");
-    }
-    return listSkills(filter);
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
-  const previewButton = within(dialog).getByRole("button", {
-    name: "Preview Adopt",
-  });
-  await waitFor(() => expect(previewButton).toBeEnabled());
-  await user.click(previewButton);
-  await user.click(
-    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
-  );
-  await user.click(
-    await within(dialog).findByRole("button", { name: "Undo this batch" }),
-  );
-
-  expect(await within(dialog).findByRole("status")).toHaveTextContent(
-    "Batch undone",
-  );
-  const alert = within(dialog).getByRole("alert");
-  expect(alert).toHaveTextContent("Refresh failed");
-  expect(alert).toHaveTextContent(
-    "Undo completed, but the Library refresh failed: Library snapshot unavailable after Undo.",
-  );
-  expect(
-    within(dialog).queryByRole("button", { name: "Undo this batch" }),
-  ).not.toBeInTheDocument();
-});
-
-test("reports an Adopt command failure before showing a result", async () => {
-  const user = userEvent.setup();
-  const client = createAdoptableFixtureCatalogClient();
-  client.applyAdopt = async () => {
-    throw new Error("Adopt command rejected the plan.");
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
-  const previewButton = within(dialog).getByRole("button", {
-    name: "Preview Adopt",
-  });
-  await waitFor(() => expect(previewButton).toBeEnabled());
-  await user.click(previewButton);
-  await user.click(
-    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
-  );
-
-  const alert = await within(dialog).findByRole("alert");
-  expect(alert).toHaveTextContent("Adopt failed");
-  expect(alert).toHaveTextContent("Adopt command rejected the plan.");
-  expect(
-    within(dialog).queryByRole("heading", { name: /Skills adopted/ }),
-  ).not.toBeInTheDocument();
-});
-
-test("reports an Undo command failure and keeps Undo available", async () => {
-  const user = userEvent.setup();
-  const client = createAdoptableFixtureCatalogClient();
-  client.undoAdopt = async () => {
-    throw new Error("Undo command rejected the operation.");
-  };
-  render(<App client={client} />);
-  await screen.findByRole("heading", { name: "skill-authoring" });
-
-  await user.click(screen.getByRole("button", { name: "Adopt" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "Adopt untracked Skills",
-  });
-  await user.click(within(dialog).getByRole("checkbox", { name: /Include/ }));
-  const previewButton = within(dialog).getByRole("button", {
-    name: "Preview Adopt",
-  });
-  await waitFor(() => expect(previewButton).toBeEnabled());
-  await user.click(previewButton);
-  await user.click(
-    await within(dialog).findByRole("button", { name: /^Adopt$/ }),
-  );
-  await user.click(
-    await within(dialog).findByRole("button", { name: "Undo this batch" }),
-  );
-
-  const alert = await within(dialog).findByRole("alert");
-  expect(alert).toHaveTextContent("Undo failed");
-  expect(alert).toHaveTextContent("Undo command rejected the operation.");
-  expect(
-    within(dialog).getByRole("button", { name: "Undo this batch" }),
-  ).toBeInTheDocument();
-});
-
 test("shows the three-step onboarding on first run and Skip records completion", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
@@ -907,6 +307,89 @@ test("returns to the Library step when preset checking fails", async () => {
   ).not.toBeInTheDocument();
 });
 
+const COMPLETE_SUMMARY = {
+  generation: 5,
+  runId: "fixture-scan-manual-1",
+  contentIdentity: "scan-report-v1:home:fixture-report-5:5:complete",
+  trigger: "onboarding" as const,
+  state: "complete" as const,
+  coverage: { completed: 1, failed: 0, unresponsive: 0 },
+  counts: {
+    roots: 1,
+    entries: 2,
+    entities: 1,
+    files: 4,
+    bytes: 2048,
+    gitProbes: 0,
+    failedRoots: 0,
+    configuredAgents: 1,
+    declaredRoots: 1,
+    canonicalRoots: 1,
+  },
+  incomplete: false,
+  publishedAtMs: 1757000000000,
+  agentConfigurationGeneration: 1,
+  configuredRootSnapshotFingerprint: "roots<1>",
+  startedAtMs: 1756999990000,
+  slow: false,
+  sourceCounts: {
+    gitGroups: 0,
+    gitGroupsConflicted: 0,
+    localCandidates: 1,
+    conflictSets: 0,
+    conflictMembers: 0,
+    blocked: 0,
+    deferred: 0,
+    identityConflicts: 0,
+    alreadyManaged: 0,
+    excluded: 0,
+    needsAttention: 0,
+  },
+};
+
+const LOCAL_CANDIDATE_ROW: ScanReportRow = {
+  kind: "source_verdict",
+  entityRef: "scan-report-v1:home:fixture-report-5:5:complete@5@1",
+  entitySeq: 1,
+  verdict: "local",
+  canonicalPath: "/dev/projects/prompt-linter",
+  directoryNames: ["prompt-linter"],
+  appearances: 1,
+  fileCount: 3,
+  byteCount: 100,
+  treeHash: "tree-sha256-v1:abc",
+  lockClaims: [],
+  worktreeHints: [],
+  reasonKind: null,
+  detail: null,
+  gitRefs: [],
+  gitLockPaths: [],
+  gitGroupSeq: null,
+  conflictSetSeq: null,
+  notes: [],
+  operations: [{ operation: "local_link", allowed: true, closedReason: null }],
+};
+
+const GIT_GROUP_ROW: ScanReportRow = {
+  kind: "git_source_group",
+  groupSeq: 1,
+  provider: "github",
+  canonicalRepository: "https://github.com/acme/skills",
+  repositoryRoot: "/tmp/agent-skills/repo",
+  remoteUrlsSeen: ["https://github.com/acme/skills"],
+  memberEntitySeqs: [1],
+  memberPaths: ["/tmp/agent-skills/repo/alpha"],
+  memberNames: ["alpha"],
+  lockClaims: [],
+  refs: [],
+  lockPaths: [],
+  status: "candidate",
+  operations: [
+    { operation: "git_fetch_and_manage", allowed: true, closedReason: null },
+  ],
+  detail: null,
+};
+
 test("shows honest busy progress while checking presets and scanning untracked Skills", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
@@ -916,13 +399,11 @@ test("shows honest busy progress while checking presets and scanning untracked S
     agents: [],
   };
   const checked = deferred<typeof info>();
-  const scanned = deferred<ReturnType<typeof evidenceReport>>();
   let startupCalls = 0;
   client.startupInfo = () => {
     startupCalls += 1;
     return startupCalls === 1 ? Promise.resolve(info) : checked.promise;
   };
-  client.scanAdopt = () => scanned.promise;
   render(<App client={client} />);
 
   await screen.findByRole("heading", { name: "Your Library" });
@@ -953,46 +434,29 @@ test("shows honest busy progress while checking presets and scanning untracked S
     screen.getByRole("heading", { name: "Scan existing Skills" }),
   ).toBeInTheDocument();
 
-  scanned.resolve(
-    evidenceReport([
-      evidenceCandidate("~/.claude/skills/prompt-linter", {
-        verdict: "verified",
-      }),
-    ]),
-  );
+  // The Run completes atomically and publishes the shared Report; the
+  // onboarding scan step shows honest facts (counts only, nothing adopted).
+  client.publishScanReport(COMPLETE_SUMMARY, {
+    local_candidates: [LOCAL_CANDIDATE_ROW],
+  });
   await screen.findByText("1 Untracked Skill found. Nothing changed yet.");
-  const untrackedList = document.querySelector(".onboarding-untracked-list");
-  expect(untrackedList).toBeInTheDocument();
-  expect(untrackedList).toHaveTextContent("~/.claude/skills/prompt-linter");
-  expect(untrackedList).toHaveTextContent("Verified Remote Source");
+  expect(
+    document.querySelector(".onboarding-untracked-list"),
+  ).not.toBeInTheDocument();
+  // Zero selection, zero adopt writes: Finish is the only completion action.
+  await user.click(screen.getByRole("button", { name: "Finish" }));
+  expect(
+    screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
+  ).not.toBeInTheDocument();
 });
 
-test("onboarding full scan hands off to Adopt with nothing selected", async () => {
+test("onboarding scan allows zero selection zero registration and Skip", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   client.startupInfo = async () => ({
     firstRun: true,
     agents: [],
   });
-  client.scanAdopt = async () =>
-    evidenceReport([
-      evidenceCandidate("~/.claude/skills/prompt-linter"),
-      evidenceCandidate("~/.agents/skills/ask-matt", {
-        verdict: "blocked",
-        reason: {
-          kind: "chain_fault",
-          fault: {
-            kind: "read_failed",
-            at: "~/.agents/skills/ask-matt",
-            detail:
-              "Skill symlink target must be a valid UTF-8 relative path: ask-matt",
-          },
-        },
-        selectable: false,
-        adoptable: false,
-        suggestedAgentIds: ["claude-code", "codex"],
-      }),
-    ]);
   render(<App client={client} />);
 
   await screen.findByRole("dialog", { name: "Welcome to Skill Man" });
@@ -1000,32 +464,89 @@ test("onboarding full scan hands off to Adopt with nothing selected", async () =
   await user.click(screen.getByRole("button", { name: "Continue" }));
 
   expect(
-    await screen.findByText(/2 Untracked Skills found/),
+    await screen.findByRole("progressbar", {
+      name: "Scanning Agent and shared directories…",
+    }),
   ).toBeInTheDocument();
-  expect(screen.getByText("Blocked")).toBeInTheDocument();
-  await user.click(
-    screen.getByRole("button", { name: "Review Adopt candidates" }),
-  );
-
-  expect(
-    await screen.findByRole("dialog", { name: "Adopt untracked Skills" }),
-  ).toBeInTheDocument();
+  client.publishScanReport(COMPLETE_SUMMARY, {
+    local_candidates: [LOCAL_CANDIDATE_ROW],
+  });
+  await screen.findByText("1 Untracked Skill found. Nothing changed yet.");
+  // Skip stays available at every step: nothing was registered.
+  await user.click(screen.getByRole("button", { name: "Skip setup" }));
   expect(
     screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
   ).not.toBeInTheDocument();
-  // Viewing is never selecting: the handoff opens the ledger with every
-  // Include control unchecked, including disabled controls for blocked rows.
-  const includeControls = screen.getAllByRole("checkbox", { name: /Include/ });
-  expect(includeControls).toHaveLength(2);
-  for (const includeControl of includeControls) {
-    expect(includeControl).not.toBeChecked();
-  }
+});
+
+test("scan summary Git source group hands the group to source management", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const remotePreview = deferred<SourceGroupPreviewOutcome>();
+  const requests: Array<{
+    sourceType: string;
+    sourceUrl: string;
+    trackingPolicy: { mode: string; value: string | null } | null;
+  }> = [];
+  client.fetchLatestAndManage = async (request) => {
+    requests.push(request);
+    return remotePreview.promise;
+  };
+  client.publishScanReport(COMPLETE_SUMMARY, {
+    git_sources: [GIT_GROUP_ROW],
+  });
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+
+  // The group row offers the closed fetch-and-manage handoff — never a
+  // per-member Include plan (spec §8.1).
+  const manage = await screen.findByRole("button", {
+    name: "Fetch Latest and Manage",
+  });
   expect(
-    includeControls.filter((control) => (control as HTMLInputElement).disabled),
-  ).toHaveLength(1);
-  expect(
-    screen.queryByRole("checkbox", { name: /ask-matt/ }),
+    screen.queryByRole("checkbox", { name: /Local Link/ }),
   ).not.toBeInTheDocument();
+  await user.click(manage);
+  expect(
+    await screen.findByRole("dialog", { name: "Import from Git" }),
+  ).toBeInTheDocument();
+  expect(requests).toEqual([
+    {
+      sourceType: "github",
+      sourceUrl: "https://github.com/acme/skills",
+      trackingPolicy: null,
+    },
+  ]);
+
+  remotePreview.resolve({
+    kind: "preview",
+    preview: {
+      provider: "github",
+      sourceUrl: "https://github.com/acme/skills",
+      aliases: [],
+      policy: {
+        mode: "auto_release_tag_head",
+        value: null,
+        selectionKind: "tag",
+        selectedRef: "v1.0.0",
+        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+      },
+      members: [
+        {
+          directoryName: "alpha",
+          displayName: "Alpha",
+          description: "The repository member",
+          skillPath: "alpha",
+          action: "added",
+          treeSummary: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      ],
+      externalOwnershipClaims: [],
+    },
+  });
+  expect(
+    await screen.findByText("Complete Source Release"),
+  ).toBeInTheDocument();
 });
 
 test("Preferences sheet shows exactly four switches with defaults", async () => {

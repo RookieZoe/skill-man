@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import type {
+  AdoptAction,
+  AdoptPlan,
+  AdoptReportSelection,
+  AdoptResult,
+  AdoptUndoResult,
   CatalogClient,
   CurrentReport,
   ObservationAndScanSnapshot,
@@ -252,13 +257,43 @@ function countCards(
   ];
 }
 
+/** Typed command failure → presentation text (spec §4.7): the closed
+ * eligibility code renders with the raw detail, never a free-form App
+ * message from the Core. */
+function adoptErrorText(
+  reason: unknown,
+  t: (key: MessageKey, params?: MessageParams) => string,
+): string {
+  const failure = reason as {
+    error?: { code?: string; closedCode?: string; detail?: string | null };
+    diagnostic?: { message?: string };
+  };
+  if (failure?.error?.code === "adopt_eligibility") {
+    return t("scan.ledger.adoptBlocked", {
+      code: failure.error.closedCode ?? "",
+      detail:
+        failure.error.detail ??
+        failure.diagnostic?.message ??
+        failure.error.code,
+    });
+  }
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 export function ScanEvidenceLedger({
   client,
   idle = false,
+  onManageGitGroup,
 }: {
   client: CatalogClient;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
   idle?: boolean;
+  /** Git Repository Source handoff (spec §8.1): candidate groups open the
+   * source management surface (#92); never per-member plans here. */
+  onManageGitGroup?: (
+    sourceType: "github" | "gitlab" | "git",
+    sourceUrl: string,
+  ) => void;
 }) {
   const { t } = useLocale();
   const [observation, setObservation] =
@@ -272,6 +307,13 @@ export function ScanEvidenceLedger({
   // state only. Reset when the Report identity changes.
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [winners, setWinners] = useState<Record<string, number>>({});
+  // Adopt plan/apply/undo/finalize draft (spec §4.6): the draft is
+  // presentation state; the plan token is the server-side authority.
+  const [adoptPlan, setAdoptPlan] = useState<AdoptPlan | null>(null);
+  const [adoptResult, setAdoptResult] = useState<AdoptResult | null>(null);
+  const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
+  const [adoptBusy, setAdoptBusy] = useState(false);
+  const [adoptMessage, setAdoptMessage] = useState<string | null>(null);
 
   // Page sections are bound to one Report identity: a published new Report
   // resets every page (the old cursor is stale by contract, never reused).
@@ -283,6 +325,10 @@ export function ScanEvidenceLedger({
       setSections(EMPTY_SECTIONS);
       setSelected({});
       setWinners({});
+      setAdoptPlan(null);
+      setAdoptResult(null);
+      setAdoptUndo(null);
+      setAdoptMessage(null);
     }
   }
 
@@ -421,6 +467,104 @@ export function ScanEvidenceLedger({
     const current = sections[section];
     if (current.nextOffset === null && current.rows.length > 0) return;
     void loadSection(section, current.nextOffset ?? 0);
+  }
+
+  function buildSelections(): AdoptReportSelection[] {
+    if (!summary) return [];
+    const selections: AdoptReportSelection[] = [];
+    for (const [key, checked] of Object.entries(selected)) {
+      if (!checked) continue;
+      const row = sections.local_candidates.rows.find(
+        (candidate) => candidateKey(candidate) === key,
+      );
+      if (row?.kind !== "source_verdict") continue;
+      const action = row.operations.find(
+        (op) =>
+          op.allowed &&
+          (op.operation === "local_link" || op.operation === "conflict_winner"),
+      );
+      if (!action) continue;
+      selections.push({
+        entityRef: row.entityRef,
+        action: action.operation as AdoptAction,
+      });
+    }
+    for (const [setKey, entitySeq] of Object.entries(winners)) {
+      const set = sections.conflict_sets.rows.find(
+        (candidate) => candidateKey(candidate) === setKey,
+      );
+      if (set?.kind !== "conflict_set") continue;
+      const memberIndex = set.memberEntitySeqs.indexOf(entitySeq);
+      const entityRef = set.memberEntityRefs[memberIndex];
+      if (entityRef) {
+        selections.push({ entityRef, action: "conflict_winner" });
+      }
+    }
+    return selections;
+  }
+
+  async function planAdopt() {
+    if (!summary || adoptBusy) return;
+    const selections = buildSelections();
+    if (selections.length === 0) return;
+    setAdoptBusy(true);
+    setAdoptMessage(null);
+    try {
+      const plan = await client.planAdopt(summary.generation, selections);
+      setAdoptPlan(plan);
+      setAdoptResult(null);
+      setAdoptUndo(null);
+    } catch (reason) {
+      setAdoptMessage(adoptErrorText(reason, t));
+      setAdoptPlan(null);
+    } finally {
+      setAdoptBusy(false);
+    }
+  }
+
+  async function applyPlan() {
+    if (!adoptPlan || adoptBusy) return;
+    setAdoptBusy(true);
+    setAdoptMessage(null);
+    try {
+      setAdoptResult(await client.applyAdopt(adoptPlan.planToken));
+    } catch (reason) {
+      setAdoptMessage(adoptErrorText(reason, t));
+    } finally {
+      setAdoptBusy(false);
+    }
+  }
+
+  async function undoOperation() {
+    if (!adoptResult?.operationId || adoptBusy) return;
+    setAdoptBusy(true);
+    setAdoptMessage(null);
+    try {
+      const undo = await client.undoAdopt(adoptResult.operationId);
+      setAdoptUndo(undo);
+      setAdoptResult(null);
+      setAdoptPlan(null);
+    } catch (reason) {
+      setAdoptMessage(adoptErrorText(reason, t));
+    } finally {
+      setAdoptBusy(false);
+    }
+  }
+
+  async function finalizeOperation() {
+    if (!adoptResult?.operationId || adoptBusy) return;
+    setAdoptBusy(true);
+    setAdoptMessage(null);
+    try {
+      await client.finalizeAdopt(adoptResult.operationId);
+      setAdoptResult(null);
+      setAdoptPlan(null);
+      setAdoptMessage(t("scan.ledger.adoptFinalized"));
+    } catch (reason) {
+      setAdoptMessage(adoptErrorText(reason, t));
+    } finally {
+      setAdoptBusy(false);
+    }
   }
 
   const runActive =
@@ -673,39 +817,56 @@ export function ScanEvidenceLedger({
                           reason; Blocked/Deferred have no control at all. */}
                       {clearable && !idle ? (
                         <div className="scan-summary-row-operations">
-                          {operations.map((op) =>
-                            op.allowed ? (
-                              <label
-                                key={op.operation}
-                                className="scan-summary-row-op"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={selected[key] ?? false}
-                                  onChange={(event) =>
-                                    setSelected((prev) => ({
-                                      ...prev,
-                                      [key]: event.target.checked,
-                                    }))
-                                  }
-                                />
-                                {t(operationKey(op.operation))}
-                              </label>
-                            ) : (
-                              <span
-                                key={op.operation}
-                                className="scan-summary-row-op-blocked"
-                                aria-disabled={true}
-                                title={t(
-                                  "scan.summary.incompleteDestructiveDisabled",
-                                )}
-                              >
-                                {t(operationKey(op.operation))}
-                                <span className="scan-summary-row-op-blocked-hint">
-                                  {t("scan.summary.op.blocked")}
+                          {row.kind === "git_source_group" &&
+                          row.status === "candidate" &&
+                          onManageGitGroup ? (
+                            <button
+                              type="button"
+                              className="scan-summary-row-manage"
+                              onClick={() =>
+                                onManageGitGroup(
+                                  row.provider as "github" | "gitlab" | "git",
+                                  row.canonicalRepository,
+                                )
+                              }
+                            >
+                              {t("scan.ledger.manageGitGroup")}
+                            </button>
+                          ) : (
+                            operations.map((op) =>
+                              op.allowed ? (
+                                <label
+                                  key={op.operation}
+                                  className="scan-summary-row-op"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selected[key] ?? false}
+                                    onChange={(event) =>
+                                      setSelected((prev) => ({
+                                        ...prev,
+                                        [key]: event.target.checked,
+                                      }))
+                                    }
+                                  />
+                                  {t(operationKey(op.operation))}
+                                </label>
+                              ) : (
+                                <span
+                                  key={op.operation}
+                                  className="scan-summary-row-op-blocked"
+                                  aria-disabled={true}
+                                  title={t(
+                                    "scan.summary.incompleteDestructiveDisabled",
+                                  )}
+                                >
+                                  {t(operationKey(op.operation))}
+                                  <span className="scan-summary-row-op-blocked-hint">
+                                    {t("scan.summary.op.blocked")}
+                                  </span>
                                 </span>
-                              </span>
-                            ),
+                              ),
+                            )
                           )}
                         </div>
                       ) : null}
@@ -806,6 +967,90 @@ export function ScanEvidenceLedger({
               ) : null}
             </section>
           ))}
+        </div>
+      ) : null}
+
+      {/* §4.6 plan → apply → undo/finalize shelf: Local Include and an
+          explicit Conflict Set winner; the selections stay presentation
+          state until the Core validates the Report (any staleness is a
+          typed PlanStale, never a silent fallback). */}
+      {summary && !runActive && !idle ? (
+        <div className="scan-ledger-adopt-shelf">
+          <div className="scan-ledger-adopt-actions">
+            <button
+              type="button"
+              onClick={planAdopt}
+              disabled={adoptBusy || stale || buildSelections().length === 0}
+            >
+              {t("scan.ledger.adoptPlan")}
+            </button>
+            {adoptPlan ? (
+              <button
+                type="button"
+                onClick={applyPlan}
+                disabled={adoptBusy || stale}
+              >
+                {t("scan.ledger.adoptApply")}
+              </button>
+            ) : null}
+            {adoptResult?.undoAvailable ? (
+              <button
+                type="button"
+                onClick={undoOperation}
+                disabled={adoptBusy || stale}
+              >
+                {t("scan.ledger.adoptUndo")}
+              </button>
+            ) : null}
+            {adoptResult ? (
+              <button
+                type="button"
+                onClick={finalizeOperation}
+                disabled={adoptBusy}
+              >
+                {t("scan.ledger.adoptFinalize")}
+              </button>
+            ) : null}
+          </div>
+          {adoptPlan ? (
+            <p className="scan-ledger-adopt-summary">
+              {t("scan.ledger.adoptPlanned", {
+                count: adoptPlan.items.length,
+              })}
+            </p>
+          ) : null}
+          {adoptResult ? (
+            <ul className="scan-ledger-adopt-results">
+              {adoptResult.items.map((item) => (
+                <li key={item.skillId}>
+                  {item.adopted
+                    ? t("scan.ledger.adoptAdopted", {
+                        name: item.directoryName,
+                      })
+                    : t("scan.ledger.adoptFailed", {
+                        name: item.directoryName,
+                        detail: item.error ?? t("library.adopt.failed_unknown"),
+                      })}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {adoptUndo ? (
+            <ul className="scan-ledger-adopt-results">
+              {adoptUndo.items.map((item, index) => (
+                <li key={index}>
+                  {t("scan.ledger.adoptUndone", {
+                    name: item.directoryName,
+                  })}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {adoptMessage ? (
+            <p className="scan-ledger-error" role="alert">
+              {adoptMessage}
+            </p>
+          ) : null}
         </div>
       ) : null}
 
