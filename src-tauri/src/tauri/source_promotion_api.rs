@@ -4,7 +4,7 @@ use crate::core::source_promotion::{SourcePromotionError, SourcePromotionService
 use crate::tauri_adapter::dto::{
     CommandFailureDto, ConfirmSourcePromotionRequestDto, DiagnosticDto,
     PreviewSourcePromotionRequestDto, PublicErrorDto, SourcePromotionDraftOutcomeDto,
-    SourcePromotionResultDto, SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto,
+    SourcePromotionResultDto, SourceTransitionOperationRequestDto,
 };
 
 pub struct SourcePromotionApi {
@@ -32,16 +32,6 @@ impl SourcePromotionApi {
     ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
         self.service
             .confirm(request.into())
-            .map(Into::into)
-            .map_err(command_error)
-    }
-
-    pub fn undo(
-        &self,
-        request: SourceTransitionOperationRequestDto,
-    ) -> Result<SourcePromotionUndoResultDto, CommandFailureDto> {
-        self.service
-            .undo(&request.operation_id)
             .map(Into::into)
             .map_err(command_error)
     }

@@ -1117,10 +1117,7 @@ fn build_root_record(
 fn classify_run(
     coordinator: &ScanCoordinator,
     slot: &RunSlot,
-) -> Result<
-    crate::core::scan::classification::ScanClassificationOutput,
-    String,
-> {
+) -> Result<crate::core::scan::classification::ScanClassificationOutput, String> {
     use crate::core::scan::classification::ScanClassificationContext;
 
     let gate = coordinator.write_gate.snapshot();
@@ -1151,15 +1148,22 @@ fn classify_run(
 
     let mut control_zones = Vec::new();
     control_zones.push(bound.path.clone());
-    control_zones.extend(slot.record.roots.iter().map(|root| root.canonical_path.clone()));
+    control_zones.extend(
+        slot.record
+            .roots
+            .iter()
+            .map(|root| root.canonical_path.clone()),
+    );
     control_zones.push(coordinator.app_state_path.clone());
     let faulted_lock_roots = lock_reports
         .iter()
         .filter_map(|report| {
-            report
-                .fault
-                .as_ref()
-                .map(|fault| (report.path.parent().map(std::path::Path::to_path_buf), fault))
+            report.fault.as_ref().map(|fault| {
+                (
+                    report.path.parent().map(std::path::Path::to_path_buf),
+                    fault,
+                )
+            })
         })
         .filter_map(|(root, fault)| root.map(|root| (root, format!("{fault:?}"))))
         .collect::<Vec<_>>();

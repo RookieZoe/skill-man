@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::home::BoundHome;
 use crate::seams::scan_evidence_store::{
-    CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord,
-    ScanClassificationRow, ScanConflictSetRecord, ScanDiagnosticRecord, ScanEntityIndexStats,
-    ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore, ScanEvidenceStoreError,
-    ScanEvidenceStoreFactory, ScanGitSourceGroupRecord, ScanLockClaimRecord, ScanObjectIdentity,
-    ScanReportCursor, ScanReportManifest, ScanReportPageError, ScanReportPageRead, ScanReportRow,
-    ScanReportSection, ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification,
+    CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord, ScanClassificationRow,
+    ScanConflictSetRecord, ScanDiagnosticRecord, ScanEntityIndexStats, ScanEntityRecord,
+    ScanEntryRecord, ScanEvidenceStore, ScanEvidenceStoreError, ScanEvidenceStoreFactory,
+    ScanGitSourceGroupRecord, ScanLockClaimRecord, ScanObjectIdentity, ScanReportCursor,
+    ScanReportManifest, ScanReportPageError, ScanReportPageRead, ScanReportRow, ScanReportSection,
+    ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification,
     ScanSourceVerdictRecord, ScanStartupMarker,
 };
 
@@ -642,9 +642,7 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 })?
             }
             ScanReportSection::LocalCandidates => {
-                self.page_verdict_rows(cursor, limit, |verdict| {
-                    verdict.verdict == "local"
-                })?
+                self.page_verdict_rows(cursor, limit, |verdict| verdict.verdict == "local")?
             }
             ScanReportSection::Excluded => self.page_verdict_rows(cursor, limit, |verdict| {
                 matches!(verdict.verdict.as_str(), "excluded" | "already_managed")
@@ -709,11 +707,7 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         // deduplicated per entity (deterministic first-seen order).
         let appearances_path = self.run_dir(run_id).join("appearances.jsonl");
         let appearances_file = File::open(&appearances_path).map_err(|error| {
-            ScanEvidenceStoreError::io(
-                "read Scan appearance index",
-                &appearances_path,
-                &error,
-            )
+            ScanEvidenceStoreError::io("read Scan appearance index", &appearances_path, &error)
         })?;
         let mut claim_seen: HashMap<(String, String), ()> = HashMap::new();
         let mut hint_seen: HashMap<(String, String), ()> = HashMap::new();
@@ -728,7 +722,11 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
             let Some(row) = rows.iter_mut().find(|row| row.entity_seq == entity_seq) else {
                 continue;
             };
-            if !row.directory_names.iter().any(|name| name == &appearance.name) {
+            if !row
+                .directory_names
+                .iter()
+                .any(|name| name == &appearance.name)
+            {
                 row.directory_names.push(appearance.name);
             }
             if let Some(claim) = appearance.lock_hint.map(|hint| ScanLockClaimRecord {
@@ -740,7 +738,10 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 requested_ref: hint.requested_ref,
                 skill_path: hint.skill_path,
             }) {
-                let key = (claim.lock_path.display().to_string(), claim.entry_name.clone());
+                let key = (
+                    claim.lock_path.display().to_string(),
+                    claim.entry_name.clone(),
+                );
                 if claim_seen.insert(key, ()).is_none() {
                     row.lock_claims.push(claim);
                 }
@@ -786,12 +787,11 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 ScanEvidenceStoreError::io("write Scan classification index", path, &error)
             })?;
             for record in records {
-                let mut line = serde_json::to_vec(record).map_err(|error| {
-                    ScanEvidenceStoreError::Write {
+                let mut line =
+                    serde_json::to_vec(record).map_err(|error| ScanEvidenceStoreError::Write {
                         operation: "write Scan classification index",
                         detail: error.to_string(),
-                    }
-                })?;
+                    })?;
                 line.push(b'\n');
                 file.write_all(&line).map_err(|error| {
                     ScanEvidenceStoreError::io("write Scan classification index", path, &error)

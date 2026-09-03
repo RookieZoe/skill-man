@@ -46,9 +46,7 @@ impl ScanManagedFactsReader for SqliteScanManagedFactsReader {
         )
         .map_err(|error| format!("open {} read-only: {error}", catalog_path.display()))?;
         let mut statement = connection
-            .prepare(
-                "SELECT directory_name, final_entity_path FROM skills ORDER BY directory_name",
-            )
+            .prepare("SELECT directory_name, final_entity_path FROM skills ORDER BY directory_name")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![], |row| {
@@ -61,10 +59,7 @@ impl ScanManagedFactsReader for SqliteScanManagedFactsReader {
         for row in rows {
             let (directory_name, final_entity_path) = row.map_err(|error| error.to_string())?;
             let path = PathBuf::from(&final_entity_path);
-            let canonical = self
-                .filesystem
-                .canonical_directory(&path)
-                .unwrap_or(path);
+            let canonical = self.filesystem.canonical_directory(&path).unwrap_or(path);
             facts.push(ManagedSkillPathFact {
                 directory_name,
                 final_entity_path: canonical,

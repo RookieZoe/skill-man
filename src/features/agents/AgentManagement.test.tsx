@@ -172,6 +172,7 @@ test("unavailable detection evidence is never presented as absent", async () => 
     },
     detection: {
       generation: 1,
+      slow: false,
       presetObservations: [
         {
           presetKey: "windsurf",
@@ -222,7 +223,7 @@ test("a pending Detection Run is not presented as no agents", async () => {
       freshness: "stale",
       staleReasons: ["cross_startup"],
     },
-    detection: { generation: 0, presetObservations: [] },
+    detection: { generation: 0, presetObservations: [], slow: false },
   };
   client.getObservationSnapshot = async () => pending;
   client.refreshDetection = async () => pending;

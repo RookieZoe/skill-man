@@ -38,9 +38,8 @@ use crate::core::fixture_recovery::{
 };
 use crate::core::git_source::parse_git_source_input;
 use crate::seams::scan_evidence_store::{
-    ScanClassificationRow, ScanConflictSetRecord, ScanGitSourceGroupRecord,
-    ScanLockClaimRecord, ScanOperationEligibility, ScanSourceCounts, ScanSourceVerdictRecord,
-    ScanWorktreeHintRecord,
+    ScanClassificationRow, ScanConflictSetRecord, ScanGitSourceGroupRecord, ScanLockClaimRecord,
+    ScanOperationEligibility, ScanSourceCounts, ScanSourceVerdictRecord, ScanWorktreeHintRecord,
 };
 
 /// Closed verdict values (the verdict vocabulary of §8.2).
@@ -192,10 +191,7 @@ impl PerEntity {
                         )],
                     )
                 } else {
-                    (
-                        VERDICT_LOCAL,
-                        vec![eligibility(OP_LOCAL_LINK, true, None)],
-                    )
+                    (VERDICT_LOCAL, vec![eligibility(OP_LOCAL_LINK, true, None)])
                 }
             }
             VerdictShape::Git { .. } => (VERDICT_GIT, Vec::new()),
@@ -285,7 +281,8 @@ pub fn classify(
             for hint in &entity.worktree_hints {
                 if hint.gitdir_kind != "uninterpretable" {
                     acc.repository_root = Some(hint.repository_root.clone());
-                    acc.remote_urls_seen.extend(hint.remote_urls.iter().cloned());
+                    acc.remote_urls_seen
+                        .extend(hint.remote_urls.iter().cloned());
                 }
             }
         }
@@ -310,13 +307,19 @@ pub fn classify(
         } else if acc.refs.len() > 1 {
             (
                 "repository_ref_conflict".to_owned(),
-                Some(format!("refs: {}", acc.refs.iter().cloned().collect::<Vec<_>>().join(", "))),
+                Some(format!(
+                    "refs: {}",
+                    acc.refs.iter().cloned().collect::<Vec<_>>().join(", ")
+                )),
             )
         } else {
             ("candidate".to_owned(), None)
         };
         if status != "candidate" {
-            group_status.insert(group_seq, (status.clone(), detail.clone().unwrap_or_default()));
+            group_status.insert(
+                group_seq,
+                (status.clone(), detail.clone().unwrap_or_default()),
+            );
         }
         let is_candidate = status == "candidate";
         groups.push(ScanGitSourceGroupRecord {
@@ -346,7 +349,10 @@ pub fn classify(
         // A conflicted group fails closed: members become typed attention
         // rows and lose every per-member control (spec §8.2).
         if let Some((kind, detail)) = group_status.get(&group_seq).cloned() {
-            for entity in per_entity.iter_mut().filter(|entity| acc.members.contains(&entity.seq)) {
+            for entity in per_entity
+                .iter_mut()
+                .filter(|entity| acc.members.contains(&entity.seq))
+            {
                 entity.git_group_seq = Some(group_seq);
                 entity.shape = VerdictShape::Blocked;
                 entity.reason_kind = Some(
@@ -360,7 +366,10 @@ pub fn classify(
                 entity.detail = Some(detail.clone());
             }
         } else {
-            for entity in per_entity.iter_mut().filter(|entity| acc.members.contains(&entity.seq)) {
+            for entity in per_entity
+                .iter_mut()
+                .filter(|entity| acc.members.contains(&entity.seq))
+            {
                 entity.git_group_seq = Some(group_seq);
             }
         }
@@ -389,10 +398,7 @@ pub fn classify(
             set_seq,
             directory_identity_key: key.clone(),
             directory_name: representative.display_name.clone(),
-            member_entity_seqs: members
-                .iter()
-                .map(|index| per_entity[*index].seq)
-                .collect(),
+            member_entity_seqs: members.iter().map(|index| per_entity[*index].seq).collect(),
             member_paths: members
                 .iter()
                 .map(|index| per_entity[*index].canonical_path.clone())
@@ -435,11 +441,7 @@ fn classify_entity(
     let mut entity = PerEntity {
         seq: row.entity_seq,
         canonical_path: row.canonical_path.clone(),
-        display_name: row
-            .directory_names
-            .first()
-            .cloned()
-            .unwrap_or_default(),
+        display_name: row.directory_names.first().cloned().unwrap_or_default(),
         identity_key: row
             .directory_names
             .first()
@@ -586,11 +588,7 @@ fn git_hint_outcome(entity: &mut PerEntity, inside: bool) -> GitHintOutcome {
             ambiguous = true;
         }
     }
-    let worktree_attributed = if ambiguous {
-        None
-    } else {
-        attributed
-    };
+    let worktree_attributed = if ambiguous { None } else { attributed };
 
     // Lock claims: git-family source types parse into canonical repos.
     let mut claim_repos: BTreeSet<(String, String)> = BTreeSet::new();
@@ -613,10 +611,7 @@ fn git_hint_outcome(entity: &mut PerEntity, inside: bool) -> GitHintOutcome {
         let Some((url_provider, canonical)) = canonical_git_url(source_url) else {
             faulty_claim = Some((
                 REASON_UNINTERPRETABLE,
-                format!(
-                    "{}: unparseable source_url {source_url}",
-                    claim.entry_name
-                ),
+                format!("{}: unparseable source_url {source_url}", claim.entry_name),
             ));
             continue;
         };
@@ -785,9 +780,7 @@ fn count(
             counts.git_groups_conflicted += 1;
         }
     }
-    counts.needs_attention = counts.blocked
-        + counts.deferred
-        + counts.identity_conflicts;
+    counts.needs_attention = counts.blocked + counts.deferred + counts.identity_conflicts;
     counts
 }
 
@@ -978,17 +971,23 @@ mod tests {
         assert_eq!(output.counts.local_candidates, 1);
         let verdict = &output.verdicts[0];
         assert_eq!(verdict.verdict, VERDICT_LOCAL);
-        assert!(verdict
-            .operations
-            .iter()
-            .any(|op| op.operation == OP_LOCAL_LINK && op.allowed));
-        assert!(verdict
-            .operations
-            .iter()
-            .all(|op| op.operation != OP_LOCAL_LINK_WITH_MOVE));
-        assert!(verdict
-            .notes
-            .contains(&NOTE_GIT_METADATA_NOT_USED.to_owned()));
+        assert!(
+            verdict
+                .operations
+                .iter()
+                .any(|op| op.operation == OP_LOCAL_LINK && op.allowed)
+        );
+        assert!(
+            verdict
+                .operations
+                .iter()
+                .all(|op| op.operation != OP_LOCAL_LINK_WITH_MOVE)
+        );
+        assert!(
+            verdict
+                .notes
+                .contains(&NOTE_GIT_METADATA_NOT_USED.to_owned())
+        );
     }
 
     #[test]
@@ -1122,7 +1121,10 @@ mod tests {
             Some(PathBuf::from("/root/agent-skills/repo"))
         );
         assert_eq!(group.refs, vec!["v1.2.3".to_owned()]);
-        assert_eq!(group.lock_paths, vec![PathBuf::from("/installer/.skill-lock.json")]);
+        assert_eq!(
+            group.lock_paths,
+            vec![PathBuf::from("/installer/.skill-lock.json")]
+        );
     }
 
     #[test]
@@ -1186,10 +1188,7 @@ mod tests {
         assert_eq!(group.refs, vec!["v1.0.0".to_owned(), "v2.0.0".to_owned()]);
         for verdict in &output.verdicts {
             assert_eq!(verdict.verdict, VERDICT_BLOCKED);
-            assert_eq!(
-                verdict.reason_kind.as_deref(),
-                Some(REASON_REF_CONFLICT)
-            );
+            assert_eq!(verdict.reason_kind.as_deref(), Some(REASON_REF_CONFLICT));
             assert!(verdict.operations.is_empty());
         }
     }
@@ -1218,10 +1217,7 @@ mod tests {
         let output = classify(vec![row], &ctx);
         let verdict = &output.verdicts[0];
         assert_eq!(verdict.verdict, VERDICT_BLOCKED);
-        assert_eq!(
-            verdict.reason_kind.as_deref(),
-            Some(REASON_OWNERSHIP_SPLIT)
-        );
+        assert_eq!(verdict.reason_kind.as_deref(), Some(REASON_OWNERSHIP_SPLIT));
         assert!(verdict.operations.is_empty());
         assert_eq!(output.git_groups.len(), 0);
     }
@@ -1256,17 +1252,23 @@ mod tests {
         for verdict in &output.verdicts {
             assert_eq!(verdict.verdict, VERDICT_CONFLICT_SET);
             assert_eq!(verdict.conflict_set_seq, Some(1));
-            assert!(verdict
-                .operations
-                .iter()
-                .any(|op| op.operation == OP_CONFLICT_WINNER && op.allowed));
+            assert!(
+                verdict
+                    .operations
+                    .iter()
+                    .any(|op| op.operation == OP_CONFLICT_WINNER && op.allowed)
+            );
         }
     }
 
     #[test]
     fn same_entity_multiple_identities_is_identity_conflict() {
         let ctx = context();
-        let row = row_with_names(1, "/workspace/skill", vec!["alpha".to_owned(), "beta".to_owned()]);
+        let row = row_with_names(
+            1,
+            "/workspace/skill",
+            vec!["alpha".to_owned(), "beta".to_owned()],
+        );
         let output = classify(vec![row], &ctx);
         let verdict = &output.verdicts[0];
         assert_eq!(verdict.verdict, VERDICT_IDENTITY_CONFLICT);
@@ -1293,7 +1295,12 @@ mod tests {
         assert_eq!(output.counts.excluded, 1);
         assert_eq!(output.verdicts[0].verdict, VERDICT_ALREADY_MANAGED);
         assert_eq!(output.verdicts[1].verdict, VERDICT_EXCLUDED);
-        assert!(output.verdicts.iter().all(|verdict| verdict.operations.is_empty()));
+        assert!(
+            output
+                .verdicts
+                .iter()
+                .all(|verdict| verdict.operations.is_empty())
+        );
     }
 
     #[test]
@@ -1317,9 +1324,11 @@ mod tests {
         outside.canonical_path = PathBuf::from("/workspace/skill");
         let output = classify(vec![outside], &context());
         assert_eq!(output.verdicts[0].verdict, VERDICT_LOCAL);
-        assert!(output.verdicts[0]
-            .notes
-            .contains(&NOTE_GIT_METADATA_NOT_USED.to_owned()));
+        assert!(
+            output.verdicts[0]
+                .notes
+                .contains(&NOTE_GIT_METADATA_NOT_USED.to_owned())
+        );
     }
 
     #[test]
@@ -1364,10 +1373,12 @@ mod tests {
         assert_eq!(verdict.verdict, VERDICT_LOCAL);
         assert_eq!(verdict.reason_kind.as_deref(), Some(REASON_MANAGED_NAME));
         // 非破坏 Local Link 仍然可用。
-        assert!(verdict
-            .operations
-            .iter()
-            .any(|op| op.operation == OP_LOCAL_LINK && op.allowed));
+        assert!(
+            verdict
+                .operations
+                .iter()
+                .any(|op| op.operation == OP_LOCAL_LINK && op.allowed)
+        );
     }
 
     #[test]

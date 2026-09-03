@@ -239,6 +239,7 @@ export function createFixtureCatalogClient(
       detection: {
         generation: detectionGeneration,
         presetObservations,
+        slow: false,
       },
       startupProbe: null,
       activationHealth: null,
@@ -841,11 +842,6 @@ export function createFixtureCatalogClient(
       );
     },
     async confirmSourcePromotion() {
-      return fixtureUnsupported(
-        "Source Promotion is not available in the preview fixture",
-      );
-    },
-    async undoSourcePromotion() {
       return fixtureUnsupported(
         "Source Promotion is not available in the preview fixture",
       );

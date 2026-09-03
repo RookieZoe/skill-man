@@ -508,24 +508,6 @@ impl From<SourceTransitionResult> for SourcePromotionResultDto {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourcePromotionUndoResultDto {
-    pub operation_id: String,
-    pub member_count: u32,
-    pub snapshot_version: u64,
-}
-
-impl From<SourceUndoResult> for SourcePromotionUndoResultDto {
-    fn from(value: SourceUndoResult) -> Self {
-        Self {
-            operation_id: value.operation_id,
-            member_count: value.member_count,
-            snapshot_version: value.snapshot_version,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmSourceTransitionRequestDto {
@@ -1278,6 +1260,9 @@ impl From<PresetObservation> for PresetObservationDto {
 pub struct DetectionSnapshotDto {
     pub generation: u64,
     pub preset_observations: Vec<PresetObservationDto>,
+    /// The run crossed the 1-second threshold (spec §4.10); never a
+    /// truncation or downgrade.
+    pub slow: bool,
 }
 
 impl From<DetectionSnapshot> for DetectionSnapshotDto {
@@ -1289,6 +1274,7 @@ impl From<DetectionSnapshot> for DetectionSnapshotDto {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            slow: value.slow,
         }
     }
 }
@@ -2299,7 +2285,10 @@ pub fn scan_report_page_dto(
                             .worktree_hints
                             .into_iter()
                             .map(|hint| ScanWorktreeHintDto {
-                                repository_root: hint.repository_root.to_string_lossy().into_owned(),
+                                repository_root: hint
+                                    .repository_root
+                                    .to_string_lossy()
+                                    .into_owned(),
                                 gitdir_kind: hint.gitdir_kind,
                                 remote_urls: hint.remote_urls,
                                 head_ref: hint.head_ref,

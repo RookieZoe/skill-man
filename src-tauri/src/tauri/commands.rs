@@ -40,9 +40,9 @@ use crate::tauri_adapter::dto::{
     RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
     RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
     SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionResultDto,
-    SourcePromotionUndoResultDto, SourceTransitionOperationRequestDto, SourceTransitionResultDto,
-    SourceUndoResultDto, StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto,
-    UpdateCheckReportDto, UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
+    SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
+    StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto,
+    UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -186,19 +186,6 @@ pub fn confirm_source_promotion(
     request: ConfirmSourcePromotionRequestDto,
 ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
     let result = state.confirm(request);
-    if result.is_ok() {
-        mutation.bump();
-    }
-    result
-}
-
-#[tauri::command]
-pub fn undo_source_promotion(
-    state: State<'_, SourcePromotionApi>,
-    mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    request: SourceTransitionOperationRequestDto,
-) -> Result<SourcePromotionUndoResultDto, CommandFailureDto> {
-    let result = state.undo(request);
     if result.is_ok() {
         mutation.bump();
     }

@@ -22,8 +22,8 @@ pub fn run() {
     use crate::adapters::remote_provider::SystemRemoteProvider;
     use crate::adapters::runtime_catalog::RuntimeCatalogStore;
     use crate::adapters::runtime_catalog::RuntimeStoreSwitch;
-    use crate::adapters::scan_managed_facts::SqliteScanManagedFactsReader;
     use crate::adapters::scan_evidence_store::SystemScanEvidenceStoreFactory;
+    use crate::adapters::scan_managed_facts::SqliteScanManagedFactsReader;
     use crate::adapters::sqlite::{
         SqliteCatalogStore, SqliteLegacyCatalogMigrator, SqlitePreparedCatalogFactory,
     };
@@ -85,11 +85,10 @@ pub fn run() {
         confirm_source_transition, confirm_source_update, continue_candidate,
         create_agent_directory, discover_file_import, discover_file_import_collection,
         discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
-
         finalize_source_promotion, finalize_source_transition, get_agent_management_snapshot,
         get_bootstrap_snapshot, get_fixture_recovery_preview, get_git_source_capability,
-        get_locale_snapshot, get_observation_page, get_observation_snapshot, get_scan_report_page, inspect_skill,
-        install_app_update, list_safety_snapshots, list_skills, load_preferences,
+        get_locale_snapshot, get_observation_page, get_observation_snapshot, get_scan_report_page,
+        inspect_skill, install_app_update, list_safety_snapshots, list_skills, load_preferences,
         pin_skill_updates, plan_abandon, plan_adopt, plan_create_agent_configuration,
         plan_delete_agent_configuration, plan_delete_safety_snapshot,
         plan_edit_agent_configuration, plan_file_import, plan_file_import_selection,
@@ -99,7 +98,7 @@ pub fn run() {
         refresh_activation_health, refresh_detection, refresh_startup_probe,
         refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
         scan_adopt, set_locale_selection, start_rescan, startup_info, undo_adopt,
-        undo_source_promotion, undo_source_transition, update_preferences,
+        undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -647,7 +646,6 @@ pub fn run() {
             fetch_latest_and_manage,
             preview_source_promotion,
             confirm_source_promotion,
-            undo_source_promotion,
             finalize_source_promotion,
             preview_source_update,
             confirm_source_update,

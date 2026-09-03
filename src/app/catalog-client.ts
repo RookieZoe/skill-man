@@ -460,6 +460,8 @@ export interface PresetObservation {
 export interface DetectionSnapshot {
   generation: number;
   presetObservations: PresetObservation[];
+  /** The run crossed the 1-second threshold (spec §4.10). */
+  slow: boolean;
 }
 
 /** Observation lifecycle; `stale` is the cross-startup/kept-old view. */
@@ -1654,7 +1656,6 @@ export interface CatalogClient {
   confirmSourcePromotion(
     request: ConfirmSourcePromotionRequest,
   ): Promise<SourcePromotionResult>;
-  undoSourcePromotion(operationId: string): Promise<SourceUndoResult>;
   finalizeSourcePromotion(operationId: string): Promise<void>;
   previewSourceUpdate(remoteId: string): Promise<SourceUpdateDraft>;
   confirmSourceUpdate(
@@ -1943,11 +1944,6 @@ const tauriCatalogClient: CatalogClient = {
   confirmSourcePromotion(request) {
     return invoke<SourcePromotionResult>("confirm_source_promotion", {
       request,
-    });
-  },
-  undoSourcePromotion(operationId) {
-    return invoke<SourceUndoResult>("undo_source_promotion", {
-      request: { operationId },
     });
   },
   finalizeSourcePromotion(operationId) {

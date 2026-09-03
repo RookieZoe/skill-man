@@ -27,13 +27,11 @@ use skill_man_lib::seams::filesystem::{
     FileSystem, FileSystemError, ScannedSkillEntry, TreeScanEntry,
 };
 use skill_man_lib::seams::installer_lock_store::EmptyInstallerLockStore;
-use skill_man_lib::seams::scan_managed_facts::{
-    ManagedSkillPathFact, ScanManagedFactsReader,
-};
 use skill_man_lib::seams::scan_evidence_store::{
     CurrentManifestRead, ScanEvidenceStore, ScanReportCursor, ScanReportRow, ScanReportSection,
     ScanRootCoverageRecord,
 };
+use skill_man_lib::seams::scan_managed_facts::{ManagedSkillPathFact, ScanManagedFactsReader};
 
 use common::{BoundTestHome, HOME_ID};
 
@@ -587,20 +585,37 @@ fn classification_verdicts_and_eligibility_of_a_complete_report() {
     std::fs::create_dir_all(&fixture).expect("fixture");
     std::fs::write(fixture.join("SKILL.md"), "# Fixture\n").expect("fixture md");
 
-    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    let started = coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     assert!(started.run.is_some());
     wait_terminal(&coordinator, 10_000);
     let snapshot = coordinator.snapshot();
     let run = snapshot.run.expect("terminal run retained");
     assert_eq!(run.state, ScanRunState::Completed);
     let report = snapshot.current_report.summary.expect("report");
-    assert_eq!(report.state, skill_man_lib::core::scan::ScanReportState::Complete);
+    assert_eq!(
+        report.state,
+        skill_man_lib::core::scan::ScanReportState::Complete
+    );
 
     // Four-card counts: entities under the control zone classify as Local
     // (move-required) or Git source group; the fixture is Excluded.
-    assert!(report.source_counts.local_candidates >= 2, "{:?}", report.source_counts);
-    assert_eq!(report.source_counts.git_groups, 1, "{:?}", report.source_counts);
-    assert!(report.source_counts.excluded >= 1, "{:?}", report.source_counts);
+    assert!(
+        report.source_counts.local_candidates >= 2,
+        "{:?}",
+        report.source_counts
+    );
+    assert_eq!(
+        report.source_counts.git_groups, 1,
+        "{:?}",
+        report.source_counts
+    );
+    assert!(
+        report.source_counts.excluded >= 1,
+        "{:?}",
+        report.source_counts
+    );
     assert_eq!(report.source_counts.conflict_sets, 0);
 
     // Git group row: provider + canonical repository + the candidate
@@ -610,7 +625,10 @@ fn classification_verdicts_and_eligibility_of_a_complete_report() {
     match &git_rows[0] {
         ScanReportRow::GitSourceGroup(group) => {
             assert_eq!(group.provider, "github");
-            assert_eq!(group.canonical_repository, "https://github.com/owner/example");
+            assert_eq!(
+                group.canonical_repository,
+                "https://github.com/owner/example"
+            );
             assert_eq!(group.status, "candidate");
             let fetch = group
                 .operations
@@ -625,8 +643,12 @@ fn classification_verdicts_and_eligibility_of_a_complete_report() {
 
     // Local candidates: the in-place external link and the move-required
     // alpha entity; each carries typed eligibility.
-    let (local_rows, _) =
-        page_section(&coordinator, &report, ScanReportSection::LocalCandidates, 64);
+    let (local_rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     assert_eq!(local_rows.len(), 2);
     for row in &local_rows {
         let ScanReportRow::SourceVerdict(verdict) = row else {
@@ -702,21 +724,30 @@ fn incomplete_report_blocks_destructive_eligibility() {
         .with_unresponsive_ms(1_000),
     );
 
-    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    let started = coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     assert!(started.run.is_some());
     wait_terminal(&coordinator, 10_000);
     let snapshot = coordinator.snapshot();
     let run = snapshot.run.expect("terminal run retained");
     assert_eq!(run.state, ScanRunState::Completed);
     let report = snapshot.current_report.summary.expect("report");
-    assert_eq!(report.state, skill_man_lib::core::scan::ScanReportState::Incomplete);
+    assert_eq!(
+        report.state,
+        skill_man_lib::core::scan::ScanReportState::Incomplete
+    );
     assert!(report.incomplete);
     assert!(report.coverage.failed >= 1);
 
     // Local candidate: the in-place external beta-skill link (outside the
     // control zone) keeps its non-destructive Local Link eligibility.
-    let (local_rows, _) =
-        page_section(&coordinator, &report, ScanReportSection::LocalCandidates, 64);
+    let (local_rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     for row in &local_rows {
         let ScanReportRow::SourceVerdict(verdict) = row else {
             panic!("expected SourceVerdict, got {row:?}");
@@ -738,13 +769,11 @@ fn incomplete_report_blocks_destructive_eligibility() {
     // The failed Root diagnostic remains visible in coverage rows.
     let (root_rows, _) = page_section(&coordinator, &report, ScanReportSection::Roots, 64);
     assert!(
-        root_rows
-            .iter()
-            .any(|row| matches!(
-                row,
-                ScanReportRow::RootCoverage(root)
-                    if root.state == skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed
-            )),
+        root_rows.iter().any(|row| matches!(
+            row,
+            ScanReportRow::RootCoverage(root)
+                if root.state == skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed
+        )),
         "failed coverage row with diagnostic must persist: {root_rows:?}"
     );
 }
@@ -819,18 +848,27 @@ fn lock_claim_forms_git_source_group_with_external_ownership_evidence() {
         .with_unresponsive_ms(1_000),
     );
 
-    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     wait_terminal(&coordinator, 10_000);
     let snapshot = coordinator.snapshot();
     let run = snapshot.run.expect("terminal run retained");
     assert_eq!(run.state, ScanRunState::Completed);
     let report = snapshot.current_report.summary.expect("report");
-    assert_eq!(report.source_counts.git_groups, 1, "{:?}", report.source_counts);
+    assert_eq!(
+        report.source_counts.git_groups, 1,
+        "{:?}",
+        report.source_counts
+    );
     let (git_rows, _) = page_section(&coordinator, &report, ScanReportSection::GitSources, 64);
     match git_rows.first().expect("a git group row") {
         ScanReportRow::GitSourceGroup(group) => {
             assert_eq!(group.provider, "github");
-            assert_eq!(group.canonical_repository, "https://github.com/owner/example");
+            assert_eq!(
+                group.canonical_repository,
+                "https://github.com/owner/example"
+            );
             assert_eq!(group.status, "candidate");
             assert_eq!(group.refs, vec!["v1.0.0".to_owned()]);
             assert_eq!(group.lock_paths.len(), 1);
@@ -887,7 +925,9 @@ fn classification_write_failure_fails_run_and_keeps_old_report() {
     );
 
     // First a clean Run publishes a Report (the one that must survive).
-    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     wait_terminal(&coordinator, 10_000);
     let first = coordinator.snapshot();
     assert_eq!(first.run.as_ref().unwrap().state, ScanRunState::Completed);
@@ -901,7 +941,9 @@ fn classification_write_failure_fails_run_and_keeps_old_report() {
 
     // The next Run fails at the classification write — old Report intact.
     factory.fail_next(skill_man_lib::seams::scan_evidence_store::fault_points::CLASSIFICATION);
-    coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     wait_terminal(&coordinator, 10_000);
     let second = coordinator.snapshot();
     assert_eq!(
@@ -909,16 +951,21 @@ fn classification_write_failure_fails_run_and_keeps_old_report() {
         ScanRunState::Failed,
         "classification failure is store-wide"
     );
-    assert!(second
-        .run
-        .as_ref()
-        .unwrap()
-        .diagnostic
-        .as_deref()
-        .map(|detail| detail.contains("source classification failed"))
-        .unwrap_or(false));
+    assert!(
+        second
+            .run
+            .as_ref()
+            .unwrap()
+            .diagnostic
+            .as_deref()
+            .map(|detail| detail.contains("source classification failed"))
+            .unwrap_or(false)
+    );
     let report = second.current_report.summary.as_ref().expect("old report");
-    assert_eq!(report.content_identity, first_identity, "old Report is kept");
+    assert_eq!(
+        report.content_identity, first_identity,
+        "old Report is kept"
+    );
 }
 
 #[test]

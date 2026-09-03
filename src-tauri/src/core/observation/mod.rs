@@ -55,6 +55,8 @@ use self::activation_health::{
 };
 
 pub const DEFAULT_PROBE_SLOW_MS: u64 = 1_000;
+/// Detection 1 秒只标记 Slow（spec §4.10），与 Startup Probe 同阈值。
+pub const DEFAULT_DETECTION_SLOW_MS: u64 = 1_000;
 
 /// Closed per-root observation state. An unreadable or invalid root is
 /// `Unavailable` with a diagnostic — never downgraded to `Absent`.
@@ -98,6 +100,9 @@ pub struct PresetObservation {
 pub struct DetectionSnapshot {
     pub generation: u64,
     pub preset_observations: Vec<PresetObservation>,
+    /// The run crossed the 1-second threshold; never truncates or
+    /// downgrades (spec §4.10).
+    pub slow: bool,
 }
 
 /// Bounded summary shared as the query result and `observation://changed`
@@ -178,6 +183,7 @@ pub struct ObservationService {
     health: Arc<Mutex<HealthSharedState>>,
     health_run: Mutex<Option<HealthRunHandle>>,
     observer: Arc<RwLock<Option<Arc<dyn ObservationEventObserver>>>>,
+    detection_slow_ms: u64,
     probe_slow_ms: u64,
     health_slow_ms: u64,
     unresponsive_ms: u64,
@@ -206,6 +212,7 @@ impl ObservationService {
                     roots: Vec::new(),
                 })
                 .collect(),
+            slow: false,
         };
         Self {
             filesystem,
@@ -224,10 +231,17 @@ impl ObservationService {
             health: Arc::new(Mutex::new(HealthSharedState::fresh())),
             health_run: Mutex::new(None),
             observer: Arc::new(RwLock::new(None)),
+            detection_slow_ms: DEFAULT_DETECTION_SLOW_MS,
             probe_slow_ms: DEFAULT_PROBE_SLOW_MS,
             health_slow_ms: DEFAULT_HEALTH_SLOW_MS,
             unresponsive_ms: DEFAULT_UNRESPONSIVE_MS,
         }
+    }
+
+    /// Test composition: shorten the Slow threshold for Agent Detection.
+    pub fn with_detection_slow_ms(mut self, milliseconds: u64) -> Self {
+        self.detection_slow_ms = milliseconds;
+        self
     }
 
     /// Test composition: shorten the Slow threshold for Startup Probe.
@@ -463,6 +477,7 @@ impl ObservationService {
             }
         };
         if owned_run {
+            let started = Instant::now();
             let published = {
                 let generation = self
                     .detection
@@ -471,7 +486,7 @@ impl ObservationService {
                     .snapshot
                     .generation
                     .wrapping_add(1);
-                self.probe_detection(generation)
+                self.probe_detection(generation, started)
             };
             let mut state = self
                 .detection
@@ -656,7 +671,7 @@ impl ObservationService {
         })
     }
 
-    fn probe_detection(&self, generation: u64) -> DetectionSnapshot {
+    fn probe_detection(&self, generation: u64, started: Instant) -> DetectionSnapshot {
         let preset_observations = self
             .presets
             .presets()
@@ -688,9 +703,11 @@ impl ObservationService {
                 }
             })
             .collect();
+        let slow = started.elapsed().as_millis() as u64 >= self.detection_slow_ms;
         DetectionSnapshot {
             generation,
             preset_observations,
+            slow,
         }
     }
 
@@ -1489,6 +1506,33 @@ mod tests {
         let probe = snapshot.startup_probe.unwrap();
         assert!(probe.slow);
         assert_eq!(probe.root_counts.present, 1, "slow never truncates results");
+    }
+
+    #[test]
+    fn detection_slow_is_flagged_but_not_truncated() {
+        let (service, agent_fs, _fs, _activation) = harness(
+            StubAgentFs::new(vec![("~/.alpha/skills", AgentRootProbe::Absent)]),
+            StubFs::new(),
+            StubAgentStore::new(1),
+            StubActivationStore::new(),
+        );
+        let service = service.with_detection_slow_ms(0);
+        let snapshot = service.refresh_detection();
+        let detection = snapshot.detection;
+        assert!(detection.slow, "a slow Detection run marks Slow");
+        assert_eq!(
+            detection.preset_observations.len(),
+            2,
+            "slow never truncates presets"
+        );
+        assert!(
+            detection
+                .preset_observations
+                .iter()
+                .all(|preset| preset.state != PresetDetectionState::Unknown),
+            "slow never downgrades an observation"
+        );
+        assert!(agent_fs.calls.load(AtomicOrdering::SeqCst) > 0);
     }
 
     #[test]

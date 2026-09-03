@@ -20,11 +20,11 @@
 //!   half candidate; healthy Roots still form an Incomplete Report; a
 //!   store-wide failure fails the whole Run and keeps the old Report.
 
+pub mod classification;
 pub mod engine;
 pub mod mutation;
 pub mod plan;
 pub mod qualifier;
-pub mod classification;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -44,8 +44,8 @@ use crate::seams::scan_evidence_store::{
     ScanFrozenFacts, ScanFrozenRoot, ScanReportManifest, ScanReportPageRead, ScanRootAgentRef,
     ScanRunRecord, ScanSourceCounts,
 };
-use crate::seams::scan_managed_facts::ScanManagedFactsReader;
 use crate::seams::scan_integrity::canonical_json_digest;
+use crate::seams::scan_managed_facts::ScanManagedFactsReader;
 use thiserror::Error;
 
 use self::mutation::ScanMutationCoordinator;
