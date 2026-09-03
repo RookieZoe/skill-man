@@ -22,7 +22,7 @@ impl SourceTransitionApi {
         self.service
             .confirm(request.into())
             .map(Into::into)
-            .map_err(command_error)
+            .map_err(|error| transition_command_error(&error))
     }
 
     pub fn undo(
@@ -32,7 +32,7 @@ impl SourceTransitionApi {
         self.service
             .undo(&request.operation_id)
             .map(Into::into)
-            .map_err(command_error)
+            .map_err(|error| transition_command_error(&error))
     }
 
     pub fn finalize(
@@ -41,16 +41,17 @@ impl SourceTransitionApi {
     ) -> Result<(), CommandFailureDto> {
         self.service
             .finalize(&request.operation_id)
-            .map_err(command_error)
+            .map_err(|error| transition_command_error(&error))
     }
 }
 
-fn command_error(error: SourceTransitionError) -> CommandFailureDto {
-    let public_error = match &error {
-        SourceTransitionError::Validation(_) | SourceTransitionError::PreviewStale => {
-            PublicErrorDto::Validation
-        }
+pub(crate) fn transition_command_error(error: &SourceTransitionError) -> CommandFailureDto {
+    let public_error = match error {
+        SourceTransitionError::SourceSnapshotMismatch => PublicErrorDto::SourceSnapshotMismatch,
         SourceTransitionError::RecoveryRequired(_) => PublicErrorDto::RecoveryRequired,
+        SourceTransitionError::ExternalOwnershipReappeared
+        | SourceTransitionError::Validation(_)
+        | SourceTransitionError::PreviewStale => PublicErrorDto::Validation,
         SourceTransitionError::Preview(_) | SourceTransitionError::Source(_) => {
             PublicErrorDto::SourceUnavailable
         }
@@ -68,7 +69,8 @@ fn command_error(error: SourceTransitionError) -> CommandFailureDto {
         ) => PublicErrorDto::RecoveryRequired,
         SourceTransitionError::FileSystem(_)
         | SourceTransitionError::Store(_)
-        | SourceTransitionError::PromotionStore(_) => PublicErrorDto::StateUnavailable,
+        | SourceTransitionError::PromotionStore(_)
+        | SourceTransitionError::UpdateStore(_) => PublicErrorDto::StateUnavailable,
     };
     CommandFailureDto {
         error: public_error,

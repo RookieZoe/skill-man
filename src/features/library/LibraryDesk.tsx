@@ -118,6 +118,19 @@ interface LibraryDeskProps {
   onPreviewSourceUpdate: (remoteId: string) => void;
   onConfirmSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
+  sourceActionActivity: boolean;
+  sourceActionNotice: {
+    kind: "restore" | "copy" | "remove";
+    ok: boolean;
+    message: string | null;
+  } | null;
+  onRestoreSource: (remoteId: string) => void;
+  onCopySourceMember: (
+    remoteId: string,
+    skillId: string,
+    destination: string,
+  ) => void;
+  onRemoveSource: (remoteId: string) => void;
   /** Git Repository Source handoff: the scan group opens the source
    * management surface (#92 Source Tracking Policy + immutable Transition). */
   onManageGitGroup: (
@@ -203,6 +216,11 @@ export function LibraryDesk({
   onPreviewSourcePromotion,
   onPreviewSourceUpdate,
   onConfirmSourcePromotion,
+  sourceActionActivity,
+  sourceActionNotice,
+  onRestoreSource,
+  onCopySourceMember,
+  onRemoveSource,
 
   onFetchLatestAndManage,
   onManageGitGroup,
@@ -405,6 +423,11 @@ export function LibraryDesk({
               promotionTrigger.current = trigger;
               onPreviewSourceUpdate(remoteId);
             }}
+            actionActivity={sourceActionActivity}
+            actionNotice={sourceActionNotice}
+            onRestore={onRestoreSource}
+            onCopyMember={onCopySourceMember}
+            onRemove={onRemoveSource}
           />
         ) : null}
       </div>

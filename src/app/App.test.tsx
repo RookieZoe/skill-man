@@ -1051,6 +1051,7 @@ test("loads Git source capability states when the Catalog opens", async () => {
         remoteId: "legacy-source",
         canonicalUrl: "https://github.com/acme/legacy",
         kind: "legacy_per_skill_git_state",
+        members: [],
       },
     ],
   });

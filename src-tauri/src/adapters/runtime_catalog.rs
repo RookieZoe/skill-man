@@ -39,7 +39,8 @@ use crate::seams::source_transition_store::{
     SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
 use crate::seams::source_update_store::{
-    SourceUpdateCurrentSource, SourceUpdateStore, SourceUpdateStoreError,
+    LocalSourceCopyRecord, SourceRemoveFacts, SourceUpdateRecord, SourceUpdateStore,
+    SourceUpdateStoreError,
 };
 
 pub struct RuntimeCatalogStore {
@@ -460,21 +461,36 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
 }
 
 impl SourceUpdateStore for RuntimeCatalogStore {
-    fn read_source_update(
+    fn read_current(
         &self,
         remote_id: &str,
-    ) -> Result<SourceUpdateCurrentSource, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().read_source_update(remote_id)
+    ) -> Result<
+        Option<crate::seams::source_update_store::SourceUpdateCurrentSource>,
+        SourceUpdateStoreError,
+    > {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .read_current(remote_id)
+    }
+
+    fn source_ids(&self) -> Result<Vec<String>, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .source_ids()
+    }
+
+    fn member_health(
+        &self,
+        skill_id: &crate::core::domain::SkillId,
+    ) -> Result<Option<(String, crate::core::domain::Health)>, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .member_health(skill_id)
     }
 
     fn validate_source_update(
         &self,
-        record: &SourcePromotionRecord,
+        record: &SourceUpdateRecord,
     ) -> Result<(), SourceUpdateStoreError> {
         if !self.is_writable() {
             return Err(SourceUpdateStoreError::Unavailable(
@@ -486,7 +502,7 @@ impl SourceUpdateStore for RuntimeCatalogStore {
 
     fn commit_source_update(
         &self,
-        record: SourcePromotionRecord,
+        record: &SourceUpdateRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
         if !self.is_writable() {
             return Err(SourceUpdateStoreError::Unavailable(
@@ -498,14 +514,72 @@ impl SourceUpdateStore for RuntimeCatalogStore {
 
     fn source_update_is_committed(
         &self,
-        record: &SourcePromotionRecord,
+        record: &SourceUpdateRecord,
     ) -> Result<bool, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .source_update_is_committed(record)
+    }
+
+    fn undo_source_update(
+        &self,
+        record: &SourceUpdateRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
         if !self.is_writable() {
             return Err(SourceUpdateStoreError::Unavailable(
                 "catalog startup is read-only".into(),
             ));
         }
-        self.require().source_update_is_committed(record)
+        self.require().undo_source_update(record)
+    }
+
+    fn set_source_member_health(
+        &self,
+        remote_id: &str,
+        health: &[(crate::core::domain::SkillId, crate::core::domain::Health)],
+    ) -> Result<u64, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().set_source_member_health(remote_id, health)
+    }
+
+    fn register_local_copy(
+        &self,
+        record: &LocalSourceCopyRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().register_local_copy(record)
+    }
+
+    fn source_remove_facts(
+        &self,
+        remote_id: &str,
+    ) -> Result<SourceRemoveFacts, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .source_remove_facts(remote_id)
+    }
+
+    fn commit_remove_source(&self, remote_id: &str) -> Result<u64, SourceUpdateStoreError> {
+        if !self.is_writable() {
+            return Err(SourceUpdateStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().commit_remove_source(remote_id)
+    }
+
+    fn source_remove_is_committed(&self, remote_id: &str) -> Result<bool, SourceUpdateStoreError> {
+        self.require_catalog()
+            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
+            .source_remove_is_committed(remote_id)
     }
 }
 

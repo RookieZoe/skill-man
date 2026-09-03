@@ -81,6 +81,10 @@ pub enum Health {
     Healthy,
     Broken,
     Modified,
+    /// Git Source Member snapshot bytes do not equal the current immutable
+    /// Source Release (ADR-0018). Mutually exclusive with `Modified`; blocks
+    /// Update, new Enable and ordinary source writes.
+    SourceSnapshotMismatch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

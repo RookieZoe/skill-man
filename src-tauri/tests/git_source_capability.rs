@@ -347,6 +347,13 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
                 kind: GitSourceCapabilityKind::GitRepositorySource,
+                members: vec![
+                    skill_man_lib::core::git_source_capability::GitSourceCapabilityMember {
+                        skill_id: "networking".into(),
+                        skill_path: "skills/networking".into(),
+                        presence: true,
+                    },
+                ],
             }
         ]
     );

@@ -23,6 +23,8 @@ pub enum NativeMessageKey {
     TrayAgentCountOther,
     TrayHealthBroken,
     TrayHealthModified,
+    TrayHealthMismatch,
+    SourceSnapshotMismatch,
     MenuWindow,
     MenuHelp,
 }
@@ -38,6 +40,8 @@ impl NativeMessageKey {
             Self::TrayAgentCountOther => "tray.agent_count_other",
             Self::TrayHealthBroken => "tray.health.broken",
             Self::TrayHealthModified => "tray.health.modified",
+            Self::TrayHealthMismatch => "tray.health.source_snapshot_mismatch",
+            Self::SourceSnapshotMismatch => "tray.health.source_snapshot_mismatch",
             Self::MenuWindow => "menu.window",
             Self::MenuHelp => "menu.help",
         }

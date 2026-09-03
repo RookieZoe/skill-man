@@ -41,6 +41,11 @@ use crate::seams::source_transition_store::{
     SourceTransitionMemberRecord, SourceTransitionRecord, SourceTransitionStore,
     SourceTransitionStoreError,
 };
+use crate::seams::source_update_store::{
+    SourceMemberPresence, SourceUpdateCurrentSource, SourceUpdateMemberOrigin,
+    SourceUpdateMemberRecord, SourceUpdatePreviousMemberRecord, SourceUpdateRecord,
+    SourceUpdateRemovedMemberRecord, SourceUpdateStore, SourceUpdateStoreError,
+};
 
 const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 2;
 /// The immutable namespace of every Git Source Member snapshot.
@@ -78,6 +83,19 @@ pub struct ConfirmSourcePromotionRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmSourceUpdateRequest {
+    /// The durable managed source id; never client-forged facts.
+    pub remote_id: String,
+    /// The Source Tracking Policy / override selected at preview.
+    pub tracking_policy: Option<SourceTrackingOverride>,
+    /// The Source Group Draft's selected ref. Confirmation refuses if a
+    /// fresh read-only preview no longer resolves the same immutable
+    /// release.
+    pub expected_selected_ref: String,
+    pub expected_resolved_commit: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTransitionResult {
     pub operation_id: String,
     pub remote_id: String,
@@ -103,6 +121,14 @@ pub enum SourceTransitionError {
     PreviewStale,
     #[error("the Source Transition requires recovery: {0}")]
     RecoveryRequired(String),
+    #[error(
+        "the Git Source Member snapshots do not match the current Source Release; Restore Current Source Release before Update"
+    )]
+    SourceSnapshotMismatch,
+    #[error(
+        "the external installer reappeared for this repository; Update is an Ownership Conflict"
+    )]
+    ExternalOwnershipReappeared,
     #[error(transparent)]
     Preview(#[from] SourceGroupPreviewError),
     #[error(transparent)]
@@ -116,6 +142,8 @@ pub enum SourceTransitionError {
     #[error(transparent)]
     Store(#[from] SourceTransitionStoreError),
     #[error(transparent)]
+    UpdateStore(#[from] SourceUpdateStoreError),
+    #[error(transparent)]
     PromotionStore(#[from] SourcePromotionStoreError),
 }
 
@@ -128,6 +156,7 @@ pub struct SourceTransitionService {
     lock_store: Arc<dyn InstallerLockStore>,
     store: Arc<dyn SourceTransitionStore>,
     promotion_store: Arc<dyn SourcePromotionStore>,
+    update_store: Arc<dyn SourceUpdateStore>,
     filesystem: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
     configured_library_root: PathBuf,
@@ -155,6 +184,7 @@ impl SourceTransitionService {
             lock_store,
             store,
             promotion_store: Arc::new(UnavailableSourcePromotionStore),
+            update_store: Arc::new(UnavailableSourceUpdateStore),
             filesystem,
             clock,
             configured_library_root: library_root,
@@ -180,6 +210,8 @@ impl SourceTransitionService {
         self
     }
 
+    /// Shared handle for the sibling lifecycle service; the same concrete
+    /// store backs both seams.
     pub fn confirm(
         &self,
         request: ConfirmSourceTransitionRequest,
@@ -275,6 +307,7 @@ impl SourceTransitionService {
                 .collect(),
             removed_members: Vec::new(),
             promotion_legacy: None,
+            update_previous: None,
         };
         self.filesystem
             .write_source_transition_journal(&library_root, &journal)?;
@@ -447,6 +480,7 @@ impl SourceTransitionService {
             members,
             removed_members,
             promotion_legacy: Some(legacy),
+            update_previous: None,
         };
         self.filesystem
             .write_source_transition_journal(&library_root, &journal)?;
@@ -482,6 +516,316 @@ impl SourceTransitionService {
         }
     }
 
+    /// v9 Source Update (ticket #93): re-evaluates the policy, freezes the
+    /// exact previous release/member facts and the complete target release,
+    /// verifies the current snapshots and ownership silence, then runs the
+    /// same source-level journal/CAS-style transition with no external lock
+    /// claims. Members are never updated individually.
+    pub fn with_update_store(mut self, store: Arc<dyn SourceUpdateStore>) -> Self {
+        self.update_store = store;
+        self
+    }
+
+    /// Shared handle for sibling lifecycle services; the same concrete
+    /// store backs both seams.
+    pub fn update_store_handle(&self) -> Arc<dyn SourceUpdateStore> {
+        self.update_store.clone()
+    }
+
+    pub fn confirm_update(
+        &self,
+        request: ConfirmSourceUpdateRequest,
+    ) -> Result<SourceTransitionResult, SourceTransitionError> {
+        self.ensure_writes_ready()?;
+        let library_root = self.active_library_root()?;
+        let current = self
+            .update_store
+            .read_current(&request.remote_id)?
+            .ok_or_else(|| {
+                SourceTransitionError::Validation(
+                    "the selected Git Repository Source is no longer complete".into(),
+                )
+            })?;
+        self.ensure_no_external_claims(&current.canonical_url)?;
+        self.verify_current_snapshots(&library_root, &current)?;
+        let source_type = if current.canonical_url.starts_with("https://github.com/") {
+            "github"
+        } else if current.canonical_url.starts_with("https://gitlab.com/") {
+            "gitlab"
+        } else {
+            "git"
+        };
+        let preview = self.refresh_preview(
+            source_type,
+            &current.canonical_url,
+            &request.tracking_policy,
+        )?;
+        if preview.policy.selected_ref != request.expected_selected_ref
+            || preview.policy.resolved_commit != request.expected_resolved_commit
+        {
+            return Err(SourceTransitionError::PreviewStale);
+        }
+        let operation_id = self.next_operation_id();
+        let release_id = format!("source-release-{operation_id}");
+        let staging_operation_root = library_root.join("staging").join(&operation_id);
+        let previous_manifest = self
+            .filesystem
+            .read_remote_parent_manifest(&library_root.join("remotes"), &request.remote_id)?;
+        let current_by_path = current
+            .members
+            .iter()
+            .map(|member| (member.skill_path.clone(), member))
+            .collect::<BTreeMap<_, _>>();
+        let target_paths = preview
+            .members
+            .iter()
+            .map(|member| member.skill_path.as_str())
+            .collect::<BTreeSet<_>>();
+        let removed_current = current
+            .members
+            .iter()
+            .filter(|member| {
+                member.presence == SourceMemberPresence::Current
+                    && !target_paths.contains(member.skill_path.as_str())
+            })
+            .collect::<Vec<_>>();
+        let mut members = Vec::with_capacity(preview.members.len());
+        for member in &preview.members {
+            let (skill_id, action) = match current_by_path.get(member.skill_path.as_str()) {
+                Some(existing) => (
+                    existing.skill_id.clone(),
+                    crate::seams::filesystem::SourceTransitionMemberAction::Current,
+                ),
+                None => (
+                    SkillId(self.next_uuid()),
+                    crate::seams::filesystem::SourceTransitionMemberAction::Added,
+                ),
+            };
+            members.push(SourceTransitionJournalMember {
+                skill_id: skill_id.0.clone(),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.directory_identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                canonical_entity: None,
+                isolated_path: None,
+                staged_root: staging_operation_root.join(&member.directory_name),
+                staged_snapshot: None,
+                namespace_path: git_member_namespace_path(
+                    &library_root,
+                    &current.remote_id,
+                    &skill_id.0,
+                ),
+                skill_path: member.skill_path.clone(),
+                tree_hash: String::new(),
+                provider_hash: None,
+                action,
+            });
+        }
+        let removed_members = removed_current
+            .iter()
+            .map(|member| SourceTransitionRemovedMember {
+                skill_id: member.skill_id.0.clone(),
+                directory_name: member.directory_name.clone(),
+                skill_path: member.skill_path.clone(),
+                legacy_path: library_root.join(&member.storage_relpath),
+                tree_hash: member.tree_hash.clone().unwrap_or_default(),
+                isolated_path: None,
+            })
+            .collect::<Vec<_>>();
+        let previous_members = current
+            .members
+            .iter()
+            .map(|member| SourceUpdatePreviousMemberRecord {
+                skill_id: member.skill_id.clone(),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                skill_path: member.skill_path.clone(),
+                storage_relpath: member.storage_relpath.clone(),
+                presence: member.presence,
+                tree_hash: member.tree_hash.clone(),
+                health: member.health,
+            })
+            .collect::<Vec<_>>();
+        let update_record = SourceUpdateRecord {
+            remote_id: current.remote_id.clone(),
+            provider: preview.provider.clone(),
+            canonical_url: preview.source_url.clone(),
+            tracking_mode: preview.policy.mode.clone(),
+            tracking_value: preview.policy.value.clone(),
+            selection_kind: preview.policy.selection_kind.clone(),
+            selected_ref: preview.policy.selected_ref.clone(),
+            release_id: release_id.clone(),
+            resolved_commit: preview.policy.resolved_commit.clone(),
+            operation_id: operation_id.clone(),
+            previous_release_id: current.current_release_id.clone(),
+            previous_tracking_mode: current.tracking_mode.clone(),
+            previous_tracking_value: current.tracking_value.clone(),
+            previous_selected_ref: current.selected_ref.clone(),
+            previous_resolved_commit: current.resolved_commit.clone(),
+            previous_members,
+            members: Vec::new(),
+            removed_members: removed_current
+                .iter()
+                .map(|member| SourceUpdateRemovedMemberRecord {
+                    skill_id: member.skill_id.clone(),
+                    directory_name: member.directory_name.clone(),
+                    skill_path: member.skill_path.clone(),
+                    storage_relpath: member.storage_relpath.clone(),
+                    previous_tree_hash: member.tree_hash.clone().unwrap_or_default(),
+                })
+                .collect(),
+        };
+        let update_previous = crate::seams::filesystem::SourceUpdatePreviousFacts {
+            release_id: current.current_release_id.clone(),
+            tracking_mode: current.tracking_mode.clone(),
+            tracking_value: current.tracking_value.clone(),
+            selected_ref: current.selected_ref.clone(),
+            resolved_commit: current.resolved_commit.clone(),
+            manifest_json: previous_manifest
+                .as_ref()
+                .and_then(|manifest| serde_json::to_string(manifest).ok()),
+            members: current
+                .members
+                .iter()
+                .map(
+                    |member| crate::seams::filesystem::SourceUpdatePreviousMemberFacts {
+                        skill_id: member.skill_id.0.clone(),
+                        directory_name: member.directory_name.clone(),
+                        identity_key: member.identity_key.clone(),
+                        display_name: member.display_name.clone(),
+                        description: member.description.clone(),
+                        skill_path: member.skill_path.clone(),
+                        storage_relpath: member.storage_relpath.clone(),
+                        presence: presence_text(member.presence).into(),
+                        tree_hash: member.tree_hash.clone(),
+                        health: health_text(member.health).into(),
+                    },
+                )
+                .collect(),
+        };
+        let mut journal = SourceTransitionJournal {
+            version: SOURCE_TRANSITION_JOURNAL_VERSION,
+            operation_id: operation_id.clone(),
+            phase: SourceTransitionPhase::Planned,
+            staging_operation_root,
+            staging_fingerprint: None,
+            remote_id: current.remote_id.clone(),
+            release_id: release_id.clone(),
+            provider: preview.provider.clone(),
+            canonical_url: preview.source_url.clone(),
+            tracking_mode: preview.policy.mode.clone(),
+            tracking_value: preview.policy.value.clone(),
+            selection_kind: preview.policy.selection_kind.clone(),
+            selected_ref: preview.policy.selected_ref.clone(),
+            resolved_commit: preview.policy.resolved_commit.clone(),
+            target_manifest: Some(RemoteParentManifest {
+                schema_version: 1,
+                remote_id: current.remote_id.clone(),
+                canonical_url: preview.source_url.clone(),
+                provider: Some(preview.provider.clone()),
+                tracking_mode: Some(preview.policy.mode.clone()),
+                tracking_value: preview.policy.value.clone(),
+                current_selected_ref: Some(preview.policy.selected_ref.clone()),
+                current_release_id: Some(release_id.clone()),
+                aliases: current.aliases.clone(),
+                created_at: current.created_at.clone(),
+            }),
+            lock_path: PathBuf::new(),
+            lock_fingerprint: String::new(),
+            lock_entries: Vec::new(),
+            members,
+            removed_members,
+            promotion_legacy: None,
+            update_previous: Some(update_previous.to_json()),
+        };
+        self.filesystem
+            .write_source_transition_journal(&library_root, &journal)?;
+        let mut frozen_record = update_record;
+
+        let result = self.apply_confirmed_update(&library_root, &mut journal, &mut frozen_record);
+        match result {
+            Ok(snapshot_version) => Ok(SourceTransitionResult {
+                operation_id,
+                remote_id: journal.remote_id.clone(),
+                release_id: journal.release_id.clone(),
+                resolved_commit: journal.resolved_commit.clone(),
+                member_count: u32::try_from(journal.members.len()).map_err(|_| {
+                    SourceTransitionError::Validation("too many source members".into())
+                })?,
+                snapshot_version,
+                undo_available: true,
+            }),
+            Err(error)
+                if matches!(
+                    journal.phase,
+                    SourceTransitionPhase::Planned
+                        | SourceTransitionPhase::MembersStaged
+                        | SourceTransitionPhase::SourceIsolated
+                        | SourceTransitionPhase::DestinationsReserved
+                ) =>
+            {
+                self.rollback_pre_commit_update(&library_root, &mut journal, &frozen_record)?;
+                self.filesystem
+                    .finish_source_transition_journal(&library_root, &journal.operation_id)?;
+                Err(error)
+            }
+            Err(error) => Err(self.block_for_recovery("continue Source Update", error)),
+        }
+    }
+
+    /// An external installer claim for this repository is an Ownership
+    /// Conflict: Update never re-adopts, merges or releases it (spec §8.4).
+    fn ensure_no_external_claims(&self, canonical_url: &str) -> Result<(), SourceTransitionError> {
+        let reports = self.lock_store.discover()?;
+        let reappeared = reports.iter().any(|report| {
+            report.entries.iter().any(|entry| {
+                parse_git_source_input(&entry.source_url)
+                    .map(|spec| spec.url == canonical_url)
+                    .unwrap_or(false)
+            })
+        });
+        if reappeared {
+            return Err(SourceTransitionError::ExternalOwnershipReappeared);
+        }
+        Ok(())
+    }
+
+    /// Startup and pre-write verification: every current member's read-only
+    /// snapshot bytes must equal the immutable current Source Release tree.
+    /// Any difference is `SourceSnapshotMismatch`.
+    fn verify_current_snapshots(
+        &self,
+        library_root: &Path,
+        current: &SourceUpdateCurrentSource,
+    ) -> Result<(), SourceTransitionError> {
+        for member in current
+            .members
+            .iter()
+            .filter(|member| member.presence == SourceMemberPresence::Current)
+        {
+            let namespace = library_root.join(&member.storage_relpath);
+            let observed = match self.filesystem.staged_tree_snapshot(&namespace) {
+                Ok(snapshot) => Some(snapshot.content_hash),
+                Err(FileSystemError::Io { source, .. })
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if observed.as_deref() != member.tree_hash.as_deref() {
+                return Err(SourceTransitionError::SourceSnapshotMismatch);
+            }
+        }
+        Ok(())
+    }
+
     /// Startup-only recovery. It reads only the frozen journal: no Fetch,
     /// no remote resolution and no partial source decisions.
     pub fn recover_pending(&self, library_root: &Path) -> Result<(), SourceTransitionError> {
@@ -490,6 +834,45 @@ impl SourceTransitionService {
             .list_source_transition_journals(library_root)?
         {
             self.validate_journal_layout(library_root, &journal)?;
+            if journal.update_previous.is_some() {
+                match journal.phase {
+                    SourceTransitionPhase::Undoing => {
+                        self.complete_update_undo(library_root, &mut journal)?;
+                    }
+                    SourceTransitionPhase::Planned
+                    | SourceTransitionPhase::MembersStaged
+                    | SourceTransitionPhase::SourceIsolated
+                    | SourceTransitionPhase::DestinationsReserved => {
+                        let record = self.read_update_record(library_root, &journal)?;
+                        if self.update_store.source_update_is_committed(&record)? {
+                            self.roll_forward_update(library_root, &mut journal)?;
+                        } else {
+                            self.rollback_pre_commit_update(library_root, &mut journal, &record)?;
+                            self.filesystem.finish_source_transition_journal(
+                                library_root,
+                                &journal.operation_id,
+                            )?;
+                        }
+                    }
+                    SourceTransitionPhase::OwnershipReleased => {
+                        return Err(self.block_for_recovery(
+                            "decide Source Update recovery",
+                            "an update journal must never reach the ownership-release phase",
+                        ));
+                    }
+                    SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized => {
+                        let record = self.read_update_record(library_root, &journal)?;
+                        if !self.update_store.source_update_is_committed(&record)? {
+                            return Err(self.block_for_recovery(
+                                "decide Source Update recovery",
+                                "the update journal is post-commit but the Catalog release is missing",
+                            ));
+                        }
+                        self.roll_forward_update(library_root, &mut journal)?;
+                    }
+                }
+                continue;
+            }
             match journal.phase {
                 SourceTransitionPhase::Undoing => {
                     self.complete_undo(library_root, &mut journal)?;
@@ -532,6 +915,30 @@ impl SourceTransitionService {
         let library_root = self.active_library_root()?;
         let mut journal = self.journal_for(&library_root, operation_id)?;
         self.validate_journal_layout(&library_root, &journal)?;
+        let update_record_present = journal.update_previous.is_some();
+        if update_record_present {
+            if !matches!(
+                journal.phase,
+                SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized
+            ) {
+                return Err(SourceTransitionError::Validation(
+                    "the Source Update is not in an undoable result window".into(),
+                ));
+            }
+            let record = self.read_update_record(&library_root, &journal)?;
+            self.preflight_update_undo(&journal, &record)?;
+            journal.phase = SourceTransitionPhase::Undoing;
+            self.filesystem
+                .write_source_transition_journal(&library_root, &journal)?;
+            let snapshot_version = self.complete_update_undo(&library_root, &mut journal)?;
+            return Ok(SourceUndoResult {
+                operation_id: operation_id.into(),
+                member_count: u32::try_from(journal.members.len()).map_err(|_| {
+                    SourceTransitionError::Validation("too many source members".into())
+                })?,
+                snapshot_version,
+            });
+        }
         if !matches!(
             journal.phase,
             SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized
@@ -558,6 +965,35 @@ impl SourceTransitionService {
         let library_root = self.active_library_root()?;
         let journal = self.journal_for(&library_root, operation_id)?;
         self.validate_journal_layout(&library_root, &journal)?;
+        let update_record_present = journal.update_previous.is_some();
+        if update_record_present {
+            if !matches!(
+                journal.phase,
+                SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized
+            ) {
+                return Err(SourceTransitionError::Validation(
+                    "the Source Update is not ready to finalize".into(),
+                ));
+            }
+            for member in &journal.members {
+                if let Some(isolated) = &member.isolated_path
+                    && self.filesystem.path_is_directory(isolated)?
+                {
+                    self.filesystem.discard_isolated_source(isolated)?;
+                }
+            }
+            for removed in &journal.removed_members {
+                if let Some(isolated) = &removed.isolated_path
+                    && self.filesystem.path_is_directory(isolated)?
+                {
+                    self.filesystem.discard_isolated_source(isolated)?;
+                }
+            }
+            self.discard_transition_staging(&library_root, &journal)?;
+            self.filesystem
+                .finish_source_transition_journal(&library_root, operation_id)?;
+            return Ok(());
+        }
         if !matches!(
             journal.phase,
             SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized
@@ -769,6 +1205,713 @@ impl SourceTransitionService {
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
         Ok(snapshot_version)
+    }
+
+    /// The Source Update apply: stage the frozen release, validate the
+    /// complete record, isolate the previous member bytes, reserve the
+    /// immutable destinations and commit one source-level Catalog
+    /// transaction. No external lock claims exist for an update.
+    fn apply_confirmed_update(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+        record: &mut SourceUpdateRecord,
+    ) -> Result<u64, SourceTransitionError> {
+        let operation_fingerprint = self
+            .filesystem
+            .create_adopt_staging_operation(library_root, &journal.operation_id)?;
+        journal.staging_fingerprint = Some(operation_fingerprint);
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+
+        let temporary_mirror_root = tempfile::Builder::new()
+            .prefix("skill-man-source-update-")
+            .tempdir()
+            .map_err(|source| {
+                SourceTransitionError::Source(SourceError::Io {
+                    operation: "create temporary Git Update mirror",
+                    path: std::env::temp_dir(),
+                    source,
+                })
+            })?;
+        let mut spec = parse_git_source_input(&journal.canonical_url)
+            .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
+        spec.requested_ref = Some(journal.selected_ref.clone());
+        let mirror = git_mirror_path(temporary_mirror_root.path(), &spec.url);
+        let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
+        let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)
+            .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
+        if resolved.commit != journal.resolved_commit {
+            return Err(SourceTransitionError::PreviewStale);
+        }
+
+        for index in 0..journal.members.len() {
+            {
+                let member = &mut journal.members[index];
+                self.git_source.stage_skill(
+                    &mirror,
+                    &journal.resolved_commit,
+                    &member.skill_path,
+                    &member.staged_root,
+                )?;
+                let snapshot = self.filesystem.staged_tree_snapshot(&member.staged_root)?;
+                crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &snapshot)
+                    .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
+                let document = self.filesystem.read_skill_document(&member.staged_root)?;
+                let metadata = parse_skill_metadata(&document);
+                member.display_name = metadata
+                    .name
+                    .unwrap_or_else(|| member.directory_name.clone());
+                member.description = metadata.description.unwrap_or_default();
+                member.tree_hash = snapshot.content_hash.clone();
+                member.staged_snapshot = Some(snapshot);
+            }
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
+        }
+        journal.phase = SourceTransitionPhase::MembersStaged;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+
+        record.members = journal
+            .members
+            .iter()
+            .map(|member| SourceUpdateMemberRecord {
+                origin: match member.action {
+                    crate::seams::filesystem::SourceTransitionMemberAction::Added => {
+                        SourceUpdateMemberOrigin::New
+                    }
+                    crate::seams::filesystem::SourceTransitionMemberAction::Current => {
+                        SourceUpdateMemberOrigin::Existing
+                    }
+                },
+                skill_id: SkillId(member.skill_id.clone()),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                storage_relpath: format!("skills/git/{}/{}", journal.remote_id, member.skill_id),
+                skill_path: member.skill_path.clone(),
+                tree_hash: member.tree_hash.clone(),
+                provider_hash: member.provider_hash.clone(),
+            })
+            .collect();
+        self.update_store.validate_source_update(record)?;
+        self.isolate_update_previous(library_root, journal, record)?;
+        journal.phase = SourceTransitionPhase::SourceIsolated;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+
+        self.preflight_update_destinations(journal)?;
+        journal.phase = SourceTransitionPhase::DestinationsReserved;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+        self.reserve_update_destinations(library_root, journal)?;
+        self.ensure_reserved_update_destinations(journal)?;
+
+        // The single transaction is the Update commit point.
+        let snapshot_version = self.update_store.commit_source_update(record)?;
+        journal.phase = SourceTransitionPhase::ManagedCommitted;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+        self.write_current_source_manifest(library_root, journal)?;
+        self.verify_final_update(journal)?;
+        journal.phase = SourceTransitionPhase::Finalized;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+        Ok(snapshot_version)
+    }
+
+    /// Rebuild the frozen complete `SourceUpdateRecord` from the staged
+    /// journal facts (freezed tree hashes after staging).
+    fn read_update_record(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<SourceUpdateRecord, SourceTransitionError> {
+        let previous_value = journal.update_previous.as_ref().ok_or_else(|| {
+            SourceTransitionError::RecoveryRequired(
+                "the Source Update journal carries no frozen previous facts".into(),
+            )
+        })?;
+        let previous: crate::seams::filesystem::SourceUpdatePreviousFacts =
+            crate::seams::filesystem::SourceUpdatePreviousFacts::from_json(previous_value)
+                .map_err(SourceTransitionError::RecoveryRequired)?;
+        let previous_members = previous
+            .members
+            .iter()
+            .map(|member| SourceUpdatePreviousMemberRecord {
+                skill_id: SkillId(member.skill_id.clone()),
+                directory_name: member.directory_name.clone(),
+                identity_key: member.identity_key.clone(),
+                display_name: member.display_name.clone(),
+                description: member.description.clone(),
+                skill_path: member.skill_path.clone(),
+                storage_relpath: member.storage_relpath.clone(),
+                presence: parse_presence_inner(&member.presence),
+                tree_hash: member.tree_hash.clone(),
+                health: parse_health_inner(&member.health),
+            })
+            .collect();
+        let _ = library_root;
+        Ok(SourceUpdateRecord {
+            remote_id: journal.remote_id.clone(),
+            provider: journal.provider.clone(),
+            canonical_url: journal.canonical_url.clone(),
+            tracking_mode: journal.tracking_mode.clone(),
+            tracking_value: journal.tracking_value.clone(),
+            selection_kind: journal.selection_kind.clone(),
+            selected_ref: journal.selected_ref.clone(),
+            release_id: journal.release_id.clone(),
+            resolved_commit: journal.resolved_commit.clone(),
+            operation_id: journal.operation_id.clone(),
+            previous_release_id: previous.release_id.clone(),
+            previous_tracking_mode: previous.tracking_mode.clone(),
+            previous_tracking_value: previous.tracking_value.clone(),
+            previous_selected_ref: previous.selected_ref.clone(),
+            previous_resolved_commit: previous.resolved_commit.clone(),
+            previous_members,
+            members: Vec::new(),
+            removed_members: journal
+                .removed_members
+                .iter()
+                .map(|removed| SourceUpdateRemovedMemberRecord {
+                    skill_id: SkillId(removed.skill_id.clone()),
+                    directory_name: removed.directory_name.clone(),
+                    skill_path: removed.skill_path.clone(),
+                    storage_relpath: removed
+                        .legacy_path
+                        .strip_prefix(library_root)
+                        .map(|path| path.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| removed.legacy_path.to_string_lossy().into_owned()),
+                    previous_tree_hash: removed.tree_hash.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Isolate the previous bytes of changed current members and every
+    /// removed member. Unchanged current snapshots and reappearing members
+    /// (absent before) have nothing to isolate.
+    fn isolate_update_previous(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+        record: &SourceUpdateRecord,
+    ) -> Result<(), SourceTransitionError> {
+        let previous_by_skill = record
+            .previous_members
+            .iter()
+            .map(|previous| (previous.skill_id.0.as_str(), previous))
+            .collect::<BTreeMap<_, _>>();
+        for index in 0..journal.members.len() {
+            let member = &mut journal.members[index];
+            if member.action != crate::seams::filesystem::SourceTransitionMemberAction::Current {
+                continue;
+            }
+            if !self.namespace_occupied(&member.namespace_path)? {
+                // Reappearing member: no current bytes to preserve.
+                continue;
+            }
+            let current_bytes = self
+                .filesystem
+                .staged_tree_snapshot(&member.namespace_path)?;
+            if current_bytes.content_hash == member.tree_hash {
+                continue;
+            }
+            let previous_tree = previous_by_skill
+                .get(member.skill_id.as_str())
+                .and_then(|previous| previous.tree_hash.clone())
+                .ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "the frozen previous member set has no tree facts".into(),
+                    )
+                })?;
+            if current_bytes.content_hash != previous_tree {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the member '{}' changed after the Update plan was frozen",
+                    member.directory_name
+                )));
+            }
+            member.isolated_path = Some(
+                self.filesystem
+                    .isolate_external_source(&member.namespace_path, &journal.operation_id)?,
+            );
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
+        }
+        for index in 0..journal.removed_members.len() {
+            let removed = &mut journal.removed_members[index];
+            if !self.namespace_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+            let current_bytes = self.filesystem.staged_tree_snapshot(&removed.legacy_path)?;
+            if current_bytes.content_hash != removed.tree_hash {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the removed member '{}' changed after the Update plan was frozen",
+                    removed.directory_name
+                )));
+            }
+            removed.isolated_path = Some(
+                self.filesystem
+                    .isolate_external_source(&removed.legacy_path, &journal.operation_id)?,
+            );
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
+        }
+        Ok(())
+    }
+
+    fn preflight_update_destinations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for member in &journal.members {
+            if self.namespace_occupied(&member.namespace_path)? {
+                match member.action {
+                    crate::seams::filesystem::SourceTransitionMemberAction::Current => {}
+                    crate::seams::filesystem::SourceTransitionMemberAction::Added => {
+                        return Err(SourceTransitionError::PreviewStale);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reserve_update_destinations(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for member in &journal.members {
+            if self.namespace_occupied(&member.namespace_path)? {
+                let occupied = self
+                    .filesystem
+                    .staged_tree_snapshot(&member.namespace_path)?;
+                if occupied.content_hash != member.tree_hash {
+                    return Err(SourceTransitionError::PreviewStale);
+                }
+                continue;
+            }
+            let expected = member.staged_snapshot.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update journal has no staged snapshot for '{}'",
+                    member.directory_name
+                ))
+            })?;
+            let staged_snapshot = self.filesystem.staged_tree_snapshot(&member.staged_root)?;
+            if staged_snapshot.content_hash != expected.content_hash {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+            self.install_git_snapshot(
+                &member.staged_root,
+                &member.namespace_path,
+                library_root,
+                &journal.operation_id,
+                expected,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_reserved_update_destinations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for member in &journal.members {
+            if !self.filesystem.path_is_directory(&member.namespace_path)? {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+            let snapshot = self
+                .filesystem
+                .staged_tree_snapshot(&member.namespace_path)?;
+            if snapshot.content_hash != member.tree_hash {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_final_update(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        let expected_manifest = journal.target_manifest.as_ref().ok_or_else(|| {
+            SourceTransitionError::RecoveryRequired(
+                "the Source Update journal has no frozen source manifest".into(),
+            )
+        })?;
+        if self.filesystem.read_remote_parent_manifest(
+            &self.active_library_root()?.join("remotes"),
+            &journal.remote_id,
+        )? != Some(expected_manifest.clone())
+        {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "the Source Update manifest does not match the fixed Source Release".into(),
+            ));
+        }
+        for member in &journal.members {
+            let snapshot = self
+                .filesystem
+                .staged_tree_snapshot(&member.namespace_path)?;
+            if snapshot.content_hash != member.tree_hash {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "Managed Skill '{}' does not match the fixed Source Release",
+                    member.directory_name
+                )));
+            }
+        }
+        for removed in &journal.removed_members {
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "removed member '{}' reappeared after the commit point",
+                    removed.directory_name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_pre_commit_update(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+        record: &SourceUpdateRecord,
+    ) -> Result<(), SourceTransitionError> {
+        let previous_by_skill = record
+            .previous_members
+            .iter()
+            .map(|previous| (previous.skill_id.0.as_str(), previous))
+            .collect::<BTreeMap<_, _>>();
+        if journal.phase == SourceTransitionPhase::SourceIsolated
+            || journal.phase == SourceTransitionPhase::DestinationsReserved
+        {
+            for member in journal.members.iter_mut().rev() {
+                if member.isolated_path.is_some() {
+                    if self.namespace_occupied(&member.namespace_path)? {
+                        if !self.filesystem.path_is_directory(&member.namespace_path)? {
+                            return Err(self.block_for_recovery(
+                                "roll back Source Update",
+                                format!(
+                                    "the reserved Home destination '{}' is no longer a directory",
+                                    member.directory_name
+                                ),
+                            ));
+                        }
+                        let snapshot = self
+                            .filesystem
+                            .staged_tree_snapshot(&member.namespace_path)?;
+                        if snapshot.content_hash != member.tree_hash {
+                            return Err(self.block_for_recovery(
+                                "roll back Source Update",
+                                format!(
+                                    "the reserved Home destination '{}' changed",
+                                    member.directory_name
+                                ),
+                            ));
+                        }
+                        self.filesystem
+                            .remove_directory_verified(&member.namespace_path)?;
+                    }
+                    let isolated = member.isolated_path.clone().ok_or_else(|| {
+                        SourceTransitionError::RecoveryRequired(
+                            "the Source Update isolation copy is missing".into(),
+                        )
+                    })?;
+                    let previous_tree = previous_by_skill
+                        .get(member.skill_id.as_str())
+                        .and_then(|previous| previous.tree_hash.clone())
+                        .ok_or_else(|| {
+                            SourceTransitionError::RecoveryRequired(
+                                "the frozen previous member set has no tree facts".into(),
+                            )
+                        })?;
+                    self.filesystem.restore_isolated_source(
+                        &isolated,
+                        &member.namespace_path,
+                        &previous_tree,
+                    )?;
+                    member.isolated_path = None;
+                } else if member.action
+                    == crate::seams::filesystem::SourceTransitionMemberAction::Added
+                    && self.namespace_occupied(&member.namespace_path)?
+                {
+                    let snapshot = self
+                        .filesystem
+                        .staged_tree_snapshot(&member.namespace_path)?;
+                    if snapshot.content_hash != member.tree_hash {
+                        return Err(self.block_for_recovery(
+                            "roll back Source Update",
+                            format!(
+                                "the added member '{}' changed during rollback",
+                                member.directory_name
+                            ),
+                        ));
+                    }
+                    self.filesystem
+                        .remove_directory_verified(&member.namespace_path)?;
+                }
+            }
+            for removed in journal.removed_members.iter_mut().rev() {
+                if let Some(isolated) = &removed.isolated_path {
+                    self.filesystem.restore_isolated_source(
+                        isolated,
+                        &removed.legacy_path,
+                        &removed.tree_hash,
+                    )?;
+                    removed.isolated_path = None;
+                }
+            }
+        }
+        journal.phase = SourceTransitionPhase::Planned;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+        self.discard_transition_staging(library_root, journal)
+    }
+
+    /// Post-CAS recovery convergence: install missing destinations and the
+    /// Catalog state (idempotently), then close the operation. It never
+    /// fetches Git again.
+    fn roll_forward_update(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        let record = self.read_update_record(library_root, journal)?;
+        if !self.update_store.source_update_is_committed(&record)? {
+            self.update_store.commit_source_update(&record)?;
+        }
+        for member in &journal.members {
+            if self.namespace_occupied(&member.namespace_path)? {
+                let occupied = self
+                    .filesystem
+                    .staged_tree_snapshot(&member.namespace_path)?;
+                if occupied.content_hash != member.tree_hash {
+                    return Err(SourceTransitionError::RecoveryRequired(format!(
+                        "the member '{}' changed during recovery",
+                        member.directory_name
+                    )));
+                }
+                continue;
+            }
+            if !self.filesystem.path_is_directory(&member.staged_root)? {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the staged member '{}' is missing during recovery",
+                    member.directory_name
+                )));
+            }
+            let staged_snapshot = self.filesystem.staged_tree_snapshot(&member.staged_root)?;
+            if staged_snapshot.content_hash != member.tree_hash {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the staged member '{}' no longer matches the journal",
+                    member.directory_name
+                )));
+            }
+            self.install_git_snapshot(
+                &member.staged_root,
+                &member.namespace_path,
+                library_root,
+                &journal.operation_id,
+                member.staged_snapshot.as_ref().ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "the Source Update journal has no staged snapshot".into(),
+                    )
+                })?,
+            )?;
+        }
+        for removed in &journal.removed_members {
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the removed member '{}' reappeared during recovery",
+                    removed.directory_name
+                )));
+            }
+        }
+        self.freeze_target_manifest_for_recovery(library_root, journal)?;
+        self.write_current_source_manifest(library_root, journal)?;
+        journal.phase = SourceTransitionPhase::Finalized;
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)?;
+        self.verify_final_update(journal)?;
+        for member in &journal.members {
+            if let Some(isolated) = &member.isolated_path
+                && self.filesystem.path_is_directory(isolated)?
+            {
+                self.filesystem.discard_isolated_source(isolated)?;
+            }
+        }
+        for removed in &journal.removed_members {
+            if let Some(isolated) = &removed.isolated_path
+                && self.filesystem.path_is_directory(isolated)?
+            {
+                self.filesystem.discard_isolated_source(isolated)?;
+            }
+        }
+        self.discard_transition_staging(library_root, journal)?;
+        self.filesystem
+            .finish_source_transition_journal(library_root, &journal.operation_id)?;
+        Ok(())
+    }
+
+    fn complete_update_undo(
+        &self,
+        library_root: &Path,
+        journal: &mut SourceTransitionJournal,
+    ) -> Result<u64, SourceTransitionError> {
+        let record = self.read_update_record(library_root, journal)?;
+        if !self.update_store.source_update_is_committed(&record)? {
+            return Err(SourceTransitionError::Validation(
+                "the Source Update no longer matches the result window".into(),
+            ));
+        }
+        self.preflight_update_undo(journal, &record)?;
+        let snapshot_version = self.update_store.undo_source_update(&record)?;
+        let previous_by_skill = record
+            .previous_members
+            .iter()
+            .map(|previous| (previous.skill_id.0.as_str(), previous))
+            .collect::<BTreeMap<_, _>>();
+        for member in &journal.members {
+            if let Some(isolated) = &member.isolated_path {
+                if self.namespace_occupied(&member.namespace_path)? {
+                    let snapshot = self
+                        .filesystem
+                        .staged_tree_snapshot(&member.namespace_path)?;
+                    if snapshot.content_hash != member.tree_hash {
+                        return Err(self.block_for_recovery(
+                            "complete Source Update Undo",
+                            format!("Home member '{}' changed", member.directory_name),
+                        ));
+                    }
+                    self.filesystem
+                        .remove_directory_verified(&member.namespace_path)?;
+                }
+                let previous_tree = previous_by_skill
+                    .get(member.skill_id.as_str())
+                    .and_then(|previous| previous.tree_hash.clone())
+                    .ok_or_else(|| {
+                        SourceTransitionError::RecoveryRequired(
+                            "the frozen previous member set has no tree facts".into(),
+                        )
+                    })?;
+                self.filesystem.restore_isolated_source(
+                    isolated,
+                    &member.namespace_path,
+                    &previous_tree,
+                )?;
+            } else if member.action == crate::seams::filesystem::SourceTransitionMemberAction::Added
+                && self.namespace_occupied(&member.namespace_path)?
+            {
+                let snapshot = self
+                    .filesystem
+                    .staged_tree_snapshot(&member.namespace_path)?;
+                if snapshot.content_hash != member.tree_hash {
+                    return Err(self.block_for_recovery(
+                        "complete Source Update Undo",
+                        format!("Home member '{}' changed", member.directory_name),
+                    ));
+                }
+                self.filesystem
+                    .remove_directory_verified(&member.namespace_path)?;
+            }
+        }
+        for removed in &journal.removed_members {
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update Undo journal has no preservation copy for removed member '{}'",
+                    removed.directory_name
+                ))
+            })?;
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(self.block_for_recovery(
+                    "complete Source Update Undo",
+                    format!(
+                        "the removed member '{}' is occupied",
+                        removed.directory_name
+                    ),
+                ));
+            }
+            self.filesystem.restore_isolated_source(
+                isolated,
+                &removed.legacy_path,
+                &removed.tree_hash,
+            )?;
+        }
+        self.discard_transition_staging(library_root, journal)?;
+        self.filesystem
+            .finish_source_transition_journal(library_root, &journal.operation_id)?;
+        Ok(snapshot_version)
+    }
+
+    fn preflight_update_undo(
+        &self,
+        journal: &SourceTransitionJournal,
+        record: &SourceUpdateRecord,
+    ) -> Result<(), SourceTransitionError> {
+        let previous_by_skill = record
+            .previous_members
+            .iter()
+            .map(|previous| (previous.skill_id.0.as_str(), previous))
+            .collect::<BTreeMap<_, _>>();
+        for member in &journal.members {
+            if self.namespace_occupied(&member.namespace_path)? {
+                if !self.filesystem.path_is_directory(&member.namespace_path)? {
+                    return Err(SourceTransitionError::Validation(format!(
+                        "the Managed Skill '{}' is no longer a directory",
+                        member.directory_name
+                    )));
+                }
+                let final_snapshot = self
+                    .filesystem
+                    .staged_tree_snapshot(&member.namespace_path)?;
+                if final_snapshot.content_hash != member.tree_hash {
+                    return Err(SourceTransitionError::Validation(format!(
+                        "the Managed Skill '{}' changed after the Update",
+                        member.directory_name
+                    )));
+                }
+            }
+            if let Some(isolated) = &member.isolated_path {
+                let snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
+                let previous_tree = previous_by_skill
+                    .get(member.skill_id.as_str())
+                    .and_then(|previous| previous.tree_hash.clone())
+                    .ok_or_else(|| {
+                        SourceTransitionError::Validation(
+                            "the frozen previous member set has no tree facts".into(),
+                        )
+                    })?;
+                if snapshot.content_hash != previous_tree {
+                    return Err(SourceTransitionError::Validation(format!(
+                        "the preservation copy for '{}' changed",
+                        member.directory_name
+                    )));
+                }
+            }
+        }
+        for removed in &journal.removed_members {
+            if self.filesystem.path_is_occupied(&removed.legacy_path)? {
+                return Err(SourceTransitionError::Validation(format!(
+                    "the removed member '{}' reappeared",
+                    removed.directory_name
+                )));
+            }
+            let isolated = removed.isolated_path.as_ref().ok_or_else(|| {
+                SourceTransitionError::Validation(format!(
+                    "the preservation copy for removed member '{}' is unavailable",
+                    removed.directory_name
+                ))
+            })?;
+            let snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
+            if snapshot.content_hash != removed.tree_hash {
+                return Err(SourceTransitionError::Validation(format!(
+                    "the preservation copy for removed member '{}' changed",
+                    removed.directory_name
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn roll_forward(
@@ -1650,6 +2793,9 @@ impl SourceTransitionService {
         library_root: &Path,
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
+        if journal.update_previous.is_some() {
+            return self.validate_update_journal_layout(library_root, journal);
+        }
         let staging_root = library_root.join("staging").join(&journal.operation_id);
         if journal.staging_operation_root != staging_root {
             return Err(SourceTransitionError::RecoveryRequired(
@@ -1766,6 +2912,103 @@ impl SourceTransitionService {
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "the Source Transition journal removal isolation path for '{}' escapes its root",
+                    removed.directory_name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_update_journal_layout(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        let staging_root = library_root.join("staging").join(&journal.operation_id);
+        if journal.staging_operation_root != staging_root {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "the Source Update journal staging root is outside its operation".into(),
+            ));
+        }
+        for member in &journal.members {
+            if !is_safe_source_transition_member_name(&member.directory_name)
+                || !is_safe_source_transition_member_name(&member.skill_id)
+                || member.identity_key != skill_identity_key(&member.directory_name)
+                || member.canonical_entity.is_some()
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update journal member '{}' has an unsafe identity",
+                    member.directory_name
+                )));
+            }
+            if member.staged_root != staging_root.join(&member.directory_name)
+                || member.namespace_path
+                    != git_member_namespace_path(library_root, &journal.remote_id, &member.skill_id)
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update journal member '{}' escapes its owned path",
+                    member.directory_name
+                )));
+            }
+            let expected_isolated = member
+                .namespace_path
+                .parent()
+                .ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "the Update member namespace has no parent".into(),
+                    )
+                })?
+                .join(format!(
+                    ".skill-man-source-transition-{}-{}",
+                    journal.operation_id, member.skill_id
+                ));
+            let expected_isolated = self
+                .filesystem
+                .normalize_configured_path(&expected_isolated)?;
+            if let Some(isolated_path) = &member.isolated_path
+                && self.filesystem.normalize_configured_path(isolated_path)? != expected_isolated
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update isolation path for '{}' escapes its namespace",
+                    member.directory_name
+                )));
+            }
+        }
+        for removed in &journal.removed_members {
+            if !is_safe_source_transition_member_name(&removed.directory_name)
+                || !is_safe_source_transition_member_name(&removed.skill_id)
+                || removed.legacy_path
+                    != git_member_namespace_path(
+                        library_root,
+                        &journal.remote_id,
+                        &removed.skill_id,
+                    )
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update removed member '{}' escapes its namespace",
+                    removed.directory_name
+                )));
+            }
+            let expected_isolated = removed
+                .legacy_path
+                .parent()
+                .ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "removed member path has no parent".into(),
+                    )
+                })?
+                .join(format!(
+                    ".skill-man-source-transition-{}-{}",
+                    journal.operation_id, removed.skill_id
+                ));
+            let expected_isolated = self
+                .filesystem
+                .normalize_configured_path(&expected_isolated)?;
+            if let Some(isolated_path) = &removed.isolated_path
+                && self.filesystem.normalize_configured_path(isolated_path)? != expected_isolated
+            {
+                return Err(SourceTransitionError::RecoveryRequired(format!(
+                    "the Source Update removal isolation path for '{}' escapes its namespace",
                     removed.directory_name
                 )));
             }
@@ -1897,6 +3140,111 @@ enum LockClaimState {
 
 /// Fail-closed default: promotion needs a real Legacy reader.
 struct UnavailableSourcePromotionStore;
+
+/// Fail-closed default: the Source Update needs a real lifecycle store.
+struct UnavailableSourceUpdateStore;
+
+impl SourceUpdateStore for UnavailableSourceUpdateStore {
+    fn read_current(
+        &self,
+        _remote_id: &str,
+    ) -> Result<Option<SourceUpdateCurrentSource>, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn source_ids(&self) -> Result<Vec<String>, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn member_health(
+        &self,
+        _skill_id: &SkillId,
+    ) -> Result<Option<(String, crate::core::domain::Health)>, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn validate_source_update(
+        &self,
+        _record: &SourceUpdateRecord,
+    ) -> Result<(), SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn commit_source_update(
+        &self,
+        _record: &SourceUpdateRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn source_update_is_committed(
+        &self,
+        _record: &SourceUpdateRecord,
+    ) -> Result<bool, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn undo_source_update(
+        &self,
+        _record: &SourceUpdateRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn set_source_member_health(
+        &self,
+        _remote_id: &str,
+        _health: &[(SkillId, crate::core::domain::Health)],
+    ) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn register_local_copy(
+        &self,
+        _record: &crate::seams::source_update_store::LocalSourceCopyRecord,
+    ) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn source_remove_facts(
+        &self,
+        _remote_id: &str,
+    ) -> Result<crate::seams::source_update_store::SourceRemoveFacts, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn commit_remove_source(&self, _remote_id: &str) -> Result<u64, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+
+    fn source_remove_is_committed(&self, _remote_id: &str) -> Result<bool, SourceUpdateStoreError> {
+        Err(SourceUpdateStoreError::Unavailable(
+            "no Source Update store is configured".into(),
+        ))
+    }
+}
 
 impl SourcePromotionStore for UnavailableSourcePromotionStore {
     fn read_legacy_source_promotion(
@@ -2107,6 +3455,38 @@ pub(crate) fn promotion_record_from_journal(
         members,
         removed_members,
     }))
+}
+
+fn presence_text(presence: SourceMemberPresence) -> &'static str {
+    match presence {
+        SourceMemberPresence::Current => "current",
+        SourceMemberPresence::Absent => "absent",
+    }
+}
+
+fn parse_presence_inner(value: &str) -> SourceMemberPresence {
+    match value {
+        "absent" => SourceMemberPresence::Absent,
+        _ => SourceMemberPresence::Current,
+    }
+}
+
+fn health_text(health: crate::core::domain::Health) -> &'static str {
+    match health {
+        crate::core::domain::Health::Healthy => "healthy",
+        crate::core::domain::Health::Broken => "broken",
+        crate::core::domain::Health::Modified => "modified",
+        crate::core::domain::Health::SourceSnapshotMismatch => "source_snapshot_mismatch",
+    }
+}
+
+fn parse_health_inner(value: &str) -> crate::core::domain::Health {
+    match value {
+        "broken" => crate::core::domain::Health::Broken,
+        "modified" => crate::core::domain::Health::Modified,
+        "source_snapshot_mismatch" => crate::core::domain::Health::SourceSnapshotMismatch,
+        _ => crate::core::domain::Health::Healthy,
+    }
 }
 
 #[cfg(test)]

@@ -618,6 +618,523 @@ pub struct SourceTransitionJournal {
     /// the exact pre-Promotion Catalog state from these bytes.
     #[serde(default)]
     pub promotion_legacy: Option<crate::seams::source_promotion_store::LegacySourcePromotionRecord>,
+    /// Frozen pre-Update facts for a v9 Source Update (ticket #93), as an
+    /// opaque JSON document so the journal format stays stable.
+    #[serde(default)]
+    pub update_previous: Option<serde_json::Value>,
+}
+
+/// One frozen pre-Update member fact (primitive fields only).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUpdatePreviousMemberFacts {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    pub skill_path: String,
+    pub storage_relpath: String,
+    /// `current` or `absent`.
+    pub presence: String,
+    pub tree_hash: Option<String>,
+    /// `healthy|broken|modified|source_snapshot_mismatch`.
+    pub health: String,
+}
+
+/// The frozen pre-Update source facts (primitive fields only).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUpdatePreviousFacts {
+    pub release_id: String,
+    pub tracking_mode: String,
+    pub tracking_value: Option<String>,
+    pub selected_ref: String,
+    pub resolved_commit: String,
+    /// JSON document of the previous `remotes/<remote-id>/source.json`.
+    pub manifest_json: Option<String>,
+    pub members: Vec<SourceUpdatePreviousMemberFacts>,
+}
+
+impl SourceUpdatePreviousFacts {
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        json!({
+            "releaseId": self.release_id,
+            "trackingMode": self.tracking_mode,
+            "trackingValue": self.tracking_value,
+            "selectedRef": self.selected_ref,
+            "resolvedCommit": self.resolved_commit,
+            "manifestJson": self.manifest_json,
+            "members": self.members.iter().map(|member| json!({
+                "skillId": member.skill_id,
+                "directoryName": member.directory_name,
+                "identityKey": member.identity_key,
+                "displayName": member.display_name,
+                "description": member.description,
+                "skillPath": member.skill_path,
+                "storageRelpath": member.storage_relpath,
+                "presence": member.presence,
+                "treeHash": member.tree_hash,
+                "health": member.health,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        use serde_json::Value;
+        let text = |key: &str| -> Result<String, String> {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("previous facts lack '{key}'"))
+        };
+        let members = value
+            .get("members")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "previous facts lack members".to_string())?
+            .iter()
+            .map(|member| {
+                let field = |key: &str| -> Result<String, String> {
+                    member
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("previous member lacks '{key}'"))
+                };
+                Ok(SourceUpdatePreviousMemberFacts {
+                    skill_id: field("skillId")?,
+                    directory_name: field("directoryName")?,
+                    identity_key: field("identityKey")?,
+                    display_name: field("displayName")?,
+                    description: field("description")?,
+                    skill_path: field("skillPath")?,
+                    storage_relpath: field("storageRelpath")?,
+                    presence: field("presence")?,
+                    tree_hash: member
+                        .get("treeHash")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    health: field("health")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            release_id: text("releaseId")?,
+            tracking_mode: text("trackingMode")?,
+            tracking_value: value
+                .get("trackingValue")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            selected_ref: text("selectedRef")?,
+            resolved_commit: text("resolvedCommit")?,
+            manifest_json: value
+                .get("manifestJson")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            members,
+        })
+    }
+}
+
+/// One durable source-lifecycle journal (Restore / Local Copy / Remove).
+/// JSON handled by explicit `to_json`/`from_json` mappers (no derive
+/// machinery, keeping the journal format small and stable).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceLifecycleJournal {
+    Restore(RestoreSourceJournal),
+    LocalCopy(LocalCopyJournal),
+    RemoveSource(RemoveSourceJournal),
+}
+
+impl SourceLifecycleJournal {
+    pub fn operation_id(&self) -> &str {
+        match self {
+            Self::Restore(journal) => &journal.operation_id,
+            Self::LocalCopy(journal) => &journal.operation_id,
+            Self::RemoveSource(journal) => &journal.operation_id,
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Restore(journal) => json!({
+                "kind": "restore",
+                "version": journal.version,
+                "operationId": journal.operation_id,
+                "phase": journal.phase.as_str(),
+                "remoteId": journal.remote_id,
+                "releaseId": journal.release_id,
+                "resolvedCommit": journal.resolved_commit,
+                "stagingOperationRoot": journal.staging_operation_root.to_string_lossy(),
+                "members": journal.members.iter().map(|member| json!({
+                    "skillId": member.skill_id,
+                    "directoryName": member.directory_name,
+                    "skillPath": member.skill_path,
+                    "namespacePath": member.namespace_path.to_string_lossy(),
+                    "stagedRoot": member.staged_root.to_string_lossy(),
+                    "releaseTreeHash": member.release_tree_hash,
+                    "observedTreeHash": member.observed_tree_hash,
+                    "backupPath": member.backup_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    "restored": member.restored,
+                })).collect::<Vec<_>>(),
+            }),
+            Self::LocalCopy(journal) => json!({
+                "kind": "local_copy",
+                "version": journal.version,
+                "operationId": journal.operation_id,
+                "phase": journal.phase.as_str(),
+                "remoteId": journal.remote_id,
+                "skillId": journal.skill_id,
+                "directoryName": journal.directory_name,
+                "identityKey": journal.identity_key,
+                "displayName": journal.display_name,
+                "description": journal.description,
+                "sourcePath": journal.source_path.to_string_lossy(),
+                "destination": journal.destination.to_string_lossy(),
+                "stagedPath": journal.staged_path.to_string_lossy(),
+                "contentHash": journal.content_hash,
+            }),
+            Self::RemoveSource(journal) => json!({
+                "kind": "remove_source",
+                "version": journal.version,
+                "operationId": journal.operation_id,
+                "phase": journal.phase.as_str(),
+                "remoteId": journal.remote_id,
+                "canonicalUrl": journal.canonical_url,
+                "stagingOperationRoot": journal.staging_operation_root.to_string_lossy(),
+                "members": journal.members.iter().map(|member| json!({
+                    "skillId": member.skill_id,
+                    "directoryName": member.directory_name,
+                    "namespacePath": member.namespace_path.to_string_lossy(),
+                    "observedTreeHash": member.observed_tree_hash,
+                    "isolatedPath": member.isolated_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                })).collect::<Vec<_>>(),
+                "activations": journal.activations.iter().map(|activation| json!({
+                    "skillId": activation.skill_id,
+                    "entryPath": activation.entry_path.to_string_lossy(),
+                    "targetPath": activation.target_path.to_string_lossy(),
+                })).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        use serde_json::Value;
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "source lifecycle journal has no kind".to_string())?;
+        let text = |key: &str| -> Result<String, String> {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("source lifecycle journal lacks '{key}'"))
+        };
+        let path = |key: &str| -> Result<PathBuf, String> { text(key).map(PathBuf::from) };
+        match kind {
+            "restore" => {
+                let members = value
+                    .get("members")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "restore journal lacks members".to_string())?
+                    .iter()
+                    .map(|member| {
+                        let field = |key: &str| -> Result<String, String> {
+                            member
+                                .get(key)
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("member lacks '{key}'"))
+                        };
+                        Ok(RestoreSourceMember {
+                            skill_id: field("skillId")?,
+                            directory_name: field("directoryName")?,
+                            skill_path: field("skillPath")?,
+                            namespace_path: field("namespacePath")?.into(),
+                            staged_root: field("stagedRoot")?.into(),
+                            release_tree_hash: field("releaseTreeHash")?,
+                            observed_tree_hash: field("observedTreeHash")?,
+                            staged_snapshot: None,
+                            backup_path: member
+                                .get("backupPath")
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from),
+                            restored: member
+                                .get("restored")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Self::Restore(RestoreSourceJournal {
+                    version: value.get("version").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    operation_id: text("operationId")?,
+                    phase: RestoreSourcePhase::parse(&text("phase")?)?,
+                    remote_id: text("remoteId")?,
+                    release_id: text("releaseId")?,
+                    resolved_commit: text("resolvedCommit")?,
+                    staging_operation_root: path("stagingOperationRoot")?,
+                    staging_fingerprint: None,
+                    members,
+                }))
+            }
+            "local_copy" => Ok(Self::LocalCopy(LocalCopyJournal {
+                version: value.get("version").and_then(Value::as_u64).unwrap_or(0) as u32,
+                operation_id: text("operationId")?,
+                phase: LocalCopyPhase::parse(&text("phase")?)?,
+                remote_id: text("remoteId")?,
+                skill_id: text("skillId")?,
+                directory_name: text("directoryName")?,
+                identity_key: text("identityKey")?,
+                display_name: text("displayName")?,
+                description: text("description")?,
+                source_path: path("sourcePath")?,
+                destination: path("destination")?,
+                staged_path: path("stagedPath")?,
+                content_hash: text("contentHash")?,
+            })),
+            "remove_source" => {
+                let members = value
+                    .get("members")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "remove journal lacks members".to_string())?
+                    .iter()
+                    .map(|member| {
+                        let field = |key: &str| -> Result<String, String> {
+                            member
+                                .get(key)
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("member lacks '{key}'"))
+                        };
+                        Ok(RemoveSourceMemberJournal {
+                            skill_id: field("skillId")?,
+                            directory_name: field("directoryName")?,
+                            namespace_path: field("namespacePath")?.into(),
+                            observed_tree_hash: field("observedTreeHash")?,
+                            isolated_path: member
+                                .get("isolatedPath")
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let activations = value
+                    .get("activations")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "remove journal lacks activations".to_string())?
+                    .iter()
+                    .map(|activation| {
+                        let field = |key: &str| -> Result<String, String> {
+                            activation
+                                .get(key)
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("activation lacks '{key}'"))
+                        };
+                        Ok(RemoveSourceActivationJournal {
+                            skill_id: field("skillId")?,
+                            entry_path: field("entryPath")?.into(),
+                            target_path: field("targetPath")?.into(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Self::RemoveSource(RemoveSourceJournal {
+                    version: value.get("version").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    operation_id: text("operationId")?,
+                    phase: RemoveSourcePhase::parse(&text("phase")?)?,
+                    remote_id: text("remoteId")?,
+                    canonical_url: text("canonicalUrl")?,
+                    staging_operation_root: path("stagingOperationRoot")?,
+                    staging_fingerprint: None,
+                    members,
+                    activations,
+                }))
+            }
+            other => Err(format!("unknown source lifecycle journal kind '{other}'")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreSourcePhase {
+    Planned,
+    Restaged,
+    BackedUp,
+    Restored,
+    Committed,
+    Finalized,
+}
+
+impl RestoreSourcePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Restaged => "restaged",
+            Self::BackedUp => "backed_up",
+            Self::Restored => "restored",
+            Self::Committed => "committed",
+            Self::Finalized => "finalized",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        Ok(match value {
+            "planned" => Self::Planned,
+            "restaged" => Self::Restaged,
+            "backed_up" => Self::BackedUp,
+            "restored" => Self::Restored,
+            "committed" => Self::Committed,
+            "finalized" => Self::Finalized,
+            other => return Err(format!("unknown restore phase '{other}'")),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreSourceMember {
+    pub skill_id: String,
+    pub directory_name: String,
+    /// Repository-relative skill path of the frozen release.
+    pub skill_path: String,
+    /// `<Home>/skills/git/<remote_id>/<skill_id>`.
+    pub namespace_path: PathBuf,
+    pub staged_root: PathBuf,
+    /// The frozen current Source Release tree hash.
+    pub release_tree_hash: String,
+    /// The observed byte hash when the restore was planned (mismatch).
+    pub observed_tree_hash: String,
+    pub staged_snapshot: Option<StagedTreeSnapshot>,
+    /// The isolated observed bytes (`.skill-man-source-transition-…`).
+    pub backup_path: Option<PathBuf>,
+    pub restored: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreSourceJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: RestoreSourcePhase,
+    pub remote_id: String,
+    pub release_id: String,
+    pub resolved_commit: String,
+    pub staging_operation_root: PathBuf,
+    pub staging_fingerprint: Option<DirectoryFingerprint>,
+    pub members: Vec<RestoreSourceMember>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalCopyPhase {
+    Planned,
+    Copied,
+    Registered,
+    Finalized,
+}
+
+impl LocalCopyPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Copied => "copied",
+            Self::Registered => "registered",
+            Self::Finalized => "finalized",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        Ok(match value {
+            "planned" => Self::Planned,
+            "copied" => Self::Copied,
+            "registered" => Self::Registered,
+            "finalized" => Self::Finalized,
+            other => return Err(format!("unknown local copy phase '{other}'")),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalCopyJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: LocalCopyPhase,
+    pub remote_id: String,
+    pub skill_id: String,
+    pub directory_name: String,
+    pub identity_key: String,
+    pub display_name: String,
+    pub description: String,
+    /// The frozen observed source bytes (`<Home>/skills/git/<id>/<skill>`).
+    pub source_path: PathBuf,
+    /// The user-chosen final (canonical) destination outside Home/Agent/
+    /// installer roots.
+    pub destination: PathBuf,
+    pub staged_path: PathBuf,
+    pub content_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoveSourcePhase {
+    Planned,
+    MembersIsolated,
+    ActivationsRemoved,
+    CatalogCommitted,
+    Finalized,
+}
+
+impl RemoveSourcePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::MembersIsolated => "members_isolated",
+            Self::ActivationsRemoved => "activations_removed",
+            Self::CatalogCommitted => "catalog_committed",
+            Self::Finalized => "finalized",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        Ok(match value {
+            "planned" => Self::Planned,
+            "members_isolated" => Self::MembersIsolated,
+            "activations_removed" => Self::ActivationsRemoved,
+            "catalog_committed" => Self::CatalogCommitted,
+            "finalized" => Self::Finalized,
+            other => return Err(format!("unknown remove phase '{other}'")),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveSourceMemberJournal {
+    pub skill_id: String,
+    pub directory_name: String,
+    pub namespace_path: PathBuf,
+    /// The frozen current release tree hash (used to verify + restore the
+    /// isolated snapshot on rollback).
+    pub observed_tree_hash: String,
+    pub isolated_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveSourceActivationJournal {
+    pub skill_id: String,
+    pub entry_path: PathBuf,
+    pub target_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveSourceJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: RemoveSourcePhase,
+    pub remote_id: String,
+    pub canonical_url: String,
+    pub staging_operation_root: PathBuf,
+    pub staging_fingerprint: Option<DirectoryFingerprint>,
+    pub members: Vec<RemoveSourceMemberJournal>,
+    pub activations: Vec<RemoveSourceActivationJournal>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2031,6 +2548,58 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "Source Transition journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Atomic durable write of one source-lifecycle journal into
+    /// `<library_root>/operations/<operation-id>/`.
+    fn write_source_lifecycle_journal(
+        &self,
+        library_root: &Path,
+        journal: &SourceLifecycleJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, journal);
+        Err(FileSystemError::Io {
+            operation: "write source lifecycle journal",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source lifecycle journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// All source-lifecycle journals whose operation directory still exists.
+    fn list_source_lifecycle_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<SourceLifecycleJournal>, FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "list source lifecycle journals",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source lifecycle journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Archive (finish) one source-lifecycle journal and remove its
+    /// operation directory; a missing operation is a no-op.
+    fn finish_source_lifecycle_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, operation_id);
+        Err(FileSystemError::Io {
+            operation: "finish source lifecycle journal",
+            path: PathBuf::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source lifecycle journals are not supported by this filesystem",
             ),
         })
     }

@@ -215,7 +215,6 @@ pub struct ScanEntityEvidence {
     pub roots: Vec<crate::seams::scan_evidence_store::ScanRootCoverageRecord>,
 }
 
-
 /// The scan slice of the Observation snapshot (bounded).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanCoordinatorSnapshot {

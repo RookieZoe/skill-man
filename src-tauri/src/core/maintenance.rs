@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::core::domain::{
     ActivationObservedState, Health, SkillId, SourceKind, parse_skill_metadata,
 };
+use crate::core::source_lifecycle::SourceLifecycleService;
 use crate::core::source_promotion::SourcePromotionService;
 use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
 use crate::core::source_update::SourceUpdateService;
@@ -47,6 +48,10 @@ pub enum MaintenanceError {
     MaintenanceStore(#[from] MaintenanceStoreError),
     #[error(transparent)]
     SourceTransition(#[from] SourceTransitionError),
+    #[error(transparent)]
+    SourceLifecycle(#[from] crate::core::source_lifecycle::SourceLifecycleError),
+    #[error(transparent)]
+    SourceUpdate(#[from] crate::core::source_update::SourceUpdateError),
     #[error("the Managed Skill was not found: {0}")]
     SkillNotFound(String),
     #[error("the Skill is not a Link and cannot be relocated: {0}")]
@@ -156,6 +161,7 @@ pub struct MaintenanceService {
     source_transition_recovery: Option<Arc<SourceTransitionService>>,
     source_promotion_recovery: Option<Arc<SourcePromotionService>>,
     source_update_recovery: Option<Arc<SourceUpdateService>>,
+    source_lifecycle_recovery: Option<Arc<SourceLifecycleService>>,
 }
 
 impl Clone for MaintenanceService {
@@ -173,6 +179,7 @@ impl Clone for MaintenanceService {
             source_transition_recovery: self.source_transition_recovery.clone(),
             source_promotion_recovery: self.source_promotion_recovery.clone(),
             source_update_recovery: self.source_update_recovery.clone(),
+            source_lifecycle_recovery: self.source_lifecycle_recovery.clone(),
         }
     }
 }
@@ -192,6 +199,7 @@ impl MaintenanceService {
             source_transition_recovery: None,
             source_promotion_recovery: None,
             source_update_recovery: None,
+            source_lifecycle_recovery: None,
         }
     }
 
@@ -254,6 +262,14 @@ impl MaintenanceService {
     /// service may validate and settle `source-update-*` operations.
     pub fn with_source_update_recovery(mut self, source_update: Arc<SourceUpdateService>) -> Self {
         self.source_update_recovery = Some(source_update);
+        self
+    }
+
+    pub fn with_source_lifecycle_recovery(
+        mut self,
+        source_lifecycle: Arc<SourceLifecycleService>,
+    ) -> Self {
+        self.source_lifecycle_recovery = Some(source_lifecycle);
         self
     }
 
@@ -348,10 +364,15 @@ impl MaintenanceService {
                 // transition recovery pass above owns them all.
                 let _ = source_promotion;
             }
+            if let Some(source_lifecycle) = &self.source_lifecycle_recovery {
+                source_lifecycle.recover_lifecycle(&library_root)?;
+            }
             if let Some(source_update) = &self.source_update_recovery {
-                // Source Update journals do not exist yet (ticket #93); the
-                // transition recovery pass covers any frozen update state.
-                let _ = source_update;
+                // Startup re-verification (spec §8.3): every current member
+                // snapshot is compared against the immutable current Source
+                // Release; mismatches persist `source_snapshot_mismatch` and
+                // block Update, new Enable and ordinary source writes.
+                source_update.verify_all_members()?;
             }
             self.recover_handoff_operations(&library_root)?;
         }

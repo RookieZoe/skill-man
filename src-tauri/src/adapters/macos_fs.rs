@@ -20,8 +20,8 @@ use crate::seams::filesystem::{
     OccupantSnapshot, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
     RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
     RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
-    SkillFingerprint, SourceTransitionJournal, StagedEntryKind, StagedTreeEntry,
-    StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind, TreeScanStatistics,
+    SkillFingerprint, SourceLifecycleJournal, SourceTransitionJournal, StagedEntryKind,
+    StagedTreeEntry, StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind, TreeScanStatistics,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -4482,6 +4482,183 @@ impl FileSystem for MacOsFileSystem {
         Ok(journals)
     }
 
+    fn write_source_lifecycle_journal(
+        &self,
+        library_root: &Path,
+        journal: &SourceLifecycleJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_lifecycle_operation_id(journal.operation_id())?;
+        let operation =
+            open_source_transition_operation_nofollow(&library_root, journal.operation_id(), true)?
+                .expect("create mode always returns a Source Lifecycle operation directory");
+        let journal_name = CString::new("source-lifecycle-journal.json").expect("static name");
+        let temporary_name = CString::new("source-lifecycle-journal.tmp").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-lifecycle-journal.json");
+        let bytes = serde_json::to_vec_pretty(&journal.to_json()).map_err(|source| {
+            FileSystemError::Io {
+                operation: "serialize Source Lifecycle journal",
+                path: journal_path.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+            }
+        })?;
+        write_owned_file_atomically_at(
+            &operation.operation,
+            &temporary_name,
+            &journal_name,
+            &journal_path,
+            &bytes,
+            "write Source Lifecycle journal without following links",
+        )?;
+        sync_descriptor(
+            &operation.operation,
+            &operation.operation_path,
+            "sync Source Lifecycle operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync Source Lifecycle operations directory",
+        )
+    }
+
+    fn finish_source_lifecycle_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_source_lifecycle_operation_id(operation_id)?;
+        let Some(operation) =
+            open_source_transition_operation_nofollow(&library_root, operation_id, false)?
+        else {
+            return Ok(());
+        };
+        let journal_name = CString::new("source-lifecycle-journal.json").expect("static name");
+        let journal_path = operation
+            .operation_path
+            .join("source-lifecycle-journal.json");
+        remove_owned_regular_file_at(
+            &operation.operation,
+            &journal_name,
+            &journal_path,
+            "remove completed Source Lifecycle journal without following links",
+        )?;
+        remove_child_directory_at(
+            &operation.root.operations,
+            operation.root.operations_metadata.st_dev,
+            operation.operation_metadata.st_ino,
+            &operation.operation_name,
+            &operation.operation_path,
+            "remove completed Source Lifecycle operation directory",
+        )?;
+        sync_descriptor(
+            &operation.root.operations,
+            &operation.root.operations_path,
+            "sync cleaned Source Lifecycle operations directory",
+        )
+    }
+
+    fn list_source_lifecycle_journals(
+        &self,
+        library_root: &Path,
+    ) -> Result<Vec<SourceLifecycleJournal>, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let Some(operations) =
+            open_source_transition_operations_root_nofollow(&library_root, false)?
+        else {
+            return Ok(Vec::new());
+        };
+        let entries = directory_entry_names(
+            &operations.operations,
+            &operations.operations_path,
+            "enumerate Source Lifecycle recovery journals without following links",
+        )?;
+        let mut journals = Vec::new();
+        for operation_name in entries {
+            let Some(operation_id) = operation_name.to_str() else {
+                continue;
+            };
+            let is_lifecycle_operation = [
+                "source-transition-restore-",
+                "source-transition-local-copy-",
+                "source-transition-remove-",
+            ]
+            .iter()
+            .any(|prefix| operation_id.starts_with(prefix));
+            if !is_lifecycle_operation {
+                continue;
+            }
+            validate_source_lifecycle_operation_id(operation_id)?;
+            let operation_name =
+                CString::new(operation_name.as_bytes()).map_err(|source| FileSystemError::Io {
+                    operation: "encode Source Lifecycle recovery operation identifier",
+                    path: operations.operations_path.join(&operation_name),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+                })?;
+            let operation_path = operations.operations_path.join(operation_id);
+            let (operation, operation_metadata) = open_directory_at_nofollow(
+                &operations.operations,
+                &operation_name,
+                &operation_path,
+                "open Source Lifecycle recovery operation without following links",
+            )?;
+            if operation_metadata.st_dev != operations.operations_metadata.st_dev {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover Source Lifecycle journal",
+                    path: operation_path,
+                    message:
+                        "the operation directory crosses the owned operations filesystem boundary"
+                            .into(),
+                });
+            }
+            let journal_name = CString::new("source-lifecycle-journal.json").expect("static name");
+            let journal_path = operation_path.join("source-lifecycle-journal.json");
+            let Some(bytes) = read_owned_regular_file_at(
+                &operation,
+                &journal_name,
+                &journal_path,
+                "read Source Lifecycle recovery journal without following links",
+            )?
+            else {
+                continue;
+            };
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Source Lifecycle recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            let journal = SourceLifecycleJournal::from_json(&value).map_err(|message| {
+                FileSystemError::Io {
+                    operation: "parse Source Lifecycle recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+                }
+            })?;
+            if journal_version(&journal) != SOURCE_LIFECYCLE_JOURNAL_VERSION {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover Source Lifecycle journal",
+                    path: journal_path,
+                    message: format!(
+                        "unsupported Source Lifecycle journal version {}; staged content is retained",
+                        journal_version(&journal)
+                    ),
+                });
+            }
+            validate_source_lifecycle_operation_id(journal.operation_id())?;
+            if journal.operation_id() != operation_id {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_path,
+                });
+            }
+            journals.push(journal);
+        }
+        Ok(journals)
+    }
+
     fn write_source_promotion_journal(
         &self,
         library_root: &Path,
@@ -4847,6 +5024,7 @@ const HANDOFF_JOURNAL_VERSION: u32 = 1;
 /// The durable whole-source journal schema written for Git Repository
 /// Source transitions. It stays distinct from legacy per-Skill handoff.
 const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 2;
+const SOURCE_LIFECYCLE_JOURNAL_VERSION: u32 = 1;
 
 fn validate_handoff_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
     validate_operation_id(operation_id)?;
@@ -4877,6 +5055,32 @@ fn validate_source_promotion_operation_id(operation_id: &str) -> Result<(), File
         });
     }
     Ok(())
+}
+
+fn validate_source_lifecycle_operation_id(operation_id: &str) -> Result<(), FileSystemError> {
+    validate_operation_id(operation_id)?;
+    let is_lifecycle_operation = [
+        "source-transition-restore-",
+        "source-transition-local-copy-",
+        "source-transition-remove-",
+    ]
+    .iter()
+    .any(|prefix| operation_id.starts_with(prefix));
+    if !is_lifecycle_operation {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: PathBuf::from(operation_id),
+        });
+    }
+    Ok(())
+}
+
+/// The frozen version field of any lifecycle journal variant.
+fn journal_version(journal: &SourceLifecycleJournal) -> u32 {
+    match journal {
+        SourceLifecycleJournal::Restore(inner) => inner.version,
+        SourceLifecycleJournal::LocalCopy(inner) => inner.version,
+        SourceLifecycleJournal::RemoveSource(inner) => inner.version,
+    }
 }
 
 fn validate_isolation_operation_id(operation_id: &str) -> Result<(), FileSystemError> {

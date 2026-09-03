@@ -35,12 +35,10 @@ use super::{
 use crate::core::domain::AgentId;
 use crate::core::scan::classification::{
     OP_CONFLICT_WINNER, OP_LOCAL_LINK, VERDICT_ALREADY_MANAGED, VERDICT_BLOCKED,
-    VERDICT_CONFLICT_SET, VERDICT_DEFERRED, VERDICT_EXCLUDED, VERDICT_GIT, VERDICT_IDENTITY_CONFLICT,
-    VERDICT_LOCAL,
+    VERDICT_CONFLICT_SET, VERDICT_DEFERRED, VERDICT_EXCLUDED, VERDICT_GIT,
+    VERDICT_IDENTITY_CONFLICT, VERDICT_LOCAL,
 };
-use crate::core::scan::{
-    ReportFreshness, ScanCoordinator, ScanEntityEvidence,
-};
+use crate::core::scan::{ReportFreshness, ScanCoordinator, ScanEntityEvidence};
 use crate::seams::filesystem::{EvidenceChainHop, EvidenceChainHopKind};
 use crate::seams::scan_evidence_store::ScanSourceVerdictRecord;
 
@@ -167,10 +165,7 @@ impl AdoptService {
     /// Open Home's non-Stale Complete/Incomplete Report is accepted. Every
     /// selection is re-verified against the frozen report evidence and the
     /// live filesystem before any plan token is issued.
-    pub fn plan_report(
-        &self,
-        request: &AdoptReportPlanRequest,
-    ) -> Result<AdoptPlan, AdoptError> {
+    pub fn plan_report(&self, request: &AdoptReportPlanRequest) -> Result<AdoptPlan, AdoptError> {
         self.ensure_writes_ready()?;
         let context = self.report_plan_context()?;
         if request.report_generation != context.generation {
@@ -214,10 +209,9 @@ impl AdoptService {
             };
             self.verify_selection_eligibility(&evidence, action, is_conflict_winner, &context)?;
             if is_conflict_winner {
-                let set_seq = evidence
-                    .verdict
-                    .conflict_set_seq
-                    .ok_or_else(|| AdoptError::Internal("a conflict set member has no set".into()))?;
+                let set_seq = evidence.verdict.conflict_set_seq.ok_or_else(|| {
+                    AdoptError::Internal("a conflict set member has no set".into())
+                })?;
                 if !winner_sets.insert(set_seq) {
                     return Err(self.eligibility(
                         ELIGIBILITY_DUPLICATE_WINNER,
@@ -271,7 +265,9 @@ impl AdoptService {
                 frozen,
             });
         }
-        let plan_number = self.next_plan_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let plan_number = self
+            .next_plan_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let plan_token = format!("adopt-plan-{plan_number}");
         let frozen_report = AdoptFrozenReport {
             report_content_identity: context.content_identity.clone(),
@@ -379,21 +375,12 @@ impl AdoptService {
         }
         if verdict.verdict != VERDICT_LOCAL || !allowed(OP_LOCAL_LINK) {
             let code = eligibility_code(verdict, action, context.incomplete);
-            return Err(self.eligibility(
-                &code,
-                verdict.entity_seq,
-                Some(verdict_detail(verdict)),
-            ));
+            return Err(self.eligibility(&code, verdict.entity_seq, Some(verdict_detail(verdict))));
         }
         Ok(())
     }
 
-    fn eligibility(
-        &self,
-        code: &str,
-        entity_seq: u64,
-        detail: Option<String>,
-    ) -> AdoptError {
+    fn eligibility(&self, code: &str, entity_seq: u64, detail: Option<String>) -> AdoptError {
         AdoptError::Eligibility {
             code: code.to_owned(),
             entity_seq,
@@ -420,7 +407,8 @@ impl AdoptService {
             .filesystem
             .directory_fingerprint(&entity.canonical_path)
             .map_err(|_| AdoptError::PlanStale)?;
-        if fingerprint.device != entity.identity.device || fingerprint.inode != entity.identity.inode
+        if fingerprint.device != entity.identity.device
+            || fingerprint.inode != entity.identity.inode
         {
             return Err(AdoptError::PlanStale);
         }
@@ -444,11 +432,16 @@ impl AdoptService {
                     .filesystem
                     .inspect_evidence_chain(&appearance.entry_path)
                     .map_err(|_| AdoptError::PlanStale)?;
-                if chain.fault.is_some() || chain.final_entity != Some(entity.canonical_path.clone())
+                if chain.fault.is_some()
+                    || chain.final_entity != Some(entity.canonical_path.clone())
                 {
                     return Err(AdoptError::PlanStale);
                 }
-                (chain.entry_path.clone(), chain.entry_device, chain.entry_inode)
+                (
+                    chain.entry_path.clone(),
+                    chain.entry_device,
+                    chain.entry_inode,
+                )
             } else {
                 // Real directory appearance: the entry IS the entity; its
                 // identity must still match the frozen object identity.
@@ -588,9 +581,7 @@ impl AdoptService {
                     .first()
                     .and_then(|hop| hop.target.clone())
                     .unwrap_or_else(|| entity.canonical_path.clone());
-                AdoptAppearanceKind::Symlink {
-                    original_target,
-                }
+                AdoptAppearanceKind::Symlink { original_target }
             } else {
                 AdoptAppearanceKind::RealDirectory
             };
@@ -615,8 +606,8 @@ impl AdoptService {
                     .find(|root| root.index == appearance.root_index);
                 if let Some(root) = root {
                     for consumer in &root.consumer_agents {
-                        if let Some(agent) =
-                            agents_by_id.get(&crate::core::domain::AgentId(consumer.agent_id.clone()))
+                        if let Some(agent) = agents_by_id
+                            .get(&crate::core::domain::AgentId(consumer.agent_id.clone()))
                         {
                             if agent.activation_target {
                                 activations.push(crate::seams::filesystem::AdoptActivationStep {

@@ -405,6 +405,15 @@ export function createFixtureCatalogClient(
     async getGitSourceCapability() {
       return { sources: [] };
     },
+    async restoreCurrentSourceRelease() {
+      throw new Error("restore is not available in the fixture client");
+    },
+    async createLocalSourceCopy() {
+      throw new Error("local source copy is not available in the fixture client");
+    },
+    async removeGitSource() {
+      throw new Error("source remove is not available in the fixture client");
+    },
     async inspectSkill(skillId) {
       const skill = skills.find(({ id }) => id === skillId);
       if (!skill) throw new Error(`Managed Skill '${skillId}' was not found`);

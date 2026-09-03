@@ -83,12 +83,13 @@ pub fn run() {
         check_app_update, check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
         confirm_fixture_recovery_result, confirm_home, confirm_source_promotion,
         confirm_source_transition, confirm_source_update, continue_candidate,
-        create_agent_directory, discover_file_import, discover_file_import_collection,
-        discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
-        finalize_source_promotion, finalize_source_transition, get_agent_management_snapshot,
-        get_bootstrap_snapshot, get_fixture_recovery_preview, get_git_source_capability,
-        get_locale_snapshot, get_observation_page, get_observation_snapshot, get_scan_report_page,
-        inspect_skill, install_app_update, list_safety_snapshots, list_skills, load_preferences,
+        create_agent_directory, create_local_source_copy, discover_file_import,
+        discover_file_import_collection, discover_link_import, download_app_update,
+        fetch_latest_and_manage, finalize_adopt, finalize_source_promotion,
+        finalize_source_transition, get_agent_management_snapshot, get_bootstrap_snapshot,
+        get_fixture_recovery_preview, get_git_source_capability, get_locale_snapshot,
+        get_observation_page, get_observation_snapshot, get_scan_report_page, inspect_skill,
+        install_app_update, list_safety_snapshots, list_skills, load_preferences,
         pin_skill_updates, plan_abandon, plan_adopt, plan_create_agent_configuration,
         plan_delete_agent_configuration, plan_delete_safety_snapshot,
         plan_edit_agent_configuration, plan_file_import, plan_file_import_selection,
@@ -96,9 +97,9 @@ pub fn run() {
         plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
         preview_source_promotion, preview_source_update, reconnect_same_home,
         refresh_activation_health, refresh_detection, refresh_startup_probe,
-        refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
-        set_locale_selection, start_rescan, startup_info, undo_adopt,
-        undo_source_transition, update_preferences,
+        refresh_system_languages, relocate_link, remove_git_source, restore_current_source_release,
+        restore_eligibility, run_activation_health_check, set_locale_selection, start_rescan,
+        startup_info, undo_adopt, undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -502,21 +503,41 @@ pub fn run() {
                 )
                 .with_write_gate(write_gate.clone())
                 .with_home_context(write_gate.clone())
-                .with_promotion_store(runtime_store.clone()),
+                .with_promotion_store(runtime_store.clone())
+                .with_update_store(runtime_store.clone()),
             );
             let source_promotion = Arc::new(SourcePromotionService::new(
                 source_group_preview.clone(),
                 runtime_store.clone(),
                 source_transition.clone(),
             ));
-            let source_update = Arc::new(SourceUpdateService::new(
-                source_group_preview.clone(),
-                runtime_store.clone(),
-            ));
+            let source_update = Arc::new(
+                SourceUpdateService::new(
+                    source_group_preview.clone(),
+                    source_transition.clone(),
+                    filesystem.clone(),
+                    resolved_library_root.clone(),
+                )
+                .with_home_context(write_gate.clone()),
+            );
             app.manage(SourceGroupPreviewApi::new(source_group_preview));
             app.manage(SourcePromotionApi::new(source_promotion.clone()));
             app.manage(SourceTransitionApi::new(source_transition.clone()));
             app.manage(SourceUpdateApi::new(source_update.clone()));
+            let source_lifecycle = Arc::new(
+                crate::core::source_lifecycle::SourceLifecycleService::new(
+                    source_transition.clone(),
+                    filesystem.clone(),
+                    Arc::new(SystemGitSource::new()),
+                    Arc::new(SystemClock::new()),
+                    resolved_library_root.clone(),
+                )
+                .with_write_gate(write_gate.clone())
+                .with_home_context(write_gate.clone()),
+            );
+            app.manage(crate::tauri_adapter::source_lifecycle_api::SourceLifecycleApi::new(
+                source_lifecycle,
+            ));
             app.manage(HealthApi::new(
                 MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
                     .with_library_root(resolved_library_root.clone())
@@ -646,6 +667,9 @@ pub fn run() {
             confirm_source_transition,
             undo_source_transition,
             finalize_source_transition,
+            restore_current_source_release,
+            create_local_source_copy,
+            remove_git_source,
             get_locale_snapshot,
             set_locale_selection,
             refresh_system_languages,

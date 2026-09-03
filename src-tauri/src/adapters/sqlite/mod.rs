@@ -42,12 +42,10 @@ use crate::seams::source_promotion_store::{
 use crate::seams::source_transition_store::{
     ExistingSourceMember, SourceTransitionRecord, SourceTransitionStore, SourceTransitionStoreError,
 };
-use crate::seams::source_update_store::{
-    SourceUpdateCurrentSource, SourceUpdateMember, SourceUpdateStore, SourceUpdateStoreError,
-};
 
 mod agent_configuration;
 mod prepared;
+mod source_update_lifecycle;
 pub use prepared::SqlitePreparedCatalogFactory;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = CURRENT_CATALOG_SCHEMA_VERSION;
@@ -1374,229 +1372,6 @@ pub struct PersistedSkillDetail {
     pub final_entity_path: PathBuf,
     pub updated_at: String,
     pub file_source_original_path: Option<String>,
-}
-
-impl SourceUpdateStore for SqliteCatalogStore {
-    fn read_source_update(
-        &self,
-        remote_id: &str,
-    ) -> Result<SourceUpdateCurrentSource, SourceUpdateStoreError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| SourceUpdateStoreError::Unavailable("SQLite lock poisoned".into()))?;
-        let (provider, canonical_url, tracking_ref, current_release_id, created_at): (
-            String,
-            String,
-            String,
-            String,
-            String,
-        ) = connection
-            .query_row(
-                "SELECT source.provider, source.canonical_url, source.current_selected_ref,
-                        source.current_release_id, parent.created_at
-                   FROM git_repository_sources source
-                   JOIN remote_source_parents parent ON parent.remote_id = source.remote_id
-                  WHERE source.remote_id = ?1",
-                [remote_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .ok_or_else(|| {
-                SourceUpdateStoreError::Conflict(
-                    "the selected Git Repository Source is no longer complete".into(),
-                )
-            })?;
-        let current_resolved_commit: String = connection
-            .query_row(
-                "SELECT resolved_commit FROM git_source_releases
-                  WHERE release_id = ?1 AND remote_id = ?2 AND selected_ref = ?3",
-                params![current_release_id, remote_id, tracking_ref],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .ok_or_else(|| {
-                SourceUpdateStoreError::Conflict(
-                    "the current Git Repository Source release is missing".into(),
-                )
-            })?;
-        let aliases = connection
-            .prepare(
-                "SELECT alias_url FROM remote_source_aliases
-                  WHERE remote_id = ?1 ORDER BY alias_url",
-            )
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .query_map([remote_id], |row| row.get::<_, String>(0))
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
-                        skills.display_name, skills.description, skills.library_entry_path,
-                        skills.final_entity_path, skills.recorded_content_hash, skills.health,
-                        members.skill_path,
-                        '' AS current_baseline_hash, '' AS remote_baseline_hash
-                   FROM git_source_members members
-                   JOIN skills ON skills.id = members.skill_id
-                  WHERE members.remote_id = ?1 AND members.presence = 'current'
-                  ORDER BY members.skill_path, skills.id",
-            )
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        let mut members = statement
-            .query_map([remote_id], |row| {
-                Ok(SourceUpdateMember {
-                    skill_id: SkillId(row.get(0)?),
-                    directory_name: row.get(1)?,
-                    identity_key: row.get(2)?,
-                    display_name: row.get(3)?,
-                    description: row.get(4)?,
-                    library_entry_path: PathBuf::from(row.get::<_, String>(5)?),
-                    final_entity_path: PathBuf::from(row.get::<_, String>(6)?),
-                    recorded_content_hash: row.get(7)?,
-                    health: parse_health(&row.get::<_, String>(8)?)?,
-                    skill_path: row.get(9)?,
-                    current_baseline_hash: row.get(10)?,
-                    remote_baseline_hash: row.get(11)?,
-                    activations: Vec::new(),
-                })
-            })
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        drop(statement);
-        for member in &mut members {
-            member.activations = connection
-                .prepare(
-                    "SELECT target_root_id, expected_entry_path, expected_target_path,
-                            desired_enabled, observed_state, last_enabled_at, last_checked_at
-                       FROM activations WHERE skill_id = ?1 ORDER BY target_root_id",
-                )
-                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-                .query_map([&member.skill_id.0], |row| {
-                    Ok(SourcePromotionActivationRecord {
-                        target_root_id: row.get(0)?,
-                        entry_path: PathBuf::from(row.get::<_, String>(1)?),
-                        target_path: PathBuf::from(row.get::<_, String>(2)?),
-                        desired_enabled: row.get(3)?,
-                        observed_state: parse_observed_state(&row.get::<_, String>(4)?)?,
-                        last_enabled_at: row.get(5)?,
-                        last_checked_at: row.get(6)?,
-                    })
-                })
-                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        }
-        let release_member_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = ?1",
-                [&current_release_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        let release_members = connection
-            .prepare(
-                "SELECT skill_path, tree_hash FROM git_source_release_members
-                  WHERE release_id = ?1 ORDER BY skill_path",
-            )
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .query_map([&current_release_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
-        let member_paths = members
-            .iter()
-            .map(|member| member.skill_path.as_str())
-            .collect::<BTreeSet<_>>();
-        let member_ids = members
-            .iter()
-            .map(|member| member.skill_id.0.as_str())
-            .collect::<BTreeSet<_>>();
-        let release_paths = release_members
-            .iter()
-            .map(|(skill_path, _)| skill_path.as_str())
-            .collect::<BTreeSet<_>>();
-        if members.is_empty()
-            || release_member_count != members.len() as i64
-            || release_members.len() != members.len()
-            || member_paths.len() != members.len()
-            || member_ids.len() != members.len()
-            || release_paths.len() != members.len()
-            || members.iter().any(|member| {
-                member.skill_path.is_empty()
-                    || member.current_baseline_hash.is_empty()
-                    || member.remote_baseline_hash.is_empty()
-                    || !release_members.iter().any(|(skill_path, tree_hash)| {
-                        skill_path == &member.skill_path
-                            && tree_hash == &member.remote_baseline_hash
-                    })
-            })
-        {
-            return Err(SourceUpdateStoreError::Conflict(
-                "the Git Repository Source does not have one complete current member set".into(),
-            ));
-        }
-        let forbidden_local_link_roots = connection
-            .prepare("SELECT configured_path FROM global_skill_roots ORDER BY path_identity_key")
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-        Ok(SourceUpdateCurrentSource {
-            remote_id: remote_id.into(),
-            provider,
-            canonical_url,
-            tracking_ref,
-            current_release_id,
-            current_resolved_commit,
-            aliases,
-            created_at,
-            members,
-            forbidden_local_link_roots,
-        })
-    }
-
-    fn validate_source_update(
-        &self,
-        _record: &SourcePromotionRecord,
-    ) -> Result<(), SourceUpdateStoreError> {
-        Err(SourceUpdateStoreError::Conflict(
-            "Source Update is restored by ticket #93".into(),
-        ))
-    }
-
-    fn commit_source_update(
-        &self,
-        _record: SourcePromotionRecord,
-    ) -> Result<u64, SourceUpdateStoreError> {
-        Err(SourceUpdateStoreError::Conflict(
-            "Source Update is restored by ticket #93".into(),
-        ))
-    }
-
-    fn source_update_is_committed(
-        &self,
-        _record: &SourcePromotionRecord,
-    ) -> Result<bool, SourceUpdateStoreError> {
-        Ok(false)
-    }
 }
 
 impl SourcePromotionStore for SqliteCatalogStore {
@@ -5613,6 +5388,7 @@ fn health_value(value: Health) -> &'static str {
         Health::Healthy => "healthy",
         Health::Broken => "broken",
         Health::Modified => "modified",
+        Health::SourceSnapshotMismatch => "source_snapshot_mismatch",
     }
 }
 
@@ -5621,6 +5397,7 @@ fn parse_health(value: &str) -> rusqlite::Result<Health> {
         "healthy" => Ok(Health::Healthy),
         "broken" => Ok(Health::Broken),
         "modified" => Ok(Health::Modified),
+        "source_snapshot_mismatch" => Ok(Health::SourceSnapshotMismatch),
         value => Err(invalid_enum_value(5, value)),
     }
 }

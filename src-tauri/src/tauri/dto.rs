@@ -12,9 +12,7 @@ use crate::core::domain::{
     ActivationObservedState, AgentKind, CatalogFilter, Compatibility, Health, SkillDetail,
     SkillSummary, SourceKind,
 };
-use crate::core::git_source_capability::{
-    GitSourceCapabilityKind, GitSourceCapabilityReport, GitSourceCapabilitySource,
-};
+use crate::core::git_source_capability::{GitSourceCapabilityKind, GitSourceCapabilityReport};
 use crate::core::import::{
     FileImportCandidate, FileImportDiscovery, FileImportPreview, FileImportResult,
     FileImportSelectionPreview, FileImportSelectionResult, GitImportCandidate, GitImportDiscovery,
@@ -77,14 +75,34 @@ pub struct GitSourceCapabilitySourceDto {
     pub remote_id: String,
     pub canonical_url: String,
     pub kind: GitSourceCapabilityKindDto,
+    pub members: Vec<GitSourceCapabilityMemberDto>,
 }
 
-impl From<GitSourceCapabilitySource> for GitSourceCapabilitySourceDto {
-    fn from(value: GitSourceCapabilitySource) -> Self {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSourceCapabilityMemberDto {
+    pub skill_id: String,
+    pub skill_path: String,
+    pub presence: bool,
+}
+
+impl From<crate::core::git_source_capability::GitSourceCapabilitySource>
+    for GitSourceCapabilitySourceDto
+{
+    fn from(value: crate::core::git_source_capability::GitSourceCapabilitySource) -> Self {
         Self {
             remote_id: value.remote_id,
             canonical_url: value.canonical_url,
             kind: value.kind.into(),
+            members: value
+                .members
+                .into_iter()
+                .map(|member| GitSourceCapabilityMemberDto {
+                    skill_id: member.skill_id,
+                    skill_path: member.skill_path,
+                    presence: member.presence,
+                })
+                .collect(),
         }
     }
 }
@@ -659,6 +677,108 @@ impl From<crate::core::source_update::SourceUpdateDraft> for SourceUpdateDraftDt
 #[serde(rename_all = "camelCase")]
 pub struct SourceUpdateConfirmRequestDto {
     pub remote_id: String,
+    /// The selected ref frozen in the preview draft; a changed ref fails
+    /// PreviewStale instead of silently updating to a different release.
+    pub expected_selected_ref: String,
+    pub expected_resolved_commit: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRestoreRequestDto {
+    pub remote_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRestoreResultDto {
+    pub remote_id: String,
+    #[serde(rename = "restoredMembers")]
+    pub restored_members: u32,
+    #[serde(rename = "snapshotVersion")]
+    pub snapshot_version: u64,
+}
+
+impl From<crate::core::source_lifecycle::SourceRestoreResult> for SourceRestoreResultDto {
+    fn from(value: crate::core::source_lifecycle::SourceRestoreResult) -> Self {
+        Self {
+            remote_id: value.remote_id,
+            restored_members: value.restored_members,
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceLocalCopyRequestDto {
+    pub remote_id: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    pub destination: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceLocalCopyResultDto {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    #[serde(rename = "directoryName")]
+    pub directory_name: String,
+    pub destination: String,
+    #[serde(rename = "snapshotVersion")]
+    pub snapshot_version: u64,
+}
+
+impl From<crate::core::source_lifecycle::SourceLocalCopyResult> for SourceLocalCopyResultDto {
+    fn from(value: crate::core::source_lifecycle::SourceLocalCopyResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            skill_id: value.skill_id.0,
+            directory_name: value.directory_name,
+            destination: value.destination.to_string_lossy().into_owned(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRemoveRequestDto {
+    pub remote_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRemoveResultDto {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    #[serde(rename = "remoteId")]
+    pub remote_id: String,
+    #[serde(rename = "memberCount")]
+    pub member_count: u32,
+    #[serde(rename = "snapshotVersion")]
+    pub snapshot_version: u64,
+}
+
+impl From<crate::core::source_lifecycle::SourceRemoveResult> for SourceRemoveResultDto {
+    fn from(value: crate::core::source_lifecycle::SourceRemoveResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            remote_id: value.remote_id,
+            member_count: value.member_count,
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceVerifyMembersResultDto {
+    #[serde(rename = "mismatchedMembers")]
+    pub mismatched_members: u32,
 }
 
 // -- Skill Man application Update (ADR-0006) --
@@ -811,6 +931,7 @@ pub enum HealthDto {
     Healthy,
     Broken,
     Modified,
+    SourceSnapshotMismatch,
 }
 
 impl From<Health> for HealthDto {
@@ -819,6 +940,7 @@ impl From<Health> for HealthDto {
             Health::Healthy => Self::Healthy,
             Health::Broken => Self::Broken,
             Health::Modified => Self::Modified,
+            Health::SourceSnapshotMismatch => Self::SourceSnapshotMismatch,
         }
     }
 }
@@ -4049,6 +4171,7 @@ pub enum PublicErrorDto {
     CatalogUnavailable,
     RecoveryRequired,
     SourceUnavailable,
+    SourceSnapshotMismatch,
     TargetMismatch,
     DiskFull {
         #[serde(rename = "requiredBytes")]

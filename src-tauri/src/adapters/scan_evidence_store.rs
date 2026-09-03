@@ -193,9 +193,8 @@ impl SystemScanEvidenceStore {
         T: serde::de::DeserializeOwned,
     {
         let path = self.run_dir(run_id).join(file_name);
-        let file = File::open(&path).map_err(|error| {
-            ScanEvidenceStoreError::io("read Scan index", &path, &error)
-        })?;
+        let file = File::open(&path)
+            .map_err(|error| ScanEvidenceStoreError::io("read Scan index", &path, &error))?;
         for line in BufReader::new(file).lines() {
             let Ok(line) = line else { continue };
             let Ok(record) = serde_json::from_str::<T>(&line) else {
@@ -1853,11 +1852,7 @@ mod tests {
                 identity_a
             };
             store
-                .append_entity(
-                    run_id,
-                    "r0",
-                    &entity_record(seq, name, identity),
-                )
+                .append_entity(run_id, "r0", &entity_record(seq, name, identity))
                 .unwrap();
         }
         store
@@ -1946,10 +1941,8 @@ mod tests {
             "aaaaaaaa-1234-4000-8000-000000000000",
             std::path::PathBuf::from("/tmp/other-home"),
         );
-        let other = SystemScanEvidenceStore::new(
-            temp.path().join("scan"),
-            other_home.home_id.0.clone(),
-        );
+        let other =
+            SystemScanEvidenceStore::new(temp.path().join("scan"), other_home.home_id.0.clone());
         assert!(matches!(
             other.read_entity(run_id, 1),
             Err(ScanEvidenceStoreError::ProvenanceMismatch { .. })

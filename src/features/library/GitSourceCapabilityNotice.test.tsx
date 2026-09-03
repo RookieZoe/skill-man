@@ -11,16 +11,19 @@ const report: GitSourceCapabilityReport = {
       remoteId: "current-source",
       canonicalUrl: "https://github.com/acme/current",
       kind: "git_repository_source",
+      members: [],
     },
     {
       remoteId: "legacy-source",
       canonicalUrl: "https://github.com/acme/legacy",
       kind: "legacy_per_skill_git_state",
+      members: [],
     },
     {
       remoteId: "conflicted-source",
       canonicalUrl: "https://github.com/acme/conflicted",
       kind: "remote_source_identity_conflict",
+      members: [],
     },
   ],
 };
@@ -99,4 +102,168 @@ test("surfaces a localized scan failure and keeps its raw diagnostic collapsed",
       .getByText("git_source_capability_scan_failed: unreadable catalog")
       .closest("details"),
   ).not.toHaveAttribute("open");
+});
+
+test("Restore removes the whole-source bytes only after an inline confirm", async () => {
+  const onRestore = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <GitSourceCapabilityNotice
+      report={report}
+      failure={null}
+      onRestore={onRestore}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Restore Release" }));
+  expect(onRestore).not.toHaveBeenCalled();
+  await user.click(
+    screen.getByRole("button", {
+      name: "Restore the current Source Release bytes?",
+    }),
+  );
+  expect(onRestore).toHaveBeenCalledWith("current-source");
+});
+
+test("Remove Source requires an explicit inline confirm and can be cancelled", async () => {
+  const onRemove = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <GitSourceCapabilityNotice
+      report={report}
+      failure={null}
+      onRemove={onRemove}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Remove Source" }));
+  expect(onRemove).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(onRemove).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("button", {
+      name: "Remove the whole Git Repository Source? Member snapshots, tombstones and Activations are deleted.",
+    }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Remove Source" }));
+  await user.click(
+    screen.getByRole("button", {
+      name: "Remove the whole Git Repository Source? Member snapshots, tombstones and Activations are deleted.",
+    }),
+  );
+  expect(onRemove).toHaveBeenCalledWith("current-source");
+});
+
+test("Copy Out forwards the single current member and picked destination without a picker list", async () => {
+  const onCopyMember = vi.fn();
+  const user = userEvent.setup();
+  const sourceReport: GitSourceCapabilityReport = {
+    sources: [
+      {
+        remoteId: "current-source",
+        canonicalUrl: "https://github.com/acme/current",
+        kind: "git_repository_source",
+        members: [
+          {
+            skillId: "skill-a",
+            skillPath: "skills/alpha",
+            presence: true,
+          },
+          {
+            skillId: "skill-b",
+            skillPath: "skills/beta",
+            presence: false,
+          },
+        ],
+      },
+    ],
+  };
+  render(
+    <GitSourceCapabilityNotice
+      report={sourceReport}
+      failure={null}
+      onCopyMember={onCopyMember}
+      pickDirectory={async () => "/Users/zoe/export"}
+    />,
+  );
+
+  expect(screen.queryByRole("combobox")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Copy Out" }));
+  expect(onCopyMember).toHaveBeenCalledWith(
+    "current-source",
+    "skill-a",
+    "/Users/zoe/export",
+  );
+});
+
+test("Copy Out offers a member picker when several current members exist", async () => {
+  const onCopyMember = vi.fn();
+  const user = userEvent.setup();
+  const sourceReport: GitSourceCapabilityReport = {
+    sources: [
+      {
+        remoteId: "current-source",
+        canonicalUrl: "https://github.com/acme/current",
+        kind: "git_repository_source",
+        members: [
+          {
+            skillId: "skill-a",
+            skillPath: "skills/alpha",
+            presence: true,
+          },
+          {
+            skillId: "skill-b",
+            skillPath: "skills/beta",
+            presence: true,
+          },
+        ],
+      },
+    ],
+  };
+  render(
+    <GitSourceCapabilityNotice
+      report={sourceReport}
+      failure={null}
+      onCopyMember={onCopyMember}
+      pickDirectory={async () => "/Users/zoe/export"}
+    />,
+  );
+
+  await user.selectOptions(screen.getByRole("combobox", { name: /Member/ }), [
+    "skill-b",
+  ]);
+  await user.click(screen.getByRole("button", { name: "Copy Out" }));
+  expect(onCopyMember).toHaveBeenCalledWith(
+    "current-source",
+    "skill-b",
+    "/Users/zoe/export",
+  );
+});
+
+test("Copy Out stays hidden when every member is tombstoned", () => {
+  const sourceReport: GitSourceCapabilityReport = {
+    sources: [
+      {
+        remoteId: "current-source",
+        canonicalUrl: "https://github.com/acme/current",
+        kind: "git_repository_source",
+        members: [
+          {
+            skillId: "skill-b",
+            skillPath: "skills/beta",
+            presence: false,
+          },
+        ],
+      },
+    ],
+  };
+  render(
+    <GitSourceCapabilityNotice
+      report={sourceReport}
+      failure={null}
+      onCopyMember={vi.fn()}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "Copy Out" })).toBeNull();
 });

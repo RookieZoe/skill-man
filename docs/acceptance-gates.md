@@ -309,9 +309,47 @@ LanguageControl 的位置取决于 route：Fixture Recovery、Binding、Lifecycl
 - [ ] 若需要本地 hash 证据，只把这些非正文 raw fields 写进两个临时 UTF-8 文件，执行 `cmp -s en.txt zh.txt`，期望 exit code 为 0；记录两个 SHA-256 和比较结果后删除临时文件。
 - [ ] 不把临时文件、Skill 正文、token、凭据、完整 lock 或 remote response body 上传到 issue。
 
-## 7. 完成与关闭
+## 7. Source Group Gate：Git 来源生命周期（#92/#93）
 
-- [ ] Gate A 至 D 全部为 PASS，每项都有 §2 所需字段和可审计资产链接。
+仅在 Gate A/D 覆盖的 Bound Home 上执行，用一个真实可访问的 Git Repository Source
+完成来源级生命周期核对。本 Gate 验收 v9 的 policy、selected ref/tag、immutable
+namespace、tombstone/reappear、Snapshot Mismatch、Restore 与 Local Copy；v8 时代的
+requested-ref/Verification Anchor/Modified/mapping 验收不再是 current-source 的通过
+条件（Adopt 证据核对仍归 Gate B）。记录沿用 §2 模板，单发一条 `Gate E` 记录。
+
+### 7.1 Update 与来源级 Transition
+
+- [ ] Fetch Latest 后的 Source Group Preview 展示 tracking policy（mode/value）与冻结的 selected ref/tag + resolved commit；确认一次即完成整来源 Transition，不出现逐成员更新入口。
+- [ ] 确认后远端再变化不影响本次结果；Undo 恢复前一动员数据，Finalize 后 Undo 不可用。
+- [ ] 新 `skillPath` 创建新稳定 `skill_id` 且默认不 Enable；消失路径只读快照被删除并留下 tombstone；rename 表现为 remove + add。
+- [ ] 同一 `(remote_id, skillPath)` 重现复用原 `skill_id` 与 storage path；对应全局 Activation 从 Broken 自动恢复 Healthy，不产生新 ownership。
+
+### 7.2 Immutable namespace 与 Snapshot Mismatch
+
+- [ ] 成员快照只出现在 `<Home>/skills/git/<remote_id>/<skill_id>`；直接改动其中字节后，受影响 Skill 显示 Source Snapshot Mismatch。
+- [ ] Mismatch 状态下 Update、新 Enable 与普通来源写被拒绝（提示恢复流程）；只读查看、Disable、Local Copy 与 Restore 仍可用。
+- [ ] 启动时对全部 current 成员重验；注入 drift 后重启 app，Mismatch 在启动恢复中呈现。
+
+### 7.3 Restore Current Source Release
+
+- [ ] Mismatch 成员执行 Restore：只按已持久化 current release（固定 ref + commit）恢复，期间不产生新的 remote fetch 记录。
+- [ ] 恢复后字节与 release 一致、health 回到 Healthy；恢复过程崩溃后重启，操作按 journal 收敛或回滚，不静默覆盖当前观察字节。
+
+### 7.4 Create Local Source Copy
+
+- [ ] 选择单个成员复制到用户指定目录（Home/Agent/installer/App-state 之外）；目录内无 `.git`，无内容 baseline。
+- [ ] 原来源、成员与 Activation 保持不变；Local Source 以新 `skill_id` 入库，与同名 Git 成员可共存。
+- [ ] 目标目录在 Home 内、或被非空占用时被拒绝，不产生半成品目录。
+
+### 7.5 Whole-source Remove 与 Ownership Conflict
+
+- [ ] Remove 只作用于来源整体：成员快照、tombstone 与 Activation 一并删除；成员没有独立 Remove 入口。
+- [ ] Remove 过程注入 Catalog 失败后重启，按 journal 回滚成员字节与 Activation；提交点之后崩溃则收敛完成。
+- [ ] external installer 重现同一仓库声明时，Update/确认被拒绝为 Ownership Conflict，不恢复旧 external owner。
+
+## 8. 完成与关闭
+
+- [ ] Gate A 至 E 全部为 PASS，每项都有 §2 所需字段和可审计资产链接。
 - [ ] 某项 FAIL 或 BLOCKED 时保持 #49 打开，写明可复现条件和缺失证据。
-- [ ] 只有人类操作者确认四项全过后，才在 #49 发布最终结果并关闭 issue。
+- [ ] 只有人类操作者确认五项全过后，才在 #49 发布最终结果并关闭 issue。
 - [ ] 签名、公证、Gatekeeper、真实 updater 升级和回滚继续由发布 Gate 跟踪。

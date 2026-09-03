@@ -237,6 +237,12 @@ export function App({ client }: AppProps) {
     useState<SourcePromotionResult | null>(null);
   const [sourceUpdateActive, setSourceUpdateActive] = useState(false);
   const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
+  const [sourceActionActivity, setSourceActionActivity] = useState(false);
+  const [sourceActionNotice, setSourceActionNotice] = useState<{
+    kind: "restore" | "copy" | "remove";
+    ok: boolean;
+    message: string | null;
+  } | null>(null);
   const [sourceGroupActivity, setSourceGroupActivity] = useState<
     "idle" | "fetching" | "confirming" | "undoing"
   >("idle");
@@ -732,6 +738,8 @@ export function App({ client }: AppProps) {
       const result = sourceUpdateActive
         ? await client.confirmSourceUpdate({
             remoteId: sourcePromotionDraft.remoteId,
+            expectedSelectedRef: sourcePromotionDraft.policy.selectedRef,
+            expectedResolvedCommit: sourcePromotionDraft.policy.resolvedCommit,
           })
         : await client.confirmSourcePromotion({
             remoteId: sourcePromotionDraft.remoteId,
@@ -768,6 +776,116 @@ export function App({ client }: AppProps) {
       }
     } finally {
       if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
+  async function refreshLibraryAfterSourceAction(runId: number) {
+    const snapshot = await client.listSkills(filter);
+    if (runId !== sourceGroupRunId.current) return;
+    setSkills(snapshot.items);
+    void client
+      .getGitSourceCapability()
+      .then((report) => {
+        if (runId !== sourceGroupRunId.current) return;
+        setGitSourceCapability(report);
+        setGitSourceCapabilityFailure(null);
+      })
+      .catch((reason: unknown) => {
+        if (runId !== sourceGroupRunId.current) return;
+        setGitSourceCapability(null);
+        setGitSourceCapabilityFailure({
+          diagnostic: readDiagnostic(reason, t),
+        });
+      });
+  }
+
+  async function restoreSourceRelease(remoteId: string) {
+    const runId = ++sourceGroupRunId.current;
+    setSourceActionActivity(true);
+    setSourceActionNotice({ kind: "restore", ok: true, message: null });
+    try {
+      const result = await client.restoreCurrentSourceRelease(remoteId);
+      await refreshLibraryAfterSourceAction(runId);
+      if (runId !== sourceGroupRunId.current) return;
+      setSourceActionNotice({
+        kind: "restore",
+        ok: true,
+        message: t("library.source_capability.restore_done", {
+          count: result.restoredMembers,
+        }),
+      });
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionNotice({
+          kind: "restore",
+          ok: false,
+          message: readError(reason, t),
+        });
+    } finally {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionActivity(false);
+    }
+  }
+
+  async function copySourceMember(
+    remoteId: string,
+    skillId: string,
+    destination: string,
+  ) {
+    const runId = ++sourceGroupRunId.current;
+    setSourceActionActivity(true);
+    setSourceActionNotice({ kind: "copy", ok: true, message: null });
+    try {
+      const result = await client.createLocalSourceCopy(
+        remoteId,
+        skillId,
+        destination,
+      );
+      await refreshLibraryAfterSourceAction(runId);
+      if (runId !== sourceGroupRunId.current) return;
+      setSourceActionNotice({
+        kind: "copy",
+        ok: true,
+        message: t("library.source_capability.copy_done", {
+          name: result.directoryName,
+        }),
+      });
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionNotice({
+          kind: "copy",
+          ok: false,
+          message: readError(reason, t),
+        });
+    } finally {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionActivity(false);
+    }
+  }
+
+  async function removeSource(remoteId: string) {
+    const runId = ++sourceGroupRunId.current;
+    setSourceActionActivity(true);
+    setSourceActionNotice({ kind: "remove", ok: true, message: null });
+    try {
+      await client.removeGitSource(remoteId);
+      await refreshLibraryAfterSourceAction(runId);
+      if (runId !== sourceGroupRunId.current) return;
+      setSourceActionNotice({
+        kind: "remove",
+        ok: true,
+        message: t("library.source_capability.remove_done"),
+      });
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionNotice({
+          kind: "remove",
+          ok: false,
+          message: readError(reason, t),
+        });
+    } finally {
+      if (runId === sourceGroupRunId.current)
+        setSourceActionActivity(false);
     }
   }
 
@@ -1277,6 +1395,13 @@ export function App({ client }: AppProps) {
         onPreviewSourcePromotion={previewSourcePromotion}
         onPreviewSourceUpdate={previewSourceUpdate}
         onConfirmSourcePromotion={confirmSourcePromotion}
+        sourceActionActivity={sourceActionActivity}
+        sourceActionNotice={sourceActionNotice}
+        onRestoreSource={(remoteId) => void restoreSourceRelease(remoteId)}
+        onCopySourceMember={(remoteId, skillId, destination) =>
+          void copySourceMember(remoteId, skillId, destination)
+        }
+        onRemoveSource={(remoteId) => void removeSource(remoteId)}
         relocatePanel={relocatePanel}
         onOpenRelocate={openRelocate}
         onCloseRelocate={closeRelocate}

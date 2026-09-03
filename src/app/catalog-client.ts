@@ -12,12 +12,25 @@ export interface GitSourceCapabilitySource {
   remoteId: string;
   canonicalUrl: string;
   kind: GitSourceCapabilityKind;
+  /** Complete only for `git_repository_source`; every other kind is empty. */
+  members: GitSourceCapabilityMember[];
+}
+
+export interface GitSourceCapabilityMember {
+  skillId: string;
+  skillPath: string;
+  /** `false` marks a tombstoned member (no bytes to copy). */
+  presence: boolean;
 }
 
 export interface GitSourceCapabilityReport {
   sources: GitSourceCapabilitySource[];
 }
-export type Health = "healthy" | "broken" | "modified";
+export type Health =
+  | "healthy"
+  | "broken"
+  | "modified"
+  | "source_snapshot_mismatch";
 export type AgentKind = "claude_preset" | "codex_preset" | "custom";
 export type Compatibility = "verified" | "unknown";
 
@@ -1277,9 +1290,33 @@ export interface SourceUpdateDraft {
 
 export interface ConfirmSourceUpdateRequest {
   remoteId: string;
+  /** The frozen preview facts; a changed ref fails PreviewStale. */
+  expectedSelectedRef: string;
+  expectedResolvedCommit: string;
 }
 
 export type SourceUpdateResult = SourcePromotionResult;
+
+export interface SourceRestoreResult {
+  remoteId: string;
+  restoredMembers: number;
+  snapshotVersion: number;
+}
+
+export interface SourceLocalCopyResult {
+  operationId: string;
+  skillId: string;
+  directoryName: string;
+  destination: string;
+  snapshotVersion: number;
+}
+
+export interface SourceRemoveResult {
+  operationId: string;
+  remoteId: string;
+  memberCount: number;
+  snapshotVersion: number;
+}
 
 export interface UpdateCheckItem {
   skillId: string;
@@ -1544,6 +1581,13 @@ export interface CatalogClient {
     request: ConfirmSourceUpdateRequest,
   ): Promise<SourceUpdateResult>;
   finalizeSourceUpdate(operationId: string): Promise<void>;
+  restoreCurrentSourceRelease(remoteId: string): Promise<SourceRestoreResult>;
+  createLocalSourceCopy(
+    remoteId: string,
+    skillId: string,
+    destination: string,
+  ): Promise<SourceLocalCopyResult>;
+  removeGitSource(remoteId: string): Promise<SourceRemoveResult>;
   confirmSourceTransition(
     request: ConfirmSourceTransitionRequest,
   ): Promise<SourceTransitionResult>;
@@ -1843,6 +1887,21 @@ const tauriCatalogClient: CatalogClient = {
   finalizeSourceUpdate(operationId) {
     return invoke<void>("finalize_source_update", {
       request: { operationId },
+    });
+  },
+  restoreCurrentSourceRelease(remoteId) {
+    return invoke<SourceRestoreResult>("restore_current_source_release", {
+      request: { remoteId },
+    });
+  },
+  createLocalSourceCopy(remoteId, skillId, destination) {
+    return invoke<SourceLocalCopyResult>("create_local_source_copy", {
+      request: { remoteId, skillId, destination },
+    });
+  },
+  removeGitSource(remoteId) {
+    return invoke<SourceRemoveResult>("remove_git_source", {
+      request: { remoteId },
     });
   },
   confirmSourceTransition(request) {

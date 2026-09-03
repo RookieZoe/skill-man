@@ -33,6 +33,9 @@ pub fn tray_skill_label(summary: &SkillSummary, locale: EffectiveLocale) -> Stri
         Health::Healthy => String::new(),
         Health::Broken => native_message(locale, NativeMessageKey::TrayHealthBroken, &[]),
         Health::Modified => native_message(locale, NativeMessageKey::TrayHealthModified, &[]),
+        Health::SourceSnapshotMismatch => {
+            native_message(locale, NativeMessageKey::TrayHealthMismatch, &[])
+        }
     };
     let agents = native_plural(locale, summary.enabled_agent_count as u64);
     format!("{} · {}{}", summary.directory_name, agents, suffix)

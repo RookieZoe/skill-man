@@ -424,7 +424,10 @@ impl AdoptService {
                 device: 0,
                 inode: 0,
             },
-            items: planned_items.iter().map(|item| item.journal.clone()).collect(),
+            items: planned_items
+                .iter()
+                .map(|item| item.journal.clone())
+                .collect(),
         };
         let batch = PlannedAdoptBatch {
             operation_id,

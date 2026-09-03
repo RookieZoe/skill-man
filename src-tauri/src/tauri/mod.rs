@@ -18,6 +18,7 @@ pub mod menu;
 pub mod native_message;
 pub mod observation_api;
 pub mod source_group_preview_api;
+pub mod source_lifecycle_api;
 pub mod source_promotion_api;
 pub mod source_transition_api;
 pub mod source_update_api;

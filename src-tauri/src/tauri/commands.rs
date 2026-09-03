@@ -9,22 +9,21 @@ use crate::tauri_adapter::app_update_api::AppUpdateApi;
 use crate::tauri_adapter::bootstrap_api::BootstrapApi;
 use crate::tauri_adapter::catalog_api::CatalogApi;
 use crate::tauri_adapter::dto::{
-    AbandonPreviewDto, ActivationHealthReportDto, AdoptPlanDto,
-    AdoptResultDto, AdoptUndoResultDto, AgentConfigurationApplyResultDto,
-    AgentConfigurationPlanDto, AgentManagementSnapshotDto, AppPreferencesDto, AppUpdateCheckDto,
-    ApplyAbandonRequestDto, ApplyAdoptRequestDto, ApplyAgentConfigurationPlanRequestDto,
-    ApplyFileImportRequestDto, ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto,
-    ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto,
-    ApplySkillUpdatesRequestDto, BootstrapSnapshotDto, CancelAdoptRequestDto,
-    CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto,
-    CancelLinkImportRequestDto, CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto,
-    CancelRescanRequestDto, CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto,
-    CheckAppUpdateRequestDto, CheckSkillUpdatesRequestDto, CommandFailureDto,
-    ConfirmExistingHomeRecoveryRequestDto, ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto,
-    ConfirmSourcePromotionRequestDto, CreateAgentConfigurationRequestDto,
-    CreateAgentDirectoryRequestDto, DeleteAgentConfigurationRequestDto,
-    DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto, DiagnosticDto,
-    DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
+    AbandonPreviewDto, ActivationHealthReportDto, AdoptPlanDto, AdoptResultDto, AdoptUndoResultDto,
+    AgentConfigurationApplyResultDto, AgentConfigurationPlanDto, AgentManagementSnapshotDto,
+    AppPreferencesDto, AppUpdateCheckDto, ApplyAbandonRequestDto, ApplyAdoptRequestDto,
+    ApplyAgentConfigurationPlanRequestDto, ApplyFileImportRequestDto,
+    ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto, ApplyLinkImportRequestDto,
+    ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto,
+    BootstrapSnapshotDto, CancelAdoptRequestDto, CancelAppUpdateRequestDto,
+    CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto, CancelLinkImportRequestDto,
+    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelRescanRequestDto,
+    CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
+    CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmExistingHomeRecoveryRequestDto,
+    ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto,
+    CreateAgentConfigurationRequestDto, CreateAgentDirectoryRequestDto,
+    DeleteAgentConfigurationRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
+    DiagnosticDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
     EditAgentConfigurationRequestDto, ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto,
     FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
@@ -39,7 +38,9 @@ use crate::tauri_adapter::dto::{
     PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, PublicErrorDto, RecoveryResultDto,
     RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
     RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
-    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourcePromotionResultDto,
+    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourceLocalCopyRequestDto,
+    SourceLocalCopyResultDto, SourcePromotionResultDto, SourceRemoveRequestDto,
+    SourceRemoveResultDto, SourceRestoreRequestDto, SourceRestoreResultDto,
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
     StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto,
     UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
@@ -56,6 +57,7 @@ use crate::tauri_adapter::observation_api::ObservationApi;
 use crate::tauri_adapter::source_group_preview_api::SourceGroupPreviewApi;
 use crate::tauri_adapter::source_promotion_api::SourcePromotionApi;
 use crate::tauri_adapter::source_transition_api::SourceTransitionApi;
+use crate::tauri_adapter::source_update_api::SourceLifecycleApi;
 use crate::tauri_adapter::source_update_api::SourceUpdateApi;
 use crate::tauri_adapter::startup_api::StartupApi;
 use crate::tauri_adapter::update_api::UpdateApi;
@@ -218,8 +220,47 @@ pub fn confirm_source_update(
     state: State<'_, SourceUpdateApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: crate::tauri_adapter::dto::SourceUpdateConfirmRequestDto,
-) -> Result<(), CommandFailureDto> {
+) -> Result<SourcePromotionResultDto, CommandFailureDto> {
     let result = state.confirm(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
+pub fn restore_current_source_release(
+    state: State<'_, SourceLifecycleApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: SourceRestoreRequestDto,
+) -> Result<SourceRestoreResultDto, CommandFailureDto> {
+    let result = state.restore_current_release(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
+pub fn create_local_source_copy(
+    state: State<'_, SourceLifecycleApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: SourceLocalCopyRequestDto,
+) -> Result<SourceLocalCopyResultDto, CommandFailureDto> {
+    let result = state.create_local_copy(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
+pub fn remove_git_source(
+    state: State<'_, SourceLifecycleApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: SourceRemoveRequestDto,
+) -> Result<SourceRemoveResultDto, CommandFailureDto> {
+    let result = state.remove_source(request);
     if result.is_ok() {
         mutation.bump();
     }

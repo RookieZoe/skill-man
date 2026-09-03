@@ -111,6 +111,8 @@ fn maintenance_error(error: MaintenanceError) -> CommandFailureDto {
             PublicErrorDto::StateUnavailable
         }
         MaintenanceError::SourceTransition(_) => PublicErrorDto::RecoveryRequired,
+        MaintenanceError::SourceLifecycle(_) => PublicErrorDto::RecoveryRequired,
+        MaintenanceError::SourceUpdate(_) => PublicErrorDto::RecoveryRequired,
         MaintenanceError::FileSystem(_) | MaintenanceError::Internal(_) => PublicErrorDto::Internal,
     };
     CommandFailureDto {

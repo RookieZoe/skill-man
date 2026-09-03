@@ -33,16 +33,12 @@ use skill_man_lib::seams::agent_configuration_store::{
     AgentConfigurationStoreSnapshot, RecentProjectFolder, StoredAgentConfiguration,
     StoredGlobalSkillRoot,
 };
-use skill_man_lib::seams::filesystem::{
-    ActivationEntrySnapshot, FileSystem,
-};
+use skill_man_lib::seams::filesystem::{ActivationEntrySnapshot, FileSystem};
 use skill_man_lib::seams::installer_lock_store::EmptyInstallerLockStore;
 use skill_man_lib::seams::scan_evidence_store::{
     ScanReportCursor, ScanReportRow, ScanReportSection,
 };
-use skill_man_lib::seams::scan_managed_facts::{
-    ManagedSkillPathFact, ScanManagedFactsReader,
-};
+use skill_man_lib::seams::scan_managed_facts::{ManagedSkillPathFact, ScanManagedFactsReader};
 
 use common::BoundTestHome;
 
@@ -198,7 +194,9 @@ fn wait_terminal(coordinator: &ScanCoordinator, deadline_ms: u64) {
 fn scan_and_wait(
     coordinator: &Arc<ScanCoordinator>,
 ) -> skill_man_lib::core::scan::ScanReportSummary {
-    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    let started = coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     assert!(started.run.is_some());
     wait_terminal(coordinator, 10_000);
     let snapshot = coordinator.snapshot();
@@ -244,7 +242,10 @@ fn plan_request(
 ) -> AdoptReportPlanRequest {
     AdoptReportPlanRequest {
         report_generation: summary.generation,
-        selections: vec![AdoptReportSelection { entity_ref, action: action.into() }],
+        selections: vec![AdoptReportSelection {
+            entity_ref,
+            action: action.into(),
+        }],
     }
 }
 
@@ -333,7 +334,12 @@ fn local_link_apply_keeps_entity_in_place_without_baseline_and_undo_restores() {
     let service = adopt_service(&home, coordinator.clone());
     let summary = scan_and_wait(&coordinator);
     assert_eq!(summary.state, ScanReportState::Complete);
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     assert_eq!(rows.len(), 1, "exactly one Local candidate: {rows:?}");
     let ScanReportRow::SourceVerdict(verdict) = &rows[0] else {
         panic!("expected SourceVerdict, got {:?}", rows[0]);
@@ -370,7 +376,10 @@ fn local_link_apply_keeps_entity_in_place_without_baseline_and_undo_restores() {
 
     // The entity stayed exactly in place: same bytes, no move/copy/rewrite,
     // nothing written into the Library skills tree.
-    assert_eq!(std::fs::read(external.join("SKILL.md")).unwrap(), bytes_before);
+    assert_eq!(
+        std::fs::read(external.join("SKILL.md")).unwrap(),
+        bytes_before
+    );
     assert!(external.join("notes.txt").exists());
     assert!(
         !home.library_root.join("skills").join("networking").exists(),
@@ -400,13 +409,20 @@ fn local_link_apply_keeps_entity_in_place_without_baseline_and_undo_restores() {
         collected
     };
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0.as_deref(), Some(external.to_string_lossy().as_ref()));
+    assert_eq!(
+        rows[0].0.as_deref(),
+        Some(external.to_string_lossy().as_ref())
+    );
     assert_eq!(rows[0].1, None, "Link records no library entry");
     assert_eq!(rows[0].2, None, "Link records no content baseline");
 
     // The Agent appearance became a direct Activation symlink.
     let entry = agent.root.join("networking");
-    match home.filesystem.activation_snapshot(&entry).expect("snapshot") {
+    match home
+        .filesystem
+        .activation_snapshot(&entry)
+        .expect("snapshot")
+    {
         ActivationEntrySnapshot::Symlink { target } => {
             assert_eq!(target, external, "activation points directly at the entity")
         }
@@ -434,13 +450,20 @@ fn local_link_apply_keeps_entity_in_place_without_baseline_and_undo_restores() {
         collected
     };
     assert!(remaining.is_empty(), "Catalog row removed after Undo");
-    match home.filesystem.activation_snapshot(&entry).expect("snapshot") {
+    match home
+        .filesystem
+        .activation_snapshot(&entry)
+        .expect("snapshot")
+    {
         ActivationEntrySnapshot::Symlink { target } => {
             assert_eq!(target, external, "original appearance restored")
         }
         other => panic!("expected restored symlink, got {other:?}"),
     }
-    assert_eq!(std::fs::read(external.join("SKILL.md")).unwrap(), bytes_before);
+    assert_eq!(
+        std::fs::read(external.join("SKILL.md")).unwrap(),
+        bytes_before
+    );
 
     // Finalize closes the result window: further Undo is rejected.
     service.finalize(&result.operation_id).expect("finalize");
@@ -461,7 +484,12 @@ fn plan_rejects_old_generation_and_cross_startup_cache() {
     let service = adopt_service(&home, coordinator.clone());
 
     let summary = scan_and_wait(&coordinator);
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     let ScanReportRow::SourceVerdict(verdict) = &rows[0] else {
         panic!("expected SourceVerdict");
     };
@@ -472,7 +500,11 @@ fn plan_rejects_old_generation_and_cross_startup_cache() {
     let second = scan_and_wait(&coordinator);
     assert!(second.generation > summary.generation);
     assert!(matches!(
-        service.plan_report(&plan_request(&summary, ref_token.clone(), ACTION_LOCAL_LINK)),
+        service.plan_report(&plan_request(
+            &summary,
+            ref_token.clone(),
+            ACTION_LOCAL_LINK
+        )),
         Err(AdoptError::PlanStale)
     ));
     // The current generation plans fine.
@@ -499,7 +531,12 @@ fn plan_rejects_old_generation_and_cross_startup_cache() {
     let fresh_view = fresh.snapshot();
     assert_eq!(fresh_view.current_report.freshness, ReportFreshness::Stale);
     assert_eq!(
-        fresh_view.current_report.summary.as_ref().unwrap().content_identity,
+        fresh_view
+            .current_report
+            .summary
+            .as_ref()
+            .unwrap()
+            .content_identity,
         second.content_identity,
         "the same Report loads from disk"
     );
@@ -525,7 +562,12 @@ fn plan_rejects_running_scan() {
     let service = adopt_service(&home, coordinator.clone());
 
     let summary = scan_and_wait(&coordinator);
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     let ScanReportRow::SourceVerdict(verdict) = &rows[0] else {
         panic!("expected SourceVerdict");
     };
@@ -534,7 +576,9 @@ fn plan_rejects_running_scan() {
     // A new Run (whether still active or already re-published) invalidates
     // the previously issued identity: either way the plan request is typed
     // PlanStale — no plan, no token.
-    let started = coordinator.start_rescan(ScanTrigger::Manual).expect("start");
+    let started = coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
     let _ = started;
     let request = plan_request(&summary, ref_token, ACTION_LOCAL_LINK);
     assert!(matches!(
@@ -588,11 +632,18 @@ fn incomplete_report_allows_only_keep_in_place_local_links() {
     assert!(summary.incomplete);
     assert!(summary.coverage.failed >= 1);
 
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     let mut in_place_seq = None;
     let mut move_seq = None;
     for row in &rows {
-        let ScanReportRow::SourceVerdict(verdict) = row else { continue };
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            continue;
+        };
         if verdict
             .operations
             .iter()
@@ -633,7 +684,9 @@ fn incomplete_report_allows_only_keep_in_place_local_links() {
         ))
         .unwrap_err();
     match err {
-        AdoptError::Eligibility { code, entity_seq, .. } => {
+        AdoptError::Eligibility {
+            code, entity_seq, ..
+        } => {
             assert_eq!(code, "scan_coverage_incomplete");
             assert_eq!(entity_seq, move_seq);
         }
@@ -649,20 +702,33 @@ fn already_managed_is_never_replaced_by_local_adopt() {
     let managed = home.path().join("Projects").join("networking");
     write_external_entity(&managed, "Networking");
     let managed = canonical(&managed);
-    home.seed_link_skill("networking", "Networking", "Managed", "1970-01-01T00:00:00Z");
+    home.seed_link_skill(
+        "networking",
+        "Networking",
+        "Managed",
+        "1970-01-01T00:00:00Z",
+    );
     std::os::unix::fs::symlink(&managed, agent.root.join("networking")).expect("symlink");
     let managed_facts = vec![ManagedSkillPathFact {
         directory_name: "networking".into(),
         final_entity_path: managed,
     }];
-    let coordinator = coordinator_for(&home, Arc::new(agent_store(&[agent], 1)), StubManagedFacts { facts: managed_facts });
+    let coordinator = coordinator_for(
+        &home,
+        Arc::new(agent_store(&[agent], 1)),
+        StubManagedFacts {
+            facts: managed_facts,
+        },
+    );
     let service = adopt_service(&home, coordinator.clone());
 
     let summary = scan_and_wait(&coordinator);
     let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::Excluded, 64);
     let mut managed_seq = None;
     for row in &rows {
-        let ScanReportRow::SourceVerdict(verdict) = row else { continue };
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            continue;
+        };
         if verdict.verdict == "already_managed" {
             managed_seq = Some(verdict.entity_seq);
         }
@@ -707,7 +773,12 @@ fn git_candidate_group_is_handoff_only() {
         "a Git Repository Source group aggregates the worktree hint"
     );
     // The member is a Git candidate member: not a Local candidate.
-    let (locals, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (locals, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     assert!(
         !locals.iter().any(|row| {
             matches!(row, ScanReportRow::SourceVerdict(verdict) if verdict.directory_names.first() == Some(&"git-member".to_string()))
@@ -722,10 +793,12 @@ fn git_candidate_group_is_handoff_only() {
     });
     let group = group.expect("git group row");
     assert_eq!(group.status, "candidate");
-    assert!(group
-        .operations
-        .iter()
-        .any(|op| op.operation == "git_fetch_and_manage" && op.allowed));
+    assert!(
+        group
+            .operations
+            .iter()
+            .any(|op| op.operation == "git_fetch_and_manage" && op.allowed)
+    );
     let _ = service;
 }
 
@@ -745,11 +818,18 @@ fn apply_revalidates_identity_tree_appearances_and_catalog_generation() {
 
     let service = adopt_service(&home, coordinator.clone());
     let summary = scan_and_wait(&coordinator);
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     let mut networking_seq = None;
     let mut gamma_seq = None;
     for row in &rows {
-        let ScanReportRow::SourceVerdict(verdict) = row else { continue };
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            continue;
+        };
         if verdict.directory_names.first() == Some(&"networking".to_string()) {
             networking_seq = Some(verdict.entity_seq);
         }
@@ -847,7 +927,11 @@ fn conflict_set_requires_exactly_one_explicit_winner() {
         StubManagedFacts { facts: vec![] },
     );
     let left = home.path().join("Projects").join("left").join("networking");
-    let right = home.path().join("Projects").join("right").join("Networking");
+    let right = home
+        .path()
+        .join("Projects")
+        .join("right")
+        .join("Networking");
     write_external_entity(&left, "Left");
     write_external_entity(&right, "Right");
     let left = std::fs::canonicalize(&left).expect("canonical left");
@@ -882,7 +966,11 @@ fn conflict_set_requires_exactly_one_explicit_winner() {
     // A second winner for the same set in the SAME request is refused
     // (exactly one explicit winner).
     let winner_plan = service
-        .plan_report(&plan_request(&summary, left_ref.clone(), ACTION_CONFLICT_WINNER))
+        .plan_report(&plan_request(
+            &summary,
+            left_ref.clone(),
+            ACTION_CONFLICT_WINNER,
+        ))
         .expect("winner plan");
     assert_eq!(winner_plan.items[0].action, ACTION_CONFLICT_WINNER);
     let both_request = AdoptReportPlanRequest {
@@ -905,7 +993,9 @@ fn conflict_set_requires_exactly_one_explicit_winner() {
     }
 
     // The explicit winner applies; the other member stays Untracked.
-    let result = service.apply(&winner_plan.plan_token).expect("winner apply");
+    let result = service
+        .apply(&winner_plan.plan_token)
+        .expect("winner apply");
     assert!(result.undo_available);
     let rows: Vec<(String, String)> = {
         let mut collected = Vec::new();
@@ -941,11 +1031,18 @@ fn failed_item_is_isolated_from_successful_siblings() {
 
     let service = adopt_service(&home, coordinator.clone());
     let summary = scan_and_wait(&coordinator);
-    let (rows, _) = page_section(&coordinator, &summary, ScanReportSection::LocalCandidates, 64);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
     let mut alpha_seq = None;
     let mut beta_seq = None;
     for row in &rows {
-        let ScanReportRow::SourceVerdict(verdict) = row else { continue };
+        let ScanReportRow::SourceVerdict(verdict) = row else {
+            continue;
+        };
         if verdict.directory_names.first() == Some(&"alpha-skill".to_string()) {
             alpha_seq = Some(verdict.entity_seq);
         }
@@ -1001,7 +1098,10 @@ fn failed_item_is_isolated_from_successful_siblings() {
         .iter()
         .find(|item| item.directory_name == "beta-skill")
         .expect("beta result");
-    assert!(alpha_result.adopted, "alpha stays adopted: {alpha_result:?}");
+    assert!(
+        alpha_result.adopted,
+        "alpha stays adopted: {alpha_result:?}"
+    );
     assert!(!beta_result.adopted, "beta fails without harming alpha");
     let rows: Vec<(String, String)> = {
         let mut collected = Vec::new();
@@ -1019,8 +1119,14 @@ fn failed_item_is_isolated_from_successful_siblings() {
         collected
     };
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|(id, name)| name == "alpha-skill" && id != "collision-1"),
-        "alpha was adopted by the plan: {rows:?}");
-    assert!(rows.iter().any(|(id, name)| name == "beta-skill" && id == "collision-1"),
-        "beta is the pre-seeded collision row, not an adopted duplicate: {rows:?}");
+    assert!(
+        rows.iter()
+            .any(|(id, name)| name == "alpha-skill" && id != "collision-1"),
+        "alpha was adopted by the plan: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(id, name)| name == "beta-skill" && id == "collision-1"),
+        "beta is the pre-seeded collision row, not an adopted duplicate: {rows:?}"
+    );
 }

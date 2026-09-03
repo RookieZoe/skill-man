@@ -20,11 +20,24 @@ pub enum GitSourceCapabilityKind {
     RemoteSourceIdentityConflict,
 }
 
+/// One current or tombstoned member of a Git Repository Source, surfaced
+/// for the minimal #93 lifecycle surface (per-member Create Local Source
+/// Copy). Labels use `skill_path`, which is unique within the source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitSourceCapabilityMember {
+    pub skill_id: String,
+    pub skill_path: String,
+    /// `false` marks a tombstoned member (no bytes to copy).
+    pub presence: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourceCapabilitySource {
     pub remote_id: String,
     pub canonical_url: String,
     pub kind: GitSourceCapabilityKind,
+    /// Complete only for `GitRepositorySource`; every other kind is empty.
+    pub members: Vec<GitSourceCapabilityMember>,
 }
 
 impl GitSourceCapabilitySource {
@@ -65,10 +78,26 @@ impl GitSourceCapabilityScan {
         let sources = facts
             .sources
             .into_iter()
-            .map(|source| GitSourceCapabilitySource {
-                remote_id: source.remote_id.clone(),
-                canonical_url: source.canonical_url.clone(),
-                kind: classify(&facts.catalog_structure, &source),
+            .map(|source| {
+                let kind = classify(&facts.catalog_structure, &source);
+                let members = match (&kind, source.repository.as_ref()) {
+                    (GitSourceCapabilityKind::GitRepositorySource, Some(repository)) => repository
+                        .current_members
+                        .iter()
+                        .map(|member| GitSourceCapabilityMember {
+                            skill_id: member.skill_id.clone(),
+                            skill_path: member.skill_path.clone(),
+                            presence: member.presence,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                GitSourceCapabilitySource {
+                    remote_id: source.remote_id.clone(),
+                    canonical_url: source.canonical_url.clone(),
+                    kind,
+                    members,
+                }
             })
             .collect();
         Ok(GitSourceCapabilityReport { sources })

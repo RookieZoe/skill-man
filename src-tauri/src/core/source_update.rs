@@ -1,25 +1,37 @@
-//! Source-wide Git Repository Source Update draft classification.
+//! v9 Git Repository Source Update (ticket #93, spec §8.3–§8.4,
+//! ADR-0018): the read-only Update draft, the whole-source Update confirm
+//! through the immutable Source Transition (same journal/CAS/recovery/Undo
+//! machinery as a fresh transition) and the member snapshot verifier that
+//! persists `source_snapshot_mismatch` and gates Update and new Enable.
 //!
-//! The v9 immutable Source Update (member add/remove/reappear, Source Member
-//! Tombstone, Source Snapshot Mismatch, Create Local Source Copy and whole
-//! source Remove) is ticket #93. This module keeps the read-only draft
-//! contract working on the v9 facts — it classifies a freshly fetched
-//! complete release against the managed source's current members — and
-//! closes every write path until ticket #93 restores the update transition.
+//! Restore Current Source Release, Create Local Source Copy and whole-source
+//! Remove live in `source_lifecycle.rs` with their own journals.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::core::domain::{Health, SkillId};
 use crate::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPolicyFacts, SourceGroupPreviewError,
     SourceGroupPreviewOutcome, SourceGroupPreviewService, SourceTrackingOverride,
 };
-use crate::seams::source_transition_store::{SourceTransitionStore, SourceTransitionStoreError};
+use crate::core::source_transition::{
+    ConfirmSourceUpdateRequest, SourceTransitionError, SourceTransitionResult,
+    SourceTransitionService, SourceUndoResult,
+};
+use crate::core::write_gate::WriteGate;
+use crate::seams::filesystem::{FileSystem, FileSystemError};
+use crate::seams::source::SourceError;
+use crate::seams::source_update_store::{SourceMemberPresence, SourceUpdateStoreError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceUpdateMemberState {
-    /// Already current in the managed source (same `skill_path`).
+    /// Already current in the managed source (same `skill_path`), including
+    /// members that reappear after a tombstone: the `skill_id` and storage
+    /// path are reused.
     Current,
     /// A member of the discovered release without a current counterpart.
     Added,
@@ -51,45 +63,100 @@ pub struct SourceUpdateDraft {
     pub members: Vec<SourceUpdateDraftMember>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRestoreResult {
+    pub remote_id: String,
+    pub restored_members: u32,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLocalCopyResult {
+    pub operation_id: String,
+    pub skill_id: SkillId,
+    pub directory_name: String,
+    pub destination: PathBuf,
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRemoveResult {
+    pub operation_id: String,
+    pub remote_id: String,
+    pub member_count: u32,
+    pub snapshot_version: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum SourceUpdateError {
-    #[error("Source Update confirmations are restored by ticket #93")]
-    UpdateRestoredByTicket93,
     #[error("{0}")]
     Validation(String),
+    #[error(
+        "the Git Source Member snapshots do not match the current Source Release; Restore Current Source Release before continuing"
+    )]
+    SourceSnapshotMismatch,
+    #[error("the restore requires recovery: {0}")]
+    RecoveryRequired(String),
     #[error(transparent)]
     Preview(#[from] SourceGroupPreviewError),
     #[error(transparent)]
-    Store(#[from] SourceTransitionStoreError),
+    Transition(SourceTransitionError),
+    #[error(transparent)]
+    Store(#[from] SourceUpdateStoreError),
+    #[error(transparent)]
+    FileSystem(#[from] FileSystemError),
+    #[error(transparent)]
+    Source(#[from] SourceError),
 }
 
-/// Read-only classification of a fresh complete release against the managed
-/// source; the update write machinery is ticket #93.
+/// The source lifecycle service. The client sends only durable ids;
+/// every member list, release and path fact is re-read by Core/seams.
 pub struct SourceUpdateService {
     preview: Arc<SourceGroupPreviewService>,
-    store: Arc<dyn SourceTransitionStore>,
+    transition: Arc<SourceTransitionService>,
+    filesystem: Arc<dyn FileSystem>,
+    configured_library_root: PathBuf,
+    home_context: Option<Arc<WriteGate>>,
 }
 
 impl SourceUpdateService {
     pub fn new(
         preview: Arc<SourceGroupPreviewService>,
-        store: Arc<dyn SourceTransitionStore>,
+        transition: Arc<SourceTransitionService>,
+        filesystem: Arc<dyn FileSystem>,
+        library_root: PathBuf,
     ) -> Self {
-        Self { preview, store }
+        Self {
+            preview,
+            transition,
+            filesystem,
+            configured_library_root: library_root,
+            home_context: None,
+        }
     }
 
+    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
+        self.home_context = Some(home_context);
+        self
+    }
+
+    /// Read-only classification of a fresh complete release against the
+    /// managed source (including tombstoned members).
     pub fn preview(
         &self,
         remote_id: &str,
         tracking_policy: Option<SourceTrackingOverride>,
     ) -> Result<SourceUpdateDraft, SourceUpdateError> {
-        // Re-read the managed source at preview time (never from the client).
-        let existing = self.store.existing_source(remote_id)?.ok_or_else(|| {
-            SourceUpdateError::Validation(
-                "the selected Git Repository Source is no longer complete".into(),
-            )
-        })?;
-        let canonical_url = existing.canonical_url.clone();
+        let current = self
+            .transition
+            .update_store_handle()
+            .read_current(remote_id)?
+            .ok_or_else(|| {
+                SourceUpdateError::Validation(
+                    "the selected Git Repository Source is no longer complete".into(),
+                )
+            })?;
+        let canonical_url = current.canonical_url.clone();
         let source_type = if canonical_url.starts_with("https://github.com/") {
             "github"
         } else if canonical_url.starts_with("https://gitlab.com/") {
@@ -109,11 +176,11 @@ impl SourceUpdateService {
                 "the current source draft is conflicted; resolve it and preview again".into(),
             ));
         };
-        let current_by_path = existing
+        let current_by_path = current
             .members
-            .into_iter()
+            .iter()
             .map(|member| (member.skill_path.clone(), member))
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
         let mut members = preview
             .members
             .iter()
@@ -125,7 +192,7 @@ impl SourceUpdateService {
                 };
                 let skill_id = current_by_path
                     .get(&member.skill_path)
-                    .map(|member| member.skill_id.clone())
+                    .map(|member| member.skill_id.0.clone())
                     .unwrap_or_default();
                 SourceUpdateDraftMember {
                     skill_id,
@@ -145,14 +212,16 @@ impl SourceUpdateService {
             .map(|member| member.skill_path.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         for (skill_path, member) in &current_by_path {
-            if !discovered_paths.contains(skill_path.as_str()) {
+            if member.presence == SourceMemberPresence::Current
+                && !discovered_paths.contains(skill_path.as_str())
+            {
                 members.push(SourceUpdateDraftMember {
-                    skill_id: member.skill_id.clone(),
+                    skill_id: member.skill_id.0.clone(),
                     skill_path: skill_path.clone(),
                     directory_name: member.directory_name.clone(),
-                    directory_identity_key: String::new(),
-                    display_name: member.directory_name.clone(),
-                    description: String::new(),
+                    directory_identity_key: member.identity_key.clone(),
+                    display_name: member.display_name.clone(),
+                    description: member.description.clone(),
                     tree_summary: String::new(),
                     state: SourceUpdateMemberState::Removed,
                 });
@@ -163,15 +232,151 @@ impl SourceUpdateService {
             remote_id: remote_id.into(),
             provider: preview.provider,
             source_url: preview.source_url,
-            aliases: preview.aliases,
+            aliases: current.aliases,
             policy: preview.policy,
             members,
         })
     }
 
-    /// Confirmation, Source-Transition recovery and the whole-source Update
-    /// commit are ticket #93; every write stays closed here.
-    pub fn confirm(&self, _remote_id: &str) -> Result<(), SourceUpdateError> {
-        Err(SourceUpdateError::UpdateRestoredByTicket93)
+    /// Confirmation: one whole-source Update through the same immutable
+    /// Source Transition machinery (journal/CAS/recovery/Undo).
+    pub fn confirm(
+        &self,
+        remote_id: &str,
+        tracking_policy: Option<SourceTrackingOverride>,
+        expected_selected_ref: String,
+        expected_resolved_commit: String,
+    ) -> Result<SourceTransitionResult, SourceUpdateError> {
+        self.transition
+            .confirm_update(ConfirmSourceUpdateRequest {
+                remote_id: remote_id.into(),
+                tracking_policy,
+                expected_selected_ref,
+                expected_resolved_commit,
+            })
+            .map_err(SourceUpdateError::Transition)
+    }
+
+    pub fn undo(&self, operation_id: &str) -> Result<SourceUndoResult, SourceUpdateError> {
+        self.transition
+            .undo(operation_id)
+            .map_err(SourceUpdateError::Transition)
+    }
+
+    pub fn finalize(&self, operation_id: &str) -> Result<(), SourceUpdateError> {
+        self.transition
+            .finalize(operation_id)
+            .map_err(SourceUpdateError::Transition)
+    }
+
+    /// Startup and pre-write verification of every current member snapshot
+    /// against the immutable current Source Release. Mismatches persist
+    /// `source_snapshot_mismatch` health and block Update/new Enable/
+    /// ordinary source writes (read-only, Disable, Local Copy and explicit
+    /// Restore stay available). Returns the number of mismatched members.
+    pub fn verify_all_members(&self) -> Result<u32, SourceUpdateError> {
+        let library_root = self.active_library_root()?;
+        let mut mismatched = 0u32;
+        for remote_id in self.transition.update_store_handle().source_ids()? {
+            let Some(current) = self
+                .transition
+                .update_store_handle()
+                .read_current(&remote_id)?
+            else {
+                continue;
+            };
+            let mut health = Vec::new();
+            for member in &current.members {
+                if member.presence != SourceMemberPresence::Current {
+                    continue;
+                }
+                let namespace = library_root.join(&member.storage_relpath);
+                let observed = self.observed_hash(&namespace)?;
+                let matches = observed.as_deref() == member.tree_hash.as_deref();
+                if !matches {
+                    mismatched += 1;
+                    if member.health != Health::SourceSnapshotMismatch {
+                        health.push((member.skill_id.clone(), Health::SourceSnapshotMismatch));
+                    }
+                } else if member.health != Health::Healthy {
+                    health.push((member.skill_id.clone(), Health::Healthy));
+                }
+            }
+            if !health.is_empty() {
+                self.transition
+                    .update_store_handle()
+                    .set_source_member_health(&remote_id, &health)?;
+            }
+        }
+        Ok(mismatched)
+    }
+
+    /// New-Enable gate (spec §8.3): `source_snapshot_mismatch` blocks new
+    /// Enable; a healthy member must also pass the byte-level re-verify.
+    pub fn ensure_new_enable_allowed(&self, skill_id: &SkillId) -> Result<(), SourceUpdateError> {
+        let library_root = self.active_library_root()?;
+        let Some((remote_id, health)) = self
+            .transition
+            .update_store_handle()
+            .member_health(skill_id)?
+        else {
+            // Non-Git skills have no snapshot gate.
+            return Ok(());
+        };
+        if health == Health::SourceSnapshotMismatch {
+            return Err(SourceUpdateError::SourceSnapshotMismatch);
+        }
+        let Some(current) = self
+            .transition
+            .update_store_handle()
+            .read_current(&remote_id)?
+        else {
+            return Err(SourceUpdateError::SourceSnapshotMismatch);
+        };
+        let Some(member) = current
+            .members
+            .iter()
+            .find(|member| member.skill_id.0 == skill_id.0)
+        else {
+            return Ok(());
+        };
+        if member.presence != SourceMemberPresence::Current {
+            return Err(SourceUpdateError::Validation(
+                "the Git Source Member is tombstoned; it cannot be enabled".into(),
+            ));
+        }
+        let namespace = library_root.join(&member.storage_relpath);
+        let observed = self.observed_hash(&namespace)?;
+        if observed.as_deref() != member.tree_hash.as_deref() || member.health != Health::Healthy {
+            return Err(SourceUpdateError::SourceSnapshotMismatch);
+        }
+        Ok(())
+    }
+
+    /// Startup recovery for Restore / Local Copy / Remove journals. It
+    /// reads only the frozen journals; no remote is ever fetched again.
+    fn observed_hash(&self, namespace: &Path) -> Result<Option<String>, SourceUpdateError> {
+        match self.filesystem.staged_tree_snapshot(namespace) {
+            Ok(snapshot) => Ok(Some(snapshot.content_hash)),
+            Err(FileSystemError::Io { source, .. })
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn active_library_root(&self) -> Result<PathBuf, SourceUpdateError> {
+        match &self.home_context {
+            Some(context) => context
+                .bound_home()
+                .map(|home| home.path)
+                .map_err(|error| SourceUpdateError::RecoveryRequired(error.to_string())),
+            None => Ok(self.configured_library_root.clone()),
+        }
     }
 }
