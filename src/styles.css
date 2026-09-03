@@ -4265,3 +4265,212 @@ button:active:not(:disabled) {
   opacity: 0.5;
   cursor: default;
 }
+
+/* -- Global Enable (spec §7.4/§7.5): Inspector Target group cards + the
+ * three-step Global Enable sheet. */
+
+.target-group-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.target-group-card {
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  background: var(--panel, #fbfaf7);
+}
+
+.target-group-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.target-group-path {
+  font-size: 12px;
+  color: var(--muted, #6b665c);
+  overflow-wrap: anywhere;
+}
+
+.target-group-consumer-count {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+  white-space: nowrap;
+}
+
+.target-group-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-weight: 600;
+}
+
+.compat-unknown {
+  font-size: 11px;
+  color: var(--muted, #6b665c);
+  border: 1px dashed currentColor;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.target-group-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.target-group-state {
+  font-size: 12px;
+  color: var(--muted, #6b665c);
+}
+
+.target-group-conflict {
+  display: grid;
+  gap: 6px;
+  border-left: 3px solid var(--warning, #b8860b);
+  padding-left: 10px;
+}
+
+.target-group-conflict p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.inspector-result {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.inspector-result p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.inspector-error {
+  font-size: 12px;
+  color: var(--danger, #a33);
+}
+
+/* Three-step sheet (reuses activation-sheet backbone). */
+.enable-sheet .enable-group-selection,
+.enable-sheet .enable-preview-matrix,
+.enable-sheet .enable-result {
+  display: grid;
+  gap: 10px;
+}
+
+.enable-selection-summary {
+  font-size: 12px;
+  color: var(--muted, #6b665c);
+  margin: 0;
+}
+
+.enable-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.enable-group-list label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.enable-group-path {
+  color: var(--muted, #6b665c);
+  overflow-wrap: anywhere;
+  grid-column: 2;
+}
+
+.enable-sheet-empty,
+.enable-sheet-hint,
+.enable-sheet-error {
+  font-size: 13px;
+  margin: 8px 0;
+}
+
+.enable-sheet-error {
+  color: var(--danger, #a33);
+}
+
+.enable-matrix-head,
+.enable-matrix-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.enable-matrix-row {
+  border-bottom: 1px solid var(--border, #d9d5cc);
+  padding: 8px 0;
+}
+
+.enable-matrix-cell {
+  overflow-wrap: anywhere;
+}
+
+.enable-matrix-eligibility,
+.enable-matrix-agents,
+.enable-matrix-note {
+  font-size: 12px;
+}
+
+.enable-matrix-agents,
+.enable-matrix-note {
+  grid-column: span 2;
+  color: var(--muted, #6b665c);
+}
+
+.enable-resolution-select {
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.enable-outcome {
+  font-weight: 600;
+}
+
+.enable-result ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.enable-result li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+}
+
+@media (max-width: 759px) {
+  .enable-matrix-head,
+  .enable-matrix-row {
+    grid-template-columns: 1fr;
+  }
+}

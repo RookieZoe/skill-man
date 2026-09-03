@@ -8,8 +8,8 @@ use crate::core::domain::{
 };
 use crate::core::home::BoundHome;
 use crate::seams::activation_store::{
-    ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
-    StoredActivationObservation,
+    ActivationCellRow, ActivationCellWrite, ActivationObservation, ActivationStore,
+    ActivationStoreError, DesiredActivation, StoredActivationObservation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict as AdoptConflict,
@@ -278,6 +278,14 @@ impl CatalogStore for RuntimeCatalogStore {
 
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError> {
         self.require_catalog()?.list_skill_summaries(filter)
+    }
+
+    fn skill_directory_identity_key(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, CatalogStoreError> {
+        self.require_catalog()?
+            .skill_directory_identity_key(skill_id)
     }
 
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
@@ -997,6 +1005,45 @@ impl ActivationStore for RuntimeCatalogStore {
             ));
         }
         self.require().record_observation(observation)
+    }
+
+    fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
+            })?
+            .activation_cells()
+    }
+
+    fn activation_cells_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
+            })?
+            .activation_cells_for_skill(skill_id)
+    }
+
+    fn write_activation_cells(
+        &self,
+        writes: &[ActivationCellWrite],
+    ) -> Result<u64, ActivationStoreError> {
+        if !self.is_writable() {
+            return Err(ActivationStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            ));
+        }
+        self.require().write_activation_cells(writes)
+    }
+
+    fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
+            })?
+            .catalog_generation()
     }
 }
 

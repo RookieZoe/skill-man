@@ -335,6 +335,22 @@ impl MaintenanceService {
             let desired_activations = self.store.desired_activation_baselines()?;
             self.filesystem
                 .recover_activation_replace_journals(&library_root, &desired_activations)?;
+            // Enable Module journals (spec §4.9): per-cell rollback /
+            // roll-forward decided by the current catalog desired state.
+            let enable_facts = self
+                .store
+                .activation_cells()?
+                .into_iter()
+                .map(|cell| crate::seams::filesystem::EnableRecoveryFact {
+                    skill_id: cell.skill_id.0,
+                    target_root_id: cell.target_root_id,
+                    desired_enabled: cell.desired_enabled,
+                    expected_entry_path: cell.expected_entry_path,
+                    expected_target_path: cell.expected_target_path,
+                })
+                .collect::<Vec<_>>();
+            self.filesystem
+                .recover_enable_journals(&library_root, &enable_facts)?;
             let relocate_baselines = self
                 .store
                 .managed_skill_baselines()?

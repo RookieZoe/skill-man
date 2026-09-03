@@ -13,38 +13,42 @@ use crate::tauri_adapter::dto::{
     AgentConfigurationApplyResultDto, AgentConfigurationPlanDto, AgentManagementSnapshotDto,
     AppPreferencesDto, AppUpdateCheckDto, ApplyAbandonRequestDto, ApplyAdoptRequestDto,
     ApplyAgentConfigurationPlanRequestDto, ApplyFileImportRequestDto,
-    ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto, ApplyLinkImportRequestDto,
-    ApplyRelocateLinkRequestDto, ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto,
-    BootstrapSnapshotDto, CancelAdoptRequestDto, CancelAppUpdateRequestDto,
-    CancelExistingHomeRecoveryRequestDto, CancelFileImportRequestDto, CancelLinkImportRequestDto,
-    CancelRelocateLinkRequestDto, CancelRemoveSkillRequestDto, CancelRescanRequestDto,
-    CancelledAppUpdateDto, CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
+    ApplyFileImportSelectionRequestDto, ApplyFixtureRecoveryRequestDto,
+    ApplyGlobalEnableRequestDto, ApplyLinkImportRequestDto, ApplyRelocateLinkRequestDto,
+    ApplyRemoveSkillRequestDto, ApplySkillUpdatesRequestDto, BootstrapSnapshotDto,
+    CancelAdoptRequestDto, CancelAppUpdateRequestDto, CancelExistingHomeRecoveryRequestDto,
+    CancelFileImportRequestDto, CancelLinkImportRequestDto, CancelRelocateLinkRequestDto,
+    CancelRemoveSkillRequestDto, CancelRescanRequestDto, CancelledAppUpdateDto,
+    CandidateOperationRequestDto, CatalogListDto, CheckAppUpdateRequestDto,
     CheckSkillUpdatesRequestDto, CommandFailureDto, ConfirmExistingHomeRecoveryRequestDto,
     ConfirmFixtureRecoveryRequestDto, ConfirmHomeRequestDto, ConfirmSourcePromotionRequestDto,
     CreateAgentConfigurationRequestDto, CreateAgentDirectoryRequestDto,
     DeleteAgentConfigurationRequestDto, DeleteSafetySnapshotRequestDto, DeleteSnapshotPreviewDto,
     DiagnosticDto, DiscoverFileImportCollectionRequestDto, DiscoverFileImportRequestDto,
     DiscoverLinkImportRequestDto, DownloadAppUpdateRequestDto, DownloadedAppUpdateDto,
-    EditAgentConfigurationRequestDto, ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto,
+    EditAgentConfigurationRequestDto, EnableOperationRequestDto, EnablePlanDto, EnableResultDto,
+    EnableUndoResultDto, ExistingHomeRecoveryPlanDto, FetchLatestAndManageRequestDto,
     FileImportCandidateDto, FileImportDiscoveryDto, FileImportPreviewDto, FileImportResultDto,
     FileImportSelectionPreviewDto, FileImportSelectionResultDto, FinalizeAdoptRequestDto,
     FixtureRecoveryPlanDto, FixtureRecoveryPreviewDto, GitSourceCapabilityReportDto,
-    HomeCandidateDto, InstallAppUpdateRequestDto, LinkImportCandidateDto, LinkImportPreviewDto,
-    LinkImportResultDto, ListSkillsRequestDto, LocaleSnapshotDto, ObservationAndScanSnapshotDto,
-    PinSkillUpdatesRequestDto, PlanAdoptRequestDto, PlanFileImportRequestDto,
-    PlanFileImportSelectionRequestDto, PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto,
-    PlanLinkImportRequestDto, PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto,
-    PreferenceUpdatesDto, PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto,
-    PrepareHomeRequestDto, PreviewSourcePromotionRequestDto, PublicErrorDto, RecoveryResultDto,
-    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
-    RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
-    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourceLocalCopyRequestDto,
-    SourceLocalCopyResultDto, SourcePromotionResultDto, SourceRemoveRequestDto,
-    SourceRemoveResultDto, SourceRestoreRequestDto, SourceRestoreResultDto,
+    GlobalTargetGroupSnapshotDto, HomeCandidateDto, InstallAppUpdateRequestDto,
+    LinkImportCandidateDto, LinkImportPreviewDto, LinkImportResultDto, ListSkillsRequestDto,
+    LocaleSnapshotDto, ObservationAndScanSnapshotDto, PinSkillUpdatesRequestDto,
+    PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
+    PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanGlobalEnableRequestDto,
+    PlanGlobalLifecycleRequestDto, PlanLinkImportRequestDto, PlanRemoveSkillRequestDto,
+    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, PreferencesWarningDto,
+    PrepareExistingHomeRecoveryRequestDto, PrepareHomeRequestDto, PreviewSourcePromotionRequestDto,
+    PublicErrorDto, RecoveryResultDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
+    RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto, RestoreEligibilityDto,
+    SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto, SourceGroupPreviewOutcomeDto,
+    SourceLocalCopyRequestDto, SourceLocalCopyResultDto, SourcePromotionResultDto,
+    SourceRemoveRequestDto, SourceRemoveResultDto, SourceRestoreRequestDto, SourceRestoreResultDto,
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
     StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto,
     UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
 };
+use crate::tauri_adapter::enable_api::EnableApi;
 use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
 use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
 use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -988,4 +992,60 @@ pub fn apply_delete_safety_snapshot(
     request: DeleteSafetySnapshotRequestDto,
 ) -> Result<(), CommandFailureDto> {
     state.apply_delete_safety_snapshot(request)
+}
+
+// -- Global Enable (spec §4.9; ADR-0019) --
+
+#[tauri::command]
+pub fn list_target_groups(
+    state: State<'_, EnableApi>,
+    skill_id: String,
+) -> Result<GlobalTargetGroupSnapshotDto, CommandFailureDto> {
+    state.list_target_groups(skill_id)
+}
+
+#[tauri::command]
+pub fn plan_global_enable(
+    state: State<'_, EnableApi>,
+    request: PlanGlobalEnableRequestDto,
+) -> Result<EnablePlanDto, CommandFailureDto> {
+    state.plan_global_enable(request)
+}
+
+#[tauri::command]
+pub fn plan_global_lifecycle(
+    state: State<'_, EnableApi>,
+    request: PlanGlobalLifecycleRequestDto,
+) -> Result<EnablePlanDto, CommandFailureDto> {
+    state.plan_global_lifecycle(request)
+}
+
+#[tauri::command]
+pub fn apply_global_enable(
+    state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: ApplyGlobalEnableRequestDto,
+) -> Result<EnableResultDto, CommandFailureDto> {
+    let result = state.apply_global_enable(request)?;
+    mutation.bump();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn undo_global_enable(
+    state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: EnableOperationRequestDto,
+) -> Result<EnableUndoResultDto, CommandFailureDto> {
+    let result = state.undo_global_enable(request)?;
+    mutation.bump();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn finalize_global_enable(
+    state: State<'_, EnableApi>,
+    request: EnableOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.finalize_global_enable(request)
 }

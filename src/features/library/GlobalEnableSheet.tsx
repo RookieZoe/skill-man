@@ -1,0 +1,570 @@
+import { useEffect, useMemo, useState } from "react";
+
+import type {
+  CatalogClient,
+  CellResolution,
+  EnableCell,
+  EnablePlan,
+  EnableResult,
+  GlobalTargetGroupSnapshot,
+} from "../../app/catalog-client";
+import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
+import type { MessageKey } from "../locale/messages";
+
+/**
+ * Global Enable three-step sheet (spec §7.4): ① Target group selection
+ * (default empty, explicit Select all, deduped physical Target count and
+ * affected Agent count) → ② Skill × resolved Target preview matrix with the
+ * §7.5 per-cell Conflict decisions → ③ Result with one `Undo this
+ * operation`. The Core owns the plan; this surface never composes per-Agent
+ * commands.
+ */
+export function GlobalEnableSheet({
+  client,
+  skillId,
+  skillName,
+  initialGroupIds,
+  onClose,
+}: {
+  client: CatalogClient;
+  skillId: string;
+  skillName: string;
+  initialGroupIds: string[];
+  onClose: () => void;
+}) {
+  const { t } = useLocale();
+  const [groupsSnapshot, setGroupsSnapshot] =
+    useState<GlobalTargetGroupSnapshot | null>(null);
+  const [selected, setSelected] = useState<string[]>(initialGroupIds);
+  const [resolutions, setResolutions] = useState<Map<string, CellResolution>>(
+    new Map(),
+  );
+  const [plan, setPlan] = useState<EnablePlan | null>(null);
+  const [result, setResult] = useState<EnableResult | null>(null);
+  const [shownStep, setShownStep] = useState<"targets" | "preview" | "result">(
+    "targets",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const step = shownStep;
+  const preparing = step === "targets" && groupsSnapshot === null;
+  const planning = step === "preview" && plan === null;
+  const busy = preparing || planning;
+  async function refreshGroups() {
+    try {
+      setGroupsSnapshot(await client.listTargetGroups(skillId));
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+
+  useEffect(() => {
+    let current = true;
+    client
+      .listTargetGroups(skillId)
+      .then((next) => {
+        if (!current) return;
+        setGroupsSnapshot(next);
+        setError(null);
+      })
+      .catch((cause) => {
+        if (!current) setError(String(cause));
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, skillId]);
+
+  // Re-plan whenever the resolution set changes so the preview matrix always
+  // reflects the user's latest per-cell decisions; only after Continue.
+  useEffect(() => {
+    if (
+      shownStep !== "preview" ||
+      selected.length === 0 ||
+      groupsSnapshot === null
+    ) {
+      return;
+    }
+    let current = true;
+    client
+      .planGlobalEnable(
+        [skillId],
+        selected,
+        [...resolutions.entries()].map(([cellKey, resolution]) => ({
+          cellKey,
+          resolution,
+        })),
+      )
+      .then((next) => {
+        if (!current) return;
+        setPlan(next);
+        setError(null);
+      })
+      .catch((cause) => {
+        if (current) setError(String(cause));
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, skillId, selected, resolutions, groupsSnapshot, shownStep]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) {
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onClose]);
+
+  const applyableCells = useMemo(
+    () =>
+      (plan?.cells ?? []).filter(
+        (cell) =>
+          cell.eligibility === "ready" ||
+          (cell.eligibility === "conflict" &&
+            cell.resolution !== "skip" &&
+            cell.resolution !== "adopt"),
+      ),
+    [plan],
+  );
+
+  const chosenGroups = (groupsSnapshot?.groups ?? []).filter((group) =>
+    selected.includes(group.targetRootId),
+  );
+  const affectedAgentIds = new Set(
+    chosenGroups.flatMap((group) => group.consumers.map((c) => c.agentId)),
+  );
+
+  async function onApply() {
+    if (!plan) {
+      return;
+    }
+    setError(null);
+    try {
+      const applied = await client.applyGlobalEnable(plan.planToken);
+      setResult(applied);
+      setShownStep("result");
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+
+  async function onUndo() {
+    if (!result) {
+      return;
+    }
+    setError(null);
+    try {
+      await client.undoGlobalEnable(result.operationId);
+      setResult(null);
+      setPlan(null);
+      setShownStep("targets");
+      await refreshGroups();
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+
+  async function onCloseWithFinalize() {
+    if (result && !busy) {
+      try {
+        await client.finalizeGlobalEnable(result.operationId);
+      } catch {
+        // Finalization is best-effort here: the result window closes on
+        // restart as well (spec §4.9).
+      }
+    }
+    onClose();
+  }
+
+  return (
+    <div
+      className="activation-sheet-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !busy) {
+          void onCloseWithFinalize();
+        }
+      }}
+    >
+      <section
+        className="activation-sheet enable-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("enable.global.dialogLabel", { skill: skillName })}
+      >
+        <ol
+          className="import-progress"
+          aria-label={t("enable.global.progressLabel")}
+        >
+          {(["targets", "preview", "result"] as const).map((s) => (
+            <li key={s} aria-current={step === s ? "step" : undefined}>
+              {t(`enable.global.step${capitalize(s)}` as MessageKey)}
+            </li>
+          ))}
+        </ol>
+
+        {step === "targets" && (
+          <TargetGroupStep
+            snapshot={groupsSnapshot}
+            selected={selected}
+            activity={busy}
+            onToggle={(groupId) => {
+              setSelected((current) =>
+                current.includes(groupId)
+                  ? current.filter((id) => id !== groupId)
+                  : [...current, groupId],
+              );
+            }}
+            onSelectAll={() =>
+              setSelected(
+                (groupsSnapshot?.groups ?? []).map(
+                  (group) => group.targetRootId,
+                ),
+              )
+            }
+            affectedAgentCount={affectedAgentIds.size}
+          />
+        )}
+
+        {step === "preview" && plan !== null && (
+          <PreviewMatrixStep
+            plan={plan}
+            resolutions={resolutions}
+            onResolutionChange={(cellKey, resolution) => {
+              setResolutions((current) => {
+                const next = new Map(current);
+                next.set(cellKey, resolution);
+                return next;
+              });
+            }}
+          />
+        )}
+
+        {step === "result" && result !== null && (
+          <ResultStep result={result} onUndo={() => void onUndo()} />
+        )}
+
+        {error !== null && (
+          <p className="enable-sheet-error" role="alert">
+            {error}
+          </p>
+        )}
+
+        <div className="import-actions">
+          {step === "targets" && (
+            <button
+              type="button"
+              className="toolbar-button primary"
+              disabled={
+                selected.length === 0 || busy || groupsSnapshot === null
+              }
+              onClick={() => {
+                setPlan(null);
+                setResolutions(new Map());
+                setShownStep("preview");
+              }}
+            >
+              {t("enable.global.continue")}
+            </button>
+          )}
+          {step === "preview" && (
+            <>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={planning}
+                onClick={() => setShownStep("targets")}
+              >
+                {t("enable.global.back")}
+              </button>
+              <button
+                type="button"
+                className="toolbar-button primary"
+                disabled={applyableCells.length === 0 || planning}
+                onClick={() => void onApply()}
+              >
+                {t("enable.global.applyPlan")}
+              </button>
+            </>
+          )}
+          {step === "result" && (
+            <button
+              type="button"
+              className="toolbar-button primary"
+              disabled={busy}
+              onClick={() => void onCloseWithFinalize()}
+            >
+              {t("enable.global.close")}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function TargetGroupStep({
+  snapshot,
+  selected,
+  activity,
+  onToggle,
+  onSelectAll,
+  affectedAgentCount,
+}: {
+  snapshot: GlobalTargetGroupSnapshot | null;
+  selected: string[];
+  activity: boolean;
+  onToggle: (groupId: string) => void;
+  onSelectAll: () => void;
+  affectedAgentCount: number;
+}) {
+  const { t, tPlural } = useLocale();
+  if (snapshot === null) {
+    return (
+      <p className="enable-sheet-empty">
+        {activity
+          ? t("library.activation.preparing")
+          : t("enable.global.noGroups")}
+      </p>
+    );
+  }
+  if (snapshot.groups.length === 0) {
+    return <p className="enable-sheet-empty">{t("enable.global.noGroups")}</p>;
+  }
+  return (
+    <div className="enable-group-selection">
+      <p className="enable-selection-summary">
+        {selected.length === 0
+          ? t("enable.global.selectedNone")
+          : tPlural("enable.global.selectedGroups", selected.length)}
+        {" · "}
+        {tPlural("enable.global.affectedAgents", affectedAgentCount)}
+        {" · "}
+        {tPlural("enable.global.physicalTargets", new Set(selected).size)}
+      </p>
+      <ul className="enable-group-list">
+        {snapshot.groups.map((group) => (
+          <li key={group.targetRootId}>
+            <label>
+              <input
+                type="checkbox"
+                checked={selected.includes(group.targetRootId)}
+                disabled={group.action !== "none" || activity}
+                onChange={() => onToggle(group.targetRootId)}
+              />
+              <span className="enable-group-name">
+                {group.consumers.map((c) => c.agentName).join(", ")}
+              </span>
+              <small className="enable-group-path">
+                {group.configuredPath}
+              </small>
+              {group.action === "open_agent_management" && (
+                <em>{t("enable.global.mismatchNote")}</em>
+              )}
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="import-actions">
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={activity}
+          onClick={onSelectAll}
+        >
+          {t("enable.global.selectAll")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewMatrixStep({
+  plan,
+  resolutions,
+  onResolutionChange,
+}: {
+  plan: EnablePlan;
+  resolutions: Map<string, CellResolution>;
+  onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="enable-preview-matrix" role="table">
+      <div className="enable-matrix-head" role="row">
+        <span role="columnheader">{t("enable.global.stepPreviewMatrix")}</span>
+      </div>
+      {plan.cells.map((cell) => (
+        <PreviewCell
+          key={cell.cellKey}
+          cell={cell}
+          resolution={resolutions.get(cell.cellKey) ?? cell.resolution}
+          onResolutionChange={onResolutionChange}
+        />
+      ))}
+      <p className="enable-sheet-hint">{t("enable.global.conflictHint")}</p>
+    </div>
+  );
+}
+
+function PreviewCell({
+  cell,
+  resolution,
+  onResolutionChange,
+}: {
+  cell: EnableCell;
+  resolution: CellResolution;
+  onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
+}) {
+  const { t } = useLocale();
+  const eligibilityLabel =
+    cell.eligibility === "ready"
+      ? t("enable.global.cellReady")
+      : cell.eligibility === "no_op"
+        ? t("enable.global.cellNoOp")
+        : cell.eligibility === "conflict"
+          ? t("enable.global.cellConflict")
+          : cell.eligibility === "blocked"
+            ? t("enable.global.cellBlocked")
+            : t("enable.global.cellSkip");
+  const blockedLabel = blockedReasonLabel(cell, t);
+  return (
+    <div className="enable-matrix-row" role="row">
+      <span className="enable-matrix-cell" role="cell">
+        {cell.skillName} → {cell.targetPath}
+      </span>
+      <span
+        className={`enable-matrix-eligibility eligibility-${cell.eligibility}`}
+        role="cell"
+      >
+        {eligibilityLabel}
+      </span>
+      {cell.eligibility === "conflict" && (
+        <select
+          className="enable-resolution-select"
+          role="cell"
+          aria-label={cell.cellKey}
+          value={resolution}
+          onChange={(event) =>
+            onResolutionChange(
+              cell.cellKey,
+              event.currentTarget.value as CellResolution,
+            )
+          }
+        >
+          <option value="switch">{t("enable.global.resolutionSwitch")}</option>
+          <option value="replace">
+            {t("enable.global.resolutionReplace")}
+          </option>
+          <option value="adopt">{t("enable.global.resolutionAdopt")}</option>
+          <option value="skip">{t("enable.global.resolutionCancel")}</option>
+        </select>
+      )}
+      {blockedLabel !== null && (
+        <small className="enable-matrix-note">{blockedLabel}</small>
+      )}
+      {cell.occExactDirect && (
+        <small className="enable-matrix-note">
+          {t("enable.global.exactDirectNote")}
+        </small>
+      )}
+      {cell.destructive && (
+        <small className="enable-matrix-note">
+          {t("enable.global.destructive", {
+            files: cell.destructive.files,
+            directories: cell.destructive.directories,
+          })}
+        </small>
+      )}
+      <small className="enable-matrix-agents">
+        {cell.affectedAgentNames.join(", ")}
+      </small>
+    </div>
+  );
+}
+
+function blockedReasonLabel(
+  cell: EnableCell,
+  t: LocaleContextValue["t"],
+): string | null {
+  switch (cell.blockedReason) {
+    case "target_absent":
+      return t("enable.global.blockedTargetAbsent");
+    case "target_unavailable":
+      return t("enable.global.blockedTargetUnavailable");
+    case "source_snapshot_mismatch":
+      return t("enable.global.blockedSourceSnapshotMismatch");
+    case "tombstoned_member":
+      return t("enable.global.blockedTombstonedMember");
+    case "entity_broken":
+      return t("enable.global.blockedEntityBroken");
+    case "entry_occupied":
+      return t("enable.global.blockedEntryOccupied");
+    default:
+      return null;
+  }
+}
+
+function ResultStep({
+  result,
+  onUndo,
+}: {
+  result: EnableResult;
+  onUndo: () => void;
+}) {
+  const { t } = useLocale();
+  const succeeded = result.cells.filter(
+    (cell) => cell.outcome === "succeeded",
+  ).length;
+  return (
+    <div className="enable-result">
+      <p>
+        {t("enable.global.resultSummary", {
+          succeeded,
+          total: result.cells.length,
+        })}
+      </p>
+      <ul>
+        {result.cells.map((cell) => (
+          <li key={cell.cellKey}>
+            <span className={`enable-outcome outcome-${cell.outcome}`}>
+              {outcomeLabel(cell.outcome, t)}
+            </span>
+            {" — "}
+            {cell.cellKey}
+            {cell.diagnostic !== null && (
+              <small className="enable-matrix-note"> {cell.diagnostic}</small>
+            )}
+          </li>
+        ))}
+      </ul>
+      <button type="button" className="toolbar-button" onClick={onUndo}>
+        {t("enable.global.undoOperation")}
+      </button>
+    </div>
+  );
+}
+
+function outcomeLabel(
+  outcome: EnableResult["cells"][number]["outcome"],
+  t: LocaleContextValue["t"],
+): string {
+  switch (outcome) {
+    case "succeeded":
+      return t("enable.global.outcomeSucceeded");
+    case "no_op":
+      return t("enable.global.outcomeNoOp");
+    case "skipped":
+      return t("enable.global.outcomeSkipped");
+    case "failed":
+      return t("enable.global.outcomeFailed");
+    case "not_attempted":
+      return t("enable.global.outcomeNotAttempted");
+  }
+}

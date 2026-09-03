@@ -11,6 +11,9 @@ import type {
   CatalogClient,
   CatalogFilter,
   Compatibility,
+  EnableCell,
+  EnablePlan,
+  GlobalTargetGroup,
   Health,
   LinkImportCandidate,
   LinkImportPreview,
@@ -39,6 +42,7 @@ interface FixtureAgent {
   detected: boolean;
   compatibility: Compatibility;
   enabledSkillIds: string[];
+  observedSkillStates?: Record<string, string | null>;
 }
 
 interface FixtureFile {
@@ -69,6 +73,16 @@ export function createFixtureCatalogClient(
 ): CatalogClient & FixtureReportPublish {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
+  let nextOperationId = 1;
+  const pendingEnablePlans = new Map<
+    string,
+    {
+      planToken: string;
+      catalogGeneration: number;
+      cells: EnableCell[];
+    }
+  >();
+  const fixtureOperations = new Map<string, string>();
   let firstRunCompleted = true;
   let localeSelection: LocaleSelection = "system";
   let localeGeneration = 0;
@@ -100,6 +114,12 @@ export function createFixtureCatalogClient(
   const skills = fixture.skills.map((skill) => ({ ...skill }));
   const enabledSkillIds = new Map(
     fixture.agents.map((agent) => [agent.id, [...agent.enabledSkillIds]]),
+  );
+  const observedSkillStates = new Map(
+    fixture.agents.map((agent) => [
+      agent.id,
+      new Map(Object.entries(agent.observedSkillStates ?? {})),
+    ]),
   );
   const presetRows = [
     ["omp", "omp", "~/.omp/agent/skills", ".omp/skills"],
@@ -423,6 +443,256 @@ export function createFixtureCatalogClient(
     },
     async getAgentManagementSnapshot() {
       return agentSnapshot();
+    },
+    async listTargetGroups(skillId) {
+      const configs = options.emptyAgentConfigurations
+        ? []
+        : agentConfigurations;
+      const groups: GlobalTargetGroup[] = [];
+      for (const config of configs) {
+        const target = config.roots.find(
+          (root) => root.role === "activation_target",
+        );
+        if (!target) {
+          continue;
+        }
+        const desired =
+          enabledSkillIds.get(config.agentId)?.includes(skillId) ?? false;
+        groups.push({
+          targetRootId: target.rootId,
+          configuredPath: target.configuredPath,
+          consumers: [
+            {
+              agentId: config.agentId,
+              agentName: config.name,
+              compatibility: config.compatibility,
+            },
+          ],
+          availability: "available",
+          diagnostic: null,
+          desired,
+          observedState:
+            (observedSkillStates
+              .get(config.agentId)
+              ?.get(skillId) as GlobalTargetGroup["observedState"]) ?? null,
+          action: "none",
+        });
+      }
+      return {
+        skillId,
+        skillName:
+          skills.find((skill) => skill.id === skillId)?.displayName ?? skillId,
+        agentGeneration: 1,
+        groups,
+      };
+    },
+    async planGlobalEnable(skillIds, targetGroupIds, cellResolutions) {
+      const cellResolutionsMap = new Map(
+        cellResolutions.map((entry) => [entry.cellKey, entry.resolution]),
+      );
+      const cells: EnableCell[] = targetGroupIds.flatMap((targetRootId) =>
+        skillIds.map((skillId) => {
+          const config = agentConfigurations.find((agent) =>
+            agent.roots.some(
+              (root) =>
+                root.role === "activation_target" &&
+                root.rootId === targetRootId,
+            ),
+          );
+          const desired =
+            enabledSkillIds.get(config?.agentId ?? "")?.includes(skillId) ??
+            false;
+          const cellKey = `${skillId}|${targetRootId}`;
+          const resolution = cellResolutionsMap.get(cellKey) ?? "skip";
+          return {
+            cellKey,
+            skillId,
+            skillName:
+              skills.find((skill) => skill.id === skillId)?.displayName ??
+              skillId,
+            directoryName:
+              skills.find((skill) => skill.id === skillId)?.directoryName ??
+              skillId,
+            directoryIdentityKey: skillId,
+            targetRootId,
+            targetPath:
+              config?.roots.find((root) => root.rootId === targetRootId)
+                ?.configuredPath ?? "",
+            entryPath: "",
+            finalEntityPath: "",
+            action: "enable" as const,
+            affectedAgentIds: config ? [config.agentId] : [],
+            affectedAgentNames: config ? [config.name] : [],
+            occupier: "empty" as const,
+            occExactDirect: false,
+            destructive: null,
+            eligibility: desired ? ("no_op" as const) : ("ready" as const),
+            blockedReason: null,
+            resolution,
+            detail: null,
+          };
+        }),
+      );
+      const plan: EnablePlan = {
+        planToken: `fixture-enable-${nextPlanId++}`,
+        scope: "global",
+        writeGateGeneration: 0,
+        catalogGeneration: snapshotVersion,
+        agentGeneration: 1,
+        cells,
+      };
+      pendingEnablePlans.set(plan.planToken, plan);
+      return plan;
+    },
+    async planGlobalLifecycle(skillId, targetGroupId, action) {
+      const config = agentConfigurations.find((agent) =>
+        agent.roots.some(
+          (root) =>
+            root.role === "activation_target" && root.rootId === targetGroupId,
+        ),
+      );
+      const desired =
+        enabledSkillIds.get(config?.agentId ?? "")?.includes(skillId) ?? false;
+      const observed =
+        observedSkillStates.get(config?.agentId ?? "")?.get(skillId) ?? null;
+      const eligibility: EnableCell["eligibility"] =
+        action === "disable" && desired
+          ? "ready"
+          : action === "repair" && desired && observed !== "present"
+            ? "ready"
+            : action === "enable" && !desired
+              ? "ready"
+              : "no_op";
+      const plan: EnablePlan = {
+        planToken: `fixture-enable-${nextPlanId++}`,
+        scope: "global",
+        writeGateGeneration: 0,
+        catalogGeneration: snapshotVersion,
+        agentGeneration: 1,
+        cells: [
+          {
+            cellKey: `${skillId}|${targetGroupId}`,
+            skillId,
+            skillName:
+              skills.find((skill) => skill.id === skillId)?.displayName ??
+              skillId,
+            directoryName:
+              skills.find((skill) => skill.id === skillId)?.directoryName ??
+              skillId,
+            directoryIdentityKey: skillId,
+            targetRootId: targetGroupId,
+            targetPath:
+              config?.roots.find((root) => root.rootId === targetGroupId)
+                ?.configuredPath ?? "",
+            entryPath: "",
+            finalEntityPath: "",
+            action,
+            affectedAgentIds: config ? [config.agentId] : [],
+            affectedAgentNames: config ? [config.name] : [],
+            occupier: "empty" as const,
+            occExactDirect: false,
+            destructive: null,
+            eligibility,
+            blockedReason: null,
+            resolution: "skip" as const,
+            detail: null,
+          },
+        ],
+      };
+      pendingEnablePlans.set(plan.planToken, plan);
+      return plan;
+    },
+    async applyGlobalEnable(planToken) {
+      const plan = pendingEnablePlans.get(planToken);
+      if (!plan) {
+        throw new Error("fixture enable plan not found");
+      }
+      pendingEnablePlans.delete(planToken);
+      const operationId = `fixture-op-${nextOperationId++}`;
+      const cells = plan.cells.map((cell) => {
+        const config = agentConfigurations.find((agent) =>
+          agent.roots.some(
+            (root) =>
+              root.role === "activation_target" &&
+              root.rootId === cell.targetRootId,
+          ),
+        );
+        if (!config) {
+          return {
+            cellKey: cell.cellKey,
+            skillId: cell.skillId,
+            targetRootId: cell.targetRootId,
+            outcome: "failed" as const,
+            diagnostic: "fixture target not found",
+          };
+        }
+        if (cell.eligibility === "ready") {
+          const base = (enabledSkillIds.get(config.agentId) ?? []).filter(
+            (id) => id !== cell.skillId,
+          );
+          if (cell.action !== "disable") {
+            base.push(cell.skillId);
+          }
+          enabledSkillIds.set(config.agentId, base);
+          observedSkillStates
+            .get(config.agentId)
+            ?.set(cell.skillId, cell.action === "disable" ? null : "present");
+          fixtureOperations.set(operationId, cell.cellKey);
+          return {
+            cellKey: cell.cellKey,
+            skillId: cell.skillId,
+            targetRootId: cell.targetRootId,
+            outcome: "succeeded" as const,
+            diagnostic: null,
+          };
+        }
+        return {
+          cellKey: cell.cellKey,
+          skillId: cell.skillId,
+          targetRootId: cell.targetRootId,
+          outcome:
+            cell.eligibility === "no_op"
+              ? ("no_op" as const)
+              : ("skipped" as const),
+          diagnostic: null,
+        };
+      });
+      return { operationId, cells, snapshotVersion };
+    },
+    async undoGlobalEnable(operationId) {
+      const cellKey = fixtureOperations.get(operationId);
+      fixtureOperations.delete(operationId);
+      if (!cellKey) {
+        return { operationId, cells: [], snapshotVersion };
+      }
+      const [skillId, targetRootId] = cellKey.split("|");
+      const config = agentConfigurations.find((agent) =>
+        agent.roots.some(
+          (root) =>
+            root.role === "activation_target" && root.rootId === targetRootId,
+        ),
+      );
+      if (config) {
+        const base = (enabledSkillIds.get(config.agentId) ?? []).filter(
+          (id) => id !== skillId,
+        );
+        enabledSkillIds.set(config.agentId, base);
+        observedSkillStates.get(config.agentId)?.set(skillId, null);
+      }
+      return {
+        operationId,
+        cells: [
+          {
+            cellKey,
+            undone: true,
+            diagnostic: null,
+          },
+        ],
+        snapshotVersion,
+      };
+    },
+    async finalizeGlobalEnable() {
+      return undefined;
     },
     async getObservationSnapshot() {
       return observationSnapshot();

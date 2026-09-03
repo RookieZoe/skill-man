@@ -39,9 +39,8 @@ test("opens the Library Desk with a selected Skill and Target-scoped placeholder
   ).toBeInTheDocument();
 
   expect(
-    screen.getByText("Target controls are not available yet"),
+    await screen.findByRole("switch", { name: "Claude Code" }),
   ).toBeInTheDocument();
-  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
 });
 
 test("selects another Skill from the Library without leaving the three-column context", async () => {
@@ -55,7 +54,9 @@ test("selects another Skill from the Library without leaving the three-column co
     await screen.findByRole("heading", { name: "media-xray" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Local changes detected")).toBeInTheDocument();
-  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(
+    await screen.findByRole("switch", { name: "Codex" }),
+  ).toBeInTheDocument();
 });
 
 test("filters the Library by health and selects the first remaining Skill", async () => {
@@ -119,9 +120,8 @@ test("imports a linked local folder and returns to its Library detail", async ()
   expect(
     await screen.findByRole("heading", { name: "linked-workflow" }),
   ).toBeInTheDocument();
-  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   expect(
-    screen.getByText("Target controls are not available yet"),
+    await screen.findByRole("switch", { name: "Claude Code" }),
   ).toBeInTheDocument();
 });
 

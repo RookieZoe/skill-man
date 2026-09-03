@@ -46,6 +46,7 @@ import {
   GitSourceCapabilityNotice,
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
+import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
@@ -510,15 +511,27 @@ export function LibraryDesk({
                   }
                 }}
               />
-              <ActivationTargetPlaceholder
-                ref={agentInspectorRef}
-                dialog={isAgentDrawerModal}
-                detail={detail}
-                onOpenAgentManagement={() => {
-                  setAgentDrawerOpen(false);
-                  setSurface("agents");
-                }}
-              />
+              {detail ? (
+                <GlobalTargetGroupsPanel
+                  ref={agentInspectorRef}
+                  dialog={isAgentDrawerModal}
+                  skillId={detail.id}
+                  client={client}
+                  onOpenAgentManagement={() => {
+                    setAgentDrawerOpen(false);
+                    setSurface("agents");
+                  }}
+                />
+              ) : (
+                <ActivationTargetPlaceholder
+                  ref={agentInspectorRef}
+                  dialog={isAgentDrawerModal}
+                  onOpenAgentManagement={() => {
+                    setAgentDrawerOpen(false);
+                    setSurface("agents");
+                  }}
+                />
+              )}
             </div>
           </div>
         )}
@@ -913,12 +926,10 @@ function SkillDetailPanel({
 function ActivationTargetPlaceholder({
   ref,
   dialog,
-  detail,
   onOpenAgentManagement,
 }: {
   ref: Ref<HTMLElement | null>;
   dialog: boolean;
-  detail: SkillDetail | null;
   onOpenAgentManagement: () => void;
 }) {
   const { t } = useLocale();
@@ -941,17 +952,11 @@ function ActivationTargetPlaceholder({
         </div>
       </div>
       <p className="inspector-intro">
-        {detail
-          ? t("library.activation.target_groups_body")
-          : t("library.activation.no_selection_body")}
+        {t("library.activation.no_selection_body")}
       </p>
       <div className="activation-target-placeholder">
         <span aria-hidden="true" />
-        <strong>
-          {detail
-            ? t("library.activation.target_groups_empty")
-            : t("library.activation.no_selection")}
-        </strong>
+        <strong>{t("library.activation.no_selection")}</strong>
         <small>{t("library.activation.target_groups_hint")}</small>
         <button
           type="button"

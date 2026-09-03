@@ -39,6 +39,7 @@ pub fn run() {
         BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess,
     };
     use crate::core::catalog::CatalogService;
+    use crate::core::enable::EnableService;
     use crate::core::existing_home_recovery::{
         ExistingHomeRecoveryConfig, ExistingHomeRecoveryService,
     };
@@ -76,31 +77,34 @@ pub fn run() {
     use crate::tauri_adapter::catalog_api::CatalogApi;
     use crate::tauri_adapter::commands::{
         apply_abandon, apply_adopt, apply_agent_configuration_plan, apply_delete_safety_snapshot,
-        apply_file_import, apply_file_import_selection, apply_fixture_recovery, apply_link_import,
-        apply_relocate_link, apply_remove_skill, apply_skill_updates, cancel_adopt,
-        cancel_app_update, cancel_candidate, cancel_existing_home_recovery, cancel_file_import,
-        cancel_link_import, cancel_relocate_link, cancel_remove_skill, cancel_rescan,
-        check_app_update, check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
+        apply_file_import, apply_file_import_selection, apply_fixture_recovery,
+        apply_global_enable, apply_link_import, apply_relocate_link, apply_remove_skill,
+        apply_skill_updates, cancel_adopt, cancel_app_update, cancel_candidate,
+        cancel_existing_home_recovery, cancel_file_import, cancel_link_import,
+        cancel_relocate_link, cancel_remove_skill, cancel_rescan, check_app_update,
+        check_skill_updates, complete_onboarding, confirm_existing_home_recovery,
         confirm_fixture_recovery_result, confirm_home, confirm_source_promotion,
         confirm_source_transition, confirm_source_update, continue_candidate,
         create_agent_directory, create_local_source_copy, discover_file_import,
         discover_file_import_collection, discover_link_import, download_app_update,
-        fetch_latest_and_manage, finalize_adopt, finalize_source_promotion,
+        fetch_latest_and_manage, finalize_adopt, finalize_global_enable, finalize_source_promotion,
         finalize_source_transition, get_agent_management_snapshot, get_bootstrap_snapshot,
         get_fixture_recovery_preview, get_git_source_capability, get_locale_snapshot,
         get_observation_page, get_observation_snapshot, get_scan_report_page, inspect_skill,
-        install_app_update, list_safety_snapshots, list_skills, load_preferences,
-        pin_skill_updates, plan_abandon, plan_adopt, plan_create_agent_configuration,
-        plan_delete_agent_configuration, plan_delete_safety_snapshot,
-        plan_edit_agent_configuration, plan_file_import, plan_file_import_selection,
-        plan_file_reinstall, plan_fixture_recovery, plan_link_import, plan_remove_skill,
-        plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
-        preview_source_promotion, preview_source_update, reconnect_same_home,
-        refresh_activation_health, refresh_detection, refresh_startup_probe,
-        refresh_system_languages, relocate_link, remove_git_source, restore_current_source_release,
-        restore_eligibility, run_activation_health_check, set_locale_selection, start_rescan,
-        startup_info, undo_adopt, undo_source_transition, update_preferences,
+        install_app_update, list_safety_snapshots, list_skills, list_target_groups,
+        load_preferences, pin_skill_updates, plan_abandon, plan_adopt,
+        plan_create_agent_configuration, plan_delete_agent_configuration,
+        plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
+        plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_global_enable,
+        plan_global_lifecycle, plan_link_import, plan_remove_skill, plan_restore,
+        plan_skill_updates, prepare_existing_home_recovery, prepare_home, preview_source_promotion,
+        preview_source_update, reconnect_same_home, refresh_activation_health, refresh_detection,
+        refresh_startup_probe, refresh_system_languages, relocate_link, remove_git_source,
+        restore_current_source_release, restore_eligibility, run_activation_health_check,
+        set_locale_selection, start_rescan, startup_info, undo_adopt, undo_global_enable,
+        undo_source_transition, update_preferences,
     };
+    use crate::tauri_adapter::enable_api::EnableApi;
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
     use crate::tauri_adapter::git_source_capability_api::GitSourceCapabilityApi;
@@ -444,11 +448,11 @@ pub fn run() {
             ));
             let observation_api = Arc::new(ObservationApi::new(
                 Arc::new(ObservationService::new(
-                    agent_configuration_filesystem,
+                    agent_configuration_filesystem.clone(),
                     filesystem.clone(),
                     presets,
                     write_gate.clone(),
-                    agent_configuration_store,
+                    agent_configuration_store.clone(),
                     activation_store,
                     Arc::new(SystemClock::new()),
                 )
@@ -524,6 +528,19 @@ pub fn run() {
             app.manage(SourcePromotionApi::new(source_promotion.clone()));
             app.manage(SourceTransitionApi::new(source_transition.clone()));
             app.manage(SourceUpdateApi::new(source_update.clone()));
+            let enable_service = EnableService::new(
+                runtime_store.clone(),
+                runtime_store.clone(),
+                agent_configuration_store.clone(),
+                agent_configuration_filesystem.clone(),
+                filesystem.clone(),
+                Arc::new(SystemClock::new()),
+                resolved_library_root.clone(),
+            )
+            .with_write_gate(write_gate.clone())
+            .with_home_context(write_gate.clone())
+            .with_source_update(source_update.clone());
+            app.manage(EnableApi::new(enable_service));
             let source_lifecycle = Arc::new(
                 crate::core::source_lifecycle::SourceLifecycleService::new(
                     source_transition.clone(),
@@ -722,6 +739,12 @@ pub fn run() {
             undo_adopt,
             finalize_adopt,
             cancel_adopt,
+            list_target_groups,
+            plan_global_enable,
+            plan_global_lifecycle,
+            apply_global_enable,
+            undo_global_enable,
+            finalize_global_enable,
             load_preferences,
             update_preferences,
             startup_info,

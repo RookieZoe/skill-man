@@ -190,13 +190,14 @@ mod tests {
     use std::path::Path;
 
     use crate::core::agent_configuration::PresetRegistry;
+    use crate::core::domain::SkillId;
     use crate::core::home::BoundHome;
     use crate::core::observation::ObservationService;
     use crate::core::write_gate::{WriteGate, WriteGateState};
     use crate::seams::activation_health::ActivationEntryFileSystem;
     use crate::seams::activation_store::{
-        ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
-        StoredActivationObservation,
+        ActivationCellRow, ActivationCellWrite, ActivationObservation, ActivationStore,
+        ActivationStoreError, DesiredActivation, StoredActivationObservation,
     };
     use crate::seams::agent_configuration_fs::{
         AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootInspection,
@@ -243,6 +244,30 @@ mod tests {
             &self,
             _observations: &[ActivationObservation],
         ) -> Result<u64, ActivationStoreError> {
+            Ok(0)
+        }
+
+        fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn activation_cells_for_skill(
+            &self,
+            _skill_id: &SkillId,
+        ) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn write_activation_cells(
+            &self,
+            _writes: &[ActivationCellWrite],
+        ) -> Result<u64, ActivationStoreError> {
+            Err(ActivationStoreError::Unavailable(
+                "the closed bootstrap never writes cells".into(),
+            ))
+        }
+
+        fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
             Ok(0)
         }
     }

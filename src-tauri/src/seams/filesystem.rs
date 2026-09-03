@@ -83,6 +83,63 @@ pub struct ActivationRecoveryBaseline {
     pub expected_target_path: PathBuf,
 }
 
+/// The closed per-cell action of the Enable Module (spec §4.9): a plain
+/// Enable/Disable/Repair, a Managed ownership Switch or a Remove-then-replace
+/// of an Untracked occupant. Every action shares the same journal so one
+/// interrupted operation has one recovery surface.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnableCellAction {
+    Enable,
+    Disable,
+    Repair,
+    Switch,
+    /// Replace an Untracked occupier (symlink / real directory / file).
+    Replace,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EnableJournalCell {
+    pub cell_index: u32,
+    pub action: EnableCellAction,
+    pub skill_id: String,
+    pub target_root_id: String,
+    pub directory_identity_key: String,
+    pub entry_path: PathBuf,
+    /// The canonical final entity path the Activation points at.
+    pub target_path: PathBuf,
+    /// The catalog desired state the commit point writes.
+    pub after_desired: bool,
+    /// The catalog desired state when the operation was planned.
+    pub before_desired: bool,
+    /// The occupant moved to backup before the write (`replace`/`switch`
+    /// cells only); `None` for plain create/remove cells.
+    pub backup_path: Option<PathBuf>,
+    pub occupant: Option<OccupantSnapshot>,
+    pub phase: ActivationReplacePhase,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EnableJournal {
+    pub version: u32,
+    pub operation_id: String,
+    pub phase: ActivationReplacePhase,
+    pub cells: Vec<EnableJournalCell>,
+}
+
+/// One catalog row fact recovered at startup (or Undo): the Enable journal
+/// recovery consults this set to decide rollback vs roll-forward per cell.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EnableRecoveryFact {
+    pub skill_id: String,
+    pub target_root_id: String,
+    pub desired_enabled: bool,
+    pub expected_entry_path: PathBuf,
+    pub expected_target_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillFingerprint {
     pub directory: DirectoryFingerprint,
@@ -1584,6 +1641,63 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "Activation replace journal recovery is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Persist one Enable operation journal (spec §4.9) before the first
+    /// filesystem mutation; the journal is rewritten after every committed
+    /// cell so startup recovery can decide per-cell rollback/roll-forward.
+    fn write_enable_journal(
+        &self,
+        library_root: &Path,
+        journal: &EnableJournal,
+    ) -> Result<(), FileSystemError> {
+        let _ = (library_root, journal);
+        Err(FileSystemError::Io {
+            operation: "write Enable journal",
+            path: PathBuf::from(&journal.operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Archive and remove one finished Enable journal (finalize / Undo /
+    /// recovery); refuses while a backup still holds content.
+    fn finish_enable_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let _ = library_root;
+        Err(FileSystemError::Io {
+            operation: "finish Enable journal",
+            path: PathBuf::from(operation_id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation journals are not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Recover every interrupted Enable journal: per cell, consult the
+    /// catalog facts (current desired state) — a fact that matches the
+    /// cell's commit point rolls the cell forward, anything else rolls it
+    /// back. External changes stop recovery with `RecoveryRequired`.
+    fn recover_enable_journals(
+        &self,
+        library_root: &Path,
+        facts: &[EnableRecoveryFact],
+    ) -> Result<u32, FileSystemError> {
+        let _ = (library_root, facts);
+        Err(FileSystemError::Io {
+            operation: "recover Enable journals",
+            path: library_root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation journal recovery is not supported by this filesystem",
             ),
         })
     }

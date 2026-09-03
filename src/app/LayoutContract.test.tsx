@@ -170,15 +170,19 @@ test("drawer traps Tab focus within its Target-scoped placeholder", async () => 
   await user.click(screen.getByRole("button", { name: "Target groups" }));
   expect(inspector()).toHaveFocus();
 
-  const managementButton = within(inspector()).getByRole("button", {
-    name: "Agents",
+  const enableButton = within(inspector()).getByRole("button", {
+    name: "Enable globally…",
   });
   await user.tab();
-  expect(managementButton).toHaveFocus();
-  await user.tab();
-  expect(managementButton).toHaveFocus();
+  expect(enableButton).toHaveFocus();
+  // Focus stays trapped inside the drawer while tabbing through the new
+  // Target group cards.
+  for (let index = 0; index < 6; index += 1) {
+    await user.tab();
+    expect(inspector().contains(document.activeElement)).toBe(true);
+  }
   await user.tab({ shift: true });
-  expect(managementButton).toHaveFocus();
+  expect(inspector().contains(document.activeElement)).toBe(true);
 });
 
 test("drawer keeps its DOM and focus when resizing across the 1059/1060 breakpoint", async () => {

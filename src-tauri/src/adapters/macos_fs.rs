@@ -13,15 +13,16 @@ use crate::seams::filesystem::{
     ActivationEntrySnapshot, ActivationRecoveryBaseline, ActivationReplaceJournal,
     ActivationReplacePhase, AdoptActivationStep, AdoptAppearanceKind, AdoptAppearanceStep,
     AdoptItemPhase, AdoptJournal, AdoptJournalItem, AdoptJournalKind, AdoptJournalPhase,
-    ChainFault, DirectoryEntry, DirectoryFingerprint, EvidenceChain, EvidenceChainHop,
-    EvidenceChainHopKind, FileImportJournal, FileImportJournalPhase, FileImportRecoveryBaseline,
-    FileReplacement, FileSystem, FileSystemError, HandoffItemPhase, HandoffJournal,
-    HandoffJournalItem, LinkSourceEntryKind, LinkSourceHop, LinkSourceSnapshot, OccupantKind,
-    OccupantSnapshot, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
-    RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
-    RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
-    SkillFingerprint, SourceLifecycleJournal, SourceTransitionJournal, StagedEntryKind,
-    StagedTreeEntry, StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind, TreeScanStatistics,
+    ChainFault, DirectoryEntry, DirectoryFingerprint, EnableCellAction, EnableJournal,
+    EnableJournalCell, EvidenceChain, EvidenceChainHop, EvidenceChainHopKind, FileImportJournal,
+    FileImportJournalPhase, FileImportRecoveryBaseline, FileReplacement, FileSystem,
+    FileSystemError, HandoffItemPhase, HandoffJournal, HandoffJournalItem, LinkSourceEntryKind,
+    LinkSourceHop, LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry,
+    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoteParentManifest,
+    RemoveInitialEntry, RemoveJournal, RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry,
+    ScannedSkillEvidence, SkillFingerprint, SourceLifecycleJournal, SourceTransitionJournal,
+    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind,
+    TreeScanStatistics,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -32,6 +33,23 @@ pub struct MacOsFileSystem {
 }
 
 impl MacOsFileSystem {
+    /// Normalize an entry path WITHOUT resolving the final component: only
+    /// the parent is canonicalized, so a symlink entry is moved, restored or
+    /// discarded itself — never its target (spec §4.9 same-parent rename).
+    fn normalize_entry_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            })?;
+        Ok(self.normalize_configured_path(parent)?.join(file_name))
+    }
+
     pub fn new(home_directory: PathBuf) -> Self {
         Self { home_directory }
     }
@@ -2026,7 +2044,10 @@ impl FileSystem for MacOsFileSystem {
     }
 
     fn occupant_snapshot(&self, path: &Path) -> Result<OccupantSnapshot, FileSystemError> {
-        let path = self.normalize_configured_path(path)?;
+        // lstat semantics: the occupant is the entry itself (symlink metadata
+        // never followed), so a symlink entry is identified as a Symlink,
+        // not as its final entity (spec §4.9 entry lstat).
+        let path = self.normalize_entry_path(path)?;
         occupant_snapshot_at(&path)
     }
 
@@ -2037,8 +2058,8 @@ impl FileSystem for MacOsFileSystem {
         library_root: &Path,
         expected: &OccupantSnapshot,
     ) -> Result<(), FileSystemError> {
-        let entry_path = self.normalize_configured_path(entry_path)?;
-        let backup_path = self.normalize_configured_path(backup_path)?;
+        let entry_path = self.normalize_entry_path(entry_path)?;
+        let backup_path = self.normalize_entry_path(backup_path)?;
         let library_root = self.normalize_configured_path(library_root)?;
         let operations_root = library_root.join("operations");
         if !backup_path.starts_with(&operations_root) {
@@ -2068,8 +2089,8 @@ impl FileSystem for MacOsFileSystem {
         library_root: &Path,
         expected: &OccupantSnapshot,
     ) -> Result<(), FileSystemError> {
-        let backup_path = self.normalize_configured_path(backup_path)?;
-        let entry_path = self.normalize_configured_path(entry_path)?;
+        let backup_path = self.normalize_entry_path(backup_path)?;
+        let entry_path = self.normalize_entry_path(entry_path)?;
         let library_root = self.normalize_configured_path(library_root)?;
         let operations_root = library_root.join("operations");
         if !backup_path.starts_with(&operations_root) {
@@ -2108,7 +2129,7 @@ impl FileSystem for MacOsFileSystem {
         library_root: &Path,
         expected: &OccupantSnapshot,
     ) -> Result<(), FileSystemError> {
-        let backup_path = self.normalize_configured_path(backup_path)?;
+        let backup_path = self.normalize_entry_path(backup_path)?;
         let library_root = self.normalize_configured_path(library_root)?;
         let operations_root = library_root.join("operations");
         if !backup_path.starts_with(&operations_root) {
@@ -2385,6 +2406,214 @@ impl FileSystem for MacOsFileSystem {
                 }
             }
             self.finish_activation_replace_journal(&library_root, &journal.operation_id)?;
+            recovered = recovered.saturating_add(1);
+        }
+        Ok(recovered)
+    }
+
+    fn write_enable_journal(
+        &self,
+        library_root: &Path,
+        journal: &EnableJournal,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(&journal.operation_id)?;
+        let operations_root = library_root.join("operations");
+        let operation_root = operations_root.join(&journal.operation_id);
+        fs::create_dir_all(&operation_root).map_err(|source| FileSystemError::Io {
+            operation: "create Enable operation directory",
+            path: operation_root.clone(),
+            source,
+        })?;
+        sync_directory(&operations_root, "sync Enable operations directory")?;
+        let journal_path = operation_root.join("enable-journal.json");
+        let temporary_path = operation_root.join("enable-journal.tmp");
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|source| FileSystemError::Io {
+            operation: "serialize Enable journal",
+            path: journal_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .map_err(|source| FileSystemError::Io {
+                operation: "open temporary Enable journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .map_err(|source| FileSystemError::Io {
+                operation: "write Enable journal",
+                path: temporary_path.clone(),
+                source,
+            })?;
+        file.sync_all().map_err(|source| FileSystemError::Io {
+            operation: "sync Enable journal",
+            path: temporary_path.clone(),
+            source,
+        })?;
+        fs::rename(&temporary_path, &journal_path).map_err(|source| FileSystemError::Io {
+            operation: "publish Enable journal",
+            path: journal_path,
+            source,
+        })?;
+        sync_directory(&operation_root, "sync Enable operation directory")
+    }
+
+    fn finish_enable_journal(
+        &self,
+        library_root: &Path,
+        operation_id: &str,
+    ) -> Result<(), FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        validate_operation_id(operation_id)?;
+        let operation_root = library_root.join("operations").join(operation_id);
+        let journal_path = operation_root.join("enable-journal.json");
+        if journal_path.is_file() {
+            let journal_bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read completed Enable journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let history_root = library_root.join("operation-history");
+            fs::create_dir_all(&history_root).map_err(|source| FileSystemError::Io {
+                operation: "create Enable operation history",
+                path: history_root.clone(),
+                source,
+            })?;
+            let archive_path = history_root.join(format!("{operation_id}.enable.json"));
+            let archive_temporary = history_root.join(format!(".{operation_id}.enable.tmp"));
+            let mut archive = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&archive_temporary)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "open temporary Enable history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive
+                .write_all(&journal_bytes)
+                .map_err(|source| FileSystemError::Io {
+                    operation: "write Enable history",
+                    path: archive_temporary.clone(),
+                    source,
+                })?;
+            archive.sync_all().map_err(|source| FileSystemError::Io {
+                operation: "sync Enable history",
+                path: archive_temporary.clone(),
+                source,
+            })?;
+            fs::rename(&archive_temporary, &archive_path).map_err(|source| {
+                FileSystemError::Io {
+                    operation: "publish Enable history",
+                    path: archive_path,
+                    source,
+                }
+            })?;
+            sync_directory(&history_root, "sync Enable operation history")?;
+        }
+        match fs::remove_file(&journal_path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove completed Enable journal",
+                    path: journal_path,
+                    source,
+                });
+            }
+        }
+        let backup_dir = operation_root.join("backup");
+        match fs::remove_dir(&backup_dir) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) if source.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                return Err(FileSystemError::Io {
+                    operation: "remove Enable backup directory",
+                    path: backup_dir,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the Enable backup still contains content; refusing to remove it",
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "remove Enable backup directory",
+                    path: backup_dir,
+                    source,
+                });
+            }
+        }
+        match fs::remove_dir(&operation_root) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(FileSystemError::Io {
+                operation: "remove completed Enable operation directory",
+                path: operation_root,
+                source,
+            }),
+        }
+    }
+
+    fn recover_enable_journals(
+        &self,
+        library_root: &Path,
+        facts: &[crate::seams::filesystem::EnableRecoveryFact],
+    ) -> Result<u32, FileSystemError> {
+        let library_root = self.normalize_configured_path(library_root)?;
+        let operations_root = library_root.join("operations");
+        let entries = match fs::read_dir(&operations_root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(FileSystemError::Io {
+                    operation: "enumerate Enable recovery journals",
+                    path: operations_root,
+                    source,
+                });
+            }
+        };
+        let mut recovered = 0_u32;
+        for entry in entries {
+            let entry = entry.map_err(|source| FileSystemError::Io {
+                operation: "enumerate Enable recovery journals",
+                path: operations_root.clone(),
+                source,
+            })?;
+            let operation_root = entry.path();
+            let journal_path = operation_root.join("enable-journal.json");
+            if !journal_path.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&journal_path).map_err(|source| FileSystemError::Io {
+                operation: "read Enable recovery journal",
+                path: journal_path.clone(),
+                source,
+            })?;
+            let journal: EnableJournal =
+                serde_json::from_slice(&bytes).map_err(|source| FileSystemError::Io {
+                    operation: "parse Enable recovery journal",
+                    path: journal_path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                })?;
+            validate_operation_id(&journal.operation_id)?;
+            if operation_root.file_name().and_then(|name| name.to_str())
+                != Some(journal.operation_id.as_str())
+            {
+                return Err(FileSystemError::InvalidConfiguredPath {
+                    path: operation_root,
+                });
+            }
+            let mut journal = journal;
+            for cell in &mut journal.cells {
+                recover_enable_cell(cell, facts, &library_root)?;
+            }
+            self.finish_enable_journal(&library_root, &journal.operation_id)?;
             recovered = recovered.saturating_add(1);
         }
         Ok(recovered)
@@ -6256,6 +6485,376 @@ fn rollback_activation_replace(journal: &ActivationReplaceJournal) -> Result<(),
             path: journal.backup_path.clone(),
             source,
         }),
+    }
+}
+
+/// Whether a catalog fact matches this cell's commit point: the row exists
+/// with the after-desired state and the exact expected paths the journal
+/// committed.
+fn enable_cell_committed_fact(
+    cell: &EnableJournalCell,
+    facts: &[crate::seams::filesystem::EnableRecoveryFact],
+) -> bool {
+    facts.iter().any(|fact| {
+        fact.skill_id == cell.skill_id
+            && fact.target_root_id == cell.target_root_id
+            && fact.desired_enabled == cell.after_desired
+            && fact.expected_entry_path == cell.entry_path
+            && fact.expected_target_path == cell.target_path
+    })
+}
+
+/// One interrupted Enable cell: the catalog facts decide the direction. A
+/// committed cell rolls forward (the entry must end in its after state), an
+/// uncommitted one rolls back (the entry must return to its before state).
+fn recover_enable_cell(
+    cell: &mut EnableJournalCell,
+    facts: &[crate::seams::filesystem::EnableRecoveryFact],
+    library_root: &Path,
+) -> Result<(), FileSystemError> {
+    match cell.phase {
+        ActivationReplacePhase::Applying => {
+            if enable_cell_committed_fact(cell, facts) {
+                enable_cell_roll_forward(cell, library_root)?;
+            } else {
+                enable_cell_roll_back(cell)?;
+            }
+            cell.phase = ActivationReplacePhase::Committed;
+        }
+        ActivationReplacePhase::Committed => {
+            if let Some((backup_path, occupant)) = backup_of(cell) {
+                discard_occupant_backup(backup_path, library_root, occupant)?;
+            }
+        }
+        ActivationReplacePhase::Undoing => {
+            complete_enable_cell_undo(cell, library_root)?;
+            cell.phase = ActivationReplacePhase::Committed;
+        }
+    }
+    Ok(())
+}
+
+fn backup_of(cell: &EnableJournalCell) -> Option<(&Path, &OccupantSnapshot)> {
+    cell.backup_path.as_deref().zip(cell.occupant.as_ref())
+}
+
+fn discard_occupant_backup(
+    backup_path: &Path,
+    library_root: &Path,
+    expected: &OccupantSnapshot,
+) -> Result<(), FileSystemError> {
+    let _ = library_root;
+    let metadata = match fs::symlink_metadata(backup_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(FileSystemError::Io {
+                operation: "inspect Activation backup",
+                path: backup_path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let actual = occupant_snapshot_from_metadata(backup_path, &metadata)?;
+    if !occupant_kind_matches(&expected.kind, &actual.kind) {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "discard Activation occupant backup",
+            path: backup_path.to_path_buf(),
+            message: "the backup content no longer matches the recorded occupant".into(),
+        });
+    }
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(backup_path).map_err(|source| FileSystemError::Io {
+            operation: "discard Activation occupant backup",
+            path: backup_path.to_path_buf(),
+            source,
+        })
+    } else {
+        fs::remove_file(backup_path).map_err(|source| FileSystemError::Io {
+            operation: "discard Activation occupant backup",
+            path: backup_path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+/// Roll an interrupted Enable cell forward: the catalog commit point is
+/// durable, so the entry must reach its after state; a still-present backup
+/// is then discarded.
+fn enable_cell_roll_forward(
+    cell: &EnableJournalCell,
+    library_root: &Path,
+) -> Result<(), FileSystemError> {
+    match (&cell.backup_path, &cell.occupant) {
+        (Some(backup_path), Some(occupant)) => match fs::symlink_metadata(backup_path) {
+            Ok(_) => {
+                ensure_enable_entry(cell)?;
+                discard_occupant_backup(backup_path, library_root, occupant)?;
+                Ok(())
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                ensure_enable_entry(cell)?;
+                Ok(())
+            }
+            Err(source) => Err(FileSystemError::Io {
+                operation: "inspect Enable roll-forward backup",
+                path: backup_path.clone(),
+                source,
+            }),
+        },
+        (Some(_), None) => Err(FileSystemError::RecoveryRequired {
+            operation: "roll forward Enable cell",
+            path: cell.entry_path.clone(),
+            message: "a backup path exists without an occupant snapshot".into(),
+        }),
+        _ => match cell.action {
+            EnableCellAction::Disable => remove_enable_entry_if_ours(cell),
+            _ => ensure_enable_entry(cell),
+        },
+    }
+}
+
+/// Roll an interrupted Enable cell back: nothing of the cell committed, so
+/// the entry returns to its before state (missing for create actions,
+/// present for Disable).
+fn enable_cell_roll_back(cell: &EnableJournalCell) -> Result<(), FileSystemError> {
+    match (&cell.backup_path, &cell.occupant) {
+        (Some(backup_path), Some(occupant)) => match fs::symlink_metadata(backup_path) {
+            Ok(_) => {
+                match activation_entry_snapshot_at(&cell.entry_path)? {
+                    ActivationEntrySnapshot::Missing => {}
+                    ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => {
+                        fs::remove_file(&cell.entry_path).map_err(|source| {
+                            FileSystemError::Io {
+                                operation: "remove interrupted Enable entry",
+                                path: cell.entry_path.clone(),
+                                source,
+                            }
+                        })?;
+                    }
+                    _ => {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "roll back Enable cell",
+                            path: cell.entry_path.clone(),
+                            message:
+                                "the Activation entry changed while the Enable was interrupted"
+                                    .into(),
+                        });
+                    }
+                }
+                restore_occupant_verified_local(cell)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                // The occupant never moved; verify it is still at the entry.
+                let current = occupant_snapshot_at(&cell.entry_path)?;
+                if &current == occupant {
+                    Ok(())
+                } else {
+                    Err(FileSystemError::RecoveryRequired {
+                        operation: "roll back Enable cell",
+                        path: cell.entry_path.clone(),
+                        message: "the entry changed before the Enable had applied anything".into(),
+                    })
+                }
+            }
+            Err(source) => Err(FileSystemError::Io {
+                operation: "inspect Enable rollback backup",
+                path: backup_path.clone(),
+                source,
+            }),
+        },
+        _ => match cell.action {
+            EnableCellAction::Enable | EnableCellAction::Repair => {
+                match activation_entry_snapshot_at(&cell.entry_path)? {
+                    ActivationEntrySnapshot::Missing => Ok(()),
+                    ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => {
+                        fs::remove_file(&cell.entry_path).map_err(|source| FileSystemError::Io {
+                            operation: "remove interrupted Enable entry",
+                            path: cell.entry_path.clone(),
+                            source,
+                        })
+                    }
+                    _ => Err(FileSystemError::RecoveryRequired {
+                        operation: "roll back Enable cell",
+                        path: cell.entry_path.clone(),
+                        message: "the Activation entry is occupied by external content".into(),
+                    }),
+                }
+            }
+            EnableCellAction::Disable => match activation_entry_snapshot_at(&cell.entry_path)? {
+                ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => Ok(()),
+                ActivationEntrySnapshot::Missing => {
+                    create_relocate_entry(&cell.target_path, &cell.entry_path, "roll back Enable")
+                }
+                _ => Err(FileSystemError::RecoveryRequired {
+                    operation: "roll back Enable cell",
+                    path: cell.entry_path.clone(),
+                    message: "the Activation entry changed while the Disable was interrupted"
+                        .into(),
+                }),
+            },
+            EnableCellAction::Switch | EnableCellAction::Replace => {
+                Err(FileSystemError::RecoveryRequired {
+                    operation: "roll back Enable cell",
+                    path: cell.entry_path.clone(),
+                    message: "the replacement cell lost its occupant snapshot".into(),
+                })
+            }
+        },
+    }
+}
+
+/// The forward state of a Disable cell: the planned link is gone.
+fn remove_enable_entry_if_ours(cell: &EnableJournalCell) -> Result<(), FileSystemError> {
+    match activation_entry_snapshot_at(&cell.entry_path)? {
+        ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => {
+            fs::remove_file(&cell.entry_path).map_err(|source| FileSystemError::Io {
+                operation: "complete interrupted Disable",
+                path: cell.entry_path.clone(),
+                source,
+            })
+        }
+        ActivationEntrySnapshot::Missing => Ok(()),
+        _ => Err(FileSystemError::RecoveryRequired {
+            operation: "complete interrupted Disable",
+            path: cell.entry_path.clone(),
+            message: "the Activation entry changed while the Disable was interrupted".into(),
+        }),
+    }
+}
+
+/// The entry must be a symlink to the planned target (created if missing);
+/// external content stops recovery.
+fn ensure_enable_entry(cell: &EnableJournalCell) -> Result<(), FileSystemError> {
+    match activation_entry_snapshot_at(&cell.entry_path)? {
+        ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => Ok(()),
+        ActivationEntrySnapshot::Missing => create_relocate_entry(
+            &cell.target_path,
+            &cell.entry_path,
+            "roll forward Enable cell",
+        ),
+        _ => Err(FileSystemError::RecoveryRequired {
+            operation: "roll forward Enable cell",
+            path: cell.entry_path.clone(),
+            message: "the Activation entry is occupied by external content".into(),
+        }),
+    }
+}
+
+fn restore_occupant_verified_local(cell: &EnableJournalCell) -> Result<(), FileSystemError> {
+    let backup_path =
+        cell.backup_path
+            .as_ref()
+            .ok_or_else(|| FileSystemError::RecoveryRequired {
+                operation: "restore Enable occupant",
+                path: cell.entry_path.clone(),
+                message: "the replacement cell lost its backup path".into(),
+            })?;
+    let occupant = cell
+        .occupant
+        .as_ref()
+        .ok_or_else(|| FileSystemError::RecoveryRequired {
+            operation: "restore Enable occupant",
+            path: cell.entry_path.clone(),
+            message: "the replacement cell lost its occupant snapshot".into(),
+        })?;
+    let backup = occupant_snapshot_at(backup_path)?;
+    if !occupant_kind_matches(&occupant.kind, &backup.kind) {
+        return Err(FileSystemError::RecoveryRequired {
+            operation: "restore Enable occupant",
+            path: backup_path.clone(),
+            message: "the occupant backup no longer matches the journal".into(),
+        });
+    }
+    match fs::symlink_metadata(&cell.entry_path) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore Enable occupant",
+                path: cell.entry_path.clone(),
+                message: "the Activation entry is occupied".into(),
+            });
+        }
+        Err(source) => {
+            return Err(FileSystemError::Io {
+                operation: "inspect Enable restore entry",
+                path: cell.entry_path.clone(),
+                source,
+            });
+        }
+    }
+    move_entry_verified(backup_path, &cell.entry_path, occupant)
+}
+
+/// Finish an interrupted Enable Undo: the backup either still holds the
+/// occupant (restore it) or was already restored (verify the restored
+/// entry). Undo recovery never discards the backup.
+fn complete_enable_cell_undo(
+    cell: &EnableJournalCell,
+    library_root: &Path,
+) -> Result<(), FileSystemError> {
+    let _ = library_root;
+    match (backup_of(cell), cell.action) {
+        (Some((backup_path, occupant)), _) => match fs::symlink_metadata(backup_path) {
+            Ok(_) => {
+                match activation_entry_snapshot_at(&cell.entry_path)? {
+                    ActivationEntrySnapshot::Missing => {}
+                    ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => {
+                        fs::remove_file(&cell.entry_path).map_err(|source| {
+                            FileSystemError::Io {
+                                operation: "remove interrupted Enable Undo entry",
+                                path: cell.entry_path.clone(),
+                                source,
+                            }
+                        })?;
+                    }
+                    _ => {
+                        return Err(FileSystemError::RecoveryRequired {
+                            operation: "complete Enable Undo",
+                            path: cell.entry_path.clone(),
+                            message: "the entry was externally occupied while Undo was interrupted; the backup is retained"
+                                .into(),
+                        });
+                    }
+                }
+                restore_occupant_verified_local(cell)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let current = occupant_snapshot_at(&cell.entry_path)?;
+                if &current == occupant {
+                    Ok(())
+                } else {
+                    Err(FileSystemError::RecoveryRequired {
+                        operation: "complete Enable Undo",
+                        path: cell.entry_path.clone(),
+                        message:
+                            "the restored occupant cannot be re-identified after Undo was interrupted"
+                                .into(),
+                    })
+                }
+            }
+            Err(source) => Err(FileSystemError::Io {
+                operation: "inspect Enable Undo backup",
+                path: backup_path.to_path_buf(),
+                source,
+            }),
+        },
+        (None, EnableCellAction::Disable) => ensure_enable_entry(cell),
+        (None, _) => match activation_entry_snapshot_at(&cell.entry_path)? {
+            ActivationEntrySnapshot::Missing => Ok(()),
+            ActivationEntrySnapshot::Symlink { target } if target == cell.target_path => {
+                fs::remove_file(&cell.entry_path).map_err(|source| FileSystemError::Io {
+                    operation: "remove interrupted Enable Undo entry",
+                    path: cell.entry_path.clone(),
+                    source,
+                })
+            }
+            _ => Err(FileSystemError::RecoveryRequired {
+                operation: "complete Enable Undo",
+                path: cell.entry_path.clone(),
+                message: "the entry was externally occupied while Undo was interrupted".into(),
+            }),
+        },
     }
 }
 

@@ -4,6 +4,7 @@ pub mod app_update;
 pub mod bootstrap;
 pub mod catalog;
 pub mod domain;
+pub mod enable;
 pub mod existing_home_profile;
 pub mod existing_home_recovery;
 pub mod fixture_recovery;

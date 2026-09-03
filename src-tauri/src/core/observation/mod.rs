@@ -932,8 +932,8 @@ mod tests {
     use crate::core::write_gate::{ReadOnlyReason, WriteGate, WriteGateState};
     use crate::seams::activation_health::ActivationEntryFileSystem;
     use crate::seams::activation_store::{
-        ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
-        StoredActivationObservation,
+        ActivationCellRow, ActivationCellWrite, ActivationObservation, ActivationStore,
+        ActivationStoreError, DesiredActivation, StoredActivationObservation,
     };
     use crate::seams::agent_configuration_fs::{
         AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootInspection,
@@ -1243,6 +1243,47 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(observations.to_vec());
             Ok(1)
+        }
+
+        fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+            let mut cells = Vec::with_capacity(self.stored.len());
+            for row in &self.stored {
+                cells.push(ActivationCellRow {
+                    skill_id: row.skill_id.clone(),
+                    target_root_id: row.target_root_id.clone(),
+                    directory_identity_key: String::new(),
+                    desired_enabled: true,
+                    expected_entry_path: row.expected_entry_path.clone(),
+                    expected_target_path: row.expected_target_path.clone(),
+                    observed_state: row.observed_state,
+                    last_enabled_at_ms: row.last_checked_at_ms,
+                });
+            }
+            Ok(cells)
+        }
+
+        fn activation_cells_for_skill(
+            &self,
+            skill_id: &SkillId,
+        ) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+            Ok(self
+                .activation_cells()?
+                .into_iter()
+                .filter(|cell| cell.skill_id == *skill_id)
+                .collect())
+        }
+
+        fn write_activation_cells(
+            &self,
+            _writes: &[ActivationCellWrite],
+        ) -> Result<u64, ActivationStoreError> {
+            Err(ActivationStoreError::Unavailable(
+                "the observation test stub never writes cells".into(),
+            ))
+        }
+
+        fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
+            Ok(0)
         }
     }
 

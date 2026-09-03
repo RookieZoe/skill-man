@@ -12,8 +12,8 @@ use crate::core::domain::{
 };
 use crate::core::home::{BoundHome, HomeId};
 use crate::seams::activation_store::{
-    ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
-    StoredActivationObservation,
+    ActivationCellRow, ActivationCellWrite, ActivationObservation, ActivationStore,
+    ActivationStoreError, DesiredActivation, StoredActivationObservation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
@@ -752,6 +752,21 @@ impl SqliteCatalogStore {
             .map_err(sqlite_catalog_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(sqlite_catalog_error)
+    }
+
+    pub fn skill_directory_identity_key(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, CatalogStoreError> {
+        self.connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?
+            .query_row(
+                "SELECT directory_identity_key FROM skills WHERE id = ?1",
+                [&skill_id.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))
     }
 
     pub fn persisted_skill_detail(
@@ -4249,6 +4264,160 @@ impl ActivationStore for SqliteCatalogStore {
             ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
         })
     }
+
+    fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at
+                 FROM activations
+                 ORDER BY skill_id, target_root_id",
+            )
+            .map_err(sqlite_activation_error)?;
+        statement
+            .query_map([], map_activation_cell_row)
+            .map_err(sqlite_activation_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_activation_error)
+    }
+
+    fn activation_cells_for_skill(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at
+                 FROM activations
+                 WHERE skill_id = ?1
+                 ORDER BY target_root_id",
+            )
+            .map_err(sqlite_activation_error)?;
+        statement
+            .query_map([&skill_id.0], map_activation_cell_row)
+            .map_err(sqlite_activation_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_activation_error)
+    }
+
+    fn write_activation_cells(
+        &self,
+        writes: &[ActivationCellWrite],
+    ) -> Result<u64, ActivationStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_activation_error)?;
+        let now = unix_timestamp();
+        for write in writes {
+            transaction
+                .execute(
+                    "INSERT INTO activations (
+                        skill_id, target_root_id, directory_identity_key, desired_enabled,
+                        expected_entry_path, expected_target_path, observed_state,
+                        last_enabled_at, last_checked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'missing',
+                        CASE WHEN ?4 = 1 THEN ?7 ELSE NULL END, NULL)
+                     ON CONFLICT(skill_id, target_root_id) DO UPDATE SET
+                        directory_identity_key = excluded.directory_identity_key,
+                        desired_enabled = excluded.desired_enabled,
+                        expected_entry_path = excluded.expected_entry_path,
+                        expected_target_path = excluded.expected_target_path,
+                        observed_state = CASE
+                            WHEN excluded.desired_enabled = 1 THEN activations.observed_state
+                            ELSE 'missing'
+                        END,
+                        last_enabled_at = CASE
+                            WHEN excluded.desired_enabled = 1
+                             AND activations.desired_enabled = 0
+                            THEN excluded.last_enabled_at
+                            ELSE activations.last_enabled_at
+                        END,
+                        last_checked_at = CASE
+                            WHEN excluded.desired_enabled = 1
+                             AND activations.desired_enabled = 0
+                            THEN NULL
+                            ELSE activations.last_checked_at
+                        END",
+                    params![
+                        write.skill_id.0,
+                        write.target_root_id,
+                        write.directory_identity_key,
+                        write.desired_enabled as i64,
+                        write.expected_entry_path.to_string_lossy(),
+                        write.expected_target_path.to_string_lossy(),
+                        now,
+                    ],
+                )
+                .map_err(|error| map_activation_cell_constraint(write, error))?;
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_activation_error)?;
+        let snapshot_version: i64 = transaction
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_activation_error)?;
+        transaction.commit().map_err(sqlite_activation_error)?;
+        u64::try_from(snapshot_version).map_err(|_| {
+            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+
+    fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
+        let connection = self.connection()?;
+        let value: i64 = connection
+            .query_row(
+                "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_activation_error)?;
+        u64::try_from(value).map_err(|_| {
+            ActivationStoreError::Unavailable("negative SQLite snapshot version".into())
+        })
+    }
+}
+
+fn map_activation_cell_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivationCellRow> {
+    let observed_state: Option<String> = row.get(6)?;
+    let last_enabled_at: Option<String> = row.get(7)?;
+    Ok(ActivationCellRow {
+        skill_id: SkillId(row.get(0)?),
+        target_root_id: row.get(1)?,
+        directory_identity_key: row.get(2)?,
+        desired_enabled: row.get::<_, i64>(3)? != 0,
+        expected_entry_path: PathBuf::from(row.get::<_, String>(4)?),
+        expected_target_path: PathBuf::from(row.get::<_, String>(5)?),
+        observed_state: observed_state
+            .as_deref()
+            .map(parse_observed_state)
+            .transpose()?,
+        last_enabled_at_ms: last_enabled_at.as_deref().and_then(parse_checked_at_ms),
+    })
+}
+
+fn map_activation_cell_constraint(
+    write: &ActivationCellWrite,
+    error: rusqlite::Error,
+) -> ActivationStoreError {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+        return ActivationStoreError::EntryConflict {
+            destination: write.expected_entry_path.to_string_lossy().into_owned(),
+        };
+    }
+    sqlite_activation_error(error)
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), CatalogStoreOpenError> {

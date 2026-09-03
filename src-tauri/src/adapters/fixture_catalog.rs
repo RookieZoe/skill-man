@@ -61,6 +61,23 @@ impl CatalogStore for FixtureCatalogStore {
             .collect())
     }
 
+    fn skill_directory_identity_key(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, CatalogStoreError> {
+        let state = self.state.read().expect("fixture state lock");
+        let Some(skill) = state
+            .skills
+            .iter()
+            .find(|skill| skill.summary.id == *skill_id)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(crate::core::domain::skill_identity_key(
+            &skill.summary.directory_name,
+        )))
+    }
+
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
         let state = self
             .state

@@ -12,6 +12,12 @@ use crate::core::domain::{
     ActivationObservedState, AgentKind, CatalogFilter, Compatibility, Health, SkillDetail,
     SkillSummary, SourceKind,
 };
+use crate::core::enable::{
+    CellBlockedReason, CellEligibility, CellOutcome, CellResolution, EnableAction, EnableCell,
+    EnableCellResult, EnablePlan, EnableResult, EnableUndoCellResult, EnableUndoResult,
+    GlobalTargetGroup, GlobalTargetGroupSnapshot, Occupier, TargetGroupAction,
+    TargetGroupAvailability, UntrackedOccupierKind,
+};
 use crate::core::git_source_capability::{GitSourceCapabilityKind, GitSourceCapabilityReport};
 use crate::core::import::{
     FileImportCandidate, FileImportDiscovery, FileImportPreview, FileImportResult,
@@ -2632,7 +2638,7 @@ impl From<AgentKind> for AgentKindDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityDto {
     Verified,
@@ -4761,5 +4767,472 @@ mod tests {
                 }
             })
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Enable Module (spec §4.9): Global Target groups, plan/apply/undo results.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetGroupMemberDto {
+    #[serde(rename = "agentId")]
+    pub agent_id: String,
+    #[serde(rename = "agentName")]
+    pub agent_name: String,
+    pub compatibility: CompatibilityDto,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetGroupAvailabilityDto {
+    Available,
+    Absent,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetGroupActionDto {
+    None,
+    #[serde(rename = "open_agent_management")]
+    OpenAgentManagement,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalTargetGroupDto {
+    #[serde(rename = "targetRootId")]
+    pub target_root_id: String,
+    #[serde(rename = "configuredPath")]
+    pub configured_path: String,
+    pub consumers: Vec<TargetGroupMemberDto>,
+    pub availability: TargetGroupAvailabilityDto,
+    pub diagnostic: Option<String>,
+    pub desired: bool,
+    pub observed_state: Option<String>,
+    pub action: TargetGroupActionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalTargetGroupSnapshotDto {
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    #[serde(rename = "skillName")]
+    pub skill_name: String,
+    #[serde(rename = "agentGeneration")]
+    pub agent_generation: u64,
+    pub groups: Vec<GlobalTargetGroupDto>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnableActionDto {
+    Enable,
+    Disable,
+    Repair,
+    Switch,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellResolutionDto {
+    Switch,
+    Replace,
+    Adopt,
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellEligibilityDto {
+    Ready,
+    NoOp,
+    Skipped,
+    Conflict,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellBlockedReasonDto {
+    #[serde(rename = "target_absent")]
+    TargetAbsent,
+    #[serde(rename = "target_unavailable")]
+    TargetUnavailable,
+    #[serde(rename = "source_snapshot_mismatch")]
+    SourceSnapshotMismatch,
+    #[serde(rename = "tombstoned_member")]
+    TombstonedMember,
+    #[serde(rename = "entity_broken")]
+    EntityBroken,
+    #[serde(rename = "entry_occupied")]
+    EntryOccupied,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntrackedOccupierKindDto {
+    Symlink,
+    RealDirectory,
+    File,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestructiveCountsDto {
+    pub directories: u64,
+    pub files: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableCellDto {
+    #[serde(rename = "cellKey")]
+    pub cell_key: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    #[serde(rename = "skillName")]
+    pub skill_name: String,
+    #[serde(rename = "directoryName")]
+    pub directory_name: String,
+    #[serde(rename = "directoryIdentityKey")]
+    pub directory_identity_key: String,
+    #[serde(rename = "targetRootId")]
+    pub target_root_id: String,
+    #[serde(rename = "targetPath")]
+    pub target_path: String,
+    #[serde(rename = "entryPath")]
+    pub entry_path: String,
+    #[serde(rename = "finalEntityPath")]
+    pub final_entity_path: String,
+    pub action: EnableActionDto,
+    #[serde(rename = "affectedAgentIds")]
+    pub affected_agent_ids: Vec<String>,
+    #[serde(rename = "affectedAgentNames")]
+    pub affected_agent_names: Vec<String>,
+    pub occupier: OccupierDto,
+    #[serde(rename = "occExactDirect")]
+    pub occ_exact_direct: bool,
+    pub destructive: Option<DestructiveCountsDto>,
+    pub eligibility: CellEligibilityDto,
+    #[serde(rename = "blockedReason")]
+    pub blocked_reason: Option<CellBlockedReasonDto>,
+    pub resolution: CellResolutionDto,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OccupierDto {
+    Empty,
+    #[serde(rename = "managed")]
+    Managed {
+        #[serde(rename = "skillId")]
+        skill_id: String,
+        #[serde(rename = "directoryName")]
+        directory_name: String,
+    },
+    #[serde(rename = "untracked")]
+    Untracked {
+        kind: UntrackedOccupierKindDto,
+        #[serde(rename = "target")]
+        target: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnablePlanDto {
+    #[serde(rename = "planToken")]
+    pub plan_token: String,
+    pub scope: String,
+    #[serde(rename = "writeGateGeneration")]
+    pub write_gate_generation: u64,
+    #[serde(rename = "catalogGeneration")]
+    pub catalog_generation: u64,
+    #[serde(rename = "agentGeneration")]
+    pub agent_generation: u64,
+    pub cells: Vec<EnableCellDto>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellOutcomeDto {
+    Succeeded,
+    NoOp,
+    Skipped,
+    Failed,
+    #[serde(rename = "not_attempted")]
+    NotAttempted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableCellResultDto {
+    #[serde(rename = "cellKey")]
+    pub cell_key: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    #[serde(rename = "targetRootId")]
+    pub target_root_id: String,
+    pub outcome: CellOutcomeDto,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableResultDto {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    pub cells: Vec<EnableCellResultDto>,
+    #[serde(rename = "snapshotVersion")]
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableUndoCellResultDto {
+    #[serde(rename = "cellKey")]
+    pub cell_key: String,
+    pub undone: bool,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableUndoResultDto {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    pub cells: Vec<EnableUndoCellResultDto>,
+    #[serde(rename = "snapshotVersion")]
+    pub snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanGlobalEnableRequestDto {
+    #[serde(rename = "skillIds")]
+    pub skill_ids: Vec<String>,
+    #[serde(rename = "targetGroupIds")]
+    pub target_group_ids: Vec<String>,
+    #[serde(rename = "cellResolutions")]
+    pub cell_resolutions: Vec<CellResolutionRequestDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellResolutionRequestDto {
+    #[serde(rename = "cellKey")]
+    pub cell_key: String,
+    pub resolution: CellResolutionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanGlobalLifecycleRequestDto {
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    #[serde(rename = "targetGroupId")]
+    pub target_group_id: String,
+    pub action: EnableActionDto,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyGlobalEnableRequestDto {
+    #[serde(rename = "planToken")]
+    pub plan_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableOperationRequestDto {
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+}
+
+impl From<GlobalTargetGroupSnapshot> for GlobalTargetGroupSnapshotDto {
+    fn from(value: GlobalTargetGroupSnapshot) -> Self {
+        Self {
+            skill_id: value.skill_id.0,
+            skill_name: value.skill_name,
+            agent_generation: value.agent_generation,
+            groups: value.groups.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GlobalTargetGroup> for GlobalTargetGroupDto {
+    fn from(value: GlobalTargetGroup) -> Self {
+        Self {
+            target_root_id: value.target_root_id,
+            configured_path: value.configured_path.to_string_lossy().into_owned(),
+            consumers: value
+                .consumers
+                .into_iter()
+                .map(|member| TargetGroupMemberDto {
+                    agent_id: member.agent_id,
+                    agent_name: member.agent_name,
+                    compatibility: member.compatibility.into(),
+                })
+                .collect(),
+            availability: match value.availability {
+                TargetGroupAvailability::Available => TargetGroupAvailabilityDto::Available,
+                TargetGroupAvailability::Absent => TargetGroupAvailabilityDto::Absent,
+                TargetGroupAvailability::Unavailable => TargetGroupAvailabilityDto::Unavailable,
+            },
+            diagnostic: value.diagnostic,
+            desired: value.desired,
+            observed_state: value
+                .observed
+                .map(activation_observed_state_name)
+                .map(str::to_owned),
+            action: match value.action {
+                TargetGroupAction::None => TargetGroupActionDto::None,
+                TargetGroupAction::OpenAgentManagement => TargetGroupActionDto::OpenAgentManagement,
+            },
+        }
+    }
+}
+
+impl From<EnablePlan> for EnablePlanDto {
+    fn from(value: EnablePlan) -> Self {
+        Self {
+            plan_token: value.plan_token,
+            scope: value.scope.to_owned(),
+            write_gate_generation: value.write_gate_generation,
+            catalog_generation: value.catalog_generation,
+            agent_generation: value.agent_generation,
+            cells: value.cells.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<EnableCell> for EnableCellDto {
+    fn from(value: EnableCell) -> Self {
+        Self {
+            cell_key: value.cell_key,
+            skill_id: value.skill_id.0,
+            skill_name: value.skill_name,
+            directory_name: value.directory_name,
+            directory_identity_key: value.directory_identity_key,
+            target_root_id: value.target_root_id,
+            target_path: value.target_path.to_string_lossy().into_owned(),
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            final_entity_path: value.final_entity_path.to_string_lossy().into_owned(),
+            action: match value.action {
+                EnableAction::Enable => EnableActionDto::Enable,
+                EnableAction::Disable => EnableActionDto::Disable,
+                EnableAction::Repair => EnableActionDto::Repair,
+                EnableAction::Switch => EnableActionDto::Switch,
+            },
+            affected_agent_ids: value.affected_agent_ids,
+            affected_agent_names: value.affected_agent_names,
+            occupier: match value.occupancy {
+                Occupier::Empty => OccupierDto::Empty,
+                Occupier::Managed {
+                    skill_id,
+                    directory_name,
+                } => OccupierDto::Managed {
+                    skill_id: skill_id.0,
+                    directory_name,
+                },
+                Occupier::Untracked { kind } => OccupierDto::Untracked {
+                    kind: match kind {
+                        UntrackedOccupierKind::Symlink { .. } => UntrackedOccupierKindDto::Symlink,
+                        UntrackedOccupierKind::RealDirectory => {
+                            UntrackedOccupierKindDto::RealDirectory
+                        }
+                        UntrackedOccupierKind::File { .. } => UntrackedOccupierKindDto::File,
+                    },
+                    target: match kind {
+                        UntrackedOccupierKind::Symlink { target } => {
+                            Some(target.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    },
+                },
+            },
+            occ_exact_direct: value.occ_exact_direct,
+            destructive: value.destructive.map(|counts| DestructiveCountsDto {
+                directories: counts.directories,
+                files: counts.files,
+            }),
+            eligibility: match value.eligibility {
+                CellEligibility::Ready => CellEligibilityDto::Ready,
+                CellEligibility::NoOp => CellEligibilityDto::NoOp,
+                CellEligibility::Skipped => CellEligibilityDto::Skipped,
+                CellEligibility::Conflict => CellEligibilityDto::Conflict,
+                CellEligibility::Blocked => CellEligibilityDto::Blocked,
+            },
+            blocked_reason: value.blocked_reason.map(|reason| match reason {
+                CellBlockedReason::TargetAbsent => CellBlockedReasonDto::TargetAbsent,
+                CellBlockedReason::TargetUnavailable => CellBlockedReasonDto::TargetUnavailable,
+                CellBlockedReason::SourceSnapshotMismatch => {
+                    CellBlockedReasonDto::SourceSnapshotMismatch
+                }
+                CellBlockedReason::TombstonedMember => CellBlockedReasonDto::TombstonedMember,
+                CellBlockedReason::EntityBroken => CellBlockedReasonDto::EntityBroken,
+                CellBlockedReason::EntryOccupied => CellBlockedReasonDto::EntryOccupied,
+            }),
+            resolution: match value.resolution {
+                CellResolution::Switch => CellResolutionDto::Switch,
+                CellResolution::Replace => CellResolutionDto::Replace,
+                CellResolution::Adopt => CellResolutionDto::Adopt,
+                CellResolution::Skip => CellResolutionDto::Skip,
+            },
+            detail: value.detail,
+        }
+    }
+}
+
+impl From<EnableResult> for EnableResultDto {
+    fn from(value: EnableResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            cells: value.cells.into_iter().map(Into::into).collect(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+impl From<EnableCellResult> for EnableCellResultDto {
+    fn from(value: EnableCellResult) -> Self {
+        Self {
+            cell_key: value.cell_key,
+            skill_id: value.skill_id.0,
+            target_root_id: value.target_root_id,
+            outcome: match value.outcome {
+                CellOutcome::Succeeded => CellOutcomeDto::Succeeded,
+                CellOutcome::NoOp => CellOutcomeDto::NoOp,
+                CellOutcome::Skipped => CellOutcomeDto::Skipped,
+                CellOutcome::Failed => CellOutcomeDto::Failed,
+                CellOutcome::NotAttempted => CellOutcomeDto::NotAttempted,
+            },
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+impl From<EnableUndoResult> for EnableUndoResultDto {
+    fn from(value: EnableUndoResult) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            cells: value.cells.into_iter().map(Into::into).collect(),
+            snapshot_version: value.snapshot_version,
+        }
+    }
+}
+
+impl From<EnableUndoCellResult> for EnableUndoCellResultDto {
+    fn from(value: EnableUndoCellResult) -> Self {
+        Self {
+            cell_key: value.cell_key,
+            undone: value.undone,
+            diagnostic: value.diagnostic,
+        }
     }
 }

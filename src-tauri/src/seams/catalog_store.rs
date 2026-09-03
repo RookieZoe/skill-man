@@ -41,6 +41,13 @@ pub trait CatalogStore: Send + Sync {
     fn snapshot_version(&self) -> u64;
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError>;
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError>;
+    /// The persisted Directory Identity key of one Skill (ADR-0018): the
+    /// authoritative entry-name identity the Enable Module freezes into a
+    /// `(Target, Directory Identity)` cell.
+    fn skill_directory_identity_key(
+        &self,
+        skill_id: &SkillId,
+    ) -> Result<Option<String>, CatalogStoreError>;
     /// When the onboarding was completed (or explicitly skipped); `None`
     /// means the next launch is still a first run (spec §8.7).
     fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {

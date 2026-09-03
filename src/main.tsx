@@ -36,7 +36,15 @@ async function renderApplication() {
 
   root.render(
     <StrictMode>
-      <BootstrapApp client={createCatalogClient()} />
+      <BootstrapApp
+        client={
+          import.meta.env.DEV && params.get("fixture") === "enable"
+            ? (
+                await import("./test-fixtures/catalog")
+              ).createFixtureCatalogClient()
+            : createCatalogClient()
+        }
+      />
     </StrictMode>,
   );
 }

@@ -409,6 +409,137 @@ export interface SkillDetail extends SkillSummary {
   skillMarkdown: string;
 }
 
+// -- Global Enable (spec §4.9; ADR-0019) --
+
+/** Typed Target availability: a missing/unverifiable Target only routes
+ * to Agent Management and is never created by Enable. */
+export type TargetGroupAvailability = "available" | "absent" | "unavailable";
+
+/** The only typed action a Target group exposes when it cannot support
+ * Enable: `open_agent_management`. */
+export type TargetGroupAction = "none" | "open_agent_management";
+
+export interface TargetGroupMember {
+  agentId: string;
+  agentName: string;
+  compatibility: Compatibility;
+}
+
+export interface GlobalTargetGroup {
+  /** Canonical Target identity (shared root id after path dedup). */
+  targetRootId: string;
+  configuredPath: string;
+  /** Every Agent Configuration pointing its Activation Target here. */
+  consumers: TargetGroupMember[];
+  availability: TargetGroupAvailability;
+  /** Raw probe failure reason, never user copy. */
+  diagnostic: string | null;
+  /** The current Skill's desired state in this group. */
+  desired: boolean;
+  /** Last Activation health observation for this `(Skill, Target)`. */
+  observedState:
+    "present" | "missing" | "target_mismatch" | "dangling" | "occupied" | null;
+  action: TargetGroupAction;
+}
+
+export interface GlobalTargetGroupSnapshot {
+  skillId: string;
+  skillName: string;
+  agentGeneration: number;
+  groups: GlobalTargetGroup[];
+}
+
+export type EnableAction = "enable" | "disable" | "repair" | "switch";
+export type CellResolution = "switch" | "replace" | "adopt" | "skip";
+export type CellEligibility =
+  "ready" | "no_op" | "skipped" | "conflict" | "blocked";
+export type CellBlockedReason =
+  | "target_absent"
+  | "target_unavailable"
+  | "source_snapshot_mismatch"
+  | "tombstoned_member"
+  | "entity_broken"
+  | "entry_occupied";
+
+export interface DestructiveCounts {
+  directories: number;
+  files: number;
+}
+
+export interface EnableCell {
+  /** `"<skill_id>|<target_root_id>"` cell identity. */
+  cellKey: string;
+  skillId: string;
+  skillName: string;
+  directoryName: string;
+  directoryIdentityKey: string;
+  targetRootId: string;
+  targetPath: string;
+  entryPath: string;
+  finalEntityPath: string;
+  action: EnableAction;
+  affectedAgentIds: string[];
+  affectedAgentNames: string[];
+  occupier:
+    | "empty"
+    | { managed: { skillId: string; directoryName: string } }
+    | {
+        untracked: {
+          kind: "symlink" | "real_directory" | "file";
+          target: string | null;
+        };
+      };
+  occExactDirect: boolean;
+  destructive: DestructiveCounts | null;
+  eligibility: CellEligibility;
+  blockedReason: CellBlockedReason | null;
+  resolution: CellResolution;
+  detail: string | null;
+}
+
+export interface EnablePlan {
+  planToken: string;
+  scope: string;
+  writeGateGeneration: number;
+  catalogGeneration: number;
+  agentGeneration: number;
+  cells: EnableCell[];
+}
+
+export type CellOutcome =
+  "succeeded" | "no_op" | "skipped" | "failed" | "not_attempted";
+
+export interface EnableCellResult {
+  cellKey: string;
+  skillId: string;
+  targetRootId: string;
+  outcome: CellOutcome;
+  diagnostic: string | null;
+}
+
+export interface EnableResult {
+  operationId: string;
+  cells: EnableCellResult[];
+  snapshotVersion: number;
+}
+
+export interface EnableUndoCellResult {
+  cellKey: string;
+  undone: boolean;
+  diagnostic: string | null;
+}
+
+export interface EnableUndoResult {
+  operationId: string;
+  cells: EnableUndoCellResult[];
+  snapshotVersion: number;
+}
+
+export interface CellResolutionRequest {
+  cellKey: string;
+  resolution: CellResolution;
+}
+
 export type AgentConfigurationOrigin = "preset" | "custom";
 export type AgentRootRole = "scan_only" | "activation_target";
 
@@ -1494,6 +1625,23 @@ export interface CatalogClient {
   inspectSkill(skillId: string): Promise<SkillDetail>;
   getAgentManagementSnapshot(): Promise<AgentManagementSnapshot>;
   /** Current in-memory Observation snapshot; never triggers detection. */
+  /** The current Skill's canonical Target groups (spec §4.9; zero-write). */
+  listTargetGroups(skillId: string): Promise<GlobalTargetGroupSnapshot>;
+  /** Plan a Global Enable; cells come out in Target order then Skill order. */
+  planGlobalEnable(
+    skillIds: string[],
+    targetGroupIds: string[],
+    cellResolutions: CellResolutionRequest[],
+  ): Promise<EnablePlan>;
+  /** Plan one Global lifecycle action (Enable / Disable / Repair). */
+  planGlobalLifecycle(
+    skillId: string,
+    targetGroupId: string,
+    action: EnableAction,
+  ): Promise<EnablePlan>;
+  applyGlobalEnable(planToken: string): Promise<EnableResult>;
+  undoGlobalEnable(operationId: string): Promise<EnableUndoResult>;
+  finalizeGlobalEnable(operationId: string): Promise<void>;
   getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
   /** Single-flight Detection trigger (spec §4.10; ADR-0020). */
   refreshDetection(): Promise<ObservationAndScanSnapshot>;
@@ -1771,6 +1919,34 @@ const tauriCatalogClient: CatalogClient = {
   getScanReportPage(cursor, limit) {
     return invoke<ScanReportPage>("get_scan_report_page", {
       request: { cursor, limit: limit ?? 64 },
+    });
+  },
+  listTargetGroups(skillId) {
+    return invoke<GlobalTargetGroupSnapshot>("list_target_groups", { skillId });
+  },
+  planGlobalEnable(skillIds, targetGroupIds, cellResolutions) {
+    return invoke<EnablePlan>("plan_global_enable", {
+      request: { skillIds, targetGroupIds, cellResolutions },
+    });
+  },
+  planGlobalLifecycle(skillId, targetGroupId, action) {
+    return invoke<EnablePlan>("plan_global_lifecycle", {
+      request: { skillId, targetGroupId, action },
+    });
+  },
+  applyGlobalEnable(planToken) {
+    return invoke<EnableResult>("apply_global_enable", {
+      request: { planToken },
+    });
+  },
+  undoGlobalEnable(operationId) {
+    return invoke<EnableUndoResult>("undo_global_enable", {
+      request: { operationId },
+    });
+  },
+  finalizeGlobalEnable(operationId) {
+    return invoke<void>("finalize_global_enable", {
+      request: { operationId },
     });
   },
   planCreateAgentConfiguration(draft) {
