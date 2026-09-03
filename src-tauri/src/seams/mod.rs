@@ -1,3 +1,4 @@
+pub mod activation_health;
 pub mod activation_store;
 pub mod adopt_store;
 pub mod agent_configuration_fs;

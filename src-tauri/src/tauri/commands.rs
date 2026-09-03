@@ -448,6 +448,59 @@ pub fn refresh_detection(state: State<'_, ObservationApi>) -> ObservationAndScan
 }
 
 #[tauri::command]
+pub fn refresh_startup_probe(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+    state.refresh_startup_probe()
+}
+
+#[tauri::command]
+pub fn refresh_activation_health(
+    state: State<'_, ObservationApi>,
+    request: crate::tauri_adapter::dto::RefreshActivationHealthRequestDto,
+) -> ObservationAndScanSnapshotDto {
+    state.refresh_activation_health(request.target_root_ids.as_deref())
+}
+
+#[tauri::command]
+pub fn get_observation_page(
+    state: State<'_, ObservationApi>,
+    request: crate::tauri_adapter::dto::ObservationPageRequestDto,
+) -> Result<crate::tauri_adapter::dto::ObservationPageReadDto, CommandFailureDto> {
+    state
+        .observation_page(
+            request.kind.into(),
+            request.generation,
+            crate::core::observation::ObservationCursor {
+                offset: request.cursor.offset,
+            },
+            request.limit.unwrap_or(64),
+        )
+        .map_err(|error| observation_command_failure(&error))
+}
+
+fn observation_command_failure(
+    error: &crate::core::observation::ObservationPageError,
+) -> CommandFailureDto {
+    let (public, diagnostic) = match error {
+        crate::core::observation::ObservationPageError::Stale { current_generation } => (
+            PublicErrorDto::ObservationPageStale {
+                current_generation: *current_generation,
+            },
+            None,
+        ),
+        crate::core::observation::ObservationPageError::NotFound => {
+            (PublicErrorDto::ObservationPageNotFound, None)
+        }
+    };
+    CommandFailureDto {
+        error: public,
+        diagnostic: diagnostic.map(|message| DiagnosticDto {
+            code: "observation_page".into(),
+            message,
+        }),
+    }
+}
+
+#[tauri::command]
 pub fn start_rescan(
     state: State<'_, ObservationApi>,
     request: StartRescanRequestDto,
@@ -559,11 +612,21 @@ pub fn plan_delete_agent_configuration(
 pub fn apply_agent_configuration_plan(
     state: State<'_, AgentConfigurationApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    observation: State<'_, ObservationApi>,
     request: ApplyAgentConfigurationPlanRequestDto,
 ) -> Result<AgentConfigurationApplyResultDto, CommandFailureDto> {
     let result = state.apply(request);
-    if result.is_ok() {
+    if let Ok(apply_result) = &result {
         mutation.bump();
+        // Spec §4.10 / ADR-0020: configuration Apply runs the Startup
+        // Probe and schedules Activation health for exactly the affected
+        // Targets (never a full Rescan, never all Targets).
+        observation.refresh_startup_probe();
+        let targets = apply_result.affected_target_root_ids.clone();
+        let observation = observation.service_handle();
+        std::thread::spawn(move || {
+            observation.refresh_activation_health(Some(&targets));
+        });
     }
     result
 }

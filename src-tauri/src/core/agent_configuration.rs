@@ -103,6 +103,11 @@ pub struct AgentConfigurationApplyResult {
     pub agent_id: String,
     pub generation: u64,
     pub deleted: bool,
+    /// Target Root ids affected by the apply: the new Target of a Create/
+    /// Edit plus (for Edit/Delete) the previously referenced Target. The
+    /// caller schedules Target-scoped Activation health for exactly these
+    /// (spec §4.10; ADR-0020: only affected Targets).
+    pub affected_target_root_ids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -495,6 +500,39 @@ impl AgentConfigurationService {
                 return Err(map_store_error(error));
             }
         };
+        let affected_target_root_ids = {
+            let mut targets = std::collections::BTreeSet::new();
+            match &plan.change {
+                AgentConfigurationStoreChange::Create(write)
+                | AgentConfigurationStoreChange::Edit(write) => {
+                    for root in &write.roots {
+                        if root.role == AgentRootRole::ActivationTarget {
+                            targets.insert(root.root_id.clone());
+                        }
+                    }
+                    if let AgentConfigurationStoreChange::Edit(_) = &plan.change
+                        && let Some(configuration) = current_snapshot
+                            .configurations
+                            .iter()
+                            .find(|configuration| configuration.agent_id == write.agent_id)
+                        && let Some(previous_target) = target_root(configuration)
+                    {
+                        targets.insert(previous_target.root_id.clone());
+                    }
+                }
+                AgentConfigurationStoreChange::Delete { agent_id } => {
+                    if let Some(configuration) = current_snapshot
+                        .configurations
+                        .iter()
+                        .find(|configuration| &configuration.agent_id == agent_id)
+                        && let Some(previous_target) = target_root(configuration)
+                    {
+                        targets.insert(previous_target.root_id.clone());
+                    }
+                }
+            }
+            targets.into_iter().collect()
+        };
         self.plans
             .lock()
             .map_err(|_| AgentConfigurationError::Store("plan lock is poisoned".into()))?
@@ -503,6 +541,7 @@ impl AgentConfigurationService {
             agent_id,
             generation,
             deleted: plan.kind == AgentConfigurationPlanKind::Delete,
+            affected_target_root_ids,
         })
     }
 

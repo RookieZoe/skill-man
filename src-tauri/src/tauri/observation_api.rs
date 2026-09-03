@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter};
 use crate::core::observation::ObservationService;
 use crate::core::scan::ScanTrigger;
 use crate::core::scan::{ScanError, ScanRunObserver, ScanRunSnapshot};
-use crate::tauri_adapter::dto::ObservationAndScanSnapshotDto;
+use crate::tauri_adapter::dto::{ObservationAndScanSnapshotDto, ObservationPageReadDto};
 
 pub const OBSERVATION_CHANGED_EVENT: &str = "observation://changed";
 
@@ -42,6 +42,8 @@ pub struct ObservationApi {
     /// Last published Detection generation this API instance has emitted;
     /// concurrent callers publish each generation exactly once.
     last_detection_generation: AtomicU64,
+    /// Last published Startup Probe generation (exact-once per generation).
+    last_probe_generation: AtomicU64,
 }
 
 impl ObservationApi {
@@ -53,7 +55,13 @@ impl ObservationApi {
             service,
             emitter,
             last_detection_generation: AtomicU64::new(0),
+            last_probe_generation: AtomicU64::new(0),
         }
+    }
+
+    /// The core service (wire-up seam: observer registration).
+    pub fn service_handle(&self) -> Arc<ObservationService> {
+        self.service.clone()
     }
 
     pub fn snapshot(&self) -> ObservationAndScanSnapshotDto {
@@ -75,6 +83,53 @@ impl ObservationApi {
             self.emitter.emit_changed(&dto);
         }
         dto
+    }
+
+    /// Single-flight Startup Probe trigger (spec §4.10): publishes
+    /// `observation://changed` exactly once per probe generation.
+    pub fn refresh_startup_probe(&self) -> ObservationAndScanSnapshotDto {
+        let dto: ObservationAndScanSnapshotDto = self.service.refresh_startup_probe().into();
+        let generation = dto
+            .startup_probe
+            .as_ref()
+            .map(|probe| probe.generation)
+            .unwrap_or(0);
+        let previous = self.last_probe_generation.load(Ordering::Acquire);
+        if generation != previous
+            && self
+                .last_probe_generation
+                .compare_exchange(previous, generation, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.emitter.emit_changed(&dto);
+        }
+        dto
+    }
+
+    /// Target-scoped Activation Health trigger (spec §4.10): the run is
+    /// asynchronous and publishes transition events through the observer.
+    pub fn refresh_activation_health(
+        &self,
+        targets: Option<&[String]>,
+    ) -> ObservationAndScanSnapshotDto {
+        self.service.refresh_activation_health(targets).into()
+    }
+
+    /// The unique paged observation read contract (spec §4.10
+    /// `observation_page`): generation-bound with typed stale/not-found.
+    pub fn observation_page(
+        &self,
+        kind: crate::core::observation::ObservationKind,
+        generation: u64,
+        cursor: crate::core::observation::ObservationCursor,
+        limit: usize,
+    ) -> Result<ObservationPageReadDto, crate::core::observation::ObservationPageError> {
+        let page = self
+            .service
+            .observation_page(kind, generation, cursor, limit)?;
+        Ok(crate::tauri_adapter::dto::observation_page_read_dto(
+            kind, generation, page,
+        ))
     }
 
     /// Start a full Rescan Run (single-flight; spec §4.10). The Run emits
@@ -118,6 +173,17 @@ impl ScanRunObserver for ObservationApi {
     }
 }
 
+/// The API also observes Activation Health run transitions: every event
+/// publishes the isomorphic snapshot payload.
+impl crate::core::observation::ObservationEventObserver for ObservationApi {
+    fn on_observation_event(
+        &self,
+        snapshot: &crate::core::observation::ObservationAndScanSnapshot,
+    ) {
+        self.emitter.emit_changed(&snapshot.clone().into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +193,11 @@ mod tests {
     use crate::core::home::BoundHome;
     use crate::core::observation::ObservationService;
     use crate::core::write_gate::{WriteGate, WriteGateState};
+    use crate::seams::activation_health::ActivationEntryFileSystem;
+    use crate::seams::activation_store::{
+        ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
+        StoredActivationObservation,
+    };
     use crate::seams::agent_configuration_fs::{
         AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootInspection,
         AgentRootProbe, CreatedAgentTargetDirectory,
@@ -136,7 +207,57 @@ mod tests {
         AgentConfigurationStoreSnapshot, RecentProjectFolder, StoredAgentConfiguration,
         StoredGlobalSkillRoot,
     };
+    use crate::seams::clock::Clock;
+    use crate::seams::filesystem::{ActivationEntrySnapshot, FileSystemError};
     use parking_lot::Mutex;
+
+    struct NoEntryFs;
+
+    impl ActivationEntryFileSystem for NoEntryFs {
+        fn activation_snapshot(
+            &self,
+            _path: &Path,
+        ) -> Result<ActivationEntrySnapshot, FileSystemError> {
+            Ok(ActivationEntrySnapshot::Missing)
+        }
+
+        fn skill_directory_is_readable(&self, _path: &Path) -> Result<bool, FileSystemError> {
+            Ok(false)
+        }
+    }
+
+    struct NoActivations;
+
+    impl ActivationStore for NoActivations {
+        fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn activation_observations(
+            &self,
+        ) -> Result<Vec<StoredActivationObservation>, ActivationStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn record_observations(
+            &self,
+            _observations: &[ActivationObservation],
+        ) -> Result<u64, ActivationStoreError> {
+            Ok(0)
+        }
+    }
+
+    struct StubClock;
+
+    impl Clock for StubClock {
+        fn monotonic_millis(&self) -> u128 {
+            0
+        }
+
+        fn unix_epoch_nanos(&self) -> u128 {
+            0
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CapturingEmitter {
@@ -237,9 +358,12 @@ mod tests {
         ))));
         let service = Arc::new(ObservationService::new(
             Arc::new(PresentProbe),
+            Arc::new(NoEntryFs),
             PresetRegistry::system(),
             gate,
             Arc::new(StubStore(Arc::new(Mutex::new(7)))),
+            Arc::new(NoActivations),
+            Arc::new(StubClock),
         ));
         let emitter = CapturingEmitter::default();
         (
@@ -269,12 +393,15 @@ mod tests {
         };
         let service = Arc::new(ObservationService::new(
             Arc::new(probe),
+            Arc::new(NoEntryFs),
             PresetRegistry::system(),
             Arc::new(WriteGate::new(WriteGateState::Open(BoundHome::test_value(
                 "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
                 std::path::PathBuf::from("/tmp/skill-man-home"),
             )))),
             Arc::new(StubStore(Arc::new(Mutex::new(3)))),
+            Arc::new(NoActivations),
+            Arc::new(StubClock),
         ));
         let emitter = CapturingEmitter::default();
         let api = Arc::new(ObservationApi::new(service, Arc::new(emitter.clone())));

@@ -9,6 +9,7 @@ use crate::core::domain::{
 use crate::core::home::BoundHome;
 use crate::seams::activation_store::{
     ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
+    StoredActivationObservation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord, LibraryConflict as AdoptConflict,
@@ -843,12 +844,21 @@ impl AdoptStore for RuntimeCatalogStore {
 
 impl ActivationStore for RuntimeCatalogStore {
     fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().desired_activations()
+        self.store()
+            .ok_or_else(|| {
+                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
+            })?
+            .desired_activations()
+    }
+
+    fn activation_observations(
+        &self,
+    ) -> Result<Vec<StoredActivationObservation>, ActivationStoreError> {
+        self.store()
+            .ok_or_else(|| {
+                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
+            })?
+            .activation_observations()
     }
 
     fn record_observations(

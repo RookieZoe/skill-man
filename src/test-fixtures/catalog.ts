@@ -18,6 +18,8 @@ import type {
   LocaleSnapshot,
   ObservationAndScanSnapshot,
   PresetObservation,
+  ScanReportRow,
+  ScanReportSection,
   SkillDetail,
   SourceKind,
 } from "../app/catalog-client";
@@ -51,9 +53,20 @@ interface PlannedFixtureLinkImport extends LinkImportPreview {
 
 const fixture = fixtureJson as FixtureFile;
 
+/** Test-only extras on the fixture client to publish a classified Report. */
+export interface FixtureReportPublish {
+  /** Publish a terminal classified Report; `pages` serve its sections. */
+  publishScanReport(
+    summary: NonNullable<
+      ObservationAndScanSnapshot["currentReport"]["summary"]
+    >,
+    pages: Partial<Record<ScanReportSection, ScanReportRow[]>>,
+  ): void;
+}
+
 export function createFixtureCatalogClient(
   options: { emptyAgentConfigurations?: boolean } = {},
-): CatalogClient {
+): CatalogClient & FixtureReportPublish {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
   let firstRunCompleted = true;
@@ -227,6 +240,8 @@ export function createFixtureCatalogClient(
         generation: detectionGeneration,
         presetObservations,
       },
+      startupProbe: null,
+      activationHealth: null,
       scanRun: fixtureScanRun,
       currentReport: fixtureCurrentReport,
     };
@@ -242,6 +257,19 @@ export function createFixtureCatalogClient(
   const scanRunListeners = new Set<
     (payload: ObservationAndScanSnapshot) => void
   >();
+  // Test-only classified Report state: pages per section, served by
+  // `getScanReportPage` when a summary is published.
+  let fixtureReportPages: Record<ScanReportSection, ScanReportRow[]> = {
+    roots: [],
+    entities: [],
+    appearances: [],
+    diagnostics: [],
+    git_sources: [],
+    local_candidates: [],
+    conflict_sets: [],
+    needs_attention: [],
+    excluded: [],
+  };
   function publishObservation() {
     const payload = observationSnapshot();
     scanRunListeners.forEach((listener) => listener(payload));
@@ -393,6 +421,19 @@ export function createFixtureCatalogClient(
       observationListeners.forEach((listener) => listener(payload));
       return payload;
     },
+    async refreshStartupProbe() {
+      return observationSnapshot();
+    },
+    async refreshActivationHealth() {
+      return observationSnapshot();
+    },
+    async getObservationPage(kind, generation) {
+      return {
+        generation,
+        rows: [],
+        nextOffset: null,
+      };
+    },
     listenObservationChanged(callback) {
       observationListeners.add(callback);
       scanRunListeners.add(callback);
@@ -464,17 +505,31 @@ export function createFixtureCatalogClient(
       return observationSnapshot();
     },
     async getScanReportPage(cursor) {
-      // The fixture never publishes a terminal Report: a page request only
-      // succeeds for the summary-shaped Report identity, and the fixture
-      // report is always `null` — return an empty page to keep the ledger
-      // surface honest in browser tests.
+      // Without a published Report the fixture serves honest empty pages;
+      // with one it serves the section's rows from the fixture classification.
+      const report = fixtureCurrentReport.summary;
+      if (!report || report.contentIdentity !== cursor.reportContentIdentity) {
+        return {
+          reportContentIdentity: cursor.reportContentIdentity,
+          runId: cursor.runId,
+          generation: cursor.generation,
+          section: cursor.section,
+          rows: [],
+          nextOffset: null,
+        };
+      }
+      const rows = fixtureReportPages[cursor.section] ?? [];
+      const start = cursor.offset;
+      const pageRows = rows.slice(start, start + 64);
+      const nextOffset =
+        start + pageRows.length < rows.length ? start + pageRows.length : null;
       return {
         reportContentIdentity: cursor.reportContentIdentity,
         runId: cursor.runId,
         generation: cursor.generation,
         section: cursor.section,
-        rows: [],
-        nextOffset: null,
+        rows: pageRows,
+        nextOffset,
       };
     },
     async planCreateAgentConfiguration(draft) {
@@ -551,6 +606,7 @@ export function createFixtureCatalogClient(
         agentId: plan.agentId,
         generation: snapshotVersion,
         deleted: plan.kind === "delete",
+        affectedTargetRootIds: [],
       };
     },
 
@@ -907,6 +963,24 @@ export function createFixtureCatalogClient(
       return fixtureUnsupported(
         "Safety Snapshot deletion is not available in the preview fixture",
       );
+    },
+    publishScanReport(summary, pages) {
+      fixtureCurrentReport.summary = summary;
+      fixtureCurrentReport.freshness = "current";
+      fixtureCurrentReport.staleReasons = [];
+      fixtureReportPages = {
+        roots: [],
+        entities: [],
+        appearances: [],
+        diagnostics: [],
+        git_sources: [],
+        local_candidates: [],
+        conflict_sets: [],
+        needs_attention: [],
+        excluded: [],
+        ...pages,
+      };
+      publishObservation();
     },
   };
 }

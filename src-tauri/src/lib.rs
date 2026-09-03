@@ -60,6 +60,7 @@ pub fn run() {
     use crate::core::startup::StartupService;
     use crate::core::update::UpdateService;
     use crate::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
+    use crate::seams::activation_store::ActivationStore;
     use crate::seams::adopt_store::AdoptStore;
     use crate::seams::agent_configuration_store::AgentConfigurationStore;
     use crate::seams::app_state_store::AppStateStore;
@@ -85,17 +86,18 @@ pub fn run() {
         discover_link_import, download_app_update, fetch_latest_and_manage, finalize_adopt,
         finalize_source_promotion, finalize_source_transition, finalize_source_update,
         get_agent_management_snapshot, get_bootstrap_snapshot, get_fixture_recovery_preview,
-        get_git_source_capability, get_locale_snapshot, get_observation_snapshot,
-        get_scan_report_page, inspect_skill, install_app_update, list_safety_snapshots,
-        list_skills, load_preferences, pin_skill_updates, plan_abandon, plan_adopt,
-        plan_create_agent_configuration, plan_delete_agent_configuration,
+        get_git_source_capability, get_locale_snapshot, get_observation_page,
+        get_observation_snapshot, get_scan_report_page, inspect_skill, install_app_update,
+        list_safety_snapshots, list_skills, load_preferences, pin_skill_updates, plan_abandon,
+        plan_adopt, plan_create_agent_configuration, plan_delete_agent_configuration,
         plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
         plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_link_import,
         plan_remove_skill, plan_restore, plan_skill_updates, prepare_existing_home_recovery,
         prepare_home, preview_source_promotion, preview_source_update, reconnect_same_home,
-        refresh_detection, refresh_system_languages, relocate_link, restore_eligibility,
-        run_activation_health_check, scan_adopt, set_locale_selection, start_rescan, startup_info,
-        undo_adopt, undo_source_promotion, undo_source_transition, update_preferences,
+        refresh_activation_health, refresh_detection, refresh_startup_probe,
+        refresh_system_languages, relocate_link, restore_eligibility, run_activation_health_check,
+        scan_adopt, set_locale_selection, start_rescan, startup_info, undo_adopt,
+        undo_source_promotion, undo_source_transition, update_preferences,
     };
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
     use crate::tauri_adapter::fixture_recovery_api::FixtureRecoveryApi;
@@ -308,6 +310,7 @@ pub fn run() {
             let catalog_store: Arc<dyn CatalogStore> = runtime_store.clone();
             let agent_configuration_store: Arc<dyn AgentConfigurationStore> =
                 runtime_store.clone();
+            let activation_store: Arc<dyn ActivationStore> = runtime_store.clone();
             let import_store: Arc<dyn ImportStore> = runtime_store.clone();
             let adopt_store: Arc<dyn AdoptStore> = runtime_store.clone();
             let maintenance_store: Arc<dyn MaintenanceStore> = runtime_store.clone();
@@ -434,15 +437,33 @@ pub fn run() {
             let observation_api = Arc::new(ObservationApi::new(
                 Arc::new(ObservationService::new(
                     agent_configuration_filesystem,
+                    filesystem.clone(),
                     presets,
                     write_gate.clone(),
                     agent_configuration_store,
+                    activation_store,
+                    Arc::new(SystemClock::new()),
                 )
                 .with_scan(scan_coordinator.clone())),
                 Arc::new(TauriObservationChangedEmitter::new(app.handle().clone())),
             ));
             scan_coordinator.set_observer(observation_api.clone());
+            observation_api
+                .service_handle()
+                .set_observation_observer(observation_api.clone());
             app.manage(observation_api.clone());
+            // Priority at startup: Activation health, Startup Probe, Agent
+            // Detection (ADR-0020). Health is asynchronous; probe/detection
+            // are single-flight join runs on their own threads so the
+            // first interactive Library Desk never waits for them.
+            let health_trigger = observation_api.clone();
+            std::thread::spawn(move || {
+                let _ = health_trigger.refresh_activation_health(None);
+            });
+            let probe_trigger = observation_api.clone();
+            std::thread::spawn(move || {
+                let _ = probe_trigger.refresh_startup_probe();
+            });
             std::thread::spawn(move || {
                 let _ = observation_api.refresh_detection();
             });
@@ -654,6 +675,9 @@ pub fn run() {
             get_agent_management_snapshot,
             get_observation_snapshot,
             refresh_detection,
+            refresh_startup_probe,
+            refresh_activation_health,
+            get_observation_page,
             start_rescan,
             cancel_rescan,
             get_scan_report_page,

@@ -278,7 +278,16 @@ impl MaintenanceService {
             self.recover_startup_operations()?;
             self.write_gate.mark_ready();
         }
-        self.run_health_check()
+        // Activation Health Observation is owned by the Observation module
+        // (spec §4.10; ADR-0020): the legacy per-row health write here
+        // would advance shared `snapshot_version` and race the CAS. The
+        // module runs its own read-mostly Target-scoped health on the
+        // shared scheduler; skill/entity health remains exposed through
+        // explicit maintenance commands.
+        Ok(ActivationHealthReport {
+            checked: 0,
+            snapshot_version: self.write_gate.generation(),
+        })
     }
 
     fn recover_startup_operations(&self) -> Result<(), MaintenanceError> {

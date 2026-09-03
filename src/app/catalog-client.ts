@@ -462,6 +462,98 @@ export interface DetectionSnapshot {
   presetObservations: PresetObservation[];
 }
 
+/** Observation lifecycle; `stale` is the cross-startup/kept-old view. */
+export type ObservationStatus = "unknown" | "checking" | "observed" | "stale";
+
+export interface StartupProbeRootCounts {
+  total: number;
+  present: number;
+  unavailable: number;
+  absent: number;
+}
+
+export interface StartupProbeTargetCounts {
+  total: number;
+  present: number;
+  unavailable: number;
+  absent: number;
+}
+
+/** Bounded Startup Probe summary (spec §4.10 `startupProbe`). */
+export interface StartupProbeSnapshot {
+  generation: number;
+  status: ObservationStatus;
+  rootCounts: StartupProbeRootCounts;
+  targetCounts: StartupProbeTargetCounts;
+  slow: boolean;
+  diagnostic: string | null;
+}
+
+export interface ActivationHealthCounts {
+  targetGroups: number;
+  observedGroups: number;
+  failedGroups: number;
+  unresponsiveGroups: number;
+  entriesTotal: number;
+  entriesPresent: number;
+  entriesUnhealthy: number;
+  entriesUnknown: number;
+}
+
+/** Bounded Activation Health summary (spec §4.10 `activationHealth`). */
+export interface ActivationHealthSnapshot {
+  generation: number;
+  status: ObservationStatus;
+  targetGroupCounts: ActivationHealthCounts;
+  slow: boolean;
+  diagnostic: string | null;
+}
+
+export type ObservationKind = "startup_probe" | "activation_health";
+
+/** Stable cursor into one observation generation (spec §4.10). */
+export interface ObservationCursor {
+  offset: number;
+}
+
+/** One Startup Probe row (read-only Root/Target observation). */
+export interface StartupProbeRow {
+  configuredPath: string;
+  pathIdentityKey: string;
+  canonicalPath: string | null;
+  state: "present" | "unavailable" | "absent";
+  diagnostic: string | null;
+  isTarget: boolean;
+}
+
+export type ActivationObservedState =
+  "present" | "missing" | "target_mismatch" | "dangling" | "occupied";
+
+/** One Activation health row (an enabled `(Skill, Target)` activation). */
+export interface ActivationHealthRow {
+  skillId: string;
+  targetRootId: string;
+  entryPath: string;
+  /** This generation's observation; `null` = Unknown (kept old). */
+  observedState: ActivationObservedState | null;
+  /** The previously persisted observation (kept old on failure). */
+  previousState: ActivationObservedState | null;
+  stale: boolean;
+  diagnostic: string | null;
+  checkedAtMs: number | null;
+}
+
+export type ObservationRow =
+  | { kind: "startup_probe"; row: StartupProbeRow }
+  | { kind: "activation_health"; row: ActivationHealthRow };
+
+/** A bounded page of one observation generation (spec §4.10). */
+export interface ObservationPage {
+  generation: number;
+  rows: ObservationRow[];
+  nextOffset: number | null;
+}
+
 /**
  * The `observation://changed` payload and the query snapshot are isomorphic
  * (spec §4.10): the same bounded summary with the same generations.
@@ -471,6 +563,10 @@ export interface ObservationAndScanSnapshot {
   writeGateGeneration: number;
   agentConfigurationGeneration: number | null;
   detection: DetectionSnapshot;
+  /** Startup Probe bounded summary (spec §4.10). */
+  startupProbe: StartupProbeSnapshot | null;
+  /** Activation Health bounded summary (spec §4.10). */
+  activationHealth: ActivationHealthSnapshot | null;
   /** The single-flight Rescan Run (spec §4.10 `scanRun`). */
   scanRun: ScanRunSnapshot | null;
   /** Bounded current Report view (`currentReport`). */
@@ -553,6 +649,23 @@ export interface ScanReportSummary {
   configuredRootSnapshotFingerprint: string;
   startedAtMs: number;
   slow: boolean;
+  /** Bounded source classification counts (spec §8.1). */
+  sourceCounts: ScanSourceCounts;
+}
+
+/** Bounded source classification counts of a terminal Report (spec §8.1). */
+export interface ScanSourceCounts {
+  gitGroups: number;
+  gitGroupsConflicted: number;
+  localCandidates: number;
+  conflictSets: number;
+  conflictMembers: number;
+  blocked: number;
+  deferred: number;
+  identityConflicts: number;
+  alreadyManaged: number;
+  excluded: number;
+  needsAttention: number;
 }
 
 /** Generation-bound object identity (ADR-0017): Report-generation scoped. */
@@ -581,6 +694,35 @@ export interface ScanLockHint {
   fingerprint: string;
   faulted: boolean;
   fault: string | null;
+  /** Declaring strict-parse entry facts (never the lock body). */
+  sourceType: string | null;
+  sourceUrl: string | null;
+  requestedRef: string | null;
+  skillPath: string | null;
+}
+
+/** One enriched applicable lock claim (External Ownership Claim, §8.1). */
+export interface ScanLockClaim {
+  lockPath: string;
+  entryName: string;
+  fingerprint: string;
+  sourceType: string | null;
+  sourceUrl: string | null;
+  requestedRef: string | null;
+  skillPath: string | null;
+}
+
+/** Typed operation eligibility of one candidate (spec §8.1). */
+export interface ScanOperationEligibility {
+  operation: string;
+  allowed: boolean;
+  closedReason: string | null;
+}
+
+/** One Root consumer Agent (spec §7.6 coverage table). */
+export interface ScanRootAgent {
+  agentId: string;
+  agentName: string;
 }
 
 export interface ScanWorktreeHint {
@@ -598,6 +740,7 @@ export type ScanReportRow =
       configuredPath: string;
       canonicalPath: string;
       state: "completed" | "failed" | "unresponsive";
+      consumerAgents: ScanRootAgent[];
       counts: ScanCounts;
       elapsedMs: number;
       slow: boolean;
@@ -632,6 +775,61 @@ export type ScanReportRow =
       worktreeHint: ScanWorktreeHint | null;
     }
   | {
+      kind: "git_source_group";
+      groupSeq: number;
+      provider: string;
+      canonicalRepository: string;
+      repositoryRoot: string | null;
+      remoteUrlsSeen: string[];
+      memberEntitySeqs: number[];
+      memberPaths: string[];
+      memberNames: string[];
+      lockClaims: ScanLockClaim[];
+      refs: string[];
+      lockPaths: string[];
+      status: "candidate" | "repository_ref_conflict" | "ownership_split";
+      operations: ScanOperationEligibility[];
+      detail: string | null;
+    }
+  | {
+      kind: "source_verdict";
+      entitySeq: number;
+      verdict:
+        | "local"
+        | "git"
+        | "conflict_set"
+        | "identity_conflict"
+        | "blocked"
+        | "deferred"
+        | "already_managed"
+        | "excluded";
+      canonicalPath: string;
+      directoryNames: string[];
+      appearances: number;
+      fileCount: number;
+      byteCount: number;
+      treeHash: string | null;
+      lockClaims: ScanLockClaim[];
+      worktreeHints: ScanWorktreeHint[];
+      reasonKind: string | null;
+      detail: string | null;
+      gitRefs: string[];
+      gitLockPaths: string[];
+      gitGroupSeq: number | null;
+      conflictSetSeq: number | null;
+      notes: string[];
+      operations: ScanOperationEligibility[];
+    }
+  | {
+      kind: "conflict_set";
+      setSeq: number;
+      directoryIdentityKey: string;
+      directoryName: string;
+      memberEntitySeqs: number[];
+      memberPaths: string[];
+      winnerEntitySeq: number | null;
+    }
+  | {
       kind: "diagnostic";
       rootIndex: number;
       diagnosticKind: string;
@@ -640,7 +838,15 @@ export type ScanReportRow =
     };
 
 export type ScanReportSection =
-  "roots" | "entities" | "appearances" | "diagnostics";
+  | "roots"
+  | "entities"
+  | "appearances"
+  | "diagnostics"
+  | "git_sources"
+  | "local_candidates"
+  | "conflict_sets"
+  | "needs_attention"
+  | "excluded";
 
 /** A stable Report cursor (spec §4.10): pinned to one Report identity. */
 export interface ScanReportCursor {
@@ -701,6 +907,8 @@ export interface AgentConfigurationApplyResult {
   agentId: string;
   generation: number;
   deleted: boolean;
+  /** Target Root ids affected by the apply (Target-scoped health). */
+  affectedTargetRootIds: string[];
 }
 
 export interface AppPreferences {
@@ -1334,6 +1542,19 @@ export interface CatalogClient {
   getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
   /** Single-flight Detection trigger (spec §4.10; ADR-0020). */
   refreshDetection(): Promise<ObservationAndScanSnapshot>;
+  /** Single-flight Startup Probe trigger (spec §4.10; ADR-0020). */
+  refreshStartupProbe(): Promise<ObservationAndScanSnapshot>;
+  /** Target-scoped Activation Health trigger (spec §4.10; ADR-0020). */
+  refreshActivationHealth(
+    targetRootIds?: string[],
+  ): Promise<ObservationAndScanSnapshot>;
+  /** The unique paged observation read contract (`observationPage`). */
+  getObservationPage(
+    kind: ObservationKind,
+    generation: number,
+    cursor: ObservationCursor,
+    limit?: number,
+  ): Promise<ObservationPage>;
   /** Start a full Rescan Run (single-flight; spec §4.10). */
   startRescan(
     trigger: "onboarding" | "manual",
@@ -1560,6 +1781,19 @@ const tauriCatalogClient: CatalogClient = {
   },
   refreshDetection() {
     return invoke<ObservationAndScanSnapshot>("refresh_detection");
+  },
+  refreshStartupProbe() {
+    return invoke<ObservationAndScanSnapshot>("refresh_startup_probe");
+  },
+  refreshActivationHealth(targetRootIds) {
+    return invoke<ObservationAndScanSnapshot>("refresh_activation_health", {
+      request: { targetRootIds: targetRootIds ?? null },
+    });
+  },
+  getObservationPage(kind, generation, cursor, limit) {
+    return invoke<ObservationPage>("get_observation_page", {
+      request: { kind, generation, cursor, limit: limit ?? 64 },
+    });
   },
   startRescan(trigger) {
     return invoke<ObservationAndScanSnapshot>("start_rescan", {

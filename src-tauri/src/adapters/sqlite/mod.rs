@@ -13,6 +13,7 @@ use crate::core::domain::{
 use crate::core::home::{BoundHome, HomeId};
 use crate::seams::activation_store::{
     ActivationObservation, ActivationStore, ActivationStoreError, DesiredActivation,
+    StoredActivationObservation,
 };
 use crate::seams::adopt_store::{
     AdoptAgent, AdoptStore, AdoptStoreError, AdoptedSkillRecord,
@@ -4893,6 +4894,40 @@ impl ActivationStore for SqliteCatalogStore {
             .map_err(sqlite_activation_error)
     }
 
+    fn activation_observations(
+        &self,
+    ) -> Result<Vec<StoredActivationObservation>, ActivationStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT skill_id, target_root_id, expected_entry_path, expected_target_path,
+                        observed_state, last_checked_at
+                 FROM activations
+                 WHERE desired_enabled = 1
+                 ORDER BY target_root_id, skill_id",
+            )
+            .map_err(sqlite_activation_error)?;
+        statement
+            .query_map([], |row| {
+                let observed_state: Option<String> = row.get(4)?;
+                let last_checked_at: Option<String> = row.get(5)?;
+                Ok(StoredActivationObservation {
+                    skill_id: SkillId(row.get(0)?),
+                    target_root_id: row.get(1)?,
+                    expected_entry_path: PathBuf::from(row.get::<_, String>(2)?),
+                    expected_target_path: PathBuf::from(row.get::<_, String>(3)?),
+                    observed_state: observed_state
+                        .as_deref()
+                        .map(parse_observed_state)
+                        .transpose()?,
+                    last_checked_at_ms: last_checked_at.as_deref().and_then(parse_checked_at_ms),
+                })
+            })
+            .map_err(sqlite_activation_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_activation_error)
+    }
+
     fn record_observations(
         &self,
         observations: &[ActivationObservation],
@@ -4920,7 +4955,7 @@ impl ActivationStore for SqliteCatalogStore {
         transaction
             .execute(
                 "UPDATE catalog_meta
-                 SET snapshot_version = snapshot_version + 1, last_startup_check_at = ?1
+                 SET last_startup_check_at = ?1
                  WHERE singleton = 1",
                 [checked_at],
             )
@@ -6131,6 +6166,44 @@ fn invalid_enum_value(column: usize, value: &str) -> rusqlite::Error {
         rusqlite::types::Type::Text,
         format!("invalid persisted enum value '{value}'").into(),
     )
+}
+
+/// `last_checked_at` historically holds either epoch seconds
+/// (`unix_timestamp()`) or RFC3339 with optional millis
+/// (`strftime('%Y-%m-%dT%H:%M:%fZ')`); normalize to epoch millis for
+/// presentation; unknown shapes yield `None` = fail closed (never a guessed
+/// timestamp).
+fn parse_checked_at_ms(value: &str) -> Option<u64> {
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .ok()
+            .map(|seconds| seconds.saturating_mul(1_000));
+    }
+    if !value.contains('.') {
+        return crate::core::scan::rfc3339_to_epoch_millis(value);
+    }
+    // Split `SS[.fraction]Z` into the whole-second part and the millis
+    // suffix, then parse the whole part with the project RFC3339 helper
+    // (which already validates shape and range).
+    let dot = value.find('.')?;
+    let whole = value.get(0..dot)?;
+    let tail = value.get(dot + 1..)?;
+    let tail = tail.strip_suffix('Z').unwrap_or(tail);
+    let mut fraction = tail
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if fraction.is_empty() {
+        return None;
+    }
+    while fraction.len() < 3 {
+        fraction.push('0');
+    }
+    fraction.truncate(3);
+    let fraction_ms = fraction.parse::<u64>().unwrap_or(0);
+    let whole_ms = crate::core::scan::rfc3339_to_epoch_millis(whole)?;
+    Some(whole_ms.saturating_add(fraction_ms))
 }
 
 fn unix_timestamp() -> String {

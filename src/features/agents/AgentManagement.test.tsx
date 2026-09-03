@@ -162,6 +162,8 @@ test("unavailable detection evidence is never presented as absent", async () => 
     homeId: null,
     writeGateGeneration: 0,
     agentConfigurationGeneration: 0,
+    startupProbe: null,
+    activationHealth: null,
     scanRun: null,
     currentReport: {
       summary: null,
@@ -212,6 +214,8 @@ test("a pending Detection Run is not presented as no agents", async () => {
     homeId: null,
     writeGateGeneration: 0,
     agentConfigurationGeneration: null,
+    startupProbe: null,
+    activationHealth: null,
     scanRun: null,
     currentReport: {
       summary: null,

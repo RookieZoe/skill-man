@@ -9,7 +9,8 @@ use crate::core::app_update::{
     AppUpdateCheck, AppUpdateOffer, CancelledAppUpdate, DownloadedAppUpdate,
 };
 use crate::core::domain::{
-    AgentKind, CatalogFilter, Compatibility, Health, SkillDetail, SkillSummary, SourceKind,
+    ActivationObservedState, AgentKind, CatalogFilter, Compatibility, Health, SkillDetail,
+    SkillSummary, SourceKind,
 };
 use crate::core::git_source_capability::{
     GitSourceCapabilityKind, GitSourceCapabilityReport, GitSourceCapabilitySource,
@@ -24,8 +25,10 @@ use crate::core::maintenance::{
     ActivationHealthReport, RelocatePreview, RelocateResult, RemovePreview, RemoveResult,
 };
 use crate::core::observation::{
-    DetectionSnapshot, ObservationAndScanSnapshot, PresetDetectionState, PresetObservation,
-    RootDetectionState, RootObservation,
+    ActivationHealthCounts, ActivationHealthRow, ActivationHealthSnapshot, DetectionSnapshot,
+    ObservationAndScanSnapshot, ObservationKind, ObservationStatus, PresetDetectionState,
+    PresetObservation, RootDetectionState, RootObservation, StartupProbeRootCounts,
+    StartupProbeRow, StartupProbeSnapshot, StartupProbeTargetCounts,
 };
 use crate::core::source_group_preview::{
     ExternalOwnershipClaim, FetchLatestAndManageRequest, RepositoryOwnershipSplit,
@@ -1044,6 +1047,9 @@ pub struct AgentConfigurationApplyResultDto {
     pub agent_id: String,
     pub generation: u64,
     pub deleted: bool,
+    /// Target Root ids affected by the apply: the caller schedules
+    /// Target-scoped Activation health for exactly these (spec §4.10).
+    pub affected_target_root_ids: Vec<String>,
 }
 
 impl From<AgentConfigurationApplyResult> for AgentConfigurationApplyResultDto {
@@ -1052,6 +1058,7 @@ impl From<AgentConfigurationApplyResult> for AgentConfigurationApplyResultDto {
             agent_id: value.agent_id,
             generation: value.generation,
             deleted: value.deleted,
+            affected_target_root_ids: value.affected_target_root_ids,
         }
     }
 }
@@ -1160,6 +1167,259 @@ impl From<DetectionSnapshot> for DetectionSnapshotDto {
                 .collect(),
         }
     }
+}
+
+/// Observation lifecycle; `stale` is the cross-startup / kept-old view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationStatusDto {
+    Unknown,
+    Checking,
+    Observed,
+    Stale,
+}
+
+impl From<ObservationStatus> for ObservationStatusDto {
+    fn from(value: ObservationStatus) -> Self {
+        match value {
+            ObservationStatus::Unknown => Self::Unknown,
+            ObservationStatus::Checking => Self::Checking,
+            ObservationStatus::Observed => Self::Observed,
+            ObservationStatus::Stale => Self::Stale,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupProbeRootCountsDto {
+    pub total: u64,
+    pub present: u64,
+    pub unavailable: u64,
+    pub absent: u64,
+}
+
+impl From<StartupProbeRootCounts> for StartupProbeRootCountsDto {
+    fn from(value: StartupProbeRootCounts) -> Self {
+        Self {
+            total: value.total,
+            present: value.present,
+            unavailable: value.unavailable,
+            absent: value.absent,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupProbeTargetCountsDto {
+    pub total: u64,
+    pub present: u64,
+    pub unavailable: u64,
+    pub absent: u64,
+}
+
+impl From<StartupProbeTargetCounts> for StartupProbeTargetCountsDto {
+    fn from(value: StartupProbeTargetCounts) -> Self {
+        Self {
+            total: value.total,
+            present: value.present,
+            unavailable: value.unavailable,
+            absent: value.absent,
+        }
+    }
+}
+
+/// Bounded Startup Probe summary (spec §4.10).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupProbeSnapshotDto {
+    pub generation: u64,
+    pub status: ObservationStatusDto,
+    pub root_counts: StartupProbeRootCountsDto,
+    pub target_counts: StartupProbeTargetCountsDto,
+    pub slow: bool,
+    pub diagnostic: Option<String>,
+}
+
+impl From<StartupProbeSnapshot> for StartupProbeSnapshotDto {
+    fn from(value: StartupProbeSnapshot) -> Self {
+        Self {
+            generation: value.generation,
+            status: value.status.into(),
+            root_counts: value.root_counts.into(),
+            target_counts: value.target_counts.into(),
+            slow: value.slow,
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationHealthCountsDto {
+    pub target_groups: u64,
+    pub observed_groups: u64,
+    pub failed_groups: u64,
+    pub unresponsive_groups: u64,
+    pub entries_total: u64,
+    pub entries_present: u64,
+    pub entries_unhealthy: u64,
+    pub entries_unknown: u64,
+}
+
+impl From<ActivationHealthCounts> for ActivationHealthCountsDto {
+    fn from(value: ActivationHealthCounts) -> Self {
+        Self {
+            target_groups: value.target_groups,
+            observed_groups: value.observed_groups,
+            failed_groups: value.failed_groups,
+            unresponsive_groups: value.unresponsive_groups,
+            entries_total: value.entries_total,
+            entries_present: value.entries_present,
+            entries_unhealthy: value.entries_unhealthy,
+            entries_unknown: value.entries_unknown,
+        }
+    }
+}
+
+/// Bounded Activation Health summary (spec §4.10).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationHealthSnapshotDto {
+    pub generation: u64,
+    pub status: ObservationStatusDto,
+    pub target_group_counts: ActivationHealthCountsDto,
+    pub slow: bool,
+    pub diagnostic: Option<String>,
+}
+
+impl From<ActivationHealthSnapshot> for ActivationHealthSnapshotDto {
+    fn from(value: ActivationHealthSnapshot) -> Self {
+        Self {
+            generation: value.generation,
+            status: value.status.into(),
+            target_group_counts: value.target_group_counts.into(),
+            slow: value.slow,
+            diagnostic: value.diagnostic,
+        }
+    }
+}
+
+/// The observation page contract (spec §4.10 `observation_page`).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationKindDto {
+    StartupProbe,
+    ActivationHealth,
+}
+
+impl From<ObservationKind> for ObservationKindDto {
+    fn from(value: ObservationKind) -> Self {
+        match value {
+            ObservationKind::StartupProbe => Self::StartupProbe,
+            ObservationKind::ActivationHealth => Self::ActivationHealth,
+        }
+    }
+}
+
+impl From<ObservationKindDto> for ObservationKind {
+    fn from(value: ObservationKindDto) -> Self {
+        match value {
+            ObservationKindDto::StartupProbe => ObservationKind::StartupProbe,
+            ObservationKindDto::ActivationHealth => ObservationKind::ActivationHealth,
+        }
+    }
+}
+
+/// Stable cursor into one observation generation (spec §4.10).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationCursorDto {
+    pub offset: u64,
+}
+
+/// One Startup Probe row: configured Root/Target existence, readability,
+/// path identity (read-only observation).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupProbeRowDto {
+    pub configured_path: String,
+    pub path_identity_key: String,
+    pub canonical_path: Option<String>,
+    /// `present | unavailable | absent`.
+    pub state: String,
+    pub diagnostic: Option<String>,
+    pub is_target: bool,
+}
+
+impl From<StartupProbeRow> for StartupProbeRowDto {
+    fn from(value: StartupProbeRow) -> Self {
+        Self {
+            configured_path: value.configured_path.to_string_lossy().into_owned(),
+            path_identity_key: value.path_identity_key,
+            canonical_path: value
+                .canonical_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            state: root_detection_state_name(value.state).to_owned(),
+            diagnostic: value.diagnostic,
+            is_target: value.is_target,
+        }
+    }
+}
+
+/// One Activation health row (an enabled `(Skill, Target)` activation).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationHealthRowDto {
+    pub skill_id: String,
+    pub target_root_id: String,
+    pub entry_path: String,
+    /// This generation's observation: `present | missing | target_mismatch
+    /// | dangling | occupied`, `None` = Unknown.
+    pub observed_state: Option<String>,
+    /// The previously persisted observation (kept old on failure).
+    pub previous_state: Option<String>,
+    pub stale: bool,
+    pub diagnostic: Option<String>,
+    pub checked_at_ms: Option<u64>,
+}
+
+impl From<ActivationHealthRow> for ActivationHealthRowDto {
+    fn from(value: ActivationHealthRow) -> Self {
+        Self {
+            skill_id: value.skill_id,
+            target_root_id: value.target_root_id,
+            entry_path: value.entry_path.to_string_lossy().into_owned(),
+            observed_state: value
+                .observed_state
+                .map(|state| activation_observed_state_name(state).to_owned()),
+            previous_state: value
+                .previous_state
+                .map(|state| activation_observed_state_name(state).to_owned()),
+            stale: value.stale,
+            diagnostic: value.diagnostic,
+            checked_at_ms: value.checked_at_ms,
+        }
+    }
+}
+
+/// One paged observation row. Tagged on the wire: `{"kind":
+/// "startup_probe"|"activation_health", "row": {...}}`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ObservationRowDto {
+    StartupProbe { row: StartupProbeRowDto },
+    ActivationHealth { row: ActivationHealthRowDto },
+}
+
+/// A bounded page of one observation generation (spec §4.10).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationPageReadDto {
+    pub generation: u64,
+    pub rows: Vec<ObservationRowDto>,
+    pub next_offset: Option<u64>,
 }
 
 /// Bounded per-Root view while a Run is active (spec §4.10).
@@ -1282,6 +1542,11 @@ pub struct ObservationAndScanSnapshotDto {
     pub write_gate_generation: u64,
     pub agent_configuration_generation: Option<u64>,
     pub detection: DetectionSnapshotDto,
+    /// Startup Probe bounded summary (spec §4.10); absent while the Agent
+    /// Configuration is not readable.
+    pub startup_probe: Option<StartupProbeSnapshotDto>,
+    /// Activation Health bounded summary (spec §4.10).
+    pub activation_health: Option<ActivationHealthSnapshotDto>,
     pub scan_run: Option<ScanRunSnapshotDto>,
     pub current_report: CurrentReportDto,
 }
@@ -1488,6 +1753,8 @@ impl From<ObservationAndScanSnapshot> for ObservationAndScanSnapshotDto {
             write_gate_generation: value.write_gate_generation,
             agent_configuration_generation: value.agent_configuration_generation,
             detection: value.detection.into(),
+            startup_probe: value.startup_probe.map(Into::into),
+            activation_health: value.activation_health.map(Into::into),
             scan_run: value.scan_run.map(Into::into),
             current_report: value.current_report.into(),
         }
@@ -1742,6 +2009,69 @@ fn scan_report_state_name(state: crate::core::scan::ScanReportState) -> &'static
     match state {
         crate::core::scan::ScanReportState::Complete => "complete",
         crate::core::scan::ScanReportState::Incomplete => "incomplete",
+    }
+}
+
+fn root_detection_state_name(state: crate::core::observation::RootDetectionState) -> &'static str {
+    match state {
+        crate::core::observation::RootDetectionState::Present => "present",
+        crate::core::observation::RootDetectionState::Unavailable => "unavailable",
+        crate::core::observation::RootDetectionState::Absent => "absent",
+    }
+}
+
+fn activation_observed_state_name(state: ActivationObservedState) -> &'static str {
+    match state {
+        ActivationObservedState::Present => "present",
+        ActivationObservedState::Missing => "missing",
+        ActivationObservedState::TargetMismatch => "target_mismatch",
+        ActivationObservedState::Dangling => "dangling",
+        ActivationObservedState::Occupied => "occupied",
+    }
+}
+
+/// The unique paged observation read request (spec §4.10
+/// `observation_page`).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationPageRequestDto {
+    /// `startup_probe | activation_health`.
+    pub kind: ObservationKindDto,
+    pub generation: u64,
+    pub cursor: ObservationCursorDto,
+    pub limit: Option<usize>,
+}
+
+/// Target-scoped Activation Health trigger (spec §4.10): `None` = all
+/// Targets, otherwise only the affected Target Root ids are re-observed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshActivationHealthRequestDto {
+    pub target_root_ids: Option<Vec<String>>,
+}
+
+/// A bounded page converted from the core page read; the kind-specific row
+/// payload is kept lossless on the wire with a tagged `kind` + `row`.
+pub fn observation_page_read_dto(
+    _kind: ObservationKind,
+    generation: u64,
+    page: crate::core::observation::ObservationPageRead,
+) -> ObservationPageReadDto {
+    ObservationPageReadDto {
+        generation,
+        rows: page
+            .rows
+            .into_iter()
+            .map(|row| match row {
+                crate::core::observation::ObservationRow::StartupProbe(row) => {
+                    ObservationRowDto::StartupProbe { row: row.into() }
+                }
+                crate::core::observation::ObservationRow::ActivationHealth(row) => {
+                    ObservationRowDto::ActivationHealth { row: row.into() }
+                }
+            })
+            .collect(),
+        next_offset: page.next_offset,
     }
 }
 
@@ -3776,6 +4106,11 @@ pub enum PublicErrorDto {
         current_generation: u64,
     },
     ScanReportNotFound,
+    ObservationPageStale {
+        #[serde(rename = "currentGeneration")]
+        current_generation: u64,
+    },
+    ObservationPageNotFound,
     Internal,
 }
 
