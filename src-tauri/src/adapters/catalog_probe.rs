@@ -194,13 +194,29 @@ impl CatalogProbe for SqliteCatalogProbe {
             .optional()
             .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
 
+        // The fixture classifier compares both the Legacy v4 shape
+        // (`identity_key`) and the current v9 shape
+        // (`directory_identity_key`). The column name is picked from the
+        // actual schema; the evidence keeps the legacy field name.
+        let skills_columns = connection
+            .prepare("SELECT name FROM pragma_table_info('skills')")
+            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?;
+        let identity_column = if skills_columns.contains("directory_identity_key") {
+            "directory_identity_key"
+        } else {
+            "identity_key"
+        };
         let skills = connection
-            .prepare(
-                "SELECT id, directory_name, identity_key, display_name, description,
+            .prepare(&format!(
+                "SELECT id, directory_name, {identity_column}, display_name, description,
                         source_kind, library_entry_path, final_entity_path,
                         recorded_content_hash, health, created_at, updated_at
                  FROM skills ORDER BY id",
-            )
+            ))
             .map_err(|error| CatalogProbeError::Unreadable(error.to_string()))?
             .query_map([], |row| {
                 Ok(FixtureSkillRowEvidence {
@@ -375,7 +391,7 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             &[
                 "id",
                 "directory_name",
-                "identity_key",
+                "directory_identity_key",
                 "display_name",
                 "description",
                 "source_kind",
@@ -469,7 +485,9 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
                 "remote_id",
                 "provider",
                 "canonical_url",
-                "tracking_ref",
+                "tracking_mode",
+                "tracking_value",
+                "current_selected_ref",
                 "current_release_id",
                 "created_at",
                 "updated_at",
@@ -480,7 +498,8 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             &[
                 "release_id",
                 "remote_id",
-                "tracking_ref",
+                "selection_kind",
+                "selected_ref",
                 "resolved_commit",
                 "discovered_at",
             ],
@@ -489,8 +508,10 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             "git_source_release_members",
             &[
                 "release_id",
+                "skill_id",
                 "skill_path",
-                "skill_name",
+                "directory_name",
+                "directory_identity_key",
                 "tree_hash",
                 "provider_hash",
             ],
@@ -500,9 +521,11 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             &[
                 "skill_id",
                 "remote_id",
-                "current_skill_path",
-                "remote_baseline_hash",
-                "current_baseline_hash",
+                "skill_path",
+                "storage_relpath",
+                "presence",
+                "first_seen_release_id",
+                "last_seen_release_id",
                 "last_checked_at",
                 "last_updated_at",
             ],
@@ -539,7 +562,6 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
         ("preferences", &["singleton"]),
     ];
     const UNIQUE_INDEXES: &[(&str, &[&str])] = &[
-        ("skills", &["identity_key"]),
         ("agent_configurations", &["name_identity_key"]),
         ("global_skill_roots", &["path_identity_key"]),
         ("agent_global_roots", &["agent_id"]),
@@ -547,7 +569,13 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
         ("remote_source_parents", &["canonical_url"]),
         ("remote_source_aliases", &["alias_url"]),
         ("git_repository_sources", &["provider", "canonical_url"]),
-        ("git_source_releases", &["remote_id", "resolved_commit"]),
+        (
+            "git_source_releases",
+            &["remote_id", "selected_ref", "resolved_commit"],
+        ),
+        ("git_source_release_members", &["release_id", "skill_id"]),
+        ("git_source_members", &["remote_id", "skill_path"]),
+        ("git_source_members", &["remote_id", "storage_relpath"]),
     ];
     const FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
         ("activations", "skill_id", "skills", "id", "CASCADE"),
@@ -616,6 +644,13 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             "release_id",
             "CASCADE",
         ),
+        (
+            "git_source_release_members",
+            "skill_id",
+            "skills",
+            "id",
+            "NO ACTION",
+        ),
         ("git_source_members", "skill_id", "skills", "id", "CASCADE"),
         (
             "git_source_members",
@@ -623,6 +658,20 @@ fn has_recovery_capabilities(connection: &Connection) -> bool {
             "remote_source_parents",
             "remote_id",
             "CASCADE",
+        ),
+        (
+            "git_source_members",
+            "first_seen_release_id",
+            "git_source_releases",
+            "release_id",
+            "NO ACTION",
+        ),
+        (
+            "git_source_members",
+            "last_seen_release_id",
+            "git_source_releases",
+            "release_id",
+            "NO ACTION",
         ),
     ];
 

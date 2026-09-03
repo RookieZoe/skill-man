@@ -26,6 +26,7 @@ use skill_man_lib::core::update::{
     UpdateApplyRequest, UpdateError, UpdateSelection, UpdateService,
 };
 use skill_man_lib::core::write_gate::WriteGate;
+use skill_man_lib::seams::git_source_capability::GitSourceMemberFact;
 use skill_man_lib::seams::import_store::ImportStore;
 
 mod common;
@@ -67,23 +68,33 @@ fn complete_repository_source_scan(
                     repository: Some(GitRepositorySourceFact {
                         provider: Some("generic".into()),
                         canonical_url: canonical_url.into(),
-                        tracking_ref: Some("main".into()),
+                        tracking_mode: Some("branch".into()),
+                        tracking_value: Some("main".into()),
+                        current_selected_ref: Some("main".into()),
                         current_release_id: Some("release-1".into()),
                         current_release: Some(GitSourceReleaseFact {
                             release_id: "release-1".into(),
                             remote_id: remote_id.into(),
-                            tracking_ref: "main".into(),
+                            selection_kind: "branch".into(),
+                            selected_ref: "main".into(),
                             resolved_commit: "abc123".into(),
                             member_paths: vec!["skills/alpha".into()],
                         }),
-                        current_member_paths: vec!["skills/alpha".into()],
+                        current_members: vec![GitSourceMemberFact {
+                            skill_id: "alpha-skill".into(),
+                            skill_path: "skills/alpha".into(),
+                            storage_relpath: format!("skills/git/{remote_id}/alpha-skill"),
+                            presence: true,
+                        }],
                     }),
                     manifest: GitSourceManifestFact::Present {
                         remote_id: remote_id.into(),
                         canonical_url: canonical_url.into(),
                         aliases: vec![],
                         provider: Some("generic".into()),
-                        tracking_ref: Some("main".into()),
+                        tracking_mode: Some("branch".into()),
+                        tracking_value: Some("main".into()),
+                        current_selected_ref: Some("main".into()),
                         current_release_id: Some("release-1".into()),
                     },
                 }],

@@ -111,7 +111,9 @@ fn manifest_is_complete(manifest: &GitSourceManifestFact) -> bool {
         canonical_url,
         aliases,
         provider,
-        tracking_ref,
+        tracking_mode,
+        tracking_value,
+        current_selected_ref,
         current_release_id,
     } = manifest
     else {
@@ -120,7 +122,11 @@ fn manifest_is_complete(manifest: &GitSourceManifestFact) -> bool {
     !remote_id.is_empty()
         && !canonical_url.is_empty()
         && provider.as_deref().is_some_and(|value| !value.is_empty())
-        && tracking_ref
+        && tracking_mode
+            .as_deref()
+            .is_some_and(is_supported_tracking_mode)
+        && tracking_value_matches_mode(tracking_mode.as_deref(), tracking_value.as_deref())
+        && current_selected_ref
             .as_deref()
             .is_some_and(|value| !value.is_empty())
         && current_release_id
@@ -128,6 +134,35 @@ fn manifest_is_complete(manifest: &GitSourceManifestFact) -> bool {
             .is_some_and(|value| !value.is_empty())
         && aliases.iter().all(|alias| !alias.is_empty())
         && has_unique_values(aliases)
+}
+
+/// The closed Source Tracking Policy vocabulary of ADR-0018. The value is
+/// only a vocabulary member; the Catalog CHECK constraint and the policy
+/// implementation own the mode families, so the scan never guesses which
+/// mode a Legacy manifest used.
+const SUPPORTED_TRACKING_MODES: &[&str] = &[
+    "auto_release_tag_head",
+    "prerelease_channel",
+    "fixed_tag",
+    "fixed_commit",
+    "branch",
+    "head",
+];
+
+fn is_supported_tracking_mode(mode: &str) -> bool {
+    SUPPORTED_TRACKING_MODES.contains(&mode)
+}
+
+/// Only the parameterised modes carry a `tracking_value`. A mode that needs
+/// one without a value is incomplete capability evidence; a `head` or
+/// automatic mode never requires one.
+fn tracking_value_matches_mode(mode: Option<&str>, value: Option<&str>) -> bool {
+    match mode {
+        Some("prerelease_channel" | "fixed_tag" | "fixed_commit" | "branch") => {
+            value.is_some_and(|value| !value.is_empty())
+        }
+        _ => true,
+    }
 }
 
 fn repository_is_complete(
@@ -138,7 +173,18 @@ fn repository_is_complete(
     if !structure.supports_repository_sources()
         || repository.canonical_url != source.canonical_url
         || repository.provider.as_deref().is_none_or(str::is_empty)
-        || repository.tracking_ref.as_deref().is_none_or(str::is_empty)
+        || repository
+            .tracking_mode
+            .as_deref()
+            .is_none_or(|mode| !is_supported_tracking_mode(mode))
+        || !tracking_value_matches_mode(
+            repository.tracking_mode.as_deref(),
+            repository.tracking_value.as_deref(),
+        )
+        || repository
+            .current_selected_ref
+            .as_deref()
+            .is_none_or(str::is_empty)
         || repository
             .current_release_id
             .as_deref()
@@ -151,12 +197,36 @@ fn repository_is_complete(
     };
     if release.release_id != repository.current_release_id.as_deref().unwrap_or_default()
         || release.remote_id != source.remote_id
-        || release.tracking_ref != repository.tracking_ref.as_deref().unwrap_or_default()
+        || release.selected_ref
+            != repository
+                .current_selected_ref
+                .as_deref()
+                .unwrap_or_default()
+        || release.selection_kind.is_empty()
         || release.resolved_commit.is_empty()
     {
         return false;
     }
-    same_non_empty_member_set(&release.member_paths, &repository.current_member_paths)
+    same_non_empty_member_set(&release.member_paths, &current_member_paths(repository))
+        && repository
+            .current_members
+            .iter()
+            .filter(|member| member.presence)
+            .all(|member| {
+                member.storage_relpath
+                    == format!("skills/git/{}/{}", source.remote_id, member.skill_id)
+            })
+}
+
+fn current_member_paths(repository: &GitRepositorySourceFact) -> Vec<String> {
+    let mut paths: Vec<String> = repository
+        .current_members
+        .iter()
+        .filter(|member| member.presence)
+        .map(|member| member.skill_path.clone())
+        .collect();
+    paths.sort();
+    paths
 }
 
 fn manifest_matches(source: &GitSourceFact, repository_is_complete: bool) -> bool {
@@ -165,7 +235,9 @@ fn manifest_matches(source: &GitSourceFact, repository_is_complete: bool) -> boo
         canonical_url,
         aliases,
         provider,
-        tracking_ref,
+        tracking_mode,
+        tracking_value,
+        current_selected_ref,
         current_release_id,
     } = &source.manifest
     else {
@@ -185,7 +257,9 @@ fn manifest_matches(source: &GitSourceFact, repository_is_complete: bool) -> boo
         .as_ref()
         .expect("complete repository fact");
     provider.as_deref() == repository.provider.as_deref()
-        && tracking_ref.as_deref() == repository.tracking_ref.as_deref()
+        && tracking_mode.as_deref() == repository.tracking_mode.as_deref()
+        && tracking_value.as_deref() == repository.tracking_value.as_deref()
+        && current_selected_ref.as_deref() == repository.current_selected_ref.as_deref()
         && current_release_id.as_deref() == repository.current_release_id.as_deref()
 }
 

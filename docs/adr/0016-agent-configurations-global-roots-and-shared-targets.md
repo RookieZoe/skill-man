@@ -136,10 +136,12 @@ stale，但不自动重跑。
 
 去重后的候选按 ownership 位置、bounded worktree 与 applicable lock 分类：稳定外部开发工作区即使
 属于 Git repository 仍是 Local Source，在 Catalog 记录真实目标路径；控制区内的 Git hint 与有效
-Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release。Git Repository Source 安装到
-`<Bound Home>/skills/{repo_user}/{repo_name}/{skill_name}`；正式路径始终从不可变 Bound Home 解析，
-不另设固定 Home。单 Root 失败保留 typed diagnostic 和其它 Root 的部分结果，但会移动、删除、替换
-实体或释放 external ownership 的操作必须等待完整 Scan Coverage。
+*Git lock 按 repository 聚合，Fetch Latest 后才形成完整 Source Release。Git Repository Source
+按 [ADR-0018](0018-git-source-namespaces-and-immutable-members.md) 安装到
+`<Home>/skills/git/<remote_id>/<skill_id>/`（旧版 `<Home>/skills/{repo_user}/{repo_name}/{skill_name}`
+不再是当前路径）；正式路径始终从不可变 Bound Home 解析，不另设固定 Home。单 Root 失败保留 typed
+diagnostic 和其它 Root 的部分结果，但会移动、删除、替换实体或释放 external ownership 的操作必须
+等待完整 Scan Coverage。
 
 全局 Enable 先选择 Agent，再解析其唯一 Target；不逐次询问目录，也不复制到全部扫描 Root。多个 Agent
 引用同一 Target 时只存在一个物理 Activation。Inspector 必须把这些 Agent 作为同一 Activation Target

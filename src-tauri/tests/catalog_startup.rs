@@ -257,7 +257,7 @@ fn future_schema_with_matching_identity_is_bound_read_only() {
     home.with_sql("bump schema", |connection| {
         connection
             .execute(
-                "UPDATE catalog_meta SET schema_version = 9 WHERE singleton = 1",
+                "UPDATE catalog_meta SET schema_version = 10 WHERE singleton = 1",
                 [],
             )
             .expect("bump schema version");

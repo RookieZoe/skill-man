@@ -406,7 +406,7 @@ fn contaminate_bound_home(home: &common::BoundTestHome) {
         connection
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path, health,
                     created_at, updated_at
                  ) VALUES

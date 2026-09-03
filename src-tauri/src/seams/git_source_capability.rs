@@ -50,19 +50,30 @@ impl GitSourceCatalogStructure {
 pub struct GitSourceReleaseFact {
     pub release_id: String,
     pub remote_id: String,
-    pub tracking_ref: String,
+    pub selection_kind: String,
+    pub selected_ref: String,
     pub resolved_commit: String,
     pub member_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitSourceMemberFact {
+    pub skill_id: String,
+    pub skill_path: String,
+    pub storage_relpath: String,
+    pub presence: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRepositorySourceFact {
     pub provider: Option<String>,
     pub canonical_url: String,
-    pub tracking_ref: Option<String>,
+    pub tracking_mode: Option<String>,
+    pub tracking_value: Option<String>,
+    pub current_selected_ref: Option<String>,
     pub current_release_id: Option<String>,
     pub current_release: Option<GitSourceReleaseFact>,
-    pub current_member_paths: Vec<String>,
+    pub current_members: Vec<GitSourceMemberFact>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +85,9 @@ pub enum GitSourceManifestFact {
         canonical_url: String,
         aliases: Vec<String>,
         provider: Option<String>,
-        tracking_ref: Option<String>,
+        tracking_mode: Option<String>,
+        tracking_value: Option<String>,
+        current_selected_ref: Option<String>,
         current_release_id: Option<String>,
     },
 }

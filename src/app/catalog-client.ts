@@ -640,10 +640,7 @@ export type ScanReportRow =
     };
 
 export type ScanReportSection =
-  | "roots"
-  | "entities"
-  | "appearances"
-  | "diagnostics";
+  "roots" | "entities" | "appearances" | "diagnostics";
 
 /** A stable Report cursor (spec §4.10): pinned to one Report identity. */
 export interface ScanReportCursor {

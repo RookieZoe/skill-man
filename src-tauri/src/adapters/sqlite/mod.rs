@@ -86,14 +86,14 @@ CREATE TABLE catalog_meta (
 CREATE TABLE skills (
     id TEXT PRIMARY KEY,
     directory_name TEXT NOT NULL,
-    identity_key TEXT NOT NULL UNIQUE,
+    directory_identity_key TEXT NOT NULL,
     display_name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     source_kind TEXT NOT NULL CHECK (source_kind IN ('link', 'remote_install', 'file_install')),
     library_entry_path TEXT,
     final_entity_path TEXT NOT NULL,
     recorded_content_hash TEXT,
-    health TEXT NOT NULL CHECK (health IN ('healthy', 'broken', 'modified')),
+    health TEXT NOT NULL CHECK (health IN ('healthy', 'broken', 'modified', 'source_snapshot_mismatch')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (
@@ -101,6 +101,9 @@ CREATE TABLE skills (
         OR (source_kind != 'link' AND library_entry_path IS NOT NULL)
     )
 );
+
+CREATE INDEX skills_directory_identity
+ON skills(directory_identity_key);
 
 CREATE TABLE agent_configurations (
     agent_id TEXT PRIMARY KEY,
@@ -200,7 +203,14 @@ CREATE TABLE git_repository_sources (
     remote_id TEXT PRIMARY KEY REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
     provider TEXT NOT NULL,
     canonical_url TEXT NOT NULL,
-    tracking_ref TEXT NOT NULL,
+    tracking_mode TEXT NOT NULL CHECK (
+        tracking_mode IN (
+            'auto_release_tag_head', 'prerelease_channel', 'fixed_tag',
+            'fixed_commit', 'branch', 'head'
+        )
+    ),
+    tracking_value TEXT,
+    current_selected_ref TEXT,
     current_release_id TEXT REFERENCES git_source_releases(release_id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -210,29 +220,37 @@ CREATE TABLE git_repository_sources (
 CREATE TABLE git_source_releases (
     release_id TEXT PRIMARY KEY,
     remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
-    tracking_ref TEXT NOT NULL,
+    selection_kind TEXT NOT NULL,
+    selected_ref TEXT NOT NULL,
     resolved_commit TEXT NOT NULL,
     discovered_at TEXT NOT NULL,
-    UNIQUE (remote_id, resolved_commit)
+    UNIQUE (remote_id, selected_ref, resolved_commit)
 );
 
 CREATE TABLE git_source_release_members (
     release_id TEXT NOT NULL REFERENCES git_source_releases(release_id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
     skill_path TEXT NOT NULL,
-    skill_name TEXT NOT NULL,
+    directory_name TEXT NOT NULL,
+    directory_identity_key TEXT NOT NULL,
     tree_hash TEXT NOT NULL,
     provider_hash TEXT,
-    PRIMARY KEY (release_id, skill_path)
+    PRIMARY KEY (release_id, skill_path),
+    UNIQUE (release_id, skill_id)
 );
 
 CREATE TABLE git_source_members (
     skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
     remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
-    current_skill_path TEXT NOT NULL,
-    remote_baseline_hash TEXT NOT NULL,
-    current_baseline_hash TEXT NOT NULL,
+    skill_path TEXT NOT NULL,
+    storage_relpath TEXT NOT NULL,
+    presence TEXT NOT NULL CHECK (presence IN ('current', 'absent')),
+    first_seen_release_id TEXT NOT NULL REFERENCES git_source_releases(release_id),
+    last_seen_release_id TEXT NOT NULL REFERENCES git_source_releases(release_id),
     last_checked_at INTEGER,
-    last_updated_at INTEGER
+    last_updated_at INTEGER,
+    UNIQUE (remote_id, skill_path),
+    UNIQUE (remote_id, storage_relpath)
 );
 
 CREATE TABLE preferences (
@@ -246,7 +264,7 @@ CREATE TABLE preferences (
 );
 
 INSERT INTO catalog_meta (singleton, schema_version, snapshot_version)
-VALUES (1, 8, 0);
+VALUES (1, 9, 0);
 
 INSERT INTO preferences (singleton) VALUES (1);
 "#;
@@ -1195,7 +1213,7 @@ impl SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path,
                         recorded_content_hash, health, created_at, updated_at
                      ) VALUES (
@@ -1374,7 +1392,7 @@ impl SourceUpdateStore for SqliteCatalogStore {
             String,
         ) = connection
             .query_row(
-                "SELECT source.provider, source.canonical_url, source.tracking_ref,
+                "SELECT source.provider, source.canonical_url, source.current_selected_ref,
                         source.current_release_id, parent.created_at
                    FROM git_repository_sources source
                    JOIN remote_source_parents parent ON parent.remote_id = source.remote_id
@@ -1400,7 +1418,7 @@ impl SourceUpdateStore for SqliteCatalogStore {
         let current_resolved_commit: String = connection
             .query_row(
                 "SELECT resolved_commit FROM git_source_releases
-                  WHERE release_id = ?1 AND remote_id = ?2 AND tracking_ref = ?3",
+                  WHERE release_id = ?1 AND remote_id = ?2 AND selected_ref = ?3",
                 params![current_release_id, remote_id, tracking_ref],
                 |row| row.get(0),
             )
@@ -1423,15 +1441,15 @@ impl SourceUpdateStore for SqliteCatalogStore {
             .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
         let mut statement = connection
             .prepare(
-                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
                         skills.display_name, skills.description, skills.library_entry_path,
                         skills.final_entity_path, skills.recorded_content_hash, skills.health,
-                        members.current_skill_path, members.current_baseline_hash,
-                        members.remote_baseline_hash
+                        members.skill_path,
+                        '' AS current_baseline_hash, '' AS remote_baseline_hash
                    FROM git_source_members members
                    JOIN skills ON skills.id = members.skill_id
-                  WHERE members.remote_id = ?1
-                  ORDER BY members.current_skill_path, skills.id",
+                  WHERE members.remote_id = ?1 AND members.presence = 'current'
+                  ORDER BY members.skill_path, skills.id",
             )
             .map_err(|error| SourceUpdateStoreError::Unavailable(error.to_string()))?;
         let mut members = statement
@@ -1676,7 +1694,7 @@ impl SourceUpdateStore for SqliteCatalogStore {
                     transaction
                         .execute(
                             "INSERT INTO skills (
-                                id, directory_name, identity_key, display_name, description,
+                                id, directory_name, directory_identity_key, display_name, description,
                                 source_kind, library_entry_path, final_entity_path,
                                 recorded_content_hash, health, created_at, updated_at
                              ) VALUES (
@@ -1870,7 +1888,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
 
         let mut statement = connection
             .prepare(
-                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
                         skills.display_name, skills.description, skills.library_entry_path,
                         skills.final_entity_path, skills.recorded_content_hash, skills.health,
                         remote_bindings.skill_path, remote_bindings.current_baseline_hash,
@@ -2108,7 +2126,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
                     transaction
                         .execute(
                             "INSERT INTO skills (
-                                id, directory_name, identity_key, display_name, description,
+                                id, directory_name, directory_identity_key, display_name, description,
                                 source_kind, library_entry_path, final_entity_path,
                                 recorded_content_hash, health, created_at, updated_at
                              ) VALUES (
@@ -2292,7 +2310,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
             let updated = transaction
                 .execute(
                     "UPDATE skills
-                     SET directory_name = ?1, identity_key = ?2, display_name = ?3,
+                     SET directory_name = ?1, directory_identity_key = ?2, display_name = ?3,
                          description = ?4, source_kind = 'remote_install',
                          library_entry_path = ?5, final_entity_path = ?6,
                          recorded_content_hash = ?7, health = ?8,
@@ -2315,7 +2333,7 @@ impl SourcePromotionStore for SqliteCatalogStore {
                 transaction
                     .execute(
                         "INSERT INTO skills (
-                            id, directory_name, identity_key, display_name, description,
+                            id, directory_name, directory_identity_key, display_name, description,
                             source_kind, library_entry_path, final_entity_path,
                             recorded_content_hash, health, created_at, updated_at
                          ) VALUES (?1, ?2, ?3, ?4, ?5, 'remote_install', ?6, ?7, ?8, ?9,
@@ -2471,7 +2489,7 @@ impl SourceTransitionStore for SqliteCatalogStore {
             let existing: Option<String> = transaction
                 .query_row(
                     "SELECT directory_name FROM skills
-                     WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                     WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
                      LIMIT 1",
                     params![
                         member.skill_id.0,
@@ -2545,7 +2563,7 @@ impl SourceTransitionStore for SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path,
                         recorded_content_hash, health, created_at, updated_at
                      ) VALUES (
@@ -2751,12 +2769,12 @@ fn source_promotion_matches(
     for member in &record.members {
         let actual: Option<SourcePromotionCurrentMemberState> = connection
             .query_row(
-                "SELECT s.directory_name, s.identity_key, s.final_entity_path,
-                            s.recorded_content_hash, s.health, gm.current_skill_path,
-                            gm.remote_baseline_hash, gm.current_baseline_hash
+                "SELECT s.directory_name, s.directory_identity_key, s.final_entity_path,
+                            s.recorded_content_hash, s.health, gm.skill_path,
+                            '' AS remote_baseline_hash, '' AS current_baseline_hash
                      FROM skills s
                      JOIN git_source_members gm ON gm.skill_id = s.id
-                     WHERE s.id = ?1 AND gm.remote_id = ?2",
+                     WHERE s.id = ?1 AND gm.remote_id = ?2 AND gm.presence = 'current'",
                 params![member.skill_id.0, record.remote_id],
                 |row| {
                     Ok((
@@ -2890,7 +2908,7 @@ fn validate_source_promotion_record(
                         b.original_commit_known, b.skill_path, b.provider_hash,
                         b.remote_baseline_hash, b.current_baseline_hash,
                         b.last_checked_at, b.last_updated_at,
-                        s.source_kind, s.directory_name, s.identity_key,
+                        s.source_kind, s.directory_name, s.directory_identity_key,
                         s.display_name, s.description, s.library_entry_path,
                         s.final_entity_path, s.recorded_content_hash, s.health
                  FROM remote_bindings b
@@ -3006,7 +3024,7 @@ fn validate_source_promotion_record(
                 }
                 let existing: Option<(String, String, String)> = connection
                     .query_row(
-                        "SELECT directory_name, identity_key, final_entity_path
+                        "SELECT directory_name, directory_identity_key, final_entity_path
                          FROM skills WHERE id = ?1",
                         [&member.skill_id.0],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -3032,7 +3050,7 @@ fn validate_source_promotion_record(
                     .query_row(
                         "SELECT EXISTS(
                             SELECT 1 FROM skills
-                            WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                            WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
                          )",
                         params![
                             member.skill_id.0,
@@ -3129,7 +3147,7 @@ fn validate_new_source_transition(
         let existing: Option<String> = connection
             .query_row(
                 "SELECT directory_name FROM skills
-                 WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3
+                 WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
                  LIMIT 1",
                 params![
                     member.skill_id.0,
@@ -3247,7 +3265,7 @@ fn validate_source_update_record(
                 let existing: Option<String> = connection
                     .query_row(
                         "SELECT directory_name FROM skills
-                          WHERE id = ?1 OR directory_name = ?2 OR identity_key = ?3 LIMIT 1",
+                          WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3 LIMIT 1",
                         params![
                             member.skill_id.0,
                             member.directory_name,
@@ -3356,16 +3374,17 @@ fn source_update_frozen_matches(
     for member in &record.legacy.members {
         let actual: Option<SourceUpdateFrozenMemberState> = connection
             .query_row(
-                "SELECT skills.directory_name, skills.identity_key, skills.display_name,
+                "SELECT skills.directory_name, skills.directory_identity_key, skills.display_name,
                         skills.description, skills.library_entry_path, skills.final_entity_path,
                         skills.recorded_content_hash, skills.health,
-                        members.current_skill_path, members.remote_baseline_hash,
-                        members.current_baseline_hash, release_members.tree_hash
+                        members.skill_path,
+                        '' AS remote_baseline_hash, '' AS current_baseline_hash,
+                        release_members.tree_hash
                    FROM skills JOIN git_source_members members ON members.skill_id = skills.id
                    JOIN git_source_release_members release_members
                      ON release_members.release_id = ?3
-                    AND release_members.skill_path = members.current_skill_path
-                  WHERE skills.id = ?1 AND members.remote_id = ?2",
+                    AND release_members.skill_path = members.skill_path
+                  WHERE skills.id = ?1 AND members.remote_id = ?2 AND members.presence = 'current'",
                 params![member.skill_id.0, record.remote_id, &current_release_id],
                 |row| {
                     Ok((
@@ -3469,16 +3488,16 @@ fn source_update_target_matches(
     for member in &record.members {
         let actual: Option<SourceUpdateTargetMemberState> = connection
             .query_row(
-                "SELECT skills.directory_name, skills.identity_key, skills.display_name,
+                "SELECT skills.directory_name, skills.directory_identity_key, skills.display_name,
                         skills.description, skills.library_entry_path, skills.final_entity_path,
-                        skills.recorded_content_hash, skills.health, members.current_skill_path,
-                        members.remote_baseline_hash, members.current_baseline_hash,
+                        skills.recorded_content_hash, skills.health, members.skill_path,
+                        '' AS remote_baseline_hash, '' AS current_baseline_hash,
                         release_members.tree_hash
                    FROM skills JOIN git_source_members members ON members.skill_id = skills.id
                    JOIN git_source_release_members release_members
                      ON release_members.release_id = ?3
-                    AND release_members.skill_path = members.current_skill_path
-                  WHERE skills.id = ?1 AND members.remote_id = ?2",
+                    AND release_members.skill_path = members.skill_path
+                  WHERE skills.id = ?1 AND members.remote_id = ?2 AND members.presence = 'current'",
                 params![member.skill_id.0, record.remote_id, &record.release_id],
                 |row| {
                     Ok((
@@ -3596,16 +3615,17 @@ fn source_transition_matches(
     for member in &record.members {
         let actual: Option<SourceTransitionMemberState> = connection
             .query_row(
-                "SELECT s.directory_name, s.identity_key, s.display_name, s.description,
+                "SELECT s.directory_name, s.directory_identity_key, s.display_name, s.description,
                         s.library_entry_path, s.final_entity_path, s.recorded_content_hash,
-                        gm.current_skill_path, gm.remote_baseline_hash, gm.current_baseline_hash,
+                        gm.skill_path,
+                        '' AS remote_baseline_hash, '' AS current_baseline_hash,
                         rm.tree_hash,
                         rm.provider_hash
                  FROM skills s
                  JOIN git_source_members gm ON gm.skill_id = s.id
                  JOIN git_source_release_members rm
-                   ON rm.release_id = ?2 AND rm.skill_path = gm.current_skill_path
-                 WHERE s.id = ?1 AND gm.remote_id = ?3",
+                   ON rm.release_id = ?2 AND rm.skill_path = gm.skill_path
+                 WHERE s.id = ?1 AND gm.remote_id = ?3 AND gm.presence = 'current'",
                 params![member.skill_id.0, record.release_id, record.remote_id],
                 |row| {
                     Ok((
@@ -3656,7 +3676,7 @@ impl ImportStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
             .query_row(
-                "SELECT id, directory_name FROM skills WHERE identity_key = ?1",
+                "SELECT id, directory_name FROM skills WHERE directory_identity_key = ?1",
                 [identity_key],
                 |row| {
                     Ok(LibraryConflict {
@@ -3679,7 +3699,7 @@ impl ImportStore for SqliteCatalogStore {
             .map_err(sqlite_import_error)?;
         let existing: Option<String> = transaction
             .query_row(
-                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                 [&record.identity_key],
                 |row| row.get(0),
             )
@@ -3691,7 +3711,7 @@ impl ImportStore for SqliteCatalogStore {
         transaction
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path, health,
                     created_at, updated_at
                  ) VALUES (
@@ -3737,7 +3757,7 @@ impl ImportStore for SqliteCatalogStore {
             .map_err(sqlite_import_error)?;
         let existing: Option<String> = transaction
             .query_row(
-                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                 [&record.identity_key],
                 |row| row.get(0),
             )
@@ -3749,7 +3769,7 @@ impl ImportStore for SqliteCatalogStore {
         transaction
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path,
                     recorded_content_hash, health, created_at, updated_at
                  ) VALUES (
@@ -3809,7 +3829,7 @@ impl ImportStore for SqliteCatalogStore {
         for record in records {
             let existing: Option<String> = transaction
                 .query_row(
-                    "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                    "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                     [&record.identity_key],
                     |row| row.get(0),
                 )
@@ -3821,7 +3841,7 @@ impl ImportStore for SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path,
                         recorded_content_hash, health, created_at, updated_at
                      ) VALUES (
@@ -3880,14 +3900,14 @@ impl ImportStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
             .query_row(
-                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
                         skills.display_name, skills.description,
                         skills.library_entry_path, skills.final_entity_path,
                         skills.recorded_content_hash, file_sources.original_path,
                         file_sources.original_filename
                    FROM skills
                    JOIN file_sources ON file_sources.skill_id = skills.id
-                  WHERE skills.identity_key = ?1 AND skills.source_kind = 'file_install'",
+                  WHERE skills.directory_identity_key = ?1 AND skills.source_kind = 'file_install'",
                 [identity_key],
                 |row| {
                     Ok(FileImportRecord {
@@ -3935,7 +3955,7 @@ impl ImportStore for SqliteCatalogStore {
                     SET display_name = ?2, description = ?3,
                         recorded_content_hash = ?4, health = 'healthy',
                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                  WHERE id = ?1 AND identity_key = ?5 AND source_kind = 'file_install'",
+                  WHERE id = ?1 AND directory_identity_key = ?5 AND source_kind = 'file_install'",
                 params![
                     record.skill_id.0,
                     record.display_name,
@@ -3992,7 +4012,7 @@ impl ImportStore for SqliteCatalogStore {
         for record in records {
             let existing: Option<String> = transaction
                 .query_row(
-                    "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                    "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                     [&record.identity_key],
                     |row| row.get(0),
                 )
@@ -4004,7 +4024,7 @@ impl ImportStore for SqliteCatalogStore {
             transaction
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path,
                         recorded_content_hash, health, created_at, updated_at
                      ) VALUES (
@@ -4092,7 +4112,7 @@ impl ImportStore for SqliteCatalogStore {
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
         let mut statement = connection
             .prepare(
-                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
                         skills.display_name, skills.description,
                         skills.final_entity_path, skills.recorded_content_hash,
                         skills.health, remote_source_parents.canonical_url,
@@ -4150,7 +4170,7 @@ impl ImportStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
             .query_row(
-                "SELECT skills.id, skills.directory_name, skills.identity_key,
+                "SELECT skills.id, skills.directory_name, skills.directory_identity_key,
                         skills.display_name, skills.description,
                         skills.final_entity_path, skills.recorded_content_hash,
                         skills.health, remote_source_parents.canonical_url,
@@ -4164,7 +4184,7 @@ impl ImportStore for SqliteCatalogStore {
                    JOIN remote_bindings ON remote_bindings.skill_id = skills.id
                    JOIN remote_source_parents
                      ON remote_source_parents.remote_id = remote_bindings.remote_id
-                  WHERE skills.identity_key = ?1 AND skills.source_kind = 'remote_install'",
+                  WHERE skills.directory_identity_key = ?1 AND skills.source_kind = 'remote_install'",
                 [identity_key],
                 |row| {
                     Ok(RemoteInstallRecord {
@@ -4208,7 +4228,7 @@ impl ImportStore for SqliteCatalogStore {
                     SET display_name = ?2, description = ?3,
                         recorded_content_hash = ?4, health = 'healthy',
                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                  WHERE id = ?1 AND identity_key = ?5 AND source_kind = 'remote_install'",
+                  WHERE id = ?1 AND directory_identity_key = ?5 AND source_kind = 'remote_install'",
                 params![
                     record.skill_id.0,
                     record.display_name,
@@ -4431,7 +4451,7 @@ impl AdoptStore for SqliteCatalogStore {
             .map_err(sqlite_adopt_error)?;
         let existing: Option<String> = transaction
             .query_row(
-                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                 [&record.identity_key],
                 |row| row.get(0),
             )
@@ -4448,7 +4468,7 @@ impl AdoptStore for SqliteCatalogStore {
         transaction
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path,
                     recorded_content_hash, health, created_at, updated_at
                  ) VALUES (
@@ -4563,7 +4583,7 @@ impl AdoptStore for SqliteCatalogStore {
             .lock()
             .map_err(|_| AdoptStoreError::Unavailable("SQLite lock poisoned".into()))?
             .query_row(
-                "SELECT id, directory_name, final_entity_path FROM skills WHERE identity_key = ?1",
+                "SELECT id, directory_name, final_entity_path FROM skills WHERE directory_identity_key = ?1",
                 [identity_key],
                 |row| {
                     Ok(AdoptLibraryConflict {
@@ -4590,7 +4610,7 @@ impl AdoptStore for SqliteCatalogStore {
             .map_err(sqlite_adopt_error)?;
         let existing: Option<String> = transaction
             .query_row(
-                "SELECT directory_name FROM skills WHERE identity_key = ?1",
+                "SELECT directory_name FROM skills WHERE directory_identity_key = ?1",
                 [&record.identity_key],
                 |row| row.get(0),
             )
@@ -4629,7 +4649,7 @@ impl AdoptStore for SqliteCatalogStore {
         transaction
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path,
                     recorded_content_hash, health, created_at, updated_at
                  ) VALUES (
@@ -4989,6 +5009,27 @@ fn migrate_to_current(
     connection: &mut Connection,
     existing_schema_version: u32,
 ) -> rusqlite::Result<()> {
+    // The v9 step (spec §3.4) follows SQLite's documented table-rebuild
+    // procedure: `foreign_keys` must be OFF for the `skills` rebuild, since
+    // an enforced DROP TABLE would cascade into every child table. The step
+    // itself still validates with `PRAGMA foreign_key_check` and
+    // `PRAGMA integrity_check` inside the transaction; enforcement is
+    // restored as soon as the migration transaction has ended.
+    let rebuilds_skills = matches!(existing_schema_version, 4..=8);
+    if rebuilds_skills {
+        connection.pragma_update(None, "foreign_keys", false)?;
+    }
+    let outcome = migrate_to_current_inner(connection, existing_schema_version);
+    if rebuilds_skills {
+        let _ = connection.pragma_update(None, "foreign_keys", true);
+    }
+    outcome
+}
+
+fn migrate_to_current_inner(
+    connection: &mut Connection,
+    existing_schema_version: u32,
+) -> rusqlite::Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if existing_schema_version == 0 {
         transaction.execute_batch(INITIAL_SCHEMA)?;
@@ -5149,7 +5190,174 @@ fn migrate_to_current(
         // leaves the complete v7 shape untouched.
         migrate_legacy_agents_to_configurations(&transaction)?;
     }
+    if matches!(existing_schema_version, 4..=8) {
+        // Schema v9 (spec §3.4, ADR-0018): rebuild `skills` so Directory
+        // Identity is an ordinary indexed comparison key (stable `skill_id`
+        // is the identity), and create the ADR-0018 Git namespace contract.
+        migrate_to_v9(&transaction)?;
+    }
     transaction.commit()
+}
+
+/// Schema v9 (ADR-0018, spec §3.4): rebuild `skills` (Directory Identity
+/// constraint, stable `skill_id`, `source_snapshot_mismatch` closed state)
+/// and move the four v7 Git tables to the v9 namespace contract. Existing
+/// v7 Git facts are preserved verbatim under `legacy_git_*` names — they are
+/// never guessed into the current model — and the v9 tables start empty.
+/// Any failure in the transaction rolls the complete step back.
+fn migrate_to_v9(transaction: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    // The pre-v9 `skills` column is `identity_key`; catalogs created by a
+    // build that already began the rewind may carry the v9 name. The
+    // Directory Identity value is copied either way — the constraint, not
+    // the column spelling, is the contract.
+    let identity_key = if table_has_column(transaction, "skills", "directory_identity_key")? {
+        "directory_identity_key"
+    } else {
+        "identity_key"
+    };
+    transaction.execute_batch(
+        "CREATE TABLE skills_v9 (
+            id TEXT PRIMARY KEY,
+            directory_name TEXT NOT NULL,
+            directory_identity_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            source_kind TEXT NOT NULL CHECK (source_kind IN ('link', 'remote_install', 'file_install')),
+            library_entry_path TEXT,
+            final_entity_path TEXT NOT NULL,
+            recorded_content_hash TEXT,
+            health TEXT NOT NULL CHECK (health IN ('healthy', 'broken', 'modified', 'source_snapshot_mismatch')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                (source_kind = 'link' AND library_entry_path IS NULL)
+                OR (source_kind != 'link' AND library_entry_path IS NOT NULL)
+            )
+        );",
+    )?;
+    transaction.execute_batch(&format!(
+        "INSERT INTO skills_v9 (
+                id, directory_name, directory_identity_key, display_name, description,
+                source_kind, library_entry_path, final_entity_path, recorded_content_hash,
+                health, created_at, updated_at
+            )
+            SELECT id, directory_name, {identity_key}, display_name, description,
+                   source_kind, library_entry_path, final_entity_path, recorded_content_hash,
+                   health, created_at, updated_at
+            FROM skills;
+            DROP TABLE skills;
+            ALTER TABLE skills_v9 RENAME TO skills;
+            CREATE INDEX skills_directory_identity ON skills(directory_identity_key);",
+    ))?;
+    for (name, legacy_name) in [
+        ("git_repository_sources", "legacy_git_repository_sources"),
+        ("git_source_releases", "legacy_git_source_releases"),
+        (
+            "git_source_release_members",
+            "legacy_git_source_release_members",
+        ),
+        ("git_source_members", "legacy_git_source_members"),
+    ] {
+        if table_exists(transaction, name)? {
+            transaction.execute(&format!("ALTER TABLE {name} RENAME TO {legacy_name}"), [])?;
+        }
+    }
+    transaction.execute_batch(
+        "CREATE TABLE git_repository_sources (
+            remote_id TEXT PRIMARY KEY REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            tracking_mode TEXT NOT NULL CHECK (
+                tracking_mode IN (
+                    'auto_release_tag_head', 'prerelease_channel', 'fixed_tag',
+                    'fixed_commit', 'branch', 'head'
+                )
+            ),
+            tracking_value TEXT,
+            current_selected_ref TEXT,
+            current_release_id TEXT REFERENCES git_source_releases(release_id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (provider, canonical_url)
+        );
+        CREATE TABLE git_source_releases (
+            release_id TEXT PRIMARY KEY,
+            remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+            selection_kind TEXT NOT NULL,
+            selected_ref TEXT NOT NULL,
+            resolved_commit TEXT NOT NULL,
+            discovered_at TEXT NOT NULL,
+            UNIQUE (remote_id, selected_ref, resolved_commit)
+        );
+        CREATE TABLE git_source_release_members (
+            release_id TEXT NOT NULL REFERENCES git_source_releases(release_id) ON DELETE CASCADE,
+            skill_id TEXT NOT NULL REFERENCES skills(id),
+            skill_path TEXT NOT NULL,
+            directory_name TEXT NOT NULL,
+            directory_identity_key TEXT NOT NULL,
+            tree_hash TEXT NOT NULL,
+            provider_hash TEXT,
+            PRIMARY KEY (release_id, skill_path),
+            UNIQUE (release_id, skill_id)
+        );
+        CREATE TABLE git_source_members (
+            skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+            remote_id TEXT NOT NULL REFERENCES remote_source_parents(remote_id) ON DELETE CASCADE,
+            skill_path TEXT NOT NULL,
+            storage_relpath TEXT NOT NULL,
+            presence TEXT NOT NULL CHECK (presence IN ('current', 'absent')),
+            first_seen_release_id TEXT NOT NULL REFERENCES git_source_releases(release_id),
+            last_seen_release_id TEXT NOT NULL REFERENCES git_source_releases(release_id),
+            last_checked_at INTEGER,
+            last_updated_at INTEGER,
+            UNIQUE (remote_id, skill_path),
+            UNIQUE (remote_id, storage_relpath)
+        );
+        UPDATE catalog_meta SET schema_version = 9 WHERE singleton = 1;",
+    )?;
+    let violations: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!(
+                "schema v9 migration left {violations} foreign-key violations"
+            )),
+        ));
+    }
+    let integrity: String =
+        transaction.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("schema v9 migration failed the integrity check".into()),
+        ));
+    }
+    Ok(())
+}
+
+fn table_exists(connection: &rusqlite::Connection, name: &str) -> rusqlite::Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(count != 0)
+}
+
+fn table_has_column(
+    connection: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    Ok(count != 0)
 }
 
 #[derive(Clone, Debug)]
@@ -5377,8 +5585,14 @@ fn migrate_legacy_agents_to_configurations(
         agent_root_ids.insert(agent.agent_id.clone(), root_id.clone());
     }
 
+    let activation_identity_column =
+        if table_has_column(transaction, "skills", "directory_identity_key")? {
+            "directory_identity_key"
+        } else {
+            "identity_key"
+        };
     let legacy_activations = {
-        let mut statement = transaction.prepare(
+        let mut statement = transaction.prepare(&format!(
             "SELECT
                 legacy_activations.skill_id,
                 legacy_activations.agent_id,
@@ -5388,11 +5602,11 @@ fn migrate_legacy_agents_to_configurations(
                 legacy_activations.observed_state,
                 legacy_activations.last_enabled_at,
                 legacy_activations.last_checked_at,
-                skills.identity_key
+                skills.{activation_identity_column}
              FROM legacy_activations
              JOIN skills ON skills.id = legacy_activations.skill_id
              ORDER BY legacy_activations.skill_id, legacy_activations.agent_id",
-        )?;
+        ))?;
         statement
             .query_map([], |row| {
                 Ok((
@@ -5981,11 +6195,11 @@ mod tests {
     }
 
     #[test]
-    fn commits_a_complete_git_source_release_and_current_members_together() {
+    fn git_source_transition_store_fails_closed_on_v9_catalog() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("skill-man.sqlite3");
         let store = SqliteCatalogStore::open(&path).expect("fresh open");
-        let version = SourceTransitionStore::commit_source_transition(
+        let result = SourceTransitionStore::commit_source_transition(
             &store,
             SourceTransitionRecord {
                 remote_id: "remote-source-1".into(),
@@ -6021,44 +6235,52 @@ mod tests {
                     },
                 ],
             },
-        )
-        .expect("commit source transition");
-        assert_eq!(version, 1);
+        );
+        // The v7-shaped Source Transition write is closed on the v9 contract
+        // (spec §3.4 v9): ticket #92 owns the immutable transition, and the
+        // old per-source transition is no longer a valid current-source write.
+        assert!(
+            result.is_err(),
+            "the pre-v9 Source Transition write must fail closed"
+        );
 
         let connection = store.connection().expect("catalog connection");
-        let current_release: String = connection
+        let parent_count: i64 = connection
             .query_row(
-                "SELECT current_release_id FROM git_repository_sources
+                "SELECT COUNT(*) FROM remote_source_parents
                  WHERE remote_id = 'remote-source-1'",
                 [],
                 |row| row.get(0),
             )
-            .expect("current release");
-        assert_eq!(current_release, "release-1");
-        let release_member_count: i64 = connection
+            .expect("parent count");
+        assert_eq!(
+            parent_count, 0,
+            "a failed transition leaves no partial parent row"
+        );
+        let repository_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM git_source_release_members WHERE release_id = 'release-1'",
+                "SELECT COUNT(*) FROM git_repository_sources
+                 WHERE remote_id = 'remote-source-1'",
                 [],
                 |row| row.get(0),
             )
-            .expect("release member count");
-        let current_member_count: i64 = connection
+            .expect("repository count");
+        assert_eq!(
+            repository_count, 0,
+            "the failed commit rolled the transaction back"
+        );
+        let member_count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM git_source_members WHERE remote_id = 'remote-source-1'",
+                "SELECT COUNT(*) FROM git_source_members
+                 WHERE remote_id = 'remote-source-1'",
                 [],
                 |row| row.get(0),
             )
-            .expect("current member count");
-        assert_eq!(release_member_count, 2);
-        assert_eq!(current_member_count, 2);
-        let independent_member_versions: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM remote_bindings WHERE skill_id IN ('source-skill-a', 'source-skill-b')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("legacy binding count");
-        assert_eq!(independent_member_versions, 0);
+            .expect("member count");
+        assert_eq!(
+            member_count, 0,
+            "no v9 members are fabricated by a closed write"
+        );
     }
 
     #[test]

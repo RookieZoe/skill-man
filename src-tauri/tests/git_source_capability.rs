@@ -7,6 +7,7 @@ use skill_man_lib::core::git_source_capability::{
     GitSourceManifestFact, GitSourceReleaseFact,
 };
 use skill_man_lib::seams::filesystem::{FileSystem, RemoteParentManifest};
+use skill_man_lib::seams::git_source_capability::GitSourceMemberFact;
 
 mod common;
 use common::{BoundTestHome, CATALOG_FILE_NAME};
@@ -37,7 +38,9 @@ fn legacy_per_skill_git_state_stays_readable_and_closes_source_writes() {
                     canonical_url: "https://github.com/acme/skills".into(),
                     aliases: vec![],
                     provider: None,
-                    tracking_ref: None,
+                    tracking_mode: None,
+                    tracking_value: None,
+                    current_selected_ref: None,
                     current_release_id: None,
                 },
             }],
@@ -92,7 +95,9 @@ fn sqlite_scan_reads_a_legacy_home_without_changing_catalog_or_manifest() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
                 provider: None,
-                tracking_ref: None,
+                tracking_mode: None,
+                tracking_value: None,
+                current_selected_ref: None,
                 current_release_id: None,
                 aliases: vec![],
                 created_at: "2026-08-01T00:00:00Z".into(),
@@ -178,7 +183,9 @@ fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
             provider: None,
-            tracking_ref: Some("main".into()),
+            tracking_mode: None,
+            tracking_value: None,
+            current_selected_ref: None,
             current_release_id: Some("release-parent-1".into()),
         },
         GitSourceManifestFact::Present {
@@ -186,7 +193,9 @@ fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
             provider: Some("github".into()),
-            tracking_ref: None,
+            tracking_mode: None,
+            tracking_value: None,
+            current_selected_ref: None,
             current_release_id: Some("release-parent-1".into()),
         },
         GitSourceManifestFact::Present {
@@ -194,7 +203,9 @@ fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
             provider: Some("github".into()),
-            tracking_ref: Some("main".into()),
+            tracking_mode: Some("branch".into()),
+            tracking_value: Some("main".into()),
+            current_selected_ref: Some("main".into()),
             current_release_id: None,
         },
     ] {
@@ -225,7 +236,9 @@ fn manifest_conflict_closes_only_the_affected_source() {
         canonical_url: "https://github.com/acme/parent-conflicted".into(),
         aliases: vec!["https://github.com/acme/different-name".into()],
         provider: Some("github".into()),
-        tracking_ref: Some("main".into()),
+        tracking_mode: Some("branch".into()),
+        tracking_value: Some("main".into()),
+        current_selected_ref: Some("main".into()),
         current_release_id: Some("release-parent-conflicted".into()),
     };
     let scan = GitSourceCapabilityScan::new(Arc::new(StaticReader {
@@ -265,30 +278,34 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
                  VALUES ('parent-1', 'https://github.com/acme/skills', '2026-08-01T00:00:00Z');
                  INSERT INTO git_source_releases (
-                    release_id, remote_id, tracking_ref, resolved_commit, discovered_at
+                    release_id, remote_id, selection_kind, selected_ref, resolved_commit,
+                    discovered_at
                  ) VALUES (
-                    'release-1', 'parent-1', 'main',
+                    'release-1', 'parent-1', 'branch', 'main',
                     '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '2026-08-01T00:00:00Z'
                  );
                  INSERT INTO git_repository_sources (
-                    remote_id, provider, canonical_url, tracking_ref, current_release_id,
-                    created_at, updated_at
+                    remote_id, provider, canonical_url, tracking_mode, tracking_value,
+                    current_selected_ref, current_release_id, created_at, updated_at
                  ) VALUES (
-                    'parent-1', 'github', 'https://github.com/acme/skills', 'main', 'release-1',
-                    '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+                    'parent-1', 'github', 'https://github.com/acme/skills', 'branch', 'main',
+                    'main', 'release-1', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
                  );
                  INSERT INTO git_source_release_members (
-                    release_id, skill_path, skill_name, tree_hash, provider_hash
+                    release_id, skill_id, skill_path, directory_name,
+                    directory_identity_key, tree_hash, provider_hash
                  ) VALUES (
-                    'release-1', 'skills/networking', 'networking',
-                    'tree-sha256-v1:remote', NULL
+                    'release-1', 'networking', 'skills/networking', 'networking',
+                    'networking', 'tree-sha256-v1:remote', NULL
                  );
                  INSERT INTO git_source_members (
-                    skill_id, remote_id, current_skill_path, remote_baseline_hash,
-                    current_baseline_hash, last_checked_at, last_updated_at
+                    skill_id, remote_id, skill_path, storage_relpath, presence,
+                    first_seen_release_id, last_seen_release_id, last_checked_at,
+                    last_updated_at
                  ) VALUES (
                     'networking', 'parent-1', 'skills/networking',
-                    'tree-sha256-v1:remote', 'tree-sha256-v1:current', NULL, NULL
+                    'skills/git/parent-1/networking', 'current', 'release-1', 'release-1',
+                    NULL, NULL
                  );
                  -- The scan must inspect the actual structure and facts,
                  -- rather than inferring eligibility from either version.
@@ -305,7 +322,9 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
                 provider: Some("github".into()),
-                tracking_ref: Some("main".into()),
+                tracking_mode: Some("branch".into()),
+                tracking_value: Some("main".into()),
+                current_selected_ref: Some("main".into()),
                 current_release_id: Some("release-1".into()),
                 aliases: vec![],
                 created_at: "2026-08-01T00:00:00Z".into(),
@@ -340,7 +359,9 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/renamed-elsewhere".into(),
                 provider: Some("github".into()),
-                tracking_ref: Some("main".into()),
+                tracking_mode: Some("branch".into()),
+                tracking_value: Some("main".into()),
+                current_selected_ref: Some("main".into()),
                 current_release_id: Some("release-1".into()),
                 aliases: vec![],
                 created_at: "2026-08-01T00:00:00Z".into(),
@@ -367,7 +388,9 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
                 provider: Some("github".into()),
-                tracking_ref: Some("main".into()),
+                tracking_mode: Some("branch".into()),
+                tracking_value: Some("main".into()),
+                current_selected_ref: Some("main".into()),
                 current_release_id: Some("release-1".into()),
                 aliases: vec![],
                 created_at: "2026-08-01T00:00:00Z".into(),
@@ -421,7 +444,9 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
                 provider: Some("github".into()),
-                tracking_ref: Some("main".into()),
+                tracking_mode: Some("branch".into()),
+                tracking_value: Some("main".into()),
+                current_selected_ref: Some("main".into()),
                 current_release_id: Some("release-1".into()),
                 aliases: vec![],
                 created_at: "2026-08-01T00:00:00Z".into(),
@@ -467,23 +492,33 @@ fn repository_source_fact(remote_id: &str) -> GitSourceFact {
         repository: Some(GitRepositorySourceFact {
             provider: Some("github".into()),
             canonical_url: canonical_url.clone(),
-            tracking_ref: Some("main".into()),
+            tracking_mode: Some("branch".into()),
+            tracking_value: Some("main".into()),
+            current_selected_ref: Some("main".into()),
             current_release_id: Some(release_id.clone()),
             current_release: Some(GitSourceReleaseFact {
                 release_id: release_id.clone(),
                 remote_id: remote_id.into(),
-                tracking_ref: "main".into(),
+                selection_kind: "branch".into(),
+                selected_ref: "main".into(),
                 resolved_commit: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".into(),
                 member_paths: vec!["skills/networking".into()],
             }),
-            current_member_paths: vec!["skills/networking".into()],
+            current_members: vec![GitSourceMemberFact {
+                skill_id: "networking".into(),
+                skill_path: "skills/networking".into(),
+                storage_relpath: format!("skills/git/{remote_id}/networking"),
+                presence: true,
+            }],
         }),
         manifest: GitSourceManifestFact::Present {
             remote_id: remote_id.into(),
             canonical_url,
             aliases: vec![],
             provider: Some("github".into()),
-            tracking_ref: Some("main".into()),
+            tracking_mode: Some("branch".into()),
+            tracking_value: Some("main".into()),
+            current_selected_ref: Some("main".into()),
             current_release_id: Some(release_id),
         },
     }

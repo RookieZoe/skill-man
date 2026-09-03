@@ -424,7 +424,11 @@ pub struct RemoteParentManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tracking_ref: Option<String>,
+    pub tracking_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_selected_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_release_id: Option<String>,
     pub aliases: Vec<String>,

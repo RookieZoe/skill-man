@@ -1032,6 +1032,26 @@ Source Group Draft
 6. 接入 React route/interaction；保留 Source Content byte equality 与 a11y 断言。
 7. smoke changed path；只有人工事实无法自动化时进入第 10.3 节 Gate。
 
+### 9.0 当前阶段依赖（#80–#93；每张票声明自己的 Blocked by）
+
+```mermaid
+flowchart LR
+    P80[实施:schema v8 迁移与 Agent Configuration Core #80] --> P86[实施:Startup Probe 与 Activation health #86]
+    P80 --> P91[实施:schema v9 与 Legacy Git capability cutover #91]
+    P81[实施:Agent Detection 竖切 #81] --> P86
+    P83[实施:Canonical Skill Entity 聚合 #83] --> P84[实施:来源分类、Conflict Set 与汇总呈现 #84]
+    P91 --> P84
+    P91 --> P92[实施:Source Tracking Policy 与 immutable Source Transition #92]
+    P92 --> P93[实施:Source Update、tombstone、Mismatch 与 Local Source 出口 #93]
+    P86 --> P87[实施:Enable Module Global 竖切 #87]
+    P93 --> P87
+    P87 --> P89[实施:Project Enable 四步竖切 #89]
+    P87 --> P90[实施:Broken 成员、Mismatch 面板与 Evidence rail #90]
+    P89 --> P88[实施:批量 Enable 与 selection shelf #88]
+    P92 --> P85[实施:Adopt 重接线到 terminal Scan Report #85]
+    P93 --> P90
+```
+
 ### 9.1 dependency graph
 
 ```mermaid
@@ -1072,11 +1092,14 @@ A 与 F 可立即并行。A 完成后 B 与 E 并行；E 完成后 G 可与 B/C 
 | [实施：English/简体中文 locale authority 与 typed messages](https://github.com/RookieZoe/skill-man/issues/44) | App-level locale authority、shared catalogs、typed public messages、native/React sync    | locale persist 失败不 publish                                   |
 | [实施：Pinned Workbench 响应布局与 overlay 契约](https://github.com/RookieZoe/skill-man/issues/42)            | 760/1060 breakpoints、Notice tray、pane/drawer scroll、overlay/focus                     | 无持久数据；bundle revert                                       |
 | [实施：Adopt 证据账本与 lock 来源验证](https://github.com/RookieZoe/skill-man/issues/47)                      | strict lock/provider/tree evidence、Evidence Ledger、explicit selection、read-only plans | Scan 只写派生 Evidence Store；plan 不写 Catalog/source；stale evidence 无 apply |
-| [实施：Git Repository Source 状态识别与 Legacy 保护](https://github.com/RookieZoe/skill-man/issues/61) | current capability scan、Git Repository Source/Legacy Per-Skill Git State 分类、Legacy 只读保护与安全操作边界 | scan/plan 零写；不自动提升、不改写 Legacy truth |
-| [实施：Fetch Latest and Manage 的来源组 Preview](https://github.com/RookieZoe/skill-man/issues/62) | Source Tracking Policy/override、完整 release 发现、来源组 Preview/Draft/Confirmation 与 DTO/UI | Draft/取消零写；PlanStale 时零 apply |
-| [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | `skills/git/<remote_id>/<skill_id>` 只读 namespace、完整成员 transition、来源级 journal/CAS/recovery/Undo | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
-| [实施：Legacy Source Promotion 与成员冲突处置](https://github.com/RookieZoe/skill-man/issues/64) | 显式 Legacy Promotion、schema v9 identity/namespace/tombstone、Source Snapshot Mismatch 与 Create Local Source Copy | Draft/失败保留旧 Legacy/current release；不补写、不猜测 mapping |
-| [实施：Git Repository Source 来源级 Update 与 Ownership Conflict](https://github.com/RookieZoe/skill-man/issues/60) | 完整 release Update、成员 add/remove/reappear、整来源 Remove、Broken global Activation、external reappearance Ownership Conflict | 固定 release 的 commit point 前整体 rollback；之后完整 release roll-forward |
+| [实施：Git Repository Source 状态识别与 Legacy 保护](https://github.com/RookieZoe/skill-man/issues/61) | 已关闭，被 #91 取代（ADR-0018 之前的能力扫描模型；不作为交付） | — |
+| [实施：Fetch Latest and Manage 的来源组 Preview](https://github.com/RookieZoe/skill-man/issues/62) | 已关闭，被 #92 取代（ADR-0018 之前的 preview 模型；不作为交付） | — |
+| [实施：清洁 Git 来源的整仓 Source Transition](https://github.com/RookieZoe/skill-man/issues/63) | 已关闭，被 #92 取代（ADR-0018 之前的 transition 模型；不作为交付） | — |
+| [实施：Legacy Source Promotion 与成员冲突处置](https://github.com/RookieZoe/skill-man/issues/64) | 已关闭，被 #91–#93 取代（ADR-0018 之前的 promotion 模型；不作为交付） | — |
+| [实施：Git Repository Source 来源级 Update 与 Ownership Conflict](https://github.com/RookieZoe/skill-man/issues/60) | 已关闭，被 #93 取代（ADR-0018 之前的 update 模型；不作为交付） | — |
+| [实施：schema v9 与 Legacy Git capability cutover](https://github.com/RookieZoe/skill-man/issues/91) | 单一 transaction 的 v9 migration（Directory Identity constraint、v9 Git namespace/tracking/member/tombstone）、`legacy_git_*` verbatim 保留、v9 Source Capability 结构/分类、Legacy 写与新 Enable fail closed、manifest tracking facts、§9.1/§9.2 与 ADR 修正 | v9 单 transaction 提交前整体 rollback；之后确定性重开分类 |
+| [实施：Source Tracking Policy 与 immutable Source Transition](https://github.com/RookieZoe/skill-man/issues/92) | v9 Source Tracking Policy 求值、immutable release-member manifest、来源级 journal/CAS/recovery/Undo 的 v9 重接 | Source Ownership Commit Point 前整体 rollback；之后完整 release roll-forward |
+| [实施：Source Update、tombstone、Mismatch 与 Local Source 出口](https://github.com/RookieZoe/skill-man/issues/93) | v9 来源级 Update、成员 add/remove/reappear、Source Member Tombstone、Source Snapshot Mismatch、Create Local Source Copy 与整来源 Remove | 固定 release 的 commit point 前整体 rollback；之后完整 release roll-forward |
 | [实施：schema v8 迁移与 Agent Configuration Core](https://github.com/RookieZoe/skill-man/issues/80) | v8 clean cutover、ADR-0016 配置 plan 护栏、PresetRegistry、Agent Management 三栏骨架与单一配置 sheet | v8 migration 单 transaction 前整体 rollback；之后 roll-forward |
 | [实施：Agent Detection 竖切与 Library first 启动](https://github.com/RookieZoe/skill-man/issues/81) | Observation Module 骨架、零写 Detection single-flight、Detected 段、启动不等观察且不自动完整 Rescan | 检测仅内存 observation；零持久产物 |
 | [实施：Rescan Run 生命周期与 Scan Evidence Store](https://github.com/RookieZoe/skill-man/issues/82) | 流式 Evidence Store、Run 全生命周期、真实进度/取消/Supersede、Root 原子提交、Evidence Ledger 非模态 | manifest 切换前旧 current Report 完整保留；orphan 仅按 identity 清理 |

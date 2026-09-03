@@ -1358,7 +1358,7 @@ pub enum ScanReportRowDto {
         final_entity: Option<String>,
         identity: Option<ScanObjectIdentityDto>,
         entity_seq: Option<u64>,
-        lock_hint: Option<ScanLockHintDto>,
+        lock_hint: Box<Option<ScanLockHintDto>>,
         worktree_hint: Option<ScanWorktreeHintDto>,
     },
     Diagnostic {
@@ -1560,8 +1560,7 @@ impl From<crate::core::scan::CurrentReportView> for CurrentReportDto {
                 incomplete: summary.incomplete,
                 published_at_ms: summary.published_at_ms,
                 agent_configuration_generation: summary.agent_configuration_generation,
-                configured_root_snapshot_fingerprint: summary
-                    .configured_root_snapshot_fingerprint,
+                configured_root_snapshot_fingerprint: summary.configured_root_snapshot_fingerprint,
                 started_at_ms: summary.started_at_ms,
                 slow: summary.slow,
             }),
@@ -1663,9 +1662,9 @@ pub fn scan_report_page_dto(
                                 kind: hop.kind,
                                 device: hop.device,
                                 inode: hop.inode,
-                                target: hop.target.map(|target| {
-                                    target.to_string_lossy().into_owned()
-                                }),
+                                target: hop
+                                    .target
+                                    .map(|target| target.to_string_lossy().into_owned()),
                             })
                             .collect(),
                         chain_fault: appearance.chain_fault.map(|fault| ScanChainFaultDto {
@@ -1673,21 +1672,21 @@ pub fn scan_report_page_dto(
                             at: fault.at.to_string_lossy().into_owned(),
                             detail: fault.detail,
                         }),
-                        final_entity: appearance.final_entity.map(|path| {
-                            path.to_string_lossy().into_owned()
-                        }),
+                        final_entity: appearance
+                            .final_entity
+                            .map(|path| path.to_string_lossy().into_owned()),
                         identity: appearance.identity.map(|identity| ScanObjectIdentityDto {
                             device: identity.device,
                             inode: identity.inode,
                         }),
                         entity_seq: appearance.entity_seq,
-                        lock_hint: appearance.lock_hint.map(|hint| ScanLockHintDto {
+                        lock_hint: Box::new(appearance.lock_hint.map(|hint| ScanLockHintDto {
                             lock_path: hint.lock_path.to_string_lossy().into_owned(),
                             entry_name: hint.entry_name,
                             fingerprint: hint.fingerprint,
                             faulted: hint.faulted,
                             fault: hint.fault,
-                        }),
+                        })),
                         worktree_hint: appearance.worktree_hint.map(|hint| ScanWorktreeHintDto {
                             repository_root: hint.repository_root.to_string_lossy().into_owned(),
                             gitdir_kind: hint.gitdir_kind,
@@ -1712,9 +1711,7 @@ pub fn scan_report_page_dto(
     }
 }
 
-fn scan_root_state_name(
-    state: crate::seams::scan_evidence_store::ScanRootState,
-) -> &'static str {
+fn scan_root_state_name(state: crate::seams::scan_evidence_store::ScanRootState) -> &'static str {
     match state {
         crate::seams::scan_evidence_store::ScanRootState::Completed => "completed",
         crate::seams::scan_evidence_store::ScanRootState::Failed => "failed",

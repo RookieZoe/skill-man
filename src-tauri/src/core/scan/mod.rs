@@ -278,10 +278,7 @@ impl RunProgress {
         configured_agents: u64,
         declared_roots: u64,
     ) -> Self {
-        let canonical_roots = planned
-            .iter()
-            .filter(|root| root.frozen.is_some())
-            .count() as u64;
+        let canonical_roots = planned.iter().filter(|root| root.frozen.is_some()).count() as u64;
         let started = Instant::now();
         let root_progress: Vec<RootProgress> = planned
             .into_iter()
@@ -868,10 +865,7 @@ impl ScanCoordinator {
                 }
             }
         }
-        let slow = manifest
-            .ended_at_ms
-            .saturating_sub(manifest.started_at_ms)
-            > 30_000;
+        let slow = manifest.ended_at_ms.saturating_sub(manifest.started_at_ms) > 30_000;
         (
             CurrentReportView {
                 summary: Some(ScanReportSummary {
@@ -882,16 +876,10 @@ impl ScanCoordinator {
                     state: parse_report_state(&manifest.state),
                     coverage,
                     counts: manifest.counts,
-                    incomplete: parse_report_state(&manifest.state)
-                        == ScanReportState::Incomplete,
+                    incomplete: parse_report_state(&manifest.state) == ScanReportState::Incomplete,
                     published_at_ms: manifest.ended_at_ms,
-                    agent_configuration_generation: manifest
-                        .frozen
-                        .agent_configuration_generation,
-                    configured_root_snapshot_fingerprint: manifest
-                        .frozen
-                        .roots_fingerprint
-                        .clone(),
+                    agent_configuration_generation: manifest.frozen.agent_configuration_generation,
+                    configured_root_snapshot_fingerprint: manifest.frozen.roots_fingerprint.clone(),
                     started_at_ms: manifest.started_at_ms,
                     slow,
                 }),

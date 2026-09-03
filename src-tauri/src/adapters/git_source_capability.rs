@@ -10,7 +10,8 @@ use crate::core::write_gate::WriteGate;
 use crate::seams::filesystem::FileSystem;
 use crate::seams::git_source_capability::{
     GitRepositorySourceFact, GitSourceCapabilityFacts, GitSourceCapabilityReader,
-    GitSourceCatalogStructure, GitSourceFact, GitSourceManifestFact, GitSourceReleaseFact,
+    GitSourceCatalogStructure, GitSourceFact, GitSourceManifestFact, GitSourceMemberFact,
+    GitSourceReleaseFact,
 };
 
 /// The system adapter opens the active Bound Home's Catalog read-only on
@@ -118,7 +119,9 @@ fn catalog_structure(
                 ("remote_id", true),
                 ("provider", true),
                 ("canonical_url", true),
-                ("tracking_ref", true),
+                ("tracking_mode", true),
+                ("tracking_value", false),
+                ("current_selected_ref", false),
                 ("current_release_id", false),
                 ("created_at", true),
                 ("updated_at", true),
@@ -130,7 +133,8 @@ fn catalog_structure(
             &[
                 ("release_id", true),
                 ("remote_id", true),
-                ("tracking_ref", true),
+                ("selection_kind", true),
+                ("selected_ref", true),
                 ("resolved_commit", true),
                 ("discovered_at", true),
             ],
@@ -140,8 +144,10 @@ fn catalog_structure(
             "git_source_release_members",
             &[
                 ("release_id", true),
+                ("skill_id", true),
                 ("skill_path", true),
-                ("skill_name", true),
+                ("directory_name", true),
+                ("directory_identity_key", true),
                 ("tree_hash", true),
                 ("provider_hash", false),
             ],
@@ -152,9 +158,11 @@ fn catalog_structure(
             &[
                 ("skill_id", true),
                 ("remote_id", true),
-                ("current_skill_path", true),
-                ("remote_baseline_hash", true),
-                ("current_baseline_hash", true),
+                ("skill_path", true),
+                ("storage_relpath", true),
+                ("presence", true),
+                ("first_seen_release_id", true),
+                ("last_seen_release_id", true),
                 ("last_checked_at", false),
                 ("last_updated_at", false),
             ],
@@ -196,6 +204,13 @@ fn catalog_structure(
             "git_source_releases",
             "release_id",
         )?
+        && has_foreign_key(
+            connection,
+            "git_source_release_members",
+            "skill_id",
+            "skills",
+            "id",
+        )?
         && has_foreign_key(connection, "git_source_members", "skill_id", "skills", "id")?
         && has_foreign_key(
             connection,
@@ -203,6 +218,20 @@ fn catalog_structure(
             "remote_id",
             "remote_source_parents",
             "remote_id",
+        )?
+        && has_foreign_key(
+            connection,
+            "git_source_members",
+            "first_seen_release_id",
+            "git_source_releases",
+            "release_id",
+        )?
+        && has_foreign_key(
+            connection,
+            "git_source_members",
+            "last_seen_release_id",
+            "git_source_releases",
+            "release_id",
         )?;
 
     let has_required_unique_constraints = target_tables_present
@@ -224,12 +253,27 @@ fn catalog_structure(
         && has_unique_columns(
             connection,
             "git_source_releases",
-            &["remote_id", "resolved_commit"],
+            &["remote_id", "selected_ref", "resolved_commit"],
         )?
         && has_unique_columns(
             connection,
             "git_source_release_members",
             &["release_id", "skill_path"],
+        )?
+        && has_unique_columns(
+            connection,
+            "git_source_release_members",
+            &["release_id", "skill_id"],
+        )?
+        && has_unique_columns(
+            connection,
+            "git_source_members",
+            &["remote_id", "skill_path"],
+        )?
+        && has_unique_columns(
+            connection,
+            "git_source_members",
+            &["remote_id", "storage_relpath"],
         )?
         && has_unique_columns(connection, "git_source_members", &["skill_id"])?;
 
@@ -415,7 +459,12 @@ fn read_sources(
                     canonical_url: manifest.canonical_url,
                     aliases: manifest.aliases,
                     provider: manifest.provider,
-                    tracking_ref: manifest.tracking_ref,
+                    // Version is never the eligibility gate (spec §3.4 v7):
+                    // a manifest without the tracking facts is simply
+                    // incomplete capability evidence, so it stays Legacy.
+                    tracking_mode: manifest.tracking_mode,
+                    tracking_value: manifest.tracking_value,
+                    current_selected_ref: manifest.current_selected_ref,
                     current_release_id: manifest.current_release_id,
                 },
                 Err(_) => GitSourceManifestFact::Unreadable,
@@ -437,7 +486,8 @@ fn read_repository_source(
 ) -> Result<Option<GitRepositorySourceFact>, String> {
     let repository = connection
         .query_row(
-            "SELECT provider, canonical_url, tracking_ref, current_release_id
+            "SELECT provider, canonical_url, tracking_mode, tracking_value,
+                    current_selected_ref, current_release_id
              FROM git_repository_sources WHERE remote_id = ?1",
             [remote_id],
             |row| {
@@ -446,12 +496,22 @@ fn read_repository_source(
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((provider, canonical_url, tracking_ref, current_release_id)) = repository else {
+    let Some((
+        provider,
+        canonical_url,
+        tracking_mode,
+        tracking_value,
+        current_selected_ref,
+        current_release_id,
+    )) = repository
+    else {
         return Ok(None);
     };
     let current_release = current_release_id
@@ -459,23 +519,33 @@ fn read_repository_source(
         .map(|release_id| read_release(connection, release_id))
         .transpose()?
         .flatten();
-    let current_member_paths = connection
+    let current_members = connection
         .prepare(
-            "SELECT current_skill_path FROM git_source_members
-             WHERE remote_id = ?1 ORDER BY current_skill_path",
+            "SELECT skill_id, skill_path, storage_relpath, presence
+             FROM git_source_members
+             WHERE remote_id = ?1 ORDER BY skill_path",
         )
         .map_err(|error| error.to_string())?
-        .query_map(params![remote_id], |row| row.get::<_, String>(0))
+        .query_map(params![remote_id], |row| {
+            Ok(GitSourceMemberFact {
+                skill_id: row.get(0)?,
+                skill_path: row.get(1)?,
+                storage_relpath: row.get(2)?,
+                presence: row.get::<_, String>(3)? == "current",
+            })
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(Some(GitRepositorySourceFact {
         provider,
         canonical_url,
-        tracking_ref,
+        tracking_mode,
+        tracking_value,
+        current_selected_ref,
         current_release_id,
         current_release,
-        current_member_paths,
+        current_members,
     }))
 }
 
@@ -485,7 +555,7 @@ fn read_release(
 ) -> Result<Option<GitSourceReleaseFact>, String> {
     let release = connection
         .query_row(
-            "SELECT remote_id, tracking_ref, resolved_commit
+            "SELECT remote_id, selection_kind, selected_ref, resolved_commit
              FROM git_source_releases WHERE release_id = ?1",
             [release_id],
             |row| {
@@ -493,12 +563,13 @@ fn read_release(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((remote_id, tracking_ref, resolved_commit)) = release else {
+    let Some((remote_id, selection_kind, selected_ref, resolved_commit)) = release else {
         return Ok(None);
     };
     let member_paths = connection
@@ -514,7 +585,8 @@ fn read_release(
     Ok(Some(GitSourceReleaseFact {
         release_id: release_id.into(),
         remote_id,
-        tracking_ref,
+        selection_kind,
+        selected_ref,
         resolved_commit,
         member_paths,
     }))

@@ -355,7 +355,7 @@ pub struct ScanReportCursor {
 pub enum ScanReportRow {
     RootCoverage(ScanRootCoverageRecord),
     Entity(ScanCanonicalEntityRecord),
-    Appearance(ScanAppearanceRecord),
+    Appearance(Box<ScanAppearanceRecord>),
     Diagnostic(ScanDiagnosticRecord),
 }
 

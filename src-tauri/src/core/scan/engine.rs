@@ -615,11 +615,7 @@ fn hash_worker_loop(
                     .filesystem
                     .directory_fingerprint(&job.final_entity)
                 {
-                    Ok(post)
-                        if post.device == pre.device && post.inode == pre.inode =>
-                    {
-                        Some(pre)
-                    }
+                    Ok(post) if post.device == pre.device && post.inode == pre.inode => Some(pre),
                     _ => {
                         file_count = 0;
                         byte_count = 0;
@@ -639,10 +635,7 @@ fn hash_worker_loop(
         let newly_assigned = match verified_identity {
             Some(identity) => {
                 let key = (identity.device, identity.inode);
-                let mut ids = engine
-                    .entity_ids
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                let mut ids = engine.entity_ids.lock().unwrap_or_else(|p| p.into_inner());
                 ids.insert(key)
             }
             _ => false,
@@ -895,7 +888,9 @@ fn finalize(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: Arc<E
             set_state_best_effort(
                 &slot,
                 ScanRunState::Failed,
-                Some(&format!("the canonical entity index could not be built: {error}")),
+                Some(&format!(
+                    "the canonical entity index could not be built: {error}"
+                )),
             );
             let _ = slot.store.remove_run(&slot.record.run_id);
             coordinator.publish_progress(&slot, true);

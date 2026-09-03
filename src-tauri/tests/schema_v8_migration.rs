@@ -150,7 +150,11 @@ fn v7_migration_groups_aliases_by_canonical_target_and_drops_detection_state() {
     seed_v7_catalog(&catalog_path, &target, &alias);
 
     let store = SqliteCatalogStore::open(&catalog_path).expect("migrate v7 catalog");
-    assert_eq!(store.startup_status().schema_version, 8);
+    assert_eq!(
+        store.startup_status().schema_version,
+        9,
+        "v7 catalogs migrate through v8 to the current v9 contract"
+    );
     drop(store);
 
     let connection = Connection::open(&catalog_path).expect("inspect migrated catalog");
@@ -264,7 +268,11 @@ fn ambiguous_target_aggregation_rolls_back_whole_migration_then_can_roll_forward
     drop(connection);
 
     let store = SqliteCatalogStore::open(&catalog_path).expect("roll migration forward");
-    assert_eq!(store.startup_status().schema_version, 8);
+    assert_eq!(
+        store.startup_status().schema_version,
+        9,
+        "v7 catalogs migrate through v8 to the current v9 contract"
+    );
     drop(store);
     let connection = Connection::open(&catalog_path).expect("inspect rolled-forward catalog");
     let activation_count: i64 = connection

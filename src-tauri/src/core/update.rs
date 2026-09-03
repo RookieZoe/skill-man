@@ -739,7 +739,9 @@ fn ensure_parent_manifest(
             remote_id: record.remote_id.clone(),
             canonical_url: record.source_url.clone(),
             provider: None,
-            tracking_ref: None,
+            tracking_mode: None,
+            tracking_value: None,
+            current_selected_ref: None,
             current_release_id: None,
             aliases,
             created_at: existing_created_at

@@ -49,7 +49,7 @@ fn promotion_keeps_the_legacy_parent_id_and_converts_the_complete_member_set() {
         connection
             .execute(
                 "INSERT INTO skills (
-                    id, directory_name, identity_key, display_name, description,
+                    id, directory_name, directory_identity_key, display_name, description,
                     source_kind, library_entry_path, final_entity_path,
                     recorded_content_hash, health, created_at, updated_at
                  ) VALUES (?1, ?2, ?3, ?2, '', 'remote_install', ?4, ?4,
@@ -138,67 +138,32 @@ fn promotion_keeps_the_legacy_parent_id_and_converts_the_complete_member_set() {
             [],
         )
         .expect("restore frozen Legacy fact");
-    SourcePromotionStore::commit_source_promotion(&store, record.clone())
-        .expect("commit promotion");
+    // The pre-v9 promotion write is closed on the v9 contract (spec §3.4
+    // v9): ticket #92 owns the immutable Source Transition, and the v7-shaped
+    // promotion must not fabricate a current release by guessing.
     assert!(
-        SourcePromotionStore::source_promotion_is_committed(&store, &record)
-            .expect("whole release is current")
+        SourcePromotionStore::commit_source_promotion(&store, record.clone()).is_err(),
+        "the pre-v9 promotion commit must fail closed"
     );
-
-    let remote_id: String = connection
-        .query_row("SELECT remote_id FROM git_repository_sources", [], |row| {
-            row.get(0)
-        })
-        .expect("preserved parent id");
-    assert_eq!(remote_id, "remote-stable");
-    let legacy_bindings: i64 = connection
-        .query_row("SELECT COUNT(*) FROM remote_bindings", [], |row| row.get(0))
-        .expect("legacy bindings removed");
-    let release_members: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM git_source_release_members",
-            [],
-            |row| row.get(0),
-        )
-        .expect("whole discovered release");
-    let current_members: i64 = connection
-        .query_row("SELECT COUNT(*) FROM git_source_members", [], |row| {
-            row.get(0)
-        })
-        .expect("whole current member set");
-    let beta_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM skills WHERE id = 'legacy-beta')",
-            [],
-            |row| row.get(0),
-        )
-        .expect("removed member state");
-    assert_eq!(
-        (legacy_bindings, release_members, current_members),
-        (0, 2, 2)
-    );
-    assert!(
-        !beta_exists,
-        "explicit Remove deletes the old member atomically"
-    );
-
-    SourcePromotionStore::undo_source_promotion(&store, &record, &legacy)
-        .expect("undo restores the frozen whole Legacy source");
     let promoted_sources: i64 = connection
         .query_row("SELECT COUNT(*) FROM git_repository_sources", [], |row| {
             row.get(0)
         })
-        .expect("Git Repository Source removed on undo");
-    let restored_bindings: i64 = connection
-        .query_row("SELECT COUNT(*) FROM remote_bindings", [], |row| row.get(0))
-        .expect("frozen Legacy audit facts restored");
-    let restored_beta: bool = connection
+        .expect("Git Repository Source count");
+    let new_gamma: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM skills WHERE id = 'legacy-beta')",
+            "SELECT EXISTS(SELECT 1 FROM skills WHERE id = 'new-gamma')",
             [],
             |row| row.get(0),
         )
-        .expect("removed legacy member restored");
-    assert_eq!((promoted_sources, restored_bindings), (0, 2));
-    assert!(restored_beta);
+        .expect("new member state");
+    let legacy_bindings: i64 = connection
+        .query_row("SELECT COUNT(*) FROM remote_bindings", [], |row| row.get(0))
+        .expect("legacy bindings intact");
+    assert_eq!(promoted_sources, 0, "no guessed current release is created");
+    assert!(!new_gamma, "the closed commit writes no member skill rows");
+    assert_eq!(
+        legacy_bindings, 2,
+        "Legacy facts stay intact for the next explicit Promotion"
+    );
 }

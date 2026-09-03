@@ -1592,7 +1592,7 @@ mod tests {
                 }),
                 fail: false,
             },
-            MemoryCatalogProbe::new(probe_report(9, Some(matching_identity()))),
+            MemoryCatalogProbe::new(probe_report(10, Some(matching_identity()))),
             Some(&valid_marker()),
             &home,
         );

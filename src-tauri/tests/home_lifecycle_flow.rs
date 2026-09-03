@@ -454,7 +454,7 @@ fn restore_of_an_integrity_failed_home_promotes_the_same_identity() {
         connection
             .execute(
                 "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path, health,
                         created_at, updated_at
                      ) VALUES (

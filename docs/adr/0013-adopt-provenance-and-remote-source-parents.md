@@ -1,6 +1,12 @@
 # Adopt 的 lock provenance、Remote Source Parent 与所有权交接
 
-`.skill-lock.json` 是外部 installer 可编辑且可能陈旧的 provenance hint，不是实体所有权或内容完整性证明。Adopt 只有在 lock、外部 canonical 实体、remote/ref、Verification Anchor、skillPath 与 tree 形成闭环后，才把候选认领为 Remote Install；其余候选保持用户所有，以 Local Link 认领。Remote Source Parent 只持久化 repository 身份，Skill 实体与版本关系分别留在 `<Home>/skills/` 和 per-Skill Remote Binding，避免 checkout、cache、Library 与外部 installer 同时拥有内容。
+> **注意**：本节与 §2.2 中受支持 Git provider 的验证职责（GitHub、GitLab、generic HTTPS Git
+> 各自验证 URL/ref/hash 语义）已被 [ADR-0014](0014-git-repository-source-releases-and-transitions.md)
+> 与 [ADR-0018](0018-git-source-namespaces-and-immutable-members.md) 取代：Git 来源的身份、
+> Source Tracking Policy、Source Release 与成员语义以上述 ADR 为权威；本 ADR 继续管辖 Adopt
+> 证据闭环、Remote Source Parent 与 Ownership Handoff。
+
+`.skill-lock.json` 是外部 installer 可编辑且可能陈旧的 provenance hint，不是实体所有权或内容完整性证明。Adopt 只有在 lock、外部 canonical 实体、remote/ref、Verification Anchor、skillPath 与 tree 形成闭环后，才把候选认领为 Remote Install；其余候选保持用户所有，以 Local Link 认领。Remote Source Parent 只持久化 repository 身份，Skill 实体与版本关系分别留在 `<Home>/skills/` 和 per-Skill Remote Binding，避免 checkout...
 
 本 ADR 细化 ADR-0004 的 remote 来源元数据与更新规则，并取代 ADR-0005 对 `.skill-lock.json` 管理候选、installer/shared root 内候选的通用 Migrate 判断；其它 Adopt 扫描、Conflict、Activation、journal 与批量隔离规则继续有效。Home 布局沿用 ADR-0012：`remotes/`、`skills/` 同级，`cache/` 可重建。
 

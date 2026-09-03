@@ -294,7 +294,7 @@ impl BoundTestHome {
             connection
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path, health,
                         created_at, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 'link', NULL, ?6, 'healthy', ?7, ?7)",
@@ -332,7 +332,7 @@ impl BoundTestHome {
             connection
                 .execute(
                     "INSERT INTO skills (
-                        id, directory_name, identity_key, display_name, description,
+                        id, directory_name, directory_identity_key, display_name, description,
                         source_kind, library_entry_path, final_entity_path, health,
                         created_at, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 'remote_install', ?6, ?6, ?7, ?8, ?8)",
@@ -367,7 +367,7 @@ impl BoundTestHome {
             let (directory_identity_key, directory_name, final_entity): (String, String, String) =
                 connection
                     .query_row(
-                        "SELECT identity_key, directory_name, final_entity_path
+                        "SELECT directory_identity_key, directory_name, final_entity_path
                      FROM skills WHERE id = ?1",
                         [skill_id],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

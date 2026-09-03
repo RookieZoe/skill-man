@@ -366,7 +366,9 @@ impl SourcePromotionService {
                 catalog_aliases.sort();
                 manifest_aliases.sort();
                 let still_legacy = manifest.provider.is_none()
-                    && manifest.tracking_ref.is_none()
+                    && manifest.tracking_mode.is_none()
+                    && manifest.tracking_value.is_none()
+                    && manifest.current_selected_ref.is_none()
                     && manifest.current_release_id.is_none();
                 let manifest_matches_mode = match self.mode {
                     SourcePromotionMode::LegacyPromotion => still_legacy,
@@ -375,8 +377,10 @@ impl SourcePromotionService {
                             .provider
                             .as_deref()
                             .is_some_and(|value| !value.is_empty())
-                            && manifest.tracking_ref.as_deref()
-                                == Some(record.tracking_ref.as_str())
+                            && manifest
+                                .tracking_mode
+                                .as_deref()
+                                .is_some_and(|value| !value.is_empty())
                             && manifest.current_release_id == record.current_release_id
                     }
                 };
@@ -560,7 +564,9 @@ impl SourcePromotionService {
             remote_id: draft.remote_id.clone(),
             canonical_url: draft.canonical_url.clone(),
             provider: Some(draft.provider.clone()),
-            tracking_ref: Some(draft.tracking_ref.clone()),
+            tracking_mode: None,
+            tracking_value: None,
+            current_selected_ref: None,
             current_release_id: Some(release_id.clone()),
             aliases: legacy_record.aliases.clone(),
             created_at: legacy_record.created_at.clone(),

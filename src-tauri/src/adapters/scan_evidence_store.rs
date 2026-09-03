@@ -15,8 +15,8 @@ use crate::core::home::BoundHome;
 use crate::seams::scan_evidence_store::{
     CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord, ScanDiagnosticRecord,
     ScanEntityIndexStats, ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore,
-    ScanEvidenceStoreError, ScanEvidenceStoreFactory, ScanReportCursor, ScanReportManifest,
-    ScanObjectIdentity, ScanReportPageError, ScanReportPageRead, ScanReportRow, ScanReportSection,
+    ScanEvidenceStoreError, ScanEvidenceStoreFactory, ScanObjectIdentity, ScanReportCursor,
+    ScanReportManifest, ScanReportPageError, ScanReportPageRead, ScanReportRow, ScanReportSection,
     ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification, ScanStartupMarker,
 };
 
@@ -292,12 +292,11 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
             path: &Path,
             operation: &'static str,
         ) -> Result<(), ScanEvidenceStoreError> {
-            let mut line = serde_json::to_vec(record).map_err(|error| {
-                ScanEvidenceStoreError::Write {
+            let mut line =
+                serde_json::to_vec(record).map_err(|error| ScanEvidenceStoreError::Write {
                     operation,
                     detail: error.to_string(),
-                }
-            })?;
+                })?;
             line.push(b'\n');
             file.write_all(&line)
                 .map_err(|error| ScanEvidenceStoreError::io(operation, path, &error))
@@ -379,15 +378,14 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 hash_fault: Option<String>,
             }
             let mut facts_by_path: HashMap<PathBuf, EntityFacts> = HashMap::new();
-            let entities_file = fs::File::open(root_dir.join("entities.jsonl").as_path()).map_err(
-                |error| {
+            let entities_file =
+                fs::File::open(root_dir.join("entities.jsonl").as_path()).map_err(|error| {
                     ScanEvidenceStoreError::io(
                         "read Scan evidence stream",
                         &root_dir.join("entities.jsonl"),
                         &error,
                     )
-                },
-            )?;
+                })?;
             for line in BufReader::new(entities_file).lines() {
                 let Ok(line) = line else { continue };
                 let Ok(record) = serde_json::from_str::<ScanEntityRecord>(&line) else {
@@ -405,15 +403,14 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 );
             }
 
-            let entries_file = fs::File::open(root_dir.join("entries.jsonl").as_path()).map_err(
-                |error| {
+            let entries_file =
+                fs::File::open(root_dir.join("entries.jsonl").as_path()).map_err(|error| {
                     ScanEvidenceStoreError::io(
                         "read Scan evidence stream",
                         &root_dir.join("entries.jsonl"),
                         &error,
                     )
-                },
-            )?;
+                })?;
             for line in BufReader::new(entries_file).lines() {
                 let Ok(line) = line else { continue };
                 let Ok(entry) = serde_json::from_str::<ScanEntryRecord>(&line) else {
@@ -477,9 +474,7 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                         detail: facts
                             .as_ref()
                             .and_then(|facts| facts.hash_fault.clone())
-                            .or_else(|| {
-                                Some("final entity identity missing or changed".into())
-                            }),
+                            .or_else(|| Some("final entity identity missing or changed".into())),
                     };
                     append_index_line(
                         &mut diagnostics_file,
@@ -489,8 +484,7 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                     )?;
                     diagnostics_count += 1;
                 }
-                if entry.chain_fault.is_some() {
-                    let fault = entry.chain_fault.as_ref().expect("checked");
+                if let Some(fault) = entry.chain_fault.as_ref() {
                     let diagnostic = ScanDiagnosticRecord {
                         root_index,
                         kind: format!("chain_{}", fault.kind),
@@ -542,10 +536,16 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         // full pass (appearance counts are exact), appearances/diagnostics
         // streamed incrementally. The manifest switch publishes only the
         // completed run artifact.
-        for file in [&mut entities_file, &mut appearances_file, &mut diagnostics_file] {
-            file.flush().and_then(|()| file.sync_all()).map_err(|error| {
-                ScanEvidenceStoreError::io("flush Scan index", &entities_path, &error)
-            })?;
+        for file in [
+            &mut entities_file,
+            &mut appearances_file,
+            &mut diagnostics_file,
+        ] {
+            file.flush()
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    ScanEvidenceStoreError::io("flush Scan index", &entities_path, &error)
+                })?;
         }
         for name in ["entities.jsonl", "appearances.jsonl", "diagnostics.jsonl"] {
             let path = self.run_dir(run_id).join(name);
@@ -574,7 +574,9 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         let limit = if limit == 0 { 1 } else { limit.min(512) };
         // The cursor is generation-bound: only the exact Report identity
         // that is current may be served (spec §4.10; ADR-0020).
-        let current = self.current_manifest().map_err(|_| ScanReportPageError::NotFound)?;
+        let current = self
+            .current_manifest()
+            .map_err(|_| ScanReportPageError::NotFound)?;
         let manifest = match current {
             CurrentManifestRead::Report(manifest)
                 if manifest.content_identity == cursor.report_content_identity =>
@@ -593,7 +595,7 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         let run = self
             .read_run(&cursor.run_id)
             .map_err(|_| ScanReportPageError::NotFound)?
-            .ok_or_else(|| ScanReportPageError::NotFound)?;
+            .ok_or(ScanReportPageError::NotFound)?;
         if run.home_id != self.home_id
             || run.generation != cursor.generation
             || run.run_id != cursor.run_id
@@ -617,19 +619,21 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
                 };
                 (rows, next)
             }
-            ScanReportSection::Entities => {
-                self.page_file_rows::<ScanCanonicalEntityRecord>(
-                    &cursor,
-                    limit,
-                    ScanReportRow::Entity,
-                )?
-            }
+            ScanReportSection::Entities => self.page_file_rows::<ScanCanonicalEntityRecord>(
+                cursor,
+                limit,
+                ScanReportRow::Entity,
+            )?,
             ScanReportSection::Appearances => {
-                self.page_file_rows::<ScanAppearanceRecord>(&cursor, limit, ScanReportRow::Appearance)?
+                self.page_file_rows::<ScanAppearanceRecord>(cursor, limit, |record| {
+                    ScanReportRow::Appearance(Box::new(record))
+                })?
             }
-            ScanReportSection::Diagnostics => {
-                self.page_file_rows::<ScanDiagnosticRecord>(&cursor, limit, ScanReportRow::Diagnostic)?
-            }
+            ScanReportSection::Diagnostics => self.page_file_rows::<ScanDiagnosticRecord>(
+                cursor,
+                limit,
+                ScanReportRow::Diagnostic,
+            )?,
         };
         Ok(ScanReportPageRead { rows, next_offset })
     }
@@ -826,10 +830,7 @@ impl SystemScanEvidenceStore {
                 rows.push(row_kind(record));
             }
         }
-        let at_end = reader
-            .fill_buf()
-            .map(|buf| buf.is_empty())
-            .unwrap_or(true);
+        let at_end = reader.fill_buf().map(|buf| buf.is_empty()).unwrap_or(true);
         let next_offset = if at_end {
             None
         } else {
@@ -1115,11 +1116,7 @@ mod tests {
         }
     }
 
-    fn entry_with_identity(
-        seq: u64,
-        name: &str,
-        identity: ScanObjectIdentity,
-    ) -> ScanEntryRecord {
+    fn entry_with_identity(seq: u64, name: &str, identity: ScanObjectIdentity) -> ScanEntryRecord {
         let mut entry = entry_record(seq, name);
         entry.identity = Some(identity);
         entry
@@ -1195,10 +1192,7 @@ mod tests {
             started_at_ms: 1000,
             ended_at_ms: 1500,
             integrity: None,
-            content_identity: format!(
-                "scan-report-v1:{}:{}:1:complete",
-                home.home_id.0, run_id
-            ),
+            content_identity: format!("scan-report-v1:{}:{}:1:complete", home.home_id.0, run_id),
         };
         manifest = seal_manifest(manifest);
         manifest
@@ -1386,8 +1380,14 @@ mod tests {
         let store = store(&temp, &home);
         let run_id = "run-1";
         store.create_run(&run_record(&home, run_id)).unwrap();
-        let identity_a = ScanObjectIdentity { device: 1, inode: 100 };
-        let identity_b = ScanObjectIdentity { device: 1, inode: 200 };
+        let identity_a = ScanObjectIdentity {
+            device: 1,
+            inode: 100,
+        };
+        let identity_b = ScanObjectIdentity {
+            device: 1,
+            inode: 200,
+        };
         // alpha and beta resolve to the same object (identity A): exactly one
         // canonical entity, two appearances; gamma is a distinct object.
         for (seq, name, identity) in [
@@ -1444,7 +1444,13 @@ mod tests {
         assert_eq!(page.rows.len(), 2);
         assert!(page.next_offset.is_some(), "one appearance remains");
         let continued = store
-            .report_page(&ScanReportCursor { offset: page.next_offset.unwrap(), ..cursor }, 2)
+            .report_page(
+                &ScanReportCursor {
+                    offset: page.next_offset.unwrap(),
+                    ..cursor
+                },
+                2,
+            )
             .unwrap();
         assert_eq!(continued.rows.len(), 1);
         assert!(continued.next_offset.is_none());
@@ -1458,7 +1464,18 @@ mod tests {
         let run_id = "run-1";
         store.create_run(&run_record(&home, run_id)).unwrap();
         store
-            .append_entry(run_id, "r0", &entry_with_identity(1, "alpha", ScanObjectIdentity { device: 1, inode: 100 }))
+            .append_entry(
+                run_id,
+                "r0",
+                &entry_with_identity(
+                    1,
+                    "alpha",
+                    ScanObjectIdentity {
+                        device: 1,
+                        inode: 100,
+                    },
+                ),
+            )
             .unwrap();
         store
             .append_entity(
@@ -1467,7 +1484,10 @@ mod tests {
                 &entity_record(
                     1,
                     "alpha",
-                    ScanObjectIdentity { device: 1, inode: 100 },
+                    ScanObjectIdentity {
+                        device: 1,
+                        inode: 100,
+                    },
                 ),
             )
             .unwrap();
@@ -1487,20 +1507,24 @@ mod tests {
         // A second Report switches current.json: the old cursor is typed
         // stale and never resolves against the new Report.
         let second = manifest(&home, "run-2", "complete");
-        store.create_run(&ScanRunRecord {
-            schema_version: SCAN_STORE_SCHEMA_VERSION,
-            home_id: home.home_id.0.clone(),
-            run_id: "run-2".into(),
-            generation: 2,
-            trigger: "manual".into(),
-            frozen: scan_run_record_frozen(),
-            roots: vec![],
-            started_at_ms: 2000,
-        }).unwrap();
+        store
+            .create_run(&ScanRunRecord {
+                schema_version: SCAN_STORE_SCHEMA_VERSION,
+                home_id: home.home_id.0.clone(),
+                run_id: "run-2".into(),
+                generation: 2,
+                trigger: "manual".into(),
+                frozen: scan_run_record_frozen(),
+                roots: vec![],
+                started_at_ms: 2000,
+            })
+            .unwrap();
         store.publish_report("run-2", &second).unwrap();
         assert!(matches!(
             store.report_page(&cursor, 16),
-            Err(ScanReportPageError::Stale { current_generation: 1 })
+            Err(ScanReportPageError::Stale {
+                current_generation: 1
+            })
         ));
         // A corrupt manifest is not-found, never a fallback.
         std::fs::write(temp.path().join("scan/current.json"), "{}").unwrap();
@@ -1517,24 +1541,26 @@ mod tests {
         let store = store(&temp, &home);
         let run_id = "run-1";
         store.create_run(&run_record(&home, run_id)).unwrap();
-        let identity_a = ScanObjectIdentity { device: 1, inode: 100 };
+        let identity_a = ScanObjectIdentity {
+            device: 1,
+            inode: 100,
+        };
         // Root r1 failed; its streamed evidence must never aggregate.
         store
             .append_entry(run_id, "r1", &entry_with_identity(1, "half", identity_a))
             .unwrap();
         store
-            .append_entity(
-                run_id,
-                "r1",
-                &entity_record(1, "half", identity_a),
-            )
+            .append_entity(run_id, "r1", &entity_record(1, "half", identity_a))
             .unwrap();
         store
             .write_root(run_id, &root_record(1, ScanRootState::Failed))
             .unwrap();
         let stats = store.build_entity_index(run_id).unwrap();
         assert_eq!(stats.entities, 0, "failed Root contributes no entity");
-        assert_eq!(stats.appearances, 0, "failed Root contributes no appearance");
+        assert_eq!(
+            stats.appearances, 0,
+            "failed Root contributes no appearance"
+        );
         assert_eq!(stats.diagnostics, 1, "typed root failure diagnostic");
     }
 

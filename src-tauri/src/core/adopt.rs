@@ -1308,7 +1308,9 @@ impl AdoptService {
                 remote_id: remote_id.clone(),
                 canonical_url: canonical_url.clone(),
                 provider: None,
-                tracking_ref: None,
+                tracking_mode: None,
+                tracking_value: None,
+                current_selected_ref: None,
                 current_release_id: None,
                 // A reused parent keeps its confirmed aliases in the
                 // manifest (ADR-0013 §4.3: manifest and row must agree).

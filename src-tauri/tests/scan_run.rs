@@ -618,7 +618,10 @@ fn failed_root_forms_incomplete_report_with_healthy_root_evidence() {
         .iter()
         .find(|root| root.index == 1)
         .expect("failed root row");
-    assert_eq!(lost.state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed);
+    assert_eq!(
+        lost.state,
+        skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed
+    );
     assert!(lost.diagnostic.is_some());
 }
 
@@ -885,7 +888,10 @@ fn zero_progress_root_is_typed_unresponsive_and_isolated() {
     assert_eq!(report.coverage.unresponsive, 1);
     assert_eq!(report.coverage.completed, 0);
     let roots = page_roots(&coordinator, &report);
-    assert_eq!(roots[0].state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Unresponsive);
+    assert_eq!(
+        roots[0].state,
+        skill_man_lib::seams::scan_evidence_store::ScanRootState::Unresponsive
+    );
 }
 
 #[test]
@@ -1141,7 +1147,10 @@ fn unresponsive_isolation_keeps_other_roots_scanning() {
         .iter()
         .find(|root| root.index == 0)
         .expect("healthy root row");
-    assert_eq!(healthy.state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Completed);
+    assert_eq!(
+        healthy.state,
+        skill_man_lib::seams::scan_evidence_store::ScanRootState::Completed
+    );
 }
 
 /// Fault matrix (spec §11 `scan.qualification.write`): a qualification
@@ -1311,12 +1320,7 @@ fn canonical_entity_aggregates_appearances_across_roots() {
         report.counts.entities, 2,
         "shared + skill-b: one canonical entity per distinct object"
     );
-    let (rows, _) = page_section(
-        &coordinator,
-        &report,
-        ScanReportSection::Entities,
-        16,
-    );
+    let (rows, _) = page_section(&coordinator, &report, ScanReportSection::Entities, 16);
     let entities = rows
         .into_iter()
         .map(|row| match row {
@@ -1335,12 +1339,8 @@ fn canonical_entity_aggregates_appearances_across_roots() {
     );
     // The appearances page preserves every appearance with the entity
     // binding (ADR-0017: 逐条保留).
-    let (appearance_rows, _) = page_section(
-        &coordinator,
-        &report,
-        ScanReportSection::Appearances,
-        16,
-    );
+    let (appearance_rows, _) =
+        page_section(&coordinator, &report, ScanReportSection::Appearances, 16);
     let shared_appearances = appearance_rows
         .iter()
         .filter(|row| matches!(row, ScanReportRow::Appearance(appearance) if appearance.entity_seq == Some(shared_entity.entity_seq)))
@@ -1378,23 +1378,11 @@ fn report_page_cursors_are_generation_bound() {
         )
         .expect("second entity page");
     assert_eq!(continuation.rows.len(), 1);
-    assert_eq!(
-        continuation.next_offset, None,
-        "all entities are paged out"
-    );
-    let (root_rows, _) = page_section(
-        &coordinator,
-        &report,
-        ScanReportSection::Roots,
-        16,
-    );
+    assert_eq!(continuation.next_offset, None, "all entities are paged out");
+    let (root_rows, _) = page_section(&coordinator, &report, ScanReportSection::Roots, 16);
     assert_eq!(root_rows.len(), 1);
-    let (diagnostic_rows, _) = page_section(
-        &coordinator,
-        &report,
-        ScanReportSection::Diagnostics,
-        16,
-    );
+    let (diagnostic_rows, _) =
+        page_section(&coordinator, &report, ScanReportSection::Diagnostics, 16);
     assert_eq!(diagnostic_rows.len(), 0);
     // A new Report generation publishes: the old cursor is typed stale.
     coordinator
@@ -1435,21 +1423,25 @@ fn funnel_counts_configured_to_canonical_layers() {
     ));
     let mut configurations = Vec::new();
     for index in 0..2 {
-        configurations.push(skill_man_lib::seams::agent_configuration_store::StoredAgentConfiguration {
-            agent_id: format!("agent-{index}"),
-            origin: skill_man_lib::core::agent_configuration::AgentConfigurationOrigin::Custom,
-            preset_key: None,
-            name: format!("Agent {index}"),
-            name_identity_key: format!("agent-{index}"),
-            compatibility: skill_man_lib::core::domain::Compatibility::Verified,
-            project_skills_dir: None,
-            created_at: "2026-08-01T00:00:00Z".into(),
-            updated_at: "2026-08-01T00:00:00Z".into(),
-            memberships: vec![skill_man_lib::seams::agent_configuration_store::StoredAgentRootMembership {
-                root_id: format!("root-{index}"),
-                role: skill_man_lib::core::agent_configuration::AgentRootRole::ScanOnly,
-            }],
-        });
+        configurations.push(
+            skill_man_lib::seams::agent_configuration_store::StoredAgentConfiguration {
+                agent_id: format!("agent-{index}"),
+                origin: skill_man_lib::core::agent_configuration::AgentConfigurationOrigin::Custom,
+                preset_key: None,
+                name: format!("Agent {index}"),
+                name_identity_key: format!("agent-{index}"),
+                compatibility: skill_man_lib::core::domain::Compatibility::Verified,
+                project_skills_dir: None,
+                created_at: "2026-08-01T00:00:00Z".into(),
+                updated_at: "2026-08-01T00:00:00Z".into(),
+                memberships: vec![
+                    skill_man_lib::seams::agent_configuration_store::StoredAgentRootMembership {
+                        root_id: format!("root-{index}"),
+                        role: skill_man_lib::core::agent_configuration::AgentRootRole::ScanOnly,
+                    },
+                ],
+            },
+        );
     }
     let coordinator = Arc::new(
         ScanCoordinator::new(
@@ -1498,13 +1490,20 @@ fn funnel_counts_configured_to_canonical_layers() {
     let report = snapshot.current_report.summary.expect("report");
     assert_eq!(report.counts.configured_agents, 2);
     assert_eq!(report.counts.declared_roots, 2);
-    assert_eq!(report.counts.canonical_roots, 1, "one physical Root scanned once");
+    assert_eq!(
+        report.counts.canonical_roots, 1,
+        "one physical Root scanned once"
+    );
     assert_eq!(report.counts.entries, 1);
     assert_eq!(report.counts.entities, 1);
     assert_eq!(report.coverage.completed, 1);
     assert!(!report.incomplete);
     assert_eq!(report.agent_configuration_generation, 1);
-    assert!(report.configured_root_snapshot_fingerprint.starts_with("roots<"));
+    assert!(
+        report
+            .configured_root_snapshot_fingerprint
+            .starts_with("roots<")
+    );
 }
 
 /// A synthetic large Root (beyond any old candidate cap) streams and pages:
@@ -1571,12 +1570,7 @@ fn synthetic_large_root_streams_and_pages_bounded() {
         "exactly three distinct objects despite 303 appearances"
     );
     // Bounded pages: page 1 of 100 returns 100 rows and a continuation.
-    let (rows, next) = page_section(
-        &coordinator,
-        &report,
-        ScanReportSection::Appearances,
-        100,
-    );
+    let (rows, next) = page_section(&coordinator, &report, ScanReportSection::Appearances, 100);
     assert_eq!(rows.len(), 100);
     assert_eq!(
         next.map(|offset| offset > 0),
