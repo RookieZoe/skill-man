@@ -33,3 +33,21 @@ test("allows Core code that uses the FileSystem seam", () => {
     false,
   );
 });
+
+test("allows non-filesystem `use std::` aliases", () => {
+  assert.equal(
+    containsDirectFileSystemAccess(
+      "use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};",
+    ),
+    false,
+  );
+});
+
+test("rejects an aliased filesystem module in a brace list", () => {
+  assert.equal(
+    containsDirectFileSystemAccess(
+      "use std::{\n  os::unix::fs as unix_fs,\n  path::Path,\n};\nunix_fs::symlink(target, path);",
+    ),
+    true,
+  );
+});
