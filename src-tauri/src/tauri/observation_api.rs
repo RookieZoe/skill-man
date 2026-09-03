@@ -95,6 +95,17 @@ impl ObservationApi {
         let dto: ObservationAndScanSnapshotDto = self.service.cancel_rescan(run_id)?.into();
         Ok(dto)
     }
+
+    /// The unique paged Report read contract (spec §4.10 `report_page`):
+    /// Root coverage / canonical entities / appearances / diagnostics of
+    /// the current Report generation only.
+    pub fn report_page(
+        &self,
+        cursor: crate::seams::scan_evidence_store::ScanReportCursor,
+        limit: usize,
+    ) -> Result<crate::seams::scan_evidence_store::ScanReportPageRead, ScanError> {
+        self.service.report_page(cursor, limit)
+    }
 }
 
 /// The API is the scan progress observer: the coordinator throttles to

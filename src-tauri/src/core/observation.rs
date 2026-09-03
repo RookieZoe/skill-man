@@ -206,6 +206,21 @@ impl ObservationService {
         Ok(self.snapshot_with(cancelled))
     }
 
+    /// The unique paged Report read contract (spec §4.10 `report_page`):
+    /// the scan module owns the filesystem loop and generation, React never
+    /// composes its own.
+    pub fn report_page(
+        &self,
+        cursor: crate::seams::scan_evidence_store::ScanReportCursor,
+        limit: usize,
+    ) -> Result<crate::seams::scan_evidence_store::ScanReportPageRead, ScanError> {
+        let scan = self
+            .scan
+            .as_ref()
+            .ok_or_else(|| ScanError::Internal("the Scan Coordinator is not attached".into()))?;
+        scan.report_page(cursor, limit)
+    }
+
     fn snapshot_with(&self, scan: ScanCoordinatorSnapshot) -> ObservationAndScanSnapshot {
         ObservationAndScanSnapshot {
             home_id: self.write_gate.bound_home().ok().map(|home| home.home_id.0),

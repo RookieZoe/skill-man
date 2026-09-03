@@ -19,8 +19,7 @@ use skill_man_lib::core::scan::mutation::ScanMutationCoordinator;
 use skill_man_lib::core::scan::{ScanCoordinator, ScanRunState, ScanTrigger};
 use skill_man_lib::seams::agent_configuration_store::{
     AgentConfigurationStore, AgentConfigurationStoreChange, AgentConfigurationStoreError,
-    AgentConfigurationStoreSnapshot, RecentProjectFolder, StoredAgentConfiguration,
-    StoredGlobalSkillRoot,
+    AgentConfigurationStoreSnapshot, RecentProjectFolder, StoredGlobalSkillRoot,
 };
 use skill_man_lib::seams::app_state_store::AppStateStore;
 use skill_man_lib::seams::clock::Clock;
@@ -28,13 +27,77 @@ use skill_man_lib::seams::filesystem::{
     FileSystem, FileSystemError, ScannedSkillEntry, TreeScanEntry,
 };
 use skill_man_lib::seams::installer_lock_store::EmptyInstallerLockStore;
-use skill_man_lib::seams::scan_evidence_store::{CurrentManifestRead, ScanEvidenceStore};
+use skill_man_lib::seams::scan_evidence_store::{
+    CurrentManifestRead, ScanEvidenceStore, ScanReportCursor, ScanReportRow, ScanReportSection,
+    ScanRootCoverageRecord,
+};
 
 use common::{BoundTestHome, HOME_ID};
+
+/// Page the Roots section of a Report through the unique `report_page`
+/// contract (spec §4.10): the tests never reach into the summary for
+/// per-Root detail.
+fn page_roots(
+    coordinator: &ScanCoordinator,
+    summary: &skill_man_lib::core::scan::ScanReportSummary,
+) -> Vec<ScanRootCoverageRecord> {
+    let mut rows = Vec::new();
+    let mut offset = 0_u64;
+    loop {
+        let page = coordinator
+            .report_page(
+                ScanReportCursor {
+                    report_content_identity: summary.content_identity.clone(),
+                    run_id: summary.run_id.clone(),
+                    generation: summary.generation,
+                    section: ScanReportSection::Roots,
+                    offset,
+                },
+                64,
+            )
+            .expect("roots page");
+        if page.rows.is_empty() {
+            break;
+        }
+        rows.extend(page.rows.into_iter().map(|row| match row {
+            ScanReportRow::RootCoverage(root) => root,
+            other => panic!("unexpected Roots row {other:?}"),
+        }));
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    rows
+}
+
+/// Page any section through `report_page`; a `limit` of 0 opens the first
+/// page with the default size.
+fn page_section(
+    coordinator: &ScanCoordinator,
+    summary: &skill_man_lib::core::scan::ScanReportSummary,
+    section: ScanReportSection,
+    limit: u32,
+) -> (Vec<ScanReportRow>, Option<u64>) {
+    let page = coordinator
+        .report_page(
+            ScanReportCursor {
+                report_content_identity: summary.content_identity.clone(),
+                run_id: summary.run_id.clone(),
+                generation: summary.generation,
+                section,
+                offset: 0,
+            },
+            limit as usize,
+        )
+        .expect("report page");
+    (page.rows, page.next_offset)
+}
 
 /// Test Agent Configuration store: one configured Root per entry.
 struct StubAgentStore {
     roots: Vec<StoredGlobalSkillRoot>,
+    configurations: Vec<skill_man_lib::seams::agent_configuration_store::StoredAgentConfiguration>,
     version: u64,
 }
 
@@ -44,7 +107,7 @@ impl AgentConfigurationStore for StubAgentStore {
     ) -> Result<AgentConfigurationStoreSnapshot, AgentConfigurationStoreError> {
         Ok(AgentConfigurationStoreSnapshot {
             snapshot_version: self.version,
-            configurations: Vec::<StoredAgentConfiguration>::new(),
+            configurations: self.configurations.clone(),
             roots: self.roots.clone(),
         })
     }
@@ -386,6 +449,7 @@ fn setup() -> (
             consumer_agent_ids: vec!["a1".into()],
             activation_skill_ids: vec![],
         }],
+        configurations: vec![],
         version: 1,
     });
     let coordinator = Arc::new(
@@ -437,12 +501,8 @@ fn manual_rescan_streams_evidence_and_publishes_complete_report() {
     assert_eq!(
         report.state,
         skill_man_lib::core::scan::ScanReportState::Complete,
-        "roots: {:?}",
-        report
-            .roots
-            .iter()
-            .map(|r| (&r.state, &r.diagnostic, r.counts))
-            .collect::<Vec<_>>()
+        "coverage: {:?}",
+        report.coverage
     );
     assert_eq!(report.generation, 1);
     // Streaming artifacts on disk: the temp-dir factory stores under
@@ -513,6 +573,7 @@ fn failed_root_forms_incomplete_report_with_healthy_root_evidence() {
                 activation_skill_ids: vec![],
             },
         ],
+        configurations: vec![],
         version: 1,
     });
     let coordinator = Arc::new(
@@ -549,16 +610,15 @@ fn failed_root_forms_incomplete_report_with_healthy_root_evidence() {
     assert_eq!(report.counts.failed_roots, 1);
     // The healthy Root still produced evidence.
     assert!(report.counts.entries >= 1, "{:?}", report.counts);
+    assert_eq!(report.coverage.completed, 1);
+    assert_eq!(report.coverage.failed, 1);
     // The failed Root carries a diagnostic, not fabricated coverage.
-    let lost = report
-        .roots
+    let roots = page_roots(&coordinator, &report);
+    let lost = roots
         .iter()
         .find(|root| root.index == 1)
         .expect("failed root row");
-    assert_eq!(
-        lost.state,
-        skill_man_lib::core::scan::ScanRootCoverageState::Failed
-    );
+    assert_eq!(lost.state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed);
     assert!(lost.diagnostic.is_some());
 }
 
@@ -589,6 +649,7 @@ fn cancel_keeps_the_previous_report_untouched() {
             consumer_agent_ids: vec!["a1".into()],
             activation_skill_ids: vec![],
         }],
+        configurations: vec![],
         version: 1,
     });
     let coordinator_gated = Arc::new(
@@ -686,6 +747,7 @@ fn mutation_generation_supersedes_a_running_run() {
                     consumer_agent_ids: vec!["a1".into()],
                     activation_skill_ids: vec![],
                 }],
+                configurations: vec![],
                 version: 1,
             }),
             mutation.clone(),
@@ -768,6 +830,7 @@ fn zero_progress_root_is_typed_unresponsive_and_isolated() {
                     consumer_agent_ids: vec!["a1".into()],
                     activation_skill_ids: vec![],
                 }],
+                configurations: vec![],
                 version: 1,
             }),
             Arc::new(ScanMutationCoordinator::new()),
@@ -819,10 +882,10 @@ fn zero_progress_root_is_typed_unresponsive_and_isolated() {
         skill_man_lib::core::scan::ScanReportState::Incomplete
     );
     assert_eq!(report.counts.failed_roots, 1);
-    assert_eq!(
-        report.roots[0].state,
-        skill_man_lib::core::scan::ScanRootCoverageState::Unresponsive
-    );
+    assert_eq!(report.coverage.unresponsive, 1);
+    assert_eq!(report.coverage.completed, 0);
+    let roots = page_roots(&coordinator, &report);
+    assert_eq!(roots[0].state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Unresponsive);
 }
 
 #[test]
@@ -844,6 +907,7 @@ fn repeated_triggers_reuse_the_active_run_single_flight() {
             home.write_gate.clone(),
             Arc::new(StubAgentStore {
                 roots: vec![],
+                configurations: vec![],
                 version: 1,
             }),
             Arc::new(ScanMutationCoordinator::new()),
@@ -933,8 +997,8 @@ fn write_failures_classify_root_local_vs_store_wide() {
     assert_eq!(
         report.state,
         skill_man_lib::core::scan::ScanReportState::Incomplete,
-        "{:?}",
-        report.roots
+        "coverage: {:?}",
+        report.coverage
     );
 
     // Store-wide: disk full fails the whole Run and keeps the old Report.
@@ -968,8 +1032,11 @@ fn orphaned_temporary_run_is_swept_by_provenance() {
     let orphan_dir = scan_dir.join("runs").join(&orphan_id);
     std::fs::create_dir_all(orphan_dir.join("roots/r0")).expect("orphan dirs");
     let run_json = format!(
-        r#"{{"schema_version":1,"home_id":"{}","run_id":"{}","generation":9,"trigger":"manual","frozen":{{"home_id":"{}","write_gate_generation":0,"agent_configuration_generation":1,"mutation_generation":0,"roots_fingerprint":"roots<0>"}},"roots":[],"started_at_ms":1}}"#,
-        home.home.home_id.0, orphan_id, home.home.home_id.0
+        r#"{{"schema_version":{},"home_id":"{}","run_id":"{}","generation":9,"trigger":"manual","frozen":{{"home_id":"{}","write_gate_generation":0,"agent_configuration_generation":1,"mutation_generation":0,"roots_fingerprint":"roots<0>","configured_agents":1,"declared_roots":1}},"roots":[],"started_at_ms":1}}"#,
+        skill_man_lib::seams::scan_evidence_store::SCAN_STORE_SCHEMA_VERSION,
+        home.home.home_id.0,
+        orphan_id,
+        home.home.home_id.0
     );
     std::fs::write(orphan_dir.join("run.json"), run_json).expect("orphan run.json");
     let store = skill_man_lib::adapters::scan_evidence_store::SystemScanEvidenceStore::new(
@@ -1027,6 +1094,7 @@ fn unresponsive_isolation_keeps_other_roots_scanning() {
                         activation_skill_ids: vec![],
                     },
                 ],
+                configurations: vec![],
                 version: 1,
             }),
             Arc::new(ScanMutationCoordinator::new()),
@@ -1068,15 +1136,12 @@ fn unresponsive_isolation_keeps_other_roots_scanning() {
         report.state,
         skill_man_lib::core::scan::ScanReportState::Incomplete
     );
-    let healthy = report
-        .roots
+    let roots = page_roots(&coordinator, &report);
+    let healthy = roots
         .iter()
         .find(|root| root.index == 0)
         .expect("healthy root row");
-    assert_eq!(
-        healthy.state,
-        skill_man_lib::core::scan::ScanRootCoverageState::Completed
-    );
+    assert_eq!(healthy.state, skill_man_lib::seams::scan_evidence_store::ScanRootState::Completed);
 }
 
 /// Fault matrix (spec §11 `scan.qualification.write`): a qualification
@@ -1106,6 +1171,7 @@ fn qualification_write_failure_keeps_report_but_not_qualification() {
                     consumer_agent_ids: vec!["a1".into()],
                     activation_skill_ids: vec![],
                 }],
+                configurations: vec![],
                 version: 1,
             }),
             Arc::new(ScanMutationCoordinator::new()),
@@ -1170,4 +1236,359 @@ fn qualification_write_failure_keeps_report_but_not_qualification() {
         store.qualification().unwrap().is_none(),
         "the Snapshot stays unqualified when the qualification write fails"
     );
+}
+
+/// ADR-0017 §canonical entity: the same final file-system object reached
+/// through multiple Roots and multiple symlinks forms exactly one
+/// generation-bound canonical entity; every appearance is preserved.
+#[test]
+fn canonical_entity_aggregates_appearances_across_roots() {
+    let home = BoundTestHome::new();
+    let root_a = home.path().join("agent-skills");
+    let root_b = home.path().join("agent-skills-b");
+    let shared = home.path().join("shared-skill");
+    std::fs::create_dir_all(&shared).expect("shared entity");
+    std::fs::write(shared.join("SKILL.md"), "# Shared\n").expect("shared doc");
+    std::fs::create_dir_all(&root_a).expect("root a");
+    std::fs::create_dir_all(&root_b).expect("root b");
+    std::fs::create_dir_all(root_a.join("skill-b")).expect("skill b");
+    std::fs::write(root_a.join("skill-b").join("SKILL.md"), "# B\n").expect("b doc");
+    // Root A: shared via one symlink. Root B: the same shared via another
+    // symlink. Both + the real entry count three appearances of one entity.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&shared, root_a.join("shared-skill")).expect("link a");
+        std::os::unix::fs::symlink(&shared, root_b.join("shared-skill")).expect("link b");
+    }
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory.clone(),
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            Arc::new(StubAgentStore {
+                roots: vec![
+                    StoredGlobalSkillRoot {
+                        root_id: "root-a".into(),
+                        configured_path: root_a,
+                        path_identity_key: "root-a".into(),
+                        consumer_agent_ids: vec!["a1".into()],
+                        activation_skill_ids: vec![],
+                    },
+                    StoredGlobalSkillRoot {
+                        root_id: "root-b".into(),
+                        configured_path: root_b,
+                        path_identity_key: "root-b".into(),
+                        consumer_agent_ids: vec!["a2".into()],
+                        activation_skill_ids: vec![],
+                    },
+                ],
+                configurations: vec![],
+                version: 1,
+            }),
+            Arc::new(ScanMutationCoordinator::new()),
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    assert_eq!(
+        snapshot.run.as_ref().unwrap().state,
+        ScanRunState::Completed
+    );
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.counts.entries, 3, "three appearances total");
+    assert_eq!(
+        report.counts.entities, 2,
+        "shared + skill-b: one canonical entity per distinct object"
+    );
+    let (rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::Entities,
+        16,
+    );
+    let entities = rows
+        .into_iter()
+        .map(|row| match row {
+            ScanReportRow::Entity(entity) => entity,
+            other => panic!("unexpected Entity row {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let expected_shared = std::fs::canonicalize(&shared).expect("canonical shared");
+    let shared_entity = entities
+        .iter()
+        .find(|entity| entity.canonical_path == expected_shared)
+        .expect("shared canonical entity");
+    assert_eq!(
+        shared_entity.appearances, 2,
+        "both Roots' appearances aggregate into one entity"
+    );
+    // The appearances page preserves every appearance with the entity
+    // binding (ADR-0017: 逐条保留).
+    let (appearance_rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::Appearances,
+        16,
+    );
+    let shared_appearances = appearance_rows
+        .iter()
+        .filter(|row| matches!(row, ScanReportRow::Appearance(appearance) if appearance.entity_seq == Some(shared_entity.entity_seq)))
+        .count();
+    assert_eq!(shared_appearances, 2);
+}
+
+/// The unique paged contract: stable cursors read the same generation,
+/// rows are bounded per page, and a published Report switch makes the old
+/// cursor typed stale instead of falling back.
+#[test]
+fn report_page_cursors_are_generation_bound() {
+    let (_home, coordinator, _factory, _mutation) = setup();
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("first");
+    wait_terminal(&coordinator, 10_000);
+    let first = coordinator.snapshot();
+    let report = first.current_report.summary.expect("report");
+    assert_eq!(report.generation, 1);
+    // Bounded first page: limit 1 returns exactly one row + continuation.
+    let (rows, next) = page_section(&coordinator, &report, ScanReportSection::Entities, 1);
+    assert_eq!(rows.len(), 1);
+    assert!(next.is_some(), "a second entity remains");
+    let continuation = coordinator
+        .report_page(
+            ScanReportCursor {
+                report_content_identity: report.content_identity.clone(),
+                run_id: report.run_id.clone(),
+                generation: report.generation,
+                section: ScanReportSection::Entities,
+                offset: next.expect("next offset"),
+            },
+            1,
+        )
+        .expect("second entity page");
+    assert_eq!(continuation.rows.len(), 1);
+    assert_eq!(
+        continuation.next_offset, None,
+        "all entities are paged out"
+    );
+    let (root_rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::Roots,
+        16,
+    );
+    assert_eq!(root_rows.len(), 1);
+    let (diagnostic_rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::Diagnostics,
+        16,
+    );
+    assert_eq!(diagnostic_rows.len(), 0);
+    // A new Report generation publishes: the old cursor is typed stale.
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("second");
+    wait_terminal(&coordinator, 10_000);
+    let second = coordinator.snapshot();
+    let second_report = second.current_report.summary.expect("second report");
+    assert_eq!(second_report.generation, 2);
+    let stale = coordinator.report_page(
+        ScanReportCursor {
+            report_content_identity: report.content_identity.clone(),
+            run_id: report.run_id.clone(),
+            generation: report.generation,
+            section: ScanReportSection::Entities,
+            offset: 0,
+        },
+        8,
+    );
+    assert!(matches!(
+        stale,
+        Err(skill_man_lib::core::scan::ScanError::ReportPageStale(2))
+    ));
+}
+
+/// Funnel counts (spec §4.6/ADR-0017): Configured Agents → declared roots →
+/// canonical roots → appearances → canonical entities, all exact.
+#[test]
+fn funnel_counts_configured_to_canonical_layers() {
+    let home = BoundTestHome::new();
+    let root = home.path().join("agent-skills");
+    std::fs::create_dir_all(&root).expect("root");
+    let skill = root.join("skill-x");
+    std::fs::create_dir_all(&skill).expect("skill");
+    std::fs::write(skill.join("SKILL.md"), "# X\n").expect("doc");
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let mut configurations = Vec::new();
+    for index in 0..2 {
+        configurations.push(skill_man_lib::seams::agent_configuration_store::StoredAgentConfiguration {
+            agent_id: format!("agent-{index}"),
+            origin: skill_man_lib::core::agent_configuration::AgentConfigurationOrigin::Custom,
+            preset_key: None,
+            name: format!("Agent {index}"),
+            name_identity_key: format!("agent-{index}"),
+            compatibility: skill_man_lib::core::domain::Compatibility::Verified,
+            project_skills_dir: None,
+            created_at: "2026-08-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            memberships: vec![skill_man_lib::seams::agent_configuration_store::StoredAgentRootMembership {
+                root_id: format!("root-{index}"),
+                role: skill_man_lib::core::agent_configuration::AgentRootRole::ScanOnly,
+            }],
+        });
+    }
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory.clone(),
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            Arc::new(StubAgentStore {
+                // Two different root_ids point at the same physical Root:
+                // declared 2, canonical 1.
+                roots: vec![
+                    StoredGlobalSkillRoot {
+                        root_id: "root-0".into(),
+                        configured_path: root.clone(),
+                        path_identity_key: "root-0".into(),
+                        consumer_agent_ids: vec!["agent-0".into()],
+                        activation_skill_ids: vec![],
+                    },
+                    StoredGlobalSkillRoot {
+                        root_id: "root-1".into(),
+                        configured_path: root.clone(),
+                        path_identity_key: "root-1".into(),
+                        consumer_agent_ids: vec!["agent-1".into()],
+                        activation_skill_ids: vec![],
+                    },
+                ],
+                configurations,
+                version: 1,
+            }),
+            Arc::new(ScanMutationCoordinator::new()),
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    assert_eq!(
+        snapshot.run.as_ref().unwrap().state,
+        ScanRunState::Completed
+    );
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.counts.configured_agents, 2);
+    assert_eq!(report.counts.declared_roots, 2);
+    assert_eq!(report.counts.canonical_roots, 1, "one physical Root scanned once");
+    assert_eq!(report.counts.entries, 1);
+    assert_eq!(report.counts.entities, 1);
+    assert_eq!(report.coverage.completed, 1);
+    assert!(!report.incomplete);
+    assert_eq!(report.agent_configuration_generation, 1);
+    assert!(report.configured_root_snapshot_fingerprint.starts_with("roots<"));
+}
+
+/// A synthetic large Root (beyond any old candidate cap) streams and pages:
+/// hundreds of appearances over a handful of entities, bounded pages and
+/// exact aggregate counts.
+#[test]
+fn synthetic_large_root_streams_and_pages_bounded() {
+    let home = BoundTestHome::new();
+    let root = home.path().join("agent-skills");
+    std::fs::create_dir_all(&root).expect("root");
+    for name in ["skill-a", "skill-b", "skill-c"] {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        std::fs::write(dir.join("SKILL.md"), format!("# {name}\n")).expect("doc");
+    }
+    #[cfg(unix)]
+    {
+        for index in 0..300 {
+            let target = root.join(format!("skill-{}", ["a", "b", "c"][index % 3]));
+            std::os::unix::fs::symlink(&target, root.join(format!("alias-{index:03}")))
+                .expect("alias symlink");
+        }
+    }
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory.clone(),
+            Arc::new(MacOsFileSystem::new(home.path().to_path_buf())),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            Arc::new(StubAgentStore {
+                roots: vec![StoredGlobalSkillRoot {
+                    root_id: "root-0".into(),
+                    configured_path: root,
+                    path_identity_key: "root-0".into(),
+                    consumer_agent_ids: vec!["a1".into()],
+                    activation_skill_ids: vec![],
+                }],
+                configurations: vec![],
+                version: 1,
+            }),
+            Arc::new(ScanMutationCoordinator::new()),
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
+    wait_terminal(&coordinator, 30_000);
+    let snapshot = coordinator.snapshot();
+    assert_eq!(
+        snapshot.run.as_ref().unwrap().state,
+        ScanRunState::Completed
+    );
+    let report = snapshot.current_report.summary.expect("report");
+    assert_eq!(report.counts.entries, 303, "3 real + 300 aliases");
+    assert_eq!(
+        report.counts.entities, 3,
+        "exactly three distinct objects despite 303 appearances"
+    );
+    // Bounded pages: page 1 of 100 returns 100 rows and a continuation.
+    let (rows, next) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::Appearances,
+        100,
+    );
+    assert_eq!(rows.len(), 100);
+    assert_eq!(
+        next.map(|offset| offset > 0),
+        Some(true),
+        "continuation stays byte-precise"
+    );
+    // Every appearance row is bound to its canonical entity.
+    let bound = rows.iter().all(|row| {
+        matches!(
+            row,
+            ScanReportRow::Appearance(appearance) if appearance.entity_seq.is_some()
+        )
+    });
+    assert!(bound, "all appearances bind to a canonical entity");
 }

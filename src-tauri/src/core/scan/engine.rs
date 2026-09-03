@@ -21,9 +21,10 @@ use crate::seams::filesystem::{
     ScannedSkillEntry, TreeScanEntry,
 };
 use crate::seams::scan_evidence_store::{
-    SCAN_STORE_SCHEMA_VERSION, ScanChainFaultRecord, ScanChainHopRecord, ScanEntityRecord,
-    ScanEntryRecord, ScanEvidenceStoreError, ScanLockHintRecord, ScanRootCoverageRecord,
-    ScanRootRecord, ScanRootState, ScanSnapshotQualification, ScanWorktreeHintRecord, fault_points,
+    SCAN_STORE_SCHEMA_VERSION, ScanChainFaultRecord, ScanChainHopRecord, ScanEntityIndexStats,
+    ScanEntityRecord, ScanEntryRecord, ScanEvidenceStoreError, ScanLockHintRecord,
+    ScanObjectIdentity, ScanRootCoverageRecord, ScanRootRecord, ScanRootState,
+    ScanSnapshotQualification, ScanWorktreeHintRecord, fault_points,
 };
 
 use super::{
@@ -75,6 +76,11 @@ struct EngineShared {
     /// Deterministic per-Root entry/entity sequence counters.
     seq: Vec<AtomicUsize>,
     entity_seq: Vec<AtomicUsize>,
+    /// Generation-bound canonical entity de-duplication: final object
+    /// identities already aggregated in this Run (ADR-0017). Live progress
+    /// counts distinct entities; the Report's exact index is built from the
+    /// healthy Roots' evidence at finalize.
+    entity_ids: Mutex<std::collections::HashSet<(u64, u64)>>,
     /// Planned Root index → walkable position (engine array index).
     positions: std::collections::HashMap<u32, usize>,
 }
@@ -138,6 +144,7 @@ struct HashJob {
     name: String,
     entry_path: std::path::PathBuf,
     final_entity: std::path::PathBuf,
+    identity: Option<ScanObjectIdentity>,
 }
 
 fn run(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>) {
@@ -200,6 +207,7 @@ fn run(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>) {
         worktree_memo: Mutex::new(std::collections::HashMap::new()),
         seq: (0..walkable.len()).map(|_| AtomicUsize::new(0)).collect(),
         entity_seq: (0..walkable.len()).map(|_| AtomicUsize::new(0)).collect(),
+        entity_ids: Mutex::new(std::collections::HashSet::new()),
         positions: walkable
             .iter()
             .enumerate()
@@ -507,6 +515,20 @@ fn process_entry(
         &entry.entry_path,
     )?;
     let (chain_hops, chain_fault) = chain_to_record(&chain);
+    // Generation-bound object identity of the resolved final entity
+    // (ADR-0017): valid only inside this Report, so the appearance carries
+    // the fact without ever becoming a persistent Skill identity. A read
+    // failure yields no identity (never a guessed entity).
+    let identity = chain.final_entity.as_ref().and_then(|final_entity| {
+        coordinator
+            .filesystem
+            .directory_fingerprint(final_entity)
+            .ok()
+            .map(|fingerprint| ScanObjectIdentity {
+                device: fingerprint.device,
+                inode: fingerprint.inode,
+            })
+    });
     let record = ScanEntryRecord {
         seq: engine.seq[heap_index].fetch_add(1, Ordering::Relaxed) as u64,
         name: entry.name.clone(),
@@ -518,6 +540,7 @@ fn process_entry(
         chain: chain_hops,
         chain_fault,
         final_entity: chain.final_entity.clone(),
+        identity,
         lock_hint,
         worktree_hint,
     };
@@ -543,6 +566,7 @@ fn process_entry(
                 name: entry.name.clone(),
                 entry_path: entry.entry_path.clone(),
                 final_entity: final_entity.clone(),
+                identity,
             })
             .map_err(|_| "the entity hash queue stopped".to_owned())?;
     }
@@ -577,9 +601,51 @@ fn hash_worker_loop(
         let stats = coordinator
             .filesystem
             .scan_tree_statistics(&job.final_entity, &mut |_entry: &TreeScanEntry| Ok(true));
-        let (file_count, byte_count, tree_hash, hash_fault) = match stats {
+        let (mut file_count, mut byte_count, mut tree_hash, mut hash_fault) = match stats {
             Ok(stats) => (stats.file_count, stats.byte_count, stats.tree_hash, None),
             Err(error) => (0, 0, None, Some(error.to_string())),
+        };
+        // Identity replacement guard (ADR-0017): the walk-time identity must
+        // still be the object that was hashed. A mismatch or unreadable
+        // identity discards the tree facts — never a partial fingerprint
+        // across two different objects.
+        let verified_identity = match (job.identity, tree_hash.as_ref()) {
+            (Some(pre), Some(_)) => {
+                match coordinator
+                    .filesystem
+                    .directory_fingerprint(&job.final_entity)
+                {
+                    Ok(post)
+                        if post.device == pre.device && post.inode == pre.inode =>
+                    {
+                        Some(pre)
+                    }
+                    _ => {
+                        file_count = 0;
+                        byte_count = 0;
+                        tree_hash = None;
+                        hash_fault =
+                            Some("final entity identity changed during hashing".to_owned());
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        // Canonical entity aggregation (ADR-0017): all appearances that
+        // resolve to the same file-system object form one generation-bound
+        // entity. Only a successfully hashed object with a readable identity
+        // joins an entity; a fault stays an appearance without a guess.
+        let newly_assigned = match verified_identity {
+            Some(identity) => {
+                let key = (identity.device, identity.inode);
+                let mut ids = engine
+                    .entity_ids
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                ids.insert(key)
+            }
+            _ => false,
         };
         {
             let mut progress = slot.progress_lock();
@@ -588,12 +654,16 @@ fn hash_worker_loop(
                 .iter_mut()
                 .find(|root| root.index == job.root_index)
             {
-                root.counts.entities += 1;
+                if newly_assigned {
+                    root.counts.entities += 1;
+                }
                 root.counts.files += file_count;
                 root.counts.bytes = root.counts.bytes.saturating_add(byte_count);
                 root.last_progress = Instant::now();
             }
-            progress.counts.entities += 1;
+            if newly_assigned {
+                progress.counts.entities += 1;
+            }
             progress.counts.files += file_count;
             progress.counts.bytes = progress.counts.bytes.saturating_add(byte_count);
             if progress.phase == ScanPhase::Walking {
@@ -605,6 +675,7 @@ fn hash_worker_loop(
             name: job.name.clone(),
             entry_path: job.entry_path.clone(),
             final_entity: job.final_entity.clone(),
+            identity: verified_identity,
             file_count,
             byte_count,
             tree_hash,
@@ -814,7 +885,25 @@ fn finalize(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: Arc<E
         finish(coordinator, slot);
         return;
     }
-    let manifest = build_manifest(&coordinator, &slot);
+    // Canonical entity index build (ADR-0017, spec §4.10): only healthy
+    // Roots' evidence aggregates into entities/appearances; a failed Root
+    // contributes typed diagnostics only. A store-side failure is
+    // store-wide — the Run fails and the old Report stays.
+    let index_stats = match slot.store.build_entity_index(&slot.record.run_id) {
+        Ok(stats) => stats,
+        Err(error) => {
+            set_state_best_effort(
+                &slot,
+                ScanRunState::Failed,
+                Some(&format!("the canonical entity index could not be built: {error}")),
+            );
+            let _ = slot.store.remove_run(&slot.record.run_id);
+            coordinator.publish_progress(&slot, true);
+            finish(coordinator, slot);
+            return;
+        }
+    };
+    let manifest = build_manifest(&coordinator, &slot, index_stats);
     match slot.store.publish_report(&slot.record.run_id, &manifest) {
         Ok(()) => {
             set_state_best_effort(&slot, ScanRunState::Completed, None);
@@ -913,6 +1002,7 @@ fn maybe_record_qualification(
 fn build_manifest(
     coordinator: &ScanCoordinator,
     slot: &RunSlot,
+    index_stats: ScanEntityIndexStats,
 ) -> crate::seams::scan_evidence_store::ScanReportManifest {
     let progress = slot.progress_lock();
     let failed_roots = progress
@@ -940,6 +1030,11 @@ fn build_manifest(
         .collect::<Vec<_>>();
     let mut counts = progress.counts;
     counts.failed_roots = failed_roots;
+    // The Report-level funnel counts aggregate the healthy Roots' evidence
+    // only (spec §8.1: a partial report claims only the healthy Roots'
+    // known appearances — a failed Root's streamed entries never count).
+    counts.entries = index_stats.appearances;
+    counts.entities = index_stats.entities;
     let state = if failed_roots == 0 {
         "complete"
     } else {

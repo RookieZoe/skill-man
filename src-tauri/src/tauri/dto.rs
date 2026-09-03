@@ -1187,6 +1187,12 @@ pub struct ScanCountsDto {
     pub bytes: u64,
     pub git_probes: u64,
     pub failed_roots: u64,
+    /// Funnel: configured Agent Configurations contributing roots.
+    pub configured_agents: u64,
+    /// Funnel: configured Root declarations before the canonical union.
+    pub declared_roots: u64,
+    /// Funnel: distinct physical Roots after the canonical union.
+    pub canonical_roots: u64,
 }
 
 /// Scan Run snapshot: only real phase/Root/count/elapsed facts — never a
@@ -1210,34 +1216,35 @@ pub struct ScanRunSnapshotDto {
     pub diagnostic: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// Layered Root coverage of a terminal Report (spec §4.6 `coverageCounts`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScanRootCoverageDto {
-    pub index: u32,
-    pub configured_path: String,
-    pub canonical_path: String,
-    /// `completed | failed | unresponsive`.
-    pub state: String,
-    pub counts: ScanCountsDto,
-    pub elapsed_ms: u64,
-    pub slow: bool,
-    pub diagnostic: Option<String>,
+pub struct ScanCoverageCountsDto {
+    pub completed: u64,
+    pub failed: u64,
+    pub unresponsive: u64,
 }
 
-/// Bounded terminal Report summary (full pages arrive with #83's
-/// `report_page` contract).
+/// Bounded terminal Report summary (spec §4.6): full Root coverage /
+/// entity / appearance / diagnostic detail is served by the unique
+/// `get_scan_report_page` contract, never by this DTO.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanReportSummaryDto {
     pub generation: u64,
     pub run_id: String,
+    /// The unforgeable Report identity page cursors bind to.
+    pub content_identity: String,
     pub trigger: String,
     /// `complete | incomplete`.
     pub state: String,
+    pub coverage: ScanCoverageCountsDto,
     pub counts: ScanCountsDto,
-    pub roots: Vec<ScanRootCoverageDto>,
+    pub incomplete: bool,
+    pub published_at_ms: u64,
+    pub agent_configuration_generation: u64,
+    pub configured_root_snapshot_fingerprint: String,
     pub started_at_ms: u64,
-    pub ended_at_ms: u64,
     pub slow: bool,
 }
 
@@ -1277,6 +1284,187 @@ pub struct ObservationAndScanSnapshotDto {
     pub detection: DetectionSnapshotDto,
     pub scan_run: Option<ScanRunSnapshotDto>,
     pub current_report: CurrentReportDto,
+}
+
+/// Generation-bound object identity (ADR-0017): valid only inside one Scan
+/// Report generation — never a Skill identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanObjectIdentityDto {
+    pub device: u64,
+    pub inode: u64,
+}
+
+/// One bounded chain hop of an appearance (spec §8.1).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanChainHopDto {
+    pub path: String,
+    /// `directory` | `symlink:<target>`.
+    pub kind: String,
+    pub device: u64,
+    pub inode: u64,
+    pub target: Option<String>,
+}
+
+/// The typed fault that stopped the bounded chain (never a guess after).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanChainFaultDto {
+    /// `dangling | cycle | hop_limit | non_utf8 | read_failed |
+    /// not_directory | identity_replaced`.
+    pub kind: String,
+    pub at: String,
+    pub detail: Option<String>,
+}
+
+/// One row of a Report page; the section determines the variant (spec
+/// §4.7: closed `kind` + typed fields, never free-form App Copy).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScanReportRowDto {
+    RootCoverage {
+        index: u32,
+        configured_path: String,
+        canonical_path: String,
+        /// `completed | failed | unresponsive`.
+        state: String,
+        counts: ScanCountsDto,
+        elapsed_ms: u64,
+        slow: bool,
+        diagnostic: Option<String>,
+    },
+    Entity {
+        entity_seq: u64,
+        identity: ScanObjectIdentityDto,
+        canonical_path: String,
+        file_count: u64,
+        byte_count: u64,
+        tree_hash: Option<String>,
+        hash_fault: Option<String>,
+        appearances: u64,
+        first_root_index: u32,
+        first_entry_seq: u64,
+    },
+    Appearance {
+        root_index: u32,
+        seq: u64,
+        name: String,
+        entry_path: String,
+        /// `directory | symlink`.
+        entry_kind: String,
+        chain: Vec<ScanChainHopDto>,
+        chain_fault: Option<ScanChainFaultDto>,
+        final_entity: Option<String>,
+        identity: Option<ScanObjectIdentityDto>,
+        entity_seq: Option<u64>,
+        lock_hint: Option<ScanLockHintDto>,
+        worktree_hint: Option<ScanWorktreeHintDto>,
+    },
+    Diagnostic {
+        root_index: u32,
+        /// `root_failed | root_unresponsive | root_record_missing |
+        /// chain_<fault> | entity_hash_fault | entity_identity_fault`.
+        diagnostic_kind: String,
+        at: Option<String>,
+        detail: Option<String>,
+    },
+}
+
+/// Memoized lock fact of one appearance (never the lock body).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanLockHintDto {
+    pub lock_path: String,
+    pub entry_name: String,
+    pub fingerprint: String,
+    pub faulted: bool,
+    pub fault: Option<String>,
+}
+
+/// Memoized bounded local Git worktree hint of one appearance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanWorktreeHintDto {
+    pub repository_root: String,
+    /// `dir | file | uninterpretable`.
+    pub gitdir_kind: String,
+    pub remote_urls: Vec<String>,
+    pub head_ref: Option<String>,
+}
+
+/// A stable Report cursor (spec §4.10): pinned to one Report identity;
+/// `offset` is a row index for `roots` and a byte offset into the immutable
+/// index stream for `entities | appearances | diagnostics`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanReportSectionDto {
+    Roots,
+    Entities,
+    Appearances,
+    Diagnostics,
+}
+
+impl From<ScanReportSectionDto> for crate::seams::scan_evidence_store::ScanReportSection {
+    fn from(value: ScanReportSectionDto) -> Self {
+        match value {
+            ScanReportSectionDto::Roots => {
+                crate::seams::scan_evidence_store::ScanReportSection::Roots
+            }
+            ScanReportSectionDto::Entities => {
+                crate::seams::scan_evidence_store::ScanReportSection::Entities
+            }
+            ScanReportSectionDto::Appearances => {
+                crate::seams::scan_evidence_store::ScanReportSection::Appearances
+            }
+            ScanReportSectionDto::Diagnostics => {
+                crate::seams::scan_evidence_store::ScanReportSection::Diagnostics
+            }
+        }
+    }
+}
+
+impl From<crate::seams::scan_evidence_store::ScanReportSection> for ScanReportSectionDto {
+    fn from(value: crate::seams::scan_evidence_store::ScanReportSection) -> Self {
+        match value {
+            crate::seams::scan_evidence_store::ScanReportSection::Roots => Self::Roots,
+            crate::seams::scan_evidence_store::ScanReportSection::Entities => Self::Entities,
+            crate::seams::scan_evidence_store::ScanReportSection::Appearances => Self::Appearances,
+            crate::seams::scan_evidence_store::ScanReportSection::Diagnostics => Self::Diagnostics,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportCursorDto {
+    pub report_content_identity: String,
+    pub run_id: String,
+    pub generation: u64,
+    pub section: ScanReportSectionDto,
+    pub offset: u64,
+}
+
+/// `get_scan_report_page` request: closed cursor + bounded row limit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportPageRequestDto {
+    pub cursor: ScanReportCursorDto,
+    /// Rows to return; the native side clamps to 1..=512.
+    pub limit: Option<u32>,
+}
+
+/// A bounded page of the current Report (spec §4.10): every page carries
+/// the pinned Report identity plus the continuation offset.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportPageDto {
+    pub report_content_identity: String,
+    pub run_id: String,
+    pub generation: u64,
+    pub section: ScanReportSectionDto,
+    pub rows: Vec<ScanReportRowDto>,
+    pub next_offset: Option<u64>,
 }
 
 /// `start_rescan` request: the trigger is a closed contract value
@@ -1347,6 +1535,9 @@ impl From<crate::seams::scan_evidence_store::ScanEvidenceCounts> for ScanCountsD
             bytes: value.bytes,
             git_probes: value.git_probes,
             failed_roots: value.failed_roots,
+            configured_agents: value.configured_agents,
+            declared_roots: value.declared_roots,
+            canonical_roots: value.canonical_roots,
         }
     }
 }
@@ -1357,25 +1548,21 @@ impl From<crate::core::scan::CurrentReportView> for CurrentReportDto {
             summary: value.summary.map(|summary| ScanReportSummaryDto {
                 generation: summary.generation,
                 run_id: summary.run_id,
+                content_identity: summary.content_identity,
                 trigger: summary.trigger.as_str().to_owned(),
                 state: scan_report_state_name(summary.state).to_owned(),
+                coverage: ScanCoverageCountsDto {
+                    completed: summary.coverage.completed,
+                    failed: summary.coverage.failed,
+                    unresponsive: summary.coverage.unresponsive,
+                },
                 counts: summary.counts.into(),
-                roots: summary
-                    .roots
-                    .into_iter()
-                    .map(|root| ScanRootCoverageDto {
-                        index: root.index,
-                        configured_path: root.configured_path.to_string_lossy().into_owned(),
-                        canonical_path: root.canonical_path.to_string_lossy().into_owned(),
-                        state: scan_root_coverage_state_name(root.state).to_owned(),
-                        counts: root.counts.into(),
-                        elapsed_ms: root.elapsed_ms,
-                        slow: root.slow,
-                        diagnostic: root.diagnostic,
-                    })
-                    .collect(),
+                incomplete: summary.incomplete,
+                published_at_ms: summary.published_at_ms,
+                agent_configuration_generation: summary.agent_configuration_generation,
+                configured_root_snapshot_fingerprint: summary
+                    .configured_root_snapshot_fingerprint,
                 started_at_ms: summary.started_at_ms,
-                ended_at_ms: summary.ended_at_ms,
                 slow: summary.slow,
             }),
             freshness: match value.freshness {
@@ -1417,6 +1604,124 @@ fn scan_run_state_name(state: crate::core::scan::ScanRunState) -> &'static str {
     }
 }
 
+/// Build the public page from the store read: rows are mapped to the typed
+/// tagged DTO and the cursor identity is echoed verbatim.
+pub fn scan_report_page_dto(
+    cursor: &crate::seams::scan_evidence_store::ScanReportCursor,
+    page: crate::seams::scan_evidence_store::ScanReportPageRead,
+) -> ScanReportPageDto {
+    ScanReportPageDto {
+        report_content_identity: cursor.report_content_identity.clone(),
+        run_id: cursor.run_id.clone(),
+        generation: cursor.generation,
+        section: ScanReportSectionDto::from(cursor.section),
+        rows: page
+            .rows
+            .into_iter()
+            .map(|row| match row {
+                crate::seams::scan_evidence_store::ScanReportRow::RootCoverage(root) => {
+                    ScanReportRowDto::RootCoverage {
+                        index: root.index,
+                        configured_path: root.configured_path.to_string_lossy().into_owned(),
+                        canonical_path: root.canonical_path.to_string_lossy().into_owned(),
+                        state: scan_root_state_name(root.state).to_owned(),
+                        counts: root.counts.into(),
+                        elapsed_ms: root.elapsed_ms,
+                        slow: root.slow,
+                        diagnostic: root.diagnostic,
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::Entity(entity) => {
+                    ScanReportRowDto::Entity {
+                        entity_seq: entity.entity_seq,
+                        identity: ScanObjectIdentityDto {
+                            device: entity.identity.device,
+                            inode: entity.identity.inode,
+                        },
+                        canonical_path: entity.canonical_path.to_string_lossy().into_owned(),
+                        file_count: entity.file_count,
+                        byte_count: entity.byte_count,
+                        tree_hash: entity.tree_hash,
+                        hash_fault: entity.hash_fault,
+                        appearances: entity.appearances,
+                        first_root_index: entity.first_root_index,
+                        first_entry_seq: entity.first_entry_seq,
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::Appearance(appearance) => {
+                    ScanReportRowDto::Appearance {
+                        root_index: appearance.root_index,
+                        seq: appearance.seq,
+                        name: appearance.name,
+                        entry_path: appearance.entry_path.to_string_lossy().into_owned(),
+                        entry_kind: appearance.entry_kind,
+                        chain: appearance
+                            .chain
+                            .into_iter()
+                            .map(|hop| ScanChainHopDto {
+                                path: hop.path.to_string_lossy().into_owned(),
+                                kind: hop.kind,
+                                device: hop.device,
+                                inode: hop.inode,
+                                target: hop.target.map(|target| {
+                                    target.to_string_lossy().into_owned()
+                                }),
+                            })
+                            .collect(),
+                        chain_fault: appearance.chain_fault.map(|fault| ScanChainFaultDto {
+                            kind: fault.kind,
+                            at: fault.at.to_string_lossy().into_owned(),
+                            detail: fault.detail,
+                        }),
+                        final_entity: appearance.final_entity.map(|path| {
+                            path.to_string_lossy().into_owned()
+                        }),
+                        identity: appearance.identity.map(|identity| ScanObjectIdentityDto {
+                            device: identity.device,
+                            inode: identity.inode,
+                        }),
+                        entity_seq: appearance.entity_seq,
+                        lock_hint: appearance.lock_hint.map(|hint| ScanLockHintDto {
+                            lock_path: hint.lock_path.to_string_lossy().into_owned(),
+                            entry_name: hint.entry_name,
+                            fingerprint: hint.fingerprint,
+                            faulted: hint.faulted,
+                            fault: hint.fault,
+                        }),
+                        worktree_hint: appearance.worktree_hint.map(|hint| ScanWorktreeHintDto {
+                            repository_root: hint.repository_root.to_string_lossy().into_owned(),
+                            gitdir_kind: hint.gitdir_kind,
+                            remote_urls: hint.remote_urls,
+                            head_ref: hint.head_ref,
+                        }),
+                    }
+                }
+                crate::seams::scan_evidence_store::ScanReportRow::Diagnostic(diagnostic) => {
+                    ScanReportRowDto::Diagnostic {
+                        root_index: diagnostic.root_index,
+                        diagnostic_kind: diagnostic.kind,
+                        at: diagnostic
+                            .at
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        detail: diagnostic.detail,
+                    }
+                }
+            })
+            .collect(),
+        next_offset: page.next_offset,
+    }
+}
+
+fn scan_root_state_name(
+    state: crate::seams::scan_evidence_store::ScanRootState,
+) -> &'static str {
+    match state {
+        crate::seams::scan_evidence_store::ScanRootState::Completed => "completed",
+        crate::seams::scan_evidence_store::ScanRootState::Failed => "failed",
+        crate::seams::scan_evidence_store::ScanRootState::Unresponsive => "unresponsive",
+    }
+}
+
 fn scan_phase_name(phase: crate::core::scan::ScanPhase) -> &'static str {
     match phase {
         crate::core::scan::ScanPhase::Planning => "planning",
@@ -1433,14 +1738,6 @@ fn scan_root_view_state_name(state: crate::core::scan::ScanRootViewState) -> &'s
         crate::core::scan::ScanRootViewState::Completed => "completed",
         crate::core::scan::ScanRootViewState::Failed => "failed",
         crate::core::scan::ScanRootViewState::Unresponsive => "unresponsive",
-    }
-}
-
-fn scan_root_coverage_state_name(state: crate::core::scan::ScanRootCoverageState) -> &'static str {
-    match state {
-        crate::core::scan::ScanRootCoverageState::Completed => "completed",
-        crate::core::scan::ScanRootCoverageState::Failed => "failed",
-        crate::core::scan::ScanRootCoverageState::Unresponsive => "unresponsive",
     }
 }
 
@@ -3477,6 +3774,11 @@ pub enum PublicErrorDto {
     LocaleStoreUnavailable,
     ScanNotWritable,
     ScanRunNotFound,
+    ScanReportStale {
+        #[serde(rename = "currentGeneration")]
+        current_generation: u64,
+    },
+    ScanReportNotFound,
     Internal,
 }
 

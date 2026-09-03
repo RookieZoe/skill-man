@@ -417,6 +417,9 @@ export function createFixtureCatalogClient(
           bytes: 0,
           gitProbes: 0,
           failedRoots: 0,
+          configuredAgents: 0,
+          declaredRoots: 1,
+          canonicalRoots: 1,
         },
         roots: [
           {
@@ -432,6 +435,9 @@ export function createFixtureCatalogClient(
               bytes: 0,
               gitProbes: 0,
               failedRoots: 0,
+              configuredAgents: 0,
+              declaredRoots: 1,
+              canonicalRoots: 1,
             },
             elapsedMs: 0,
             slow: false,
@@ -456,6 +462,20 @@ export function createFixtureCatalogClient(
       };
       publishObservation();
       return observationSnapshot();
+    },
+    async getScanReportPage(cursor) {
+      // The fixture never publishes a terminal Report: a page request only
+      // succeeds for the summary-shaped Report identity, and the fixture
+      // report is always `null` — return an empty page to keep the ledger
+      // surface honest in browser tests.
+      return {
+        reportContentIdentity: cursor.reportContentIdentity,
+        runId: cursor.runId,
+        generation: cursor.generation,
+        section: cursor.section,
+        rows: [],
+        nextOffset: null,
+      };
     },
     async planCreateAgentConfiguration(draft) {
       const planToken = `fixture-agent-plan-${planCounter++}`;

@@ -132,6 +132,8 @@ fn base_manifest(
         agent_configuration_generation: 1,
         mutation_generation: 0,
         roots_fingerprint: "roots<2>".into(),
+        configured_agents: 1,
+        declared_roots: 2,
     };
     let run = scan::ScanRunRecord {
         schema_version: scan::SCAN_STORE_SCHEMA_VERSION,

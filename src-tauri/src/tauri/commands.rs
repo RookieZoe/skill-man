@@ -490,6 +490,15 @@ fn scan_command_failure(error: &crate::core::scan::ScanError) -> CommandFailureD
         }
         crate::core::scan::ScanError::RunNotFound(_) => (PublicErrorDto::ScanRunNotFound, None),
         crate::core::scan::ScanError::Superseded => (PublicErrorDto::PlanStale, None),
+        crate::core::scan::ScanError::ReportPageStale(current_generation) => (
+            PublicErrorDto::ScanReportStale {
+                current_generation: *current_generation,
+            },
+            None,
+        ),
+        crate::core::scan::ScanError::ReportPageNotFound => {
+            (PublicErrorDto::ScanReportNotFound, None)
+        }
         crate::core::scan::ScanError::Internal(detail) => {
             (PublicErrorDto::Internal, Some(detail.clone()))
         }
@@ -501,6 +510,25 @@ fn scan_command_failure(error: &crate::core::scan::ScanError) -> CommandFailureD
             message,
         }),
     }
+}
+
+#[tauri::command]
+pub fn get_scan_report_page(
+    state: State<'_, ObservationApi>,
+    request: crate::tauri_adapter::dto::ScanReportPageRequestDto,
+) -> Result<crate::tauri_adapter::dto::ScanReportPageDto, CommandFailureDto> {
+    use crate::tauri_adapter::dto::scan_report_page_dto;
+    let cursor = crate::seams::scan_evidence_store::ScanReportCursor {
+        report_content_identity: request.cursor.report_content_identity,
+        run_id: request.cursor.run_id,
+        generation: request.cursor.generation,
+        section: request.cursor.section.into(),
+        offset: request.cursor.offset,
+    };
+    state
+        .report_page(cursor.clone(), request.limit.unwrap_or(64) as usize)
+        .map(|page| scan_report_page_dto(&cursor, page))
+        .map_err(|error| scan_command_failure(&error))
 }
 
 #[tauri::command]

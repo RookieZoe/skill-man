@@ -363,6 +363,10 @@ export type PublicError =
       reason: ExistingHomeRecoveryProfileRejection;
     }
   | { code: "locale_store_unavailable" }
+  | { code: "scan_not_writable" }
+  | { code: "scan_run_not_found" }
+  | { code: "scan_report_not_found" }
+  | { code: "scan_report_stale"; currentGeneration: number }
   | { code: "internal" };
 
 export interface SkillSummary {
@@ -493,6 +497,12 @@ export interface ScanCounts {
   bytes: number;
   gitProbes: number;
   failedRoots: number;
+  /** Funnel: configured Agent Configurations contributing roots. */
+  configuredAgents: number;
+  /** Funnel: configured Root declarations before the canonical union. */
+  declaredRoots: number;
+  /** Funnel: distinct physical Roots after the canonical union. */
+  canonicalRoots: number;
 }
 
 /** Real phase/Root/count/elapsed facts — never a percent or ETA. */
@@ -521,27 +531,137 @@ export interface ScanRootView {
   diagnostic: string | null;
 }
 
-export interface ScanRootCoverage {
-  index: number;
-  configuredPath: string;
-  canonicalPath: string;
-  state: "completed" | "failed" | "unresponsive";
-  counts: ScanCounts;
-  elapsedMs: number;
-  slow: boolean;
-  diagnostic: string | null;
+/** Layered Root coverage of a terminal Report (spec §4.6 `coverageCounts`). */
+export interface ScanCoverageCounts {
+  completed: number;
+  failed: number;
+  unresponsive: number;
 }
 
 export interface ScanReportSummary {
   generation: number;
   runId: string;
+  /** The unforgeable Report identity page cursors bind to. */
+  contentIdentity: string;
   trigger: "onboarding" | "manual";
   state: "complete" | "incomplete";
+  coverage: ScanCoverageCounts;
   counts: ScanCounts;
-  roots: ScanRootCoverage[];
+  incomplete: boolean;
+  publishedAtMs: number;
+  agentConfigurationGeneration: number;
+  configuredRootSnapshotFingerprint: string;
   startedAtMs: number;
-  endedAtMs: number;
   slow: boolean;
+}
+
+/** Generation-bound object identity (ADR-0017): Report-generation scoped. */
+export interface ScanObjectIdentity {
+  device: number;
+  inode: number;
+}
+
+export interface ScanChainHop {
+  path: string;
+  kind: string;
+  device: number;
+  inode: number;
+  target: string | null;
+}
+
+export interface ScanChainFault {
+  kind: string;
+  at: string;
+  detail: string | null;
+}
+
+export interface ScanLockHint {
+  lockPath: string;
+  entryName: string;
+  fingerprint: string;
+  faulted: boolean;
+  fault: string | null;
+}
+
+export interface ScanWorktreeHint {
+  repositoryRoot: string;
+  gitdirKind: string;
+  remoteUrls: string[];
+  headRef: string | null;
+}
+
+/** One row of a Report page; the section determines the shape. */
+export type ScanReportRow =
+  | {
+      kind: "root_coverage";
+      index: number;
+      configuredPath: string;
+      canonicalPath: string;
+      state: "completed" | "failed" | "unresponsive";
+      counts: ScanCounts;
+      elapsedMs: number;
+      slow: boolean;
+      diagnostic: string | null;
+    }
+  | {
+      kind: "entity";
+      entitySeq: number;
+      identity: ScanObjectIdentity;
+      canonicalPath: string;
+      fileCount: number;
+      byteCount: number;
+      treeHash: string | null;
+      hashFault: string | null;
+      appearances: number;
+      firstRootIndex: number;
+      firstEntrySeq: number;
+    }
+  | {
+      kind: "appearance";
+      rootIndex: number;
+      seq: number;
+      name: string;
+      entryPath: string;
+      entryKind: "directory" | "symlink";
+      chain: ScanChainHop[];
+      chainFault: ScanChainFault | null;
+      finalEntity: string | null;
+      identity: ScanObjectIdentity | null;
+      entitySeq: number | null;
+      lockHint: ScanLockHint | null;
+      worktreeHint: ScanWorktreeHint | null;
+    }
+  | {
+      kind: "diagnostic";
+      rootIndex: number;
+      diagnosticKind: string;
+      at: string | null;
+      detail: string | null;
+    };
+
+export type ScanReportSection =
+  | "roots"
+  | "entities"
+  | "appearances"
+  | "diagnostics";
+
+/** A stable Report cursor (spec §4.10): pinned to one Report identity. */
+export interface ScanReportCursor {
+  reportContentIdentity: string;
+  runId: string;
+  generation: number;
+  section: ScanReportSection;
+  offset: number;
+}
+
+/** A bounded page of the current Report (spec §4.10). */
+export interface ScanReportPage {
+  reportContentIdentity: string;
+  runId: string;
+  generation: number;
+  section: ScanReportSection;
+  rows: ScanReportRow[];
+  nextOffset: number | null;
 }
 
 export type ReportFreshness = "current" | "stale";
@@ -1223,6 +1343,11 @@ export interface CatalogClient {
   ): Promise<ObservationAndScanSnapshot>;
   /** Coordinate cancellation of the active Rescan Run. */
   cancelRescan(runId: string): Promise<ObservationAndScanSnapshot>;
+  /** The unique paged Report read contract (spec §4.10 `report_page`). */
+  getScanReportPage(
+    cursor: ScanReportCursor,
+    limit?: number,
+  ): Promise<ScanReportPage>;
   /** `observation://changed`: payload isomorphic with the query snapshot. */
   listenObservationChanged(
     callback: (payload: ObservationAndScanSnapshot) => void,
@@ -1447,6 +1572,11 @@ const tauriCatalogClient: CatalogClient = {
   cancelRescan(runId) {
     return invoke<ObservationAndScanSnapshot>("cancel_rescan", {
       request: { runId },
+    });
+  },
+  getScanReportPage(cursor, limit) {
+    return invoke<ScanReportPage>("get_scan_report_page", {
+      request: { cursor, limit: limit ?? 64 },
     });
   },
   planCreateAgentConfiguration(draft) {

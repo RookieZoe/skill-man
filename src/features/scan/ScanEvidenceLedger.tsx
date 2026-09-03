@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   CatalogClient,
   CurrentReport,
   ObservationAndScanSnapshot,
+  ScanReportRow,
+  ScanReportSection,
   ScanRunSnapshot,
 } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
-import type { MessageKey } from "../locale/messages";
+import type { MessageKey, MessageParams } from "../locale/messages";
 
 /**
  * Non-modal Evidence Ledger for the full Rescan (spec §4.10, ADR-0020): the
@@ -16,9 +18,28 @@ import type { MessageKey } from "../locale/messages";
  * or an ETA (the total scale is unknown). The report stays on screen while a
  * Run is active; Reports loaded from a previous launch are marked Stale.
  *
- * Full Root/entity/appearance/diagnostic pagination arrives with #83's
- * `report_page` contract; this surface is the bounded summary.
+ * Full Root coverage / entity / appearance / diagnostic detail is served by
+ * the unique generation-bound `getScanReportPage` contract (spec §4.10;
+ * ADR-0017): every section keeps a stable cursor and bounded pages, and a
+ * Report switch makes an old cursor typed stale instead of falling back.
  */
+
+const PAGE_SIZE = 64;
+
+interface SectionState {
+  rows: ScanReportRow[];
+  nextOffset: number | null;
+  loading: boolean;
+  /** The section fetched at least one page for the current Report. */
+  loaded: boolean;
+}
+
+const EMPTY_SECTIONS: Record<ScanReportSection, SectionState> = {
+  roots: { rows: [], nextOffset: null, loading: false, loaded: false },
+  entities: { rows: [], nextOffset: null, loading: false, loaded: false },
+  appearances: { rows: [], nextOffset: null, loading: false, loaded: false },
+  diagnostics: { rows: [], nextOffset: null, loading: false, loaded: false },
+};
 
 function stateKey(run: ScanRunSnapshot): MessageKey {
   switch (run.state) {
@@ -58,6 +79,49 @@ function reportStateKey(report: CurrentReport["summary"]): MessageKey {
     : "scan.ledger.incomplete";
 }
 
+function sectionKey(section: ScanReportSection): MessageKey {
+  switch (section) {
+    case "roots":
+      return "scan.ledger.sectionRoots";
+    case "entities":
+      return "scan.ledger.sectionEntities";
+    case "appearances":
+      return "scan.ledger.sectionAppearances";
+    case "diagnostics":
+      return "scan.ledger.sectionDiagnostics";
+  }
+}
+
+function rowText(
+  row: ScanReportRow,
+  t: (key: MessageKey, params?: MessageParams) => string,
+): string {
+  switch (row.kind) {
+    case "root_coverage":
+      return t("scan.ledger.rootRow", {
+        path: row.canonicalPath,
+        state: t(`scan.ledger.rootState.${row.state}` as MessageKey),
+      });
+    case "entity":
+      return t("scan.ledger.entityRow", {
+        seq: row.entitySeq,
+        path: row.canonicalPath,
+        appearances: row.appearances,
+      });
+    case "appearance":
+      return t("scan.ledger.appearanceRow", {
+        name: row.name,
+        path: row.entryPath,
+        entity: row.entitySeq ?? "-",
+      });
+    case "diagnostic":
+      return t("scan.ledger.diagnosticRow", {
+        kind: row.diagnosticKind,
+        at: row.at ?? "-",
+      });
+  }
+}
+
 export function ScanEvidenceLedger({
   client,
   idle = false,
@@ -71,6 +135,20 @@ export function ScanEvidenceLedger({
     useState<ObservationAndScanSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sections, setSections] =
+    useState<Record<ScanReportSection, SectionState>>(EMPTY_SECTIONS);
+  const lastReportIdentity = useRef<string | null>(null);
+
+  // Page sections are bound to one Report identity: a published new Report
+  // resets every page (the old cursor is stale by contract, never reused).
+  // Synchronized at the same places the observation snapshot is updated.
+  function syncSections(next: ObservationAndScanSnapshot) {
+    const identity = next.currentReport?.summary?.contentIdentity ?? null;
+    if (identity !== lastReportIdentity.current) {
+      lastReportIdentity.current = identity;
+      setSections(EMPTY_SECTIONS);
+    }
+  }
 
   useEffect(() => {
     let current = true;
@@ -78,12 +156,18 @@ export function ScanEvidenceLedger({
     client
       .getObservationSnapshot()
       .then((next) => {
-        if (current) setObservation(next);
+        if (current) {
+          setObservation(next);
+          syncSections(next);
+        }
       })
       .catch(() => undefined);
     client
       .listenObservationChanged((payload) => {
-        if (current) setObservation(payload);
+        if (current) {
+          setObservation(payload);
+          syncSections(payload);
+        }
       })
       .then((stop) => {
         if (!current) stop();
@@ -98,7 +182,8 @@ export function ScanEvidenceLedger({
 
   const run = observation?.scanRun ?? null;
   const report = observation?.currentReport ?? null;
-  const hasReport = (report?.summary ?? null) !== null;
+  const summary = report?.summary ?? null;
+  const hasReport = summary !== null;
   const stale = report?.freshness === "stale";
   const cacheUnreadable =
     report?.staleReasons.includes("cache_unreadable") ?? false;
@@ -128,6 +213,50 @@ export function ScanEvidenceLedger({
     }
   }
 
+  async function loadMore(section: ScanReportSection) {
+    if (!summary) return;
+    const current = sections[section];
+    if (current.loading) return;
+    if (current.nextOffset === null && current.rows.length > 0) return;
+    setSections((prev) => ({
+      ...prev,
+      [section]: { ...prev[section], loading: true },
+    }));
+    try {
+      const page = await client.getScanReportPage(
+        {
+          reportContentIdentity: summary.contentIdentity,
+          runId: summary.runId,
+          generation: summary.generation,
+          section,
+          offset: current.nextOffset ?? 0,
+        },
+        PAGE_SIZE,
+      );
+      // The page is accepted only when the Report identity still matches.
+      if (page.reportContentIdentity !== summary.contentIdentity) {
+        setError(t("scan.ledger.pageStale"));
+        setSections(EMPTY_SECTIONS);
+        return;
+      }
+      setSections((prev) => ({
+        ...prev,
+        [section]: {
+          rows: [...prev[section].rows, ...page.rows],
+          nextOffset: page.nextOffset,
+          loading: false,
+          loaded: true,
+        },
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setSections((prev) => ({
+        ...prev,
+        [section]: { ...prev[section], loading: false },
+      }));
+    }
+  }
+
   const runActive =
     run !== null && ["queued", "running", "cancelling"].includes(run.state);
   const terminalFailed = run?.state === "failed" || run?.state === "superseded";
@@ -146,7 +275,7 @@ export function ScanEvidenceLedger({
             ? t(stateKey(run))
             : run
               ? t(stateKey(run))
-              : t(reportStateKey(report?.summary ?? null))}
+              : t(reportStateKey(summary))}
         </span>
         {stale ? (
           <span className="scan-ledger-stale">{t("scan.ledger.stale")}</span>
@@ -187,25 +316,55 @@ export function ScanEvidenceLedger({
             })}
           </dd>
         </dl>
-      ) : report?.summary ? (
-        <dl className="scan-ledger-facts">
-          <dd>
-            {t("scan.ledger.entryCount", {
-              entries: report.summary.counts.entries,
+      ) : summary ? (
+        <>
+          <p className="scan-ledger-funnel">
+            {t("scan.ledger.funnel", {
+              agents: summary.counts.configuredAgents,
+              declared: summary.counts.declaredRoots,
+              canonical: summary.counts.canonicalRoots,
+              appearances: summary.counts.entries,
+              entities: summary.counts.entities,
             })}
-          </dd>
-          <dd>
-            {t("scan.ledger.entityCount", {
-              entities: report.summary.counts.entities,
+          </p>
+          <p className="scan-ledger-coverage">
+            {t("scan.ledger.coverage", {
+              completed: summary.coverage.completed,
+              failed: summary.coverage.failed,
+              unresponsive: summary.coverage.unresponsive,
             })}
-          </dd>
-          <dd>
-            {t("scan.ledger.fileCount", { files: report.summary.counts.files })}
-          </dd>
-          <dd>
-            {t("scan.ledger.byteCount", { bytes: report.summary.counts.bytes })}
-          </dd>
-        </dl>
+          </p>
+          <dl className="scan-ledger-facts">
+            <dd>
+              {t("scan.ledger.entryCount", {
+                entries: summary.counts.entries,
+              })}
+            </dd>
+            <dd>
+              {t("scan.ledger.entityCount", {
+                entities: summary.counts.entities,
+              })}
+            </dd>
+            <dd>
+              {t("scan.ledger.fileCount", {
+                files: summary.counts.files,
+              })}
+            </dd>
+            <dd>
+              {t("scan.ledger.byteCount", { bytes: summary.counts.bytes })}
+            </dd>
+            <dd>
+              {t("scan.ledger.published", {
+                time: new Date(summary.publishedAtMs).toLocaleString(),
+              })}
+            </dd>
+          </dl>
+          {summary.incomplete ? (
+            <p className="scan-ledger-slow" role="alert">
+              {t("scan.ledger.incompleteCoverage")}
+            </p>
+          ) : null}
+        </>
       ) : null}
 
       {run?.currentRoot !== null && run?.currentRoot !== undefined ? (
@@ -228,6 +387,42 @@ export function ScanEvidenceLedger({
         <p className="scan-ledger-error" role="alert">
           {error}
         </p>
+      ) : null}
+
+      {summary && !runActive ? (
+        <div className="scan-ledger-sections">
+          {(["roots", "entities", "appearances", "diagnostics"] as const).map(
+            (section) => {
+              const state = sections[section];
+              const hasMore = !state.loaded || state.nextOffset !== null;
+              return (
+                <details key={section} className={`scan-ledger-section`}>
+                  <summary>{t(sectionKey(section))}</summary>
+                  {state.loaded && state.rows.length === 0 ? (
+                    <p className="scan-ledger-none">
+                      {t("scan.ledger.noRows")}
+                    </p>
+                  ) : (
+                    <ul className="scan-ledger-rows">
+                      {state.rows.map((row, index) => (
+                        <li key={index}>{rowText(row, t)}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {hasMore ? (
+                    <button
+                      type="button"
+                      onClick={() => loadMore(section)}
+                      disabled={state.loading}
+                    >
+                      {t("scan.ledger.loadMore")}
+                    </button>
+                  ) : null}
+                </details>
+              );
+            },
+          )}
+        </div>
       ) : null}
 
       {!idle ? (

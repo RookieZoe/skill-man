@@ -33,8 +33,20 @@ use thiserror::Error;
 
 use crate::core::home::BoundHome;
 
-pub const SCAN_STORE_SCHEMA_VERSION: u32 = 1;
+/// v2: the Report carries canonical entity aggregation (object identity,
+/// entity index, funnel counts, cursor-paginated pages, spec §4.6/§8.1,
+/// ADR-0017). A v1 artifact fails closed as `No cached report`.
+pub const SCAN_STORE_SCHEMA_VERSION: u32 = 2;
 pub const SCAN_ARTIFACT_VERSION_PREFIX: &str = "scan-artifact-v1";
+
+/// Generation-bound file-system object identity (vol/device + inode,
+/// ADR-0017): valid only inside one Scan Report generation — never a
+/// persistent Skill identity and never written to the Catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanObjectIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
 
 /// Frozen generation facts a Run binds to (spec §4.10): any change after the
 /// Run starts makes it Superseded.
@@ -47,6 +59,12 @@ pub struct ScanFrozenFacts {
     /// Identity fingerprint of the configured canonical Root snapshot; a
     /// Root set/identity change makes the Run stale.
     pub roots_fingerprint: String,
+    /// Funnel facts frozen at Run start (spec §4.6/ADR-0017): the number of
+    /// configured Agent Configurations that declare roots.
+    pub configured_agents: u64,
+    /// The number of configured Root declarations (before the canonical
+    /// union deduplicates them).
+    pub declared_roots: u64,
 }
 
 /// One configured Root frozen into a Run: canonical path resolved once, with
@@ -71,6 +89,12 @@ pub struct ScanEvidenceCounts {
     pub bytes: u64,
     pub git_probes: u64,
     pub failed_roots: u64,
+    /// Configured Agent Configurations contributing roots (funnel).
+    pub configured_agents: u64,
+    /// Configured Root declarations before the canonical union (funnel).
+    pub declared_roots: u64,
+    /// Distinct physical Roots after the canonical union (funnel).
+    pub canonical_roots: u64,
 }
 
 /// `run.json`: one-time provenance record proving the Run artifact belongs
@@ -163,6 +187,9 @@ pub struct ScanEntryRecord {
     pub chain: Vec<ScanChainHopRecord>,
     pub chain_fault: Option<ScanChainFaultRecord>,
     pub final_entity: Option<PathBuf>,
+    /// Generation-bound object identity of the resolved final entity;
+    /// `None` when the chain faulted or the identity could not be read.
+    pub identity: Option<ScanObjectIdentity>,
     pub lock_hint: Option<ScanLockHintRecord>,
     pub worktree_hint: Option<ScanWorktreeHintRecord>,
 }
@@ -216,11 +243,138 @@ pub struct ScanEntityRecord {
     pub name: String,
     pub entry_path: PathBuf,
     pub final_entity: PathBuf,
+    /// The final object identity re-verified after the tree hash: `None`
+    /// when the identity was replaced/unreadable during hashing (ADR-0017
+    /// identity replacement — the tree facts are discarded, never a partial
+    /// fingerprint). Aggregate key; generation-bound only.
+    pub identity: Option<ScanObjectIdentity>,
     pub file_count: u64,
     pub byte_count: u64,
     pub tree_hash: Option<String>,
     pub hash_fault: Option<String>,
     pub elapsed_ms: u64,
+}
+
+/// One canonical Skill Entity of a Report generation (ADR-0017): all
+/// appearances that resolved to the same file-system object identity are
+/// aggregated into exactly one record. The object identity is valid only
+/// inside this generation — never a persistent Skill identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanCanonicalEntityRecord {
+    /// Stable per-Report canonical entity sequence (1-based).
+    pub entity_seq: u64,
+    pub identity: ScanObjectIdentity,
+    /// The representative resolved final entity path (first appearance).
+    pub canonical_path: PathBuf,
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub tree_hash: Option<String>,
+    pub hash_fault: Option<String>,
+    /// Exact number of appearances aggregated into this entity.
+    pub appearances: u64,
+    /// The Root that first revealed this entity (healthy Roots only).
+    pub first_root_index: u32,
+    /// The walk sequence of the first appearance within that Root.
+    pub first_entry_seq: u64,
+}
+
+/// One aggregated appearance of a healthy Root (ADR-0017 §canonical entity):
+/// the directory entry with its full bounded chain, memoized hints and the
+/// canonical entity it aggregates into.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanAppearanceRecord {
+    pub root_index: u32,
+    pub seq: u64,
+    pub name: String,
+    pub entry_path: PathBuf,
+    pub entry_kind: String,
+    pub chain: Vec<ScanChainHopRecord>,
+    pub chain_fault: Option<ScanChainFaultRecord>,
+    pub final_entity: Option<PathBuf>,
+    pub identity: Option<ScanObjectIdentity>,
+    /// Canonical entity this appearance aggregates into; `None` when the
+    /// chain faulted or the tree facts could not be read (never a guess).
+    pub entity_seq: Option<u64>,
+    pub lock_hint: Option<ScanLockHintRecord>,
+    pub worktree_hint: Option<ScanWorktreeHintRecord>,
+}
+
+/// One typed diagnostic row of a Report (root failure, chain fault, hash
+/// fault or identity fault). Presentation owns the copy; the kind is closed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanDiagnosticRecord {
+    pub root_index: u32,
+    /// `root_failed | root_unresponsive | root_record_missing |
+    /// chain_dangling | chain_cycle | chain_hop_limit | chain_non_utf8 |
+    /// chain_read_failed | chain_not_directory | chain_identity_replaced |
+    /// entity_hash_fault | entity_identity_fault`.
+    pub kind: String,
+    pub at: Option<PathBuf>,
+    pub detail: Option<String>,
+}
+
+/// Aggregation statistics of a Run's canonical entity index build.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ScanEntityIndexStats {
+    pub entities: u64,
+    pub appearances: u64,
+    pub diagnostics: u64,
+}
+
+/// Report page sections the unique paged contract serves (spec §4.10
+/// `report_page`; ADR-0017): Root coverage, canonical entities,
+/// appearances and diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanReportSection {
+    Roots,
+    Entities,
+    Appearances,
+    Diagnostics,
+}
+
+/// Stable, generation-bound cursor (spec §4.10/ADR-0020): a page read is
+/// accepted only while `report_content_identity` is still the current
+/// Report identity; any manifest switch, corrupt manifest or missing
+/// artifact returns typed stale/not-found and never falls back to another
+/// Report.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReportCursor {
+    pub report_content_identity: String,
+    pub run_id: String,
+    pub generation: u64,
+    pub section: ScanReportSection,
+    /// Row index for `Roots` (manifest-backed); byte offset into the
+    /// immutable index stream for the other sections.
+    pub offset: u64,
+}
+
+/// One page row; the section determines the variant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScanReportRow {
+    RootCoverage(ScanRootCoverageRecord),
+    Entity(ScanCanonicalEntityRecord),
+    Appearance(ScanAppearanceRecord),
+    Diagnostic(ScanDiagnosticRecord),
+}
+
+/// A bounded page of the current Report (spec §4.10): at most `limit`
+/// rows; `next_offset` continues the same section, `None` means exhausted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanReportPageRead {
+    pub rows: Vec<ScanReportRow>,
+    pub next_offset: Option<u64>,
+}
+
+/// Typed page read failures: a generation-bound cursor never silently falls
+/// back to another Report (spec §4.10).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScanReportPageError {
+    /// The current Report identity differs from the cursor's.
+    Stale { current_generation: u64 },
+    /// No current Report / corrupt manifest / missing run artifact.
+    NotFound,
 }
 
 /// One Root line of the coverage table in the terminal manifest.
@@ -440,6 +594,27 @@ pub trait ScanEvidenceStore: Send + Sync {
     /// any removal).
     fn read_run(&self, run_id: &str) -> Result<Option<ScanRunRecord>, ScanEvidenceStoreError>;
 
+    /// Build the canonical entity index of a Run from its Root evidence
+    /// (spec §4.10 Root atomicity, ADR-0017 canonical entity): only healthy
+    /// Roots contribute appearances/entities; a failed or unresponsive Root
+    /// contributes a typed diagnostic and no half candidate. The run-level
+    /// `entities.jsonl`, `appearances.jsonl` and `diagnostics.jsonl`
+    /// streams are written before the manifest switch, so a torn index is
+    /// never published.
+    fn build_entity_index(
+        &self,
+        run_id: &str,
+    ) -> Result<ScanEntityIndexStats, ScanEvidenceStoreError>;
+
+    /// The unique paged Report read contract (spec §4.10/§8.1): rows of the
+    /// current Report generation only. The cursor is re-verified against
+    /// the current manifest on every read.
+    fn report_page(
+        &self,
+        cursor: &ScanReportCursor,
+        limit: usize,
+    ) -> Result<ScanReportPageRead, ScanReportPageError>;
+
     /// Remove one temporary Run artifact, keeping `current.json` untouched.
     /// Only the Run whose `run.json` matches `(home_id, run_id)` is removed;
     /// anything unproven is left behind (`ProvenanceMismatch`).
@@ -505,6 +680,7 @@ pub mod fault_points {
     pub const RUN_CANCEL: &str = "scan.run.cancel_cleanup";
     pub const RUN_SUPERSEDE: &str = "scan.run.supersede_cleanup";
     pub const ROOT_WATCHDOG: &str = "scan.root.watchdog";
+    pub const ENTITY_INDEX: &str = "scan.evidence_store.entity_index";
 }
 
 /// Matrix registry used by tests and documentation: every `(name, failure
@@ -545,5 +721,9 @@ pub const FAULT_POINT_MATRIX: &[(&str, &str)] = &[
     (
         fault_points::ROOT_WATCHDOG,
         "30s zero-progress Root → typed Unresponsive + isolated",
+    ),
+    (
+        fault_points::ENTITY_INDEX,
+        "entity index build fails → Run Failed, old Report kept",
     ),
 ];

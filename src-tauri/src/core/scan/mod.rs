@@ -40,7 +40,7 @@ use crate::seams::installer_lock_store::InstallerLockStore;
 use crate::seams::local_git_probe::LocalGitProbe;
 use crate::seams::scan_evidence_store::{
     CurrentManifestRead, ScanEvidenceCounts, ScanEvidenceStore, ScanEvidenceStoreFactory,
-    ScanFrozenFacts, ScanFrozenRoot, ScanReportManifest, ScanRunRecord,
+    ScanFrozenFacts, ScanFrozenRoot, ScanReportManifest, ScanReportPageRead, ScanRunRecord,
 };
 use crate::seams::scan_integrity::canonical_json_digest;
 use thiserror::Error;
@@ -94,14 +94,6 @@ impl ScanTrigger {
     }
 }
 
-/// Terminal Report coverage of one Root.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ScanRootCoverageState {
-    Completed,
-    Failed,
-    Unresponsive,
-}
-
 /// Root view state while a Run is active.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanRootViewState {
@@ -140,30 +132,32 @@ pub struct ScanRunSnapshot {
     pub diagnostic: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScanRootCoverageView {
-    pub index: u32,
-    pub configured_path: PathBuf,
-    pub canonical_path: PathBuf,
-    pub state: ScanRootCoverageState,
-    pub counts: ScanEvidenceCounts,
-    pub elapsed_ms: u64,
-    pub slow: bool,
-    pub diagnostic: Option<String>,
+/// Layered Root coverage of a terminal Report (spec §4.6 `coverage_counts`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScanCoverageCounts {
+    pub completed: u64,
+    pub failed: u64,
+    pub unresponsive: u64,
 }
 
-/// Bounded summary of the terminal Report (paged detail arrives with #83's
-/// `report_page` contract).
+/// Bounded summary of the terminal Report (spec §4.6): the full Root
+/// coverage/entity/appearance/diagnostic detail is served by the unique
+/// `report_page` contract, never by the summary DTO.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanReportSummary {
     pub generation: u64,
     pub run_id: String,
+    /// The unforgeable Report identity page cursors bind to.
+    pub content_identity: String,
     pub trigger: ScanTrigger,
     pub state: ScanReportState,
+    pub coverage: ScanCoverageCounts,
     pub counts: ScanEvidenceCounts,
-    pub roots: Vec<ScanRootCoverageView>,
+    pub incomplete: bool,
+    pub published_at_ms: u64,
+    pub agent_configuration_generation: u64,
+    pub configured_root_snapshot_fingerprint: String,
     pub started_at_ms: u64,
-    pub ended_at_ms: u64,
     pub slow: bool,
 }
 
@@ -222,6 +216,10 @@ pub enum ScanError {
     Internal(String),
     #[error("the Scan Run was superseded by a product write")]
     Superseded,
+    #[error("the Report page cursor is stale: current generation {0}")]
+    ReportPageStale(u64),
+    #[error("the Report page is not available")]
+    ReportPageNotFound,
 }
 
 /// Progress observer fed by the Run threads; the Tauri adapter converts the
@@ -274,7 +272,16 @@ pub(crate) struct RunProgress {
 }
 
 impl RunProgress {
-    pub(crate) fn new(planned: Vec<PlannedRoot>, state: ScanRunState) -> Self {
+    pub(crate) fn new(
+        planned: Vec<PlannedRoot>,
+        state: ScanRunState,
+        configured_agents: u64,
+        declared_roots: u64,
+    ) -> Self {
+        let canonical_roots = planned
+            .iter()
+            .filter(|root| root.frozen.is_some())
+            .count() as u64;
         let started = Instant::now();
         let root_progress: Vec<RootProgress> = planned
             .into_iter()
@@ -314,6 +321,9 @@ impl RunProgress {
             counts: ScanEvidenceCounts {
                 roots: root_progress.len() as u64,
                 failed_roots,
+                configured_agents,
+                declared_roots,
+                canonical_roots,
                 ..Default::default()
             },
             roots: root_progress,
@@ -495,6 +505,8 @@ impl ScanCoordinator {
                 .iter()
                 .filter_map(|planned| planned.frozen.clone())
                 .collect::<Vec<_>>();
+            let configured_agents = agent_snapshot.configurations.len() as u64;
+            let declared_roots = agent_snapshot.roots.len() as u64;
             let generation = state.next_generation.max(
                 state
                     .cross_startup_report
@@ -521,6 +533,8 @@ impl ScanCoordinator {
                     agent_configuration_generation: agent_snapshot.snapshot_version,
                     mutation_generation: self.mutation.generation(),
                     roots_fingerprint: fingerprint,
+                    configured_agents,
+                    declared_roots,
                 },
                 roots: roots.clone(),
                 started_at_ms: (self.clock.unix_epoch_nanos() / 1_000_000) as u64,
@@ -529,7 +543,12 @@ impl ScanCoordinator {
                 record: record.clone(),
                 store,
                 shared: Arc::new(RunShared {
-                    progress: Mutex::new(RunProgress::new(planned, ScanRunState::Queued)),
+                    progress: Mutex::new(RunProgress::new(
+                        planned,
+                        ScanRunState::Queued,
+                        configured_agents,
+                        declared_roots,
+                    )),
                     cancel: AtomicBool::new(false),
                     done: AtomicBool::new(false),
                 }),
@@ -587,6 +606,42 @@ impl ScanCoordinator {
             run: Some(build_run_snapshot(slot)),
             current_report,
         })
+    }
+
+    /// The unique paged Report read contract (spec §4.10 `report_page`;
+    /// ADR-0017): Root coverage, canonical entities, appearances and typed
+    /// diagnostics of the current Report generation only. A cursor whose
+    /// Report identity is no longer current returns typed stale; a corrupt
+    /// manifest or missing artifact returns not-found — never a fallback to
+    /// another Report.
+    pub fn report_page(
+        &self,
+        cursor: crate::seams::scan_evidence_store::ScanReportCursor,
+        limit: usize,
+    ) -> Result<ScanReportPageRead, ScanError> {
+        let gate = self.write_gate.snapshot();
+        let bound = match &gate.state {
+            WriteGateState::Open(home) => home.clone(),
+            other => {
+                return Err(ScanError::NotWritable(
+                    write_gate_state_summary(other).to_string(),
+                ));
+            }
+        };
+        let store = self
+            .factory
+            .store_for(&bound)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        store
+            .report_page(&cursor, limit)
+            .map_err(|error| match error {
+                crate::seams::scan_evidence_store::ScanReportPageError::Stale {
+                    current_generation,
+                } => ScanError::ReportPageStale(current_generation),
+                crate::seams::scan_evidence_store::ScanReportPageError::NotFound => {
+                    ScanError::ReportPageNotFound
+                }
+            })
     }
 
     /// The 250 ms / phase-change progress publisher.
@@ -799,43 +854,45 @@ impl ScanCoordinator {
         } else {
             ReportFreshness::Stale
         };
-        let started_at_ms = manifest.started_at_ms;
-        let ended_at_ms = manifest.ended_at_ms;
-        let slow = ended_at_ms.saturating_sub(started_at_ms) > 30_000;
+        let mut coverage = ScanCoverageCounts::default();
+        for root in &manifest.roots {
+            match root.state {
+                crate::seams::scan_evidence_store::ScanRootState::Completed => {
+                    coverage.completed += 1;
+                }
+                crate::seams::scan_evidence_store::ScanRootState::Unresponsive => {
+                    coverage.unresponsive += 1;
+                }
+                crate::seams::scan_evidence_store::ScanRootState::Failed => {
+                    coverage.failed += 1;
+                }
+            }
+        }
+        let slow = manifest
+            .ended_at_ms
+            .saturating_sub(manifest.started_at_ms)
+            > 30_000;
         (
             CurrentReportView {
                 summary: Some(ScanReportSummary {
                     generation: manifest.generation,
                     run_id: manifest.run_id.clone(),
+                    content_identity: manifest.content_identity.clone(),
                     trigger: parse_trigger(&manifest.trigger),
                     state: parse_report_state(&manifest.state),
+                    coverage,
                     counts: manifest.counts,
-                    roots: manifest
-                        .roots
-                        .iter()
-                        .map(|root| ScanRootCoverageView {
-                            index: root.index,
-                            configured_path: root.configured_path.clone(),
-                            canonical_path: root.canonical_path.clone(),
-                            state: match root.state {
-                                crate::seams::scan_evidence_store::ScanRootState::Completed => {
-                                    ScanRootCoverageState::Completed
-                                }
-                                crate::seams::scan_evidence_store::ScanRootState::Failed => {
-                                    ScanRootCoverageState::Failed
-                                }
-                                crate::seams::scan_evidence_store::ScanRootState::Unresponsive => {
-                                    ScanRootCoverageState::Unresponsive
-                                }
-                            },
-                            counts: root.counts,
-                            elapsed_ms: root.elapsed_ms,
-                            slow: root.slow,
-                            diagnostic: root.diagnostic.clone(),
-                        })
-                        .collect(),
-                    started_at_ms,
-                    ended_at_ms,
+                    incomplete: parse_report_state(&manifest.state)
+                        == ScanReportState::Incomplete,
+                    published_at_ms: manifest.ended_at_ms,
+                    agent_configuration_generation: manifest
+                        .frozen
+                        .agent_configuration_generation,
+                    configured_root_snapshot_fingerprint: manifest
+                        .frozen
+                        .roots_fingerprint
+                        .clone(),
+                    started_at_ms: manifest.started_at_ms,
                     slow,
                 }),
                 freshness,

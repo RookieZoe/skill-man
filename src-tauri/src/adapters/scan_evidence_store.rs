@@ -7,15 +7,17 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::core::home::BoundHome;
 use crate::seams::scan_evidence_store::{
-    CurrentManifestRead, ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore,
-    ScanEvidenceStoreError, ScanEvidenceStoreFactory, ScanReportManifest, ScanRootRecord,
-    ScanRunRecord, ScanSnapshotQualification, ScanStartupMarker,
+    CurrentManifestRead, ScanAppearanceRecord, ScanCanonicalEntityRecord, ScanDiagnosticRecord,
+    ScanEntityIndexStats, ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore,
+    ScanEvidenceStoreError, ScanEvidenceStoreFactory, ScanReportCursor, ScanReportManifest,
+    ScanObjectIdentity, ScanReportPageError, ScanReportPageRead, ScanReportRow, ScanReportSection,
+    ScanRootRecord, ScanRootState, ScanRunRecord, ScanSnapshotQualification, ScanStartupMarker,
 };
 
 pub const SCAN_DIR_NAME: &str = "scan";
@@ -219,6 +221,419 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
         Ok(ScanRunRecord::parse(&content))
     }
 
+    fn build_entity_index(
+        &self,
+        run_id: &str,
+    ) -> Result<ScanEntityIndexStats, ScanEvidenceStoreError> {
+        // Provenance first: no evidence is ever interpreted without the
+        // `(home_id, run_id)` run record of this Home.
+        let Some(run) = self.read_run(run_id)? else {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("no run.json for {run_id}"),
+            });
+        };
+        if run.home_id != self.home_id {
+            return Err(ScanEvidenceStoreError::ProvenanceMismatch {
+                detail: format!("run {run_id} belongs to home {}", run.home_id),
+            });
+        }
+        let roots_dir = self.run_dir(run_id).join("roots");
+        let root_indices = {
+            let mut indices = Vec::new();
+            match fs::read_dir(&roots_dir) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let Some(raw) = name.to_str() else { continue };
+                        let Some(index) = raw
+                            .strip_prefix('r')
+                            .and_then(|value| value.parse::<u32>().ok())
+                        else {
+                            continue;
+                        };
+                        indices.push(index);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ScanEvidenceStoreError::io(
+                        "enumerate Scan Run roots",
+                        &roots_dir,
+                        &error,
+                    ));
+                }
+            }
+            indices.sort_unstable();
+            indices
+        };
+
+        // Canonical aggregation working set: identity → canonical row (the
+        // irreducible entity index of the generation). The evidence streams
+        // are read line by line and the appearance/diagnostic index streams
+        // are written incrementally — only the canonical entity rows and the
+        // per-Root facts map are held (ADR-0017 aggregation index).
+        let mut identity_index: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut canonical_entities: Vec<ScanCanonicalEntityRecord> = Vec::new();
+        let entities_path = self.run_dir(run_id).join("entities.jsonl");
+        let appearances_path = self.run_dir(run_id).join("appearances.jsonl");
+        let diagnostics_path = self.run_dir(run_id).join("diagnostics.jsonl");
+        let mut entities_file = fs::File::create(&entities_path).map_err(|error| {
+            ScanEvidenceStoreError::io("write canonical Scan entity index", &entities_path, &error)
+        })?;
+        let mut appearances_file = fs::File::create(&appearances_path).map_err(|error| {
+            ScanEvidenceStoreError::io("write Scan appearance index", &appearances_path, &error)
+        })?;
+        let mut diagnostics_file = fs::File::create(&diagnostics_path).map_err(|error| {
+            ScanEvidenceStoreError::io("write Scan diagnostic index", &diagnostics_path, &error)
+        })?;
+        fn append_index_line<T: serde::Serialize>(
+            file: &mut fs::File,
+            record: &T,
+            path: &Path,
+            operation: &'static str,
+        ) -> Result<(), ScanEvidenceStoreError> {
+            let mut line = serde_json::to_vec(record).map_err(|error| {
+                ScanEvidenceStoreError::Write {
+                    operation,
+                    detail: error.to_string(),
+                }
+            })?;
+            line.push(b'\n');
+            file.write_all(&line)
+                .map_err(|error| ScanEvidenceStoreError::io(operation, path, &error))
+        }
+        let mut appearances_count = 0_u64;
+        let mut diagnostics_count = 0_u64;
+        for root_index in root_indices {
+            let root_dir = roots_dir.join(format!("r{root_index}"));
+            let root_json = root_dir.join("root.json");
+            let root_record = match self.read_string(&root_json)? {
+                Some(content) => match ScanRootRecord::parse(&content) {
+                    Some(record) => record,
+                    None => {
+                        let diagnostic = ScanDiagnosticRecord {
+                            root_index,
+                            kind: "root_record_missing".into(),
+                            at: Some(root_json.clone()),
+                            detail: Some("unparseable root.json".into()),
+                        };
+                        append_index_line(
+                            &mut diagnostics_file,
+                            &diagnostic,
+                            &diagnostics_path,
+                            "write Scan diagnostic index",
+                        )?;
+                        diagnostics_count += 1;
+                        continue;
+                    }
+                },
+                None => {
+                    let diagnostic = ScanDiagnosticRecord {
+                        root_index,
+                        kind: "root_record_missing".into(),
+                        at: Some(root_json),
+                        detail: Some("no root.json for a committed Root".into()),
+                    };
+                    append_index_line(
+                        &mut diagnostics_file,
+                        &diagnostic,
+                        &diagnostics_path,
+                        "write Scan diagnostic index",
+                    )?;
+                    diagnostics_count += 1;
+                    continue;
+                }
+            };
+            // Root is the minimum evidence commit unit (spec §4.10): a
+            // failed/unresponsive Root publishes coverage + diagnostic only,
+            // never its half candidates.
+            if root_record.state != ScanRootState::Completed {
+                let diagnostic = ScanDiagnosticRecord {
+                    root_index,
+                    kind: if root_record.state == ScanRootState::Unresponsive {
+                        "root_unresponsive".into()
+                    } else {
+                        "root_failed".into()
+                    },
+                    at: Some(root_record.canonical_path),
+                    detail: root_record.diagnostic,
+                };
+                append_index_line(
+                    &mut diagnostics_file,
+                    &diagnostic,
+                    &diagnostics_path,
+                    "write Scan diagnostic index",
+                )?;
+                diagnostics_count += 1;
+                continue;
+            }
+
+            // Per-Root tree-fact join: entity records streamed during the
+            // walk, keyed by entry path (appearance → verified facts).
+            #[derive(Clone)]
+            struct EntityFacts {
+                identity: Option<ScanObjectIdentity>,
+                file_count: u64,
+                byte_count: u64,
+                tree_hash: Option<String>,
+                hash_fault: Option<String>,
+            }
+            let mut facts_by_path: HashMap<PathBuf, EntityFacts> = HashMap::new();
+            let entities_file = fs::File::open(root_dir.join("entities.jsonl").as_path()).map_err(
+                |error| {
+                    ScanEvidenceStoreError::io(
+                        "read Scan evidence stream",
+                        &root_dir.join("entities.jsonl"),
+                        &error,
+                    )
+                },
+            )?;
+            for line in BufReader::new(entities_file).lines() {
+                let Ok(line) = line else { continue };
+                let Ok(record) = serde_json::from_str::<ScanEntityRecord>(&line) else {
+                    continue;
+                };
+                facts_by_path.insert(
+                    record.entry_path.clone(),
+                    EntityFacts {
+                        identity: record.identity,
+                        file_count: record.file_count,
+                        byte_count: record.byte_count,
+                        tree_hash: record.tree_hash,
+                        hash_fault: record.hash_fault,
+                    },
+                );
+            }
+
+            let entries_file = fs::File::open(root_dir.join("entries.jsonl").as_path()).map_err(
+                |error| {
+                    ScanEvidenceStoreError::io(
+                        "read Scan evidence stream",
+                        &root_dir.join("entries.jsonl"),
+                        &error,
+                    )
+                },
+            )?;
+            for line in BufReader::new(entries_file).lines() {
+                let Ok(line) = line else { continue };
+                let Ok(entry) = serde_json::from_str::<ScanEntryRecord>(&line) else {
+                    continue;
+                };
+                let mut entity_seq = None;
+                let facts = facts_by_path.get(&entry.entry_path).cloned();
+                // The aggregate key is the identity re-verified after the
+                // tree hash (ADR-0017 replacement guard); a stale or missing
+                // identity never guesses an entity.
+                let identity = facts.as_ref().and_then(|facts| facts.identity);
+                if let (Some(final_entity), Some(identity)) = (&entry.final_entity, identity) {
+                    let key = (identity.device, identity.inode);
+                    if let Some(facts) = facts.as_ref().filter(|facts| facts.tree_hash.is_some()) {
+                        let seq = if let Some(position) = identity_index.get(&key).copied() {
+                            canonical_entities[position].appearances += 1;
+                            Some(canonical_entities[position].entity_seq)
+                        } else {
+                            let entity_seq = canonical_entities.len() as u64 + 1;
+                            canonical_entities.push(ScanCanonicalEntityRecord {
+                                entity_seq,
+                                identity,
+                                canonical_path: final_entity.clone(),
+                                file_count: facts.file_count,
+                                byte_count: facts.byte_count,
+                                tree_hash: facts.tree_hash.clone(),
+                                hash_fault: facts.hash_fault.clone(),
+                                appearances: 1,
+                                first_root_index: root_index,
+                                first_entry_seq: entry.seq,
+                            });
+                            identity_index.insert(key, canonical_entities.len() - 1);
+                            Some(entity_seq)
+                        };
+                        entity_seq = seq;
+                    } else {
+                        let diagnostic = ScanDiagnosticRecord {
+                            root_index,
+                            kind: "entity_hash_fault".into(),
+                            at: Some(final_entity.clone()),
+                            detail: facts
+                                .as_ref()
+                                .and_then(|facts| facts.hash_fault.clone())
+                                .or_else(|| Some("no tree facts for a resolved entity".into())),
+                        };
+                        append_index_line(
+                            &mut diagnostics_file,
+                            &diagnostic,
+                            &diagnostics_path,
+                            "write Scan diagnostic index",
+                        )?;
+                        diagnostics_count += 1;
+                    }
+                } else if entry.final_entity.is_some() {
+                    // Resolved entity without a verified identity: typed
+                    // identity fault, never a guessed canonical entity.
+                    let diagnostic = ScanDiagnosticRecord {
+                        root_index,
+                        kind: "entity_identity_fault".into(),
+                        at: entry.final_entity.clone(),
+                        detail: facts
+                            .as_ref()
+                            .and_then(|facts| facts.hash_fault.clone())
+                            .or_else(|| {
+                                Some("final entity identity missing or changed".into())
+                            }),
+                    };
+                    append_index_line(
+                        &mut diagnostics_file,
+                        &diagnostic,
+                        &diagnostics_path,
+                        "write Scan diagnostic index",
+                    )?;
+                    diagnostics_count += 1;
+                }
+                if entry.chain_fault.is_some() {
+                    let fault = entry.chain_fault.as_ref().expect("checked");
+                    let diagnostic = ScanDiagnosticRecord {
+                        root_index,
+                        kind: format!("chain_{}", fault.kind),
+                        at: Some(fault.at.clone()),
+                        detail: fault.detail.clone(),
+                    };
+                    append_index_line(
+                        &mut diagnostics_file,
+                        &diagnostic,
+                        &diagnostics_path,
+                        "write Scan diagnostic index",
+                    )?;
+                    diagnostics_count += 1;
+                }
+                let appearance = ScanAppearanceRecord {
+                    root_index,
+                    seq: entry.seq,
+                    name: entry.name,
+                    entry_path: entry.entry_path,
+                    entry_kind: entry.entry_kind,
+                    chain: entry.chain,
+                    chain_fault: entry.chain_fault,
+                    final_entity: entry.final_entity,
+                    // The verified identity is authoritative; the walk-time
+                    // entry identity stays only in the raw evidence stream.
+                    identity,
+                    entity_seq,
+                    lock_hint: entry.lock_hint,
+                    worktree_hint: entry.worktree_hint,
+                };
+                append_index_line(
+                    &mut appearances_file,
+                    &appearance,
+                    &appearances_path,
+                    "write Scan appearance index",
+                )?;
+                appearances_count += 1;
+            }
+        }
+        for entity in &canonical_entities {
+            append_index_line(
+                &mut entities_file,
+                entity,
+                &entities_path,
+                "write canonical Scan entity index",
+            )?;
+        }
+        // Deterministic streamed indexes: canonical rows written after the
+        // full pass (appearance counts are exact), appearances/diagnostics
+        // streamed incrementally. The manifest switch publishes only the
+        // completed run artifact.
+        for file in [&mut entities_file, &mut appearances_file, &mut diagnostics_file] {
+            file.flush().and_then(|()| file.sync_all()).map_err(|error| {
+                ScanEvidenceStoreError::io("flush Scan index", &entities_path, &error)
+            })?;
+        }
+        for name in ["entities.jsonl", "appearances.jsonl", "diagnostics.jsonl"] {
+            let path = self.run_dir(run_id).join(name);
+            if !path.exists() {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|error| {
+                        ScanEvidenceStoreError::io("write empty Scan index", &path, &error)
+                    })?;
+            }
+        }
+        Ok(ScanEntityIndexStats {
+            entities: canonical_entities.len() as u64,
+            appearances: appearances_count,
+            diagnostics: diagnostics_count,
+        })
+    }
+
+    fn report_page(
+        &self,
+        cursor: &ScanReportCursor,
+        limit: usize,
+    ) -> Result<ScanReportPageRead, ScanReportPageError> {
+        let limit = if limit == 0 { 1 } else { limit.min(512) };
+        // The cursor is generation-bound: only the exact Report identity
+        // that is current may be served (spec §4.10; ADR-0020).
+        let current = self.current_manifest().map_err(|_| ScanReportPageError::NotFound)?;
+        let manifest = match current {
+            CurrentManifestRead::Report(manifest)
+                if manifest.content_identity == cursor.report_content_identity =>
+            {
+                manifest
+            }
+            CurrentManifestRead::Report(manifest) => {
+                return Err(ScanReportPageError::Stale {
+                    current_generation: manifest.generation,
+                });
+            }
+            CurrentManifestRead::Absent | CurrentManifestRead::Corrupt => {
+                return Err(ScanReportPageError::NotFound);
+            }
+        };
+        let run = self
+            .read_run(&cursor.run_id)
+            .map_err(|_| ScanReportPageError::NotFound)?
+            .ok_or_else(|| ScanReportPageError::NotFound)?;
+        if run.home_id != self.home_id
+            || run.generation != cursor.generation
+            || run.run_id != cursor.run_id
+        {
+            return Err(ScanReportPageError::NotFound);
+        }
+        let (rows, next_offset) = match cursor.section {
+            ScanReportSection::Roots => {
+                let total = manifest.roots.len() as u64;
+                let start = cursor.offset.min(total) as usize;
+                let end = (start + limit).min(manifest.roots.len());
+                let rows = manifest.roots[start..end]
+                    .iter()
+                    .cloned()
+                    .map(ScanReportRow::RootCoverage)
+                    .collect();
+                let next = if (end as u64) < total {
+                    Some(end as u64)
+                } else {
+                    None
+                };
+                (rows, next)
+            }
+            ScanReportSection::Entities => {
+                self.page_file_rows::<ScanCanonicalEntityRecord>(
+                    &cursor,
+                    limit,
+                    ScanReportRow::Entity,
+                )?
+            }
+            ScanReportSection::Appearances => {
+                self.page_file_rows::<ScanAppearanceRecord>(&cursor, limit, ScanReportRow::Appearance)?
+            }
+            ScanReportSection::Diagnostics => {
+                self.page_file_rows::<ScanDiagnosticRecord>(&cursor, limit, ScanReportRow::Diagnostic)?
+            }
+        };
+        Ok(ScanReportPageRead { rows, next_offset })
+    }
+
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError> {
         self.remove_run_verified(run_id)
     }
@@ -368,6 +783,62 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
     }
 }
 
+impl SystemScanEvidenceStore {
+    fn page_file_rows<T>(
+        &self,
+        cursor: &ScanReportCursor,
+        limit: usize,
+        row_kind: fn(T) -> ScanReportRow,
+    ) -> Result<(Vec<ScanReportRow>, Option<u64>), ScanReportPageError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let file_name = match cursor.section {
+            ScanReportSection::Entities => "entities.jsonl",
+            ScanReportSection::Appearances => "appearances.jsonl",
+            ScanReportSection::Diagnostics => "diagnostics.jsonl",
+            ScanReportSection::Roots => unreachable!("root rows are manifest-backed"),
+        };
+        let path = self.run_dir(&cursor.run_id).join(file_name);
+        let file = File::open(&path).map_err(|_| ScanReportPageError::NotFound)?;
+        let mut reader = BufReader::new(file);
+        reader
+            .seek(SeekFrom::Start(cursor.offset))
+            .map_err(|_| ScanReportPageError::NotFound)?;
+        let mut rows = Vec::new();
+        let mut consumed = 0_u64;
+        for _ in 0..limit {
+            let mut line = Vec::new();
+            let read = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|_| ScanReportPageError::NotFound)?;
+            if read == 0 {
+                break;
+            }
+            consumed += read as u64;
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            if let Ok(record) = serde_json::from_slice::<T>(&line) {
+                rows.push(row_kind(record));
+            }
+        }
+        let at_end = reader
+            .fill_buf()
+            .map(|buf| buf.is_empty())
+            .unwrap_or(true);
+        let next_offset = if at_end {
+            None
+        } else {
+            Some(cursor.offset + consumed)
+        };
+        Ok((rows, next_offset))
+    }
+}
+
 /// The stable per-Root artifact key: `r<index>` + canonical path hash so two
 /// Runs on different generations never share root artifacts.
 fn root_key(index: u32) -> String {
@@ -499,6 +970,22 @@ impl ScanEvidenceStore for FaultInjectingScanEvidenceStore {
         self.inner.read_run(run_id)
     }
 
+    fn build_entity_index(
+        &self,
+        run_id: &str,
+    ) -> Result<ScanEntityIndexStats, ScanEvidenceStoreError> {
+        self.maybe_fail(crate::seams::scan_evidence_store::fault_points::ENTITY_INDEX)?;
+        self.inner.build_entity_index(run_id)
+    }
+
+    fn report_page(
+        &self,
+        cursor: &ScanReportCursor,
+        limit: usize,
+    ) -> Result<ScanReportPageRead, ScanReportPageError> {
+        self.inner.report_page(cursor, limit)
+    }
+
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError> {
         self.maybe_fail(crate::seams::scan_evidence_store::fault_points::RUN_CANCEL)?;
         self.inner.remove_run(run_id)
@@ -575,7 +1062,8 @@ mod tests {
     use super::*;
     use crate::seams::scan_evidence_store::{
         SCAN_STORE_SCHEMA_VERSION, ScanEvidenceCounts, ScanEvidenceStore, ScanEvidenceStoreFactory,
-        ScanFrozenFacts, ScanFrozenRoot, ScanRootCoverageRecord, ScanRootState, fault_points,
+        ScanFrozenFacts, ScanFrozenRoot, ScanObjectIdentity, ScanReportPageError,
+        ScanRootCoverageRecord, ScanRootState, fault_points,
     };
 
     fn home() -> BoundHome {
@@ -598,6 +1086,8 @@ mod tests {
                 agent_configuration_generation: 3,
                 mutation_generation: 0,
                 roots_fingerprint: "roots<1>".into(),
+                configured_agents: 1,
+                declared_roots: 1,
             },
             roots: vec![ScanFrozenRoot {
                 index: 0,
@@ -619,8 +1109,55 @@ mod tests {
             chain: vec![],
             chain_fault: None,
             final_entity: Some(PathBuf::from(format!("/tmp/root/{name}"))),
+            identity: None,
             lock_hint: None,
             worktree_hint: None,
+        }
+    }
+
+    fn entry_with_identity(
+        seq: u64,
+        name: &str,
+        identity: ScanObjectIdentity,
+    ) -> ScanEntryRecord {
+        let mut entry = entry_record(seq, name);
+        entry.identity = Some(identity);
+        entry
+    }
+
+    fn entity_record(seq: u64, name: &str, identity: ScanObjectIdentity) -> ScanEntityRecord {
+        ScanEntityRecord {
+            seq,
+            name: name.into(),
+            entry_path: PathBuf::from(format!("/tmp/root/{name}")),
+            final_entity: PathBuf::from(format!("/tmp/root/{name}")),
+            identity: Some(identity),
+            file_count: 1,
+            byte_count: 64,
+            tree_hash: Some(format!("tree-sha256-v1:{name}")),
+            hash_fault: None,
+            elapsed_ms: 2,
+        }
+    }
+
+    fn root_record(index: u32, state: ScanRootState) -> ScanRootRecord {
+        ScanRootRecord {
+            schema_version: SCAN_STORE_SCHEMA_VERSION,
+            home_id: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into(),
+            run_id: "run-1".into(),
+            index,
+            configured_path: PathBuf::from("/tmp/root"),
+            canonical_path: PathBuf::from("/tmp/root"),
+            state,
+            counts: ScanEvidenceCounts::default(),
+            elapsed_ms: 5,
+            slow: false,
+            diagnostic: if state == ScanRootState::Completed {
+                None
+            } else {
+                Some("root failed".into())
+            },
+            completed_at_ms: 1000,
         }
     }
 
@@ -652,12 +1189,16 @@ mod tests {
                 agent_configuration_generation: 3,
                 mutation_generation: 0,
                 roots_fingerprint: "roots<1>".into(),
+                configured_agents: 1,
+                declared_roots: 1,
             },
             started_at_ms: 1000,
             ended_at_ms: 1500,
             integrity: None,
-            content_identity:
-                "scan-report-v1:b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab:run-1:1:complete".into(),
+            content_identity: format!(
+                "scan-report-v1:{}:{}:1:complete",
+                home.home_id.0, run_id
+            ),
         };
         manifest = seal_manifest(manifest);
         manifest
@@ -685,6 +1226,7 @@ mod tests {
                     name: "alpha".into(),
                     entry_path: PathBuf::from("/tmp/root/alpha"),
                     final_entity: PathBuf::from("/tmp/root/alpha"),
+                    identity: None,
                     file_count: 1,
                     byte_count: 128,
                     tree_hash: Some("tree-sha256-v1:abc".into()),
@@ -835,5 +1377,176 @@ mod tests {
         )
         .unwrap();
         assert!(store.qualification().unwrap().is_none());
+    }
+
+    #[test]
+    fn entity_index_aggregates_appearances_by_object_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = home();
+        let store = store(&temp, &home);
+        let run_id = "run-1";
+        store.create_run(&run_record(&home, run_id)).unwrap();
+        let identity_a = ScanObjectIdentity { device: 1, inode: 100 };
+        let identity_b = ScanObjectIdentity { device: 1, inode: 200 };
+        // alpha and beta resolve to the same object (identity A): exactly one
+        // canonical entity, two appearances; gamma is a distinct object.
+        for (seq, name, identity) in [
+            (1, "alpha", identity_a),
+            (2, "beta", identity_a),
+            (3, "gamma", identity_b),
+        ] {
+            store
+                .append_entry(run_id, "r0", &entry_with_identity(seq, name, identity))
+                .unwrap();
+            store
+                .append_entity(run_id, "r0", &entity_record(seq, name, identity))
+                .unwrap();
+        }
+        store
+            .write_root(run_id, &root_record(0, ScanRootState::Completed))
+            .unwrap();
+        let stats = store.build_entity_index(run_id).unwrap();
+        assert_eq!(stats.entities, 2, "one entity per distinct object");
+        assert_eq!(stats.appearances, 3);
+        assert_eq!(stats.diagnostics, 0);
+        // Both appearances of identity A carry the same entity_seq and the
+        // canonical row reports the exact appearance count.
+        let manifest = manifest(&home, run_id, "complete");
+        store.publish_report(run_id, &manifest).unwrap();
+        let cursor = ScanReportCursor {
+            report_content_identity: manifest.content_identity.clone(),
+            run_id: run_id.into(),
+            generation: 1,
+            section: ScanReportSection::Entities,
+            offset: 0,
+        };
+        let page = store.report_page(&cursor, 16).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert!(page.next_offset.is_none());
+        let entities = page
+            .rows
+            .iter()
+            .map(|row| match row {
+                ScanReportRow::Entity(entity) => entity.clone(),
+                other => panic!("unexpected row {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entities[0].entity_seq, 1);
+        assert_eq!(entities[0].appearances, 2, "both alpha + beta appearances");
+        assert_eq!(entities[1].entity_seq, 2);
+        assert_eq!(entities[1].appearances, 1);
+        // The appearances section pages the same generation-bound rows.
+        let cursor = ScanReportCursor {
+            section: ScanReportSection::Appearances,
+            ..cursor.clone()
+        };
+        let page = store.report_page(&cursor, 2).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert!(page.next_offset.is_some(), "one appearance remains");
+        let continued = store
+            .report_page(&ScanReportCursor { offset: page.next_offset.unwrap(), ..cursor }, 2)
+            .unwrap();
+        assert_eq!(continued.rows.len(), 1);
+        assert!(continued.next_offset.is_none());
+    }
+
+    #[test]
+    fn report_page_never_falls_back_to_another_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = home();
+        let store = store(&temp, &home);
+        let run_id = "run-1";
+        store.create_run(&run_record(&home, run_id)).unwrap();
+        store
+            .append_entry(run_id, "r0", &entry_with_identity(1, "alpha", ScanObjectIdentity { device: 1, inode: 100 }))
+            .unwrap();
+        store
+            .append_entity(
+                run_id,
+                "r0",
+                &entity_record(
+                    1,
+                    "alpha",
+                    ScanObjectIdentity { device: 1, inode: 100 },
+                ),
+            )
+            .unwrap();
+        store
+            .write_root(run_id, &root_record(0, ScanRootState::Completed))
+            .unwrap();
+        store.build_entity_index(run_id).unwrap();
+        let first = manifest(&home, run_id, "complete");
+        store.publish_report(run_id, &first).unwrap();
+        let cursor = ScanReportCursor {
+            report_content_identity: first.content_identity.clone(),
+            run_id: run_id.into(),
+            generation: 1,
+            section: ScanReportSection::Entities,
+            offset: 0,
+        };
+        // A second Report switches current.json: the old cursor is typed
+        // stale and never resolves against the new Report.
+        let second = manifest(&home, "run-2", "complete");
+        store.create_run(&ScanRunRecord {
+            schema_version: SCAN_STORE_SCHEMA_VERSION,
+            home_id: home.home_id.0.clone(),
+            run_id: "run-2".into(),
+            generation: 2,
+            trigger: "manual".into(),
+            frozen: scan_run_record_frozen(),
+            roots: vec![],
+            started_at_ms: 2000,
+        }).unwrap();
+        store.publish_report("run-2", &second).unwrap();
+        assert!(matches!(
+            store.report_page(&cursor, 16),
+            Err(ScanReportPageError::Stale { current_generation: 1 })
+        ));
+        // A corrupt manifest is not-found, never a fallback.
+        std::fs::write(temp.path().join("scan/current.json"), "{}").unwrap();
+        assert!(matches!(
+            store.report_page(&cursor, 16),
+            Err(ScanReportPageError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn failed_root_publishes_no_half_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = home();
+        let store = store(&temp, &home);
+        let run_id = "run-1";
+        store.create_run(&run_record(&home, run_id)).unwrap();
+        let identity_a = ScanObjectIdentity { device: 1, inode: 100 };
+        // Root r1 failed; its streamed evidence must never aggregate.
+        store
+            .append_entry(run_id, "r1", &entry_with_identity(1, "half", identity_a))
+            .unwrap();
+        store
+            .append_entity(
+                run_id,
+                "r1",
+                &entity_record(1, "half", identity_a),
+            )
+            .unwrap();
+        store
+            .write_root(run_id, &root_record(1, ScanRootState::Failed))
+            .unwrap();
+        let stats = store.build_entity_index(run_id).unwrap();
+        assert_eq!(stats.entities, 0, "failed Root contributes no entity");
+        assert_eq!(stats.appearances, 0, "failed Root contributes no appearance");
+        assert_eq!(stats.diagnostics, 1, "typed root failure diagnostic");
+    }
+
+    fn scan_run_record_frozen() -> ScanFrozenFacts {
+        ScanFrozenFacts {
+            home_id: "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab".into(),
+            write_gate_generation: 0,
+            agent_configuration_generation: 3,
+            mutation_generation: 0,
+            roots_fingerprint: "roots<0>".into(),
+            configured_agents: 1,
+            declared_roots: 1,
+        }
     }
 }
