@@ -442,12 +442,33 @@ function FolderStep({
             value={folder}
             onChange={(e) => onFolderChange(e.currentTarget.value)}
           />
+          <button
+            type="button"
+            className="toolbar-button"
+            onClick={async () => {
+              const picked = await browseProjectFolder();
+              if (picked) {
+                onFolderChange(picked);
+              }
+            }}
+          >
+            {t("enable.project.browse")}
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
+async function browseProjectFolder(): Promise<string | null> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selection = await open({ directory: true, multiple: false });
+    return typeof selection === "string" ? selection : null;
+  } catch {
+    return null;
+  }
+}
 function AgentSelectionStep({
   agents,
   selectedIds,

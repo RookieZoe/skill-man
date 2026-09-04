@@ -90,6 +90,21 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   });
 });
 
+test("folder step renders browse button and input", async () => {
+  const client = createFixtureCatalogClient();
+  renderSheet(client);
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Enable Skill authoring to Project",
+  });
+
+  expect(
+    within(dialog).getByRole("button", { name: "Browse…" }),
+  ).toBeInTheDocument();
+  const folderInput = within(dialog).getByPlaceholderText("/path/to/project");
+  expect(folderInput).toHaveValue("");
+});
+
 test("recent project folders candidate selection and clear", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient({
