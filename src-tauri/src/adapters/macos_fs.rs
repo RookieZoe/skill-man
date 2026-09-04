@@ -673,6 +673,7 @@ impl FileSystem for MacOsFileSystem {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_project_activation(
         &self,
         project_root: &DirectoryFingerprint,
@@ -8420,6 +8421,7 @@ fn open_project_relative_directory_nofollow(
     Ok((current, metadata))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_project_activation_nofollow(
     project_root: &DirectoryFingerprint,
     expected_targets: &[(PathBuf, ProjectTargetResolution)],

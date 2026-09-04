@@ -1669,7 +1669,7 @@ impl EnableService {
             if !agent_snapshot
                 .configurations
                 .iter()
-                .any(|configuration| references_target(configuration, &root))
+                .any(|configuration| references_target(configuration, root))
             {
                 return Err(EnableError::PlanStale);
             }

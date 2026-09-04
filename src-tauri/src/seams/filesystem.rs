@@ -1537,6 +1537,7 @@ pub trait FileSystem: Send + Sync {
     /// Create a Project Enable entry while binding the project root and
     /// resolved target through no-follow, descriptor-relative operations.
     /// The system adapter also rechecks every planned missing component.
+    #[allow(clippy::too_many_arguments)]
     fn create_project_activation(
         &self,
         project_root: &DirectoryFingerprint,

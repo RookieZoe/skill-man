@@ -5,6 +5,7 @@ use crate::tauri_adapter::dto::{
     CommandFailureDto, ConfirmSourceTransitionRequestDto, DiagnosticDto, PublicErrorDto,
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
 };
+use crate::seams::installer_lock_store::LockReleaseError;
 
 pub struct SourceTransitionApi {
     service: Arc<SourceTransitionService>,
@@ -54,6 +55,9 @@ pub(crate) fn transition_command_error(error: &SourceTransitionError) -> Command
         SourceTransitionError::PreviewStale => PublicErrorDto::PlanStale,
         SourceTransitionError::Preview(_) | SourceTransitionError::Source(_) => {
             PublicErrorDto::SourceUnavailable
+        }
+        SourceTransitionError::LockRelease(LockReleaseError::RecoveryRequired(_)) => {
+            PublicErrorDto::RecoveryRequired
         }
         SourceTransitionError::Lock(_) | SourceTransitionError::LockRelease(_) => {
             PublicErrorDto::StateUnavailable
