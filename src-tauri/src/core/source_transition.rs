@@ -31,6 +31,7 @@ use crate::seams::filesystem::{
 };
 use crate::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockFileIdentity, LockReleaseError,
+    PendingLockCasState,
 };
 use crate::seams::source::{GitSource, SourceError};
 use crate::seams::source_promotion_store::{
@@ -334,6 +335,11 @@ impl SourceTransitionService {
                 snapshot_version,
                 undo_available: true,
             }),
+            Err(
+                error @ SourceTransitionError::LockRelease(LockReleaseError::RecoveryRequired(_)),
+            ) => {
+                Err(self.block_for_recovery("resolve ambiguous Source Transition lock CAS", error))
+            }
             Err(error)
                 if matches!(
                     journal.phase,
@@ -527,6 +533,9 @@ impl SourceTransitionService {
                 snapshot_version,
                 undo_available: true,
             }),
+            Err(
+                error @ SourceTransitionError::LockRelease(LockReleaseError::RecoveryRequired(_)),
+            ) => Err(self.block_for_recovery("resolve ambiguous Source Promotion lock CAS", error)),
             Err(error)
                 if matches!(
                     journal.phase,
@@ -2863,6 +2872,16 @@ impl SourceTransitionService {
         journal: &SourceTransitionJournal,
         require_original_fingerprint_when_present: bool,
     ) -> Result<LockClaimState, SourceTransitionError> {
+        match self.lock_store.recover_pending_lock_cas(
+            &journal.lock_path,
+            &journal.lock_fingerprint,
+            journal.lock_identity.as_ref(),
+            &journal.lock_entries,
+        )? {
+            PendingLockCasState::Released => return Ok(LockClaimState::Released),
+            PendingLockCasState::Present => return Ok(LockClaimState::Present),
+            PendingLockCasState::None => {}
+        }
         let reports = self.lock_store.discover()?;
         let report = reports
             .into_iter()

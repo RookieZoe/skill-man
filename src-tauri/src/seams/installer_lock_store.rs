@@ -87,6 +87,13 @@ pub struct LockFileIdentity {
     pub inode: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingLockCasState {
+    None,
+    Released,
+    Present,
+}
+
 #[derive(Debug, Error)]
 pub enum InstallerLockError {
     #[error("{0}")]
@@ -115,6 +122,8 @@ pub enum LockReleaseError {
     Invalid(String),
     #[error("the lock file could not be read or written: {0}")]
     Io(String),
+    #[error("the lock CAS requires recovery: {0}")]
+    RecoveryRequired(String),
 }
 
 /// Known installer lock locations, strict v3 parse and full fingerprint
@@ -134,6 +143,19 @@ pub trait InstallerLockStore: Send + Sync {
         _frozen_fingerprint: &str,
     ) -> Option<LockFileIdentity> {
         None
+    }
+
+    /// Recover a lock CAS whose atomic exchange completed before the Source
+    /// Transition journal could advance its phase. The system adapter uses a
+    /// durable sidecar marker; lightweight adapters have no pending sidecar.
+    fn recover_pending_lock_cas(
+        &self,
+        _lock_path: &Path,
+        _frozen_fingerprint: &str,
+        _frozen_identity: Option<&LockFileIdentity>,
+        _entries: &[LockEntry],
+    ) -> Result<PendingLockCasState, LockReleaseError> {
+        Ok(PendingLockCasState::None)
     }
 
     /// CAS-release exactly one lock entry (the Ownership Handoff logical

@@ -12,15 +12,15 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::seams::installer_lock_store::{
     InstallerLockError, InstallerLockStore, LockEntry, LockFileIdentity, LockFileReport,
-    LockReleaseError, parse_lock_bytes, release_lock_entries_bytes, restore_lock_entries_bytes,
-    restore_lock_entry_bytes,
+    LockReleaseError, PendingLockCasState, parse_lock_bytes, release_lock_entries_bytes,
+    restore_lock_entries_bytes, restore_lock_entry_bytes,
 };
 
-static NEXT_LOCK_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+const LOCK_CAS_TEMP_NAME: &str = ".skill-lock.json.tmp";
+const LOCK_CAS_MARKER_NAME: &str = ".skill-lock.json.cas";
 
 /// Default lock location: `~/.agents/.skill-lock.json`.
 pub const DEFAULT_LOCK_RELATIVE_PATH: &str = ".agents/.skill-lock.json";
@@ -124,6 +124,27 @@ impl InstallerLockStore for SystemInstallerLockStore {
         })
     }
 
+    fn recover_pending_lock_cas(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        frozen_identity: Option<&LockFileIdentity>,
+        entries: &[LockEntry],
+    ) -> Result<PendingLockCasState, LockReleaseError> {
+        let (parent, final_name) = open_lock_parent(lock_path).map_err(|source| {
+            LockReleaseError::Io(format!("open {}: {source}", lock_path.display()))
+        })?;
+        lock_parent_exclusively(&parent, lock_path)?;
+        recover_pending_lock_cas_at(
+            &parent,
+            &final_name,
+            lock_path,
+            frozen_fingerprint,
+            frozen_identity,
+            entries,
+        )
+    }
+
     fn release_entry(
         &self,
         lock_path: &Path,
@@ -223,16 +244,12 @@ fn write_lock_atomically(
     // parent lock closes the check→exchange window for cooperating writers
     // instead of relying on an unlink/rename sequence.
     lock_parent_exclusively(&parent, lock_path)?;
-    let temporary_name = CString::new(format!(
-        ".skill-lock.json.tmp-{}-{}",
-        std::process::id(),
-        NEXT_LOCK_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ))
-    .map_err(|error| LockReleaseError::Io(format!("encode lock temp name: {error}")))?;
+    let temporary_name =
+        CString::new(LOCK_CAS_TEMP_NAME).expect("static lock temp name has no NUL");
     let temporary_path = lock_path
         .parent()
         .unwrap_or_else(|| Path::new("/"))
-        .join(std::ffi::OsStr::from_bytes(temporary_name.as_bytes()));
+        .join(LOCK_CAS_TEMP_NAME);
     let descriptor = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -250,7 +267,13 @@ fn write_lock_atomically(
     }
     // SAFETY: `openat` returned a new owned descriptor.
     let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
-    let temporary_identity = descriptor_identity(&descriptor, &temporary_path)?;
+    let temporary_identity = match descriptor_identity(&descriptor, &temporary_path) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(descriptor);
+            return Err(error);
+        }
+    };
     let mut file = fs::File::from(descriptor);
     if let Err(source) = file.write_all(bytes).and_then(|_| file.sync_all()) {
         drop(file);
@@ -266,6 +289,32 @@ fn write_lock_atomically(
         )));
     }
     drop(file);
+    let marker_name = CString::new(LOCK_CAS_MARKER_NAME).expect("static marker name has no NUL");
+    let marker_path = lock_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(LOCK_CAS_MARKER_NAME);
+    let marker_identity = match write_cas_marker(
+        &parent,
+        &marker_name,
+        &marker_path,
+        lock_path,
+        expected_identity,
+        expected_fingerprint,
+        &temporary_identity,
+        bytes,
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = unlink_temp(
+                &parent,
+                &temporary_name,
+                &temporary_path,
+                &temporary_identity,
+            );
+            return Err(error);
+        }
+    };
 
     if let Some(expected_identity) = expected_identity {
         let current_metadata = metadata_at_nofollow(&parent, &final_name, lock_path)
@@ -281,6 +330,7 @@ fn write_lock_atomically(
                 &temporary_path,
                 &temporary_identity,
             )?;
+            clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
             return Err(LockReleaseError::FingerprintChanged);
         }
         let status = unsafe {
@@ -300,6 +350,7 @@ fn write_lock_atomically(
                 &temporary_path,
                 &temporary_identity,
             )?;
+            clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
             return if matches!(
                 source.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::AlreadyExists
@@ -317,7 +368,7 @@ fn write_lock_atomically(
         let previous_snapshot = match previous {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) | Err(_) => {
-                return Err(LockReleaseError::Io(format!(
+                return Err(LockReleaseError::RecoveryRequired(format!(
                     "the pre-CAS lock claim is not a readable regular file: {}",
                     lock_path.display()
                 )));
@@ -334,6 +385,7 @@ fn write_lock_atomically(
                 &previous_snapshot.identity,
             )?;
             sync_lock_parent(&parent, lock_path)?;
+            clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
             return Ok(());
         }
 
@@ -360,6 +412,7 @@ fn write_lock_atomically(
                     &temporary_identity,
                 )?;
                 sync_lock_parent(&parent, lock_path)?;
+                clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
                 return Err(LockReleaseError::FingerprintChanged);
             }
 
@@ -368,7 +421,7 @@ fn write_lock_atomically(
             });
             if final_is_our_temp {
                 if temporary_snapshot.is_none() {
-                    return Err(LockReleaseError::Io(format!(
+                    return Err(LockReleaseError::RecoveryRequired(format!(
                         "the lock compensation slot vanished: {}",
                         lock_path.display()
                     )));
@@ -380,13 +433,13 @@ fn write_lock_atomically(
                         snapshot.identity == temporary_identity && snapshot.bytes == bytes
                     })
                 {
-                    return Err(LockReleaseError::Io(format!(
+                    return Err(LockReleaseError::RecoveryRequired(format!(
                         "the lock changed while the CAS rollback was in progress: {}",
                         lock_path.display()
                     )));
                 }
             } else {
-                return Err(LockReleaseError::Io(format!(
+                return Err(LockReleaseError::RecoveryRequired(format!(
                     "the lock changed while the CAS rollback was in progress: {}",
                     lock_path.display()
                 )));
@@ -402,7 +455,7 @@ fn write_lock_atomically(
                 )
             };
             if restore_status != 0 {
-                return Err(LockReleaseError::Io(format!(
+                return Err(LockReleaseError::RecoveryRequired(format!(
                     "restore concurrent lock claim {}: {}",
                     lock_path.display(),
                     std::io::Error::last_os_error()
@@ -424,11 +477,12 @@ fn write_lock_atomically(
                     &temporary_identity,
                 )?;
                 sync_lock_parent(&parent, lock_path)?;
+                clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
                 return Err(LockReleaseError::FingerprintChanged);
             }
             expected_final = after_final;
         }
-        Err(LockReleaseError::Io(format!(
+        Err(LockReleaseError::RecoveryRequired(format!(
             "the lock changed repeatedly while the CAS rollback was in progress: {}",
             lock_path.display()
         )))
@@ -450,12 +504,14 @@ fn write_lock_atomically(
                 &temporary_path,
                 &temporary_identity,
             )?;
+            clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)?;
             return Err(LockReleaseError::Io(format!(
                 "publish {}: {source}",
                 lock_path.display()
             )));
         }
-        sync_lock_parent(&parent, lock_path)
+        sync_lock_parent(&parent, lock_path)?;
+        clear_cas_marker(&parent, &marker_name, &marker_path, &marker_identity)
     }
 }
 
@@ -468,6 +524,88 @@ struct LockFileSnapshot {
 fn lock_fingerprint(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_cas_marker(
+    parent: &OwnedFd,
+    marker_name: &CString,
+    marker_path: &Path,
+    lock_path: &Path,
+    expected_identity: Option<&LockFileIdentity>,
+    expected_fingerprint: Option<&str>,
+    rewritten_identity: &LockFileIdentity,
+    rewritten_bytes: &[u8],
+) -> Result<LockFileIdentity, LockReleaseError> {
+    let marker = serde_json::json!({
+        "version": 1,
+        "temporaryName": LOCK_CAS_TEMP_NAME,
+        "expectedFingerprint": expected_fingerprint,
+        "expectedIdentity": expected_identity.map(|identity| serde_json::json!({
+            "device": identity.device,
+            "inode": identity.inode,
+        })),
+        "rewrittenFingerprint": lock_fingerprint(rewritten_bytes),
+        "rewrittenIdentity": {
+            "device": rewritten_identity.device,
+            "inode": rewritten_identity.inode,
+        },
+    });
+    let bytes = serde_json::to_vec(&marker).map_err(|error| {
+        LockReleaseError::Invalid(format!("serialize lock CAS marker: {error}"))
+    })?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            marker_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(LockReleaseError::Io(format!(
+            "open CAS marker {} for {}: {}",
+            marker_path.display(),
+            lock_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let identity = descriptor_identity(&descriptor, marker_path)?;
+    let mut marker_file = fs::File::from(descriptor);
+    marker_file
+        .write_all(&bytes)
+        .and_then(|()| marker_file.sync_all())
+        .map_err(|source| {
+            LockReleaseError::Io(format!(
+                "write CAS marker {}: {source}",
+                marker_path.display()
+            ))
+        })?;
+    drop(marker_file);
+    sync_lock_parent(parent, lock_path)?;
+    Ok(identity)
+}
+
+fn clear_cas_marker(
+    parent: &OwnedFd,
+    marker_name: &CString,
+    marker_path: &Path,
+    marker_identity: &LockFileIdentity,
+) -> Result<(), LockReleaseError> {
+    unlink_temp(parent, marker_name, marker_path, marker_identity).map_err(|error| {
+        LockReleaseError::RecoveryRequired(format!(
+            "remove lock CAS marker {}: {error}",
+            marker_path.display()
+        ))
+    })?;
+    sync_lock_parent(parent, marker_path).map_err(|error| {
+        LockReleaseError::RecoveryRequired(format!(
+            "sync lock CAS marker parent {}: {error}",
+            marker_path.display()
+        ))
+    })
 }
 
 fn read_lock_snapshot(path: &Path) -> Result<Option<LockFileSnapshot>, InstallerLockError> {
@@ -652,6 +790,264 @@ fn read_regular_at(
     Ok(Some(LockFileSnapshot { bytes, identity }))
 }
 
+fn lock_snapshot_has_claims(
+    snapshot: &LockFileSnapshot,
+    frozen_fingerprint: &str,
+    frozen_identity: Option<&LockFileIdentity>,
+    entries: &[LockEntry],
+) -> bool {
+    snapshot
+        .identity
+        .eq(frozen_identity.unwrap_or(&snapshot.identity))
+        && lock_fingerprint(&snapshot.bytes) == frozen_fingerprint
+        && !entries.is_empty()
+        && release_lock_entries_bytes(&snapshot.bytes, frozen_fingerprint, entries).is_ok()
+}
+
+fn lock_snapshot_matches_marker(
+    snapshot: Option<&LockFileSnapshot>,
+    fingerprint: &str,
+    identity: &LockFileIdentity,
+) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        lock_fingerprint(&snapshot.bytes) == fingerprint && snapshot.identity == *identity
+    })
+}
+
+fn marker_identity(
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<LockFileIdentity, LockReleaseError> {
+    let object = value
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| LockReleaseError::Invalid(format!("lock CAS marker lacks {key}")))?;
+    Ok(LockFileIdentity {
+        device: object
+            .get("device")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                LockReleaseError::Invalid(format!("lock CAS marker lacks {key}.device"))
+            })?,
+        inode: object
+            .get("inode")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                LockReleaseError::Invalid(format!("lock CAS marker lacks {key}.inode"))
+            })?,
+    })
+}
+
+fn recover_pending_lock_cas_at(
+    parent: &OwnedFd,
+    final_name: &CString,
+    lock_path: &Path,
+    frozen_fingerprint: &str,
+    frozen_identity: Option<&LockFileIdentity>,
+    entries: &[LockEntry],
+) -> Result<PendingLockCasState, LockReleaseError> {
+    let marker_name = CString::new(LOCK_CAS_MARKER_NAME).expect("static marker name has no NUL");
+    let temporary_name = CString::new(LOCK_CAS_TEMP_NAME).expect("static temp name has no NUL");
+    let marker_path = lock_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(LOCK_CAS_MARKER_NAME);
+    let Some(marker_snapshot) =
+        read_regular_at(parent, &marker_name, &marker_path).map_err(|source| {
+            LockReleaseError::Io(format!("read {}: {source}", marker_path.display()))
+        })?
+    else {
+        return Ok(PendingLockCasState::None);
+    };
+    let marker: serde_json::Value = serde_json::from_slice(&marker_snapshot.bytes)
+        .map_err(|error| LockReleaseError::Invalid(format!("parse lock CAS marker: {error}")))?;
+    if marker.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || marker
+            .get("temporaryName")
+            .and_then(serde_json::Value::as_str)
+            != Some(LOCK_CAS_TEMP_NAME)
+    {
+        return Err(LockReleaseError::Invalid(
+            "the lock CAS marker has an unsupported shape".into(),
+        ));
+    }
+    let marker_fingerprint = marker
+        .get("expectedFingerprint")
+        .and_then(serde_json::Value::as_str);
+    if marker_fingerprint != Some(frozen_fingerprint) {
+        return Err(LockReleaseError::RecoveryRequired(
+            "the pending lock CAS belongs to a different frozen fingerprint".into(),
+        ));
+    }
+    let marker_expected_identity = marker
+        .get("expectedIdentity")
+        .filter(|value| !value.is_null())
+        .map(|_| marker_identity(&marker, "expectedIdentity"))
+        .transpose()?;
+    if marker_expected_identity.as_ref() != frozen_identity {
+        return Err(LockReleaseError::RecoveryRequired(
+            "the pending lock CAS belongs to a different frozen identity".into(),
+        ));
+    }
+    let rewritten_fingerprint = marker
+        .get("rewrittenFingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            LockReleaseError::Invalid("lock CAS marker lacks rewrittenFingerprint".into())
+        })?;
+    let rewritten_identity = marker_identity(&marker, "rewrittenIdentity")?;
+    let temporary_path = lock_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(LOCK_CAS_TEMP_NAME);
+    let final_snapshot = read_regular_at(parent, final_name, lock_path).map_err(|source| {
+        LockReleaseError::Io(format!("read {}: {source}", lock_path.display()))
+    })?;
+    let temporary_snapshot =
+        read_regular_at(parent, &temporary_name, &temporary_path).map_err(|source| {
+            LockReleaseError::Io(format!("read {}: {source}", temporary_path.display()))
+        })?;
+    let final_is_rewritten = lock_snapshot_matches_marker(
+        final_snapshot.as_ref(),
+        rewritten_fingerprint,
+        &rewritten_identity,
+    );
+    let final_is_old = final_snapshot.as_ref().is_some_and(|snapshot| {
+        lock_snapshot_has_claims(snapshot, frozen_fingerprint, frozen_identity, entries)
+    });
+    let temporary_is_rewritten = lock_snapshot_matches_marker(
+        temporary_snapshot.as_ref(),
+        rewritten_fingerprint,
+        &rewritten_identity,
+    );
+    let temporary_is_old = temporary_snapshot.as_ref().is_some_and(|snapshot| {
+        lock_snapshot_has_claims(snapshot, frozen_fingerprint, frozen_identity, entries)
+    });
+
+    if temporary_is_old {
+        let old_identity = temporary_snapshot
+            .as_ref()
+            .expect("temporary_is_old implies a snapshot")
+            .identity;
+        if final_is_rewritten {
+            unlink_temp(parent, &temporary_name, &temporary_path, &old_identity)?;
+            clear_cas_marker(
+                parent,
+                &marker_name,
+                &marker_path,
+                &marker_snapshot.identity,
+            )?;
+            return Ok(PendingLockCasState::Released);
+        }
+        if final_is_old {
+            unlink_temp(parent, &temporary_name, &temporary_path, &old_identity)?;
+            clear_cas_marker(
+                parent,
+                &marker_name,
+                &marker_path,
+                &marker_snapshot.identity,
+            )?;
+            return Ok(PendingLockCasState::None);
+        }
+        return Err(LockReleaseError::RecoveryRequired(
+            "the pending lock CAS has an unrecognized final lock state".into(),
+        ));
+    }
+
+    if temporary_is_rewritten {
+        if final_is_old {
+            unlink_temp(
+                parent,
+                &temporary_name,
+                &temporary_path,
+                &rewritten_identity,
+            )?;
+            clear_cas_marker(
+                parent,
+                &marker_name,
+                &marker_path,
+                &marker_snapshot.identity,
+            )?;
+            return Ok(PendingLockCasState::None);
+        }
+        if final_snapshot.is_some() && !final_is_rewritten {
+            unlink_temp(
+                parent,
+                &temporary_name,
+                &temporary_path,
+                &rewritten_identity,
+            )?;
+            clear_cas_marker(
+                parent,
+                &marker_name,
+                &marker_path,
+                &marker_snapshot.identity,
+            )?;
+            return Ok(PendingLockCasState::Present);
+        }
+        return Err(LockReleaseError::RecoveryRequired(
+            "the pending lock CAS lost its live lock path".into(),
+        ));
+    }
+
+    if final_is_rewritten {
+        let status = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                temporary_name.as_ptr(),
+                parent.as_raw_fd(),
+                final_name.as_ptr(),
+                libc::RENAME_SWAP,
+            )
+        };
+        if status != 0 {
+            return Err(LockReleaseError::RecoveryRequired(format!(
+                "restore pending external lock claim {}: {}",
+                lock_path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let restored =
+            read_regular_at(parent, &temporary_name, &temporary_path).map_err(|source| {
+                LockReleaseError::RecoveryRequired(format!(
+                    "read restored lock CAS temporary {}: {source}",
+                    temporary_path.display()
+                ))
+            })?;
+        if !lock_snapshot_matches_marker(
+            restored.as_ref(),
+            rewritten_fingerprint,
+            &rewritten_identity,
+        ) {
+            return Err(LockReleaseError::RecoveryRequired(
+                "the pending lock CAS could not re-identify its rewritten bytes".into(),
+            ));
+        }
+        unlink_temp(
+            parent,
+            &temporary_name,
+            &temporary_path,
+            &rewritten_identity,
+        )?;
+        clear_cas_marker(
+            parent,
+            &marker_name,
+            &marker_path,
+            &marker_snapshot.identity,
+        )?;
+        return Ok(PendingLockCasState::Present);
+    }
+
+    if final_is_old && temporary_snapshot.is_some() {
+        return Err(LockReleaseError::RecoveryRequired(
+            "the pending lock CAS has an external temporary claim beside the old lock".into(),
+        ));
+    }
+    Err(LockReleaseError::RecoveryRequired(
+        "the pending lock CAS has ambiguous final and temporary entries".into(),
+    ))
+}
+
 fn unlink_temp(
     parent: &OwnedFd,
     name: &CString,
@@ -721,6 +1117,8 @@ fn lock_parent_shared(parent: &OwnedFd, lock_path: &Path) -> Result<(), Installe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seams::installer_lock_store::release_lock_entry_bytes;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn discover_returns_nothing_when_no_lock_exists() {
@@ -832,5 +1230,146 @@ mod tests {
 
         assert!(matches!(result, Err(LockReleaseError::FingerprintChanged)));
         assert_eq!(fs::read(&lock_path).expect("read lock"), changed);
+    }
+
+    #[test]
+    fn recovery_finishes_a_crashed_successful_lock_exchange() {
+        let root = tempfile::tempdir().expect("temporary home");
+        let lock_path = root.path().join(DEFAULT_LOCK_RELATIVE_PATH);
+        fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
+        let original = br#"{"version":3,"skills":{"dupe":{"sourceType":"github","source":"acme/dupe","sourceUrl":"https://github.com/acme/dupe","skillPath":"skills/dupe","skillFolderHash":"0123456789abcdef0123456789abcdef01234567"}}}"#;
+        fs::write(&lock_path, original).expect("write original lock");
+        let store = SystemInstallerLockStore::new(root.path().to_path_buf());
+        let report = store
+            .discover()
+            .expect("discover")
+            .into_iter()
+            .next()
+            .expect("lock report");
+        let old_identity = store
+            .observed_identity(&lock_path, &report.fingerprint)
+            .expect("old lock identity");
+        let rewritten = release_lock_entry_bytes(original, &report.fingerprint, &report.entries[0])
+            .expect("rewrite lock bytes");
+        let temporary = lock_path
+            .parent()
+            .expect("lock parent")
+            .join(LOCK_CAS_TEMP_NAME);
+        fs::write(&temporary, &rewritten).expect("write rewritten temporary");
+        let rewritten_metadata = fs::symlink_metadata(&temporary).expect("rewritten metadata");
+        let rewritten_identity = LockFileIdentity {
+            device: rewritten_metadata.dev(),
+            inode: rewritten_metadata.ino(),
+        };
+        let backup = root.path().join("original-lock");
+        fs::rename(&lock_path, &backup).expect("move original lock aside");
+        fs::rename(&temporary, &lock_path).expect("publish rewritten lock");
+        fs::rename(&backup, &temporary).expect("leave old lock in CAS slot");
+        let (parent, _) = open_lock_parent(&lock_path).expect("open lock parent");
+        let marker_name = CString::new(LOCK_CAS_MARKER_NAME).expect("marker name");
+        let marker_path = lock_path.parent().unwrap().join(LOCK_CAS_MARKER_NAME);
+        let marker_identity = write_cas_marker(
+            &parent,
+            &marker_name,
+            &marker_path,
+            &lock_path,
+            Some(&old_identity),
+            Some(&report.fingerprint),
+            &rewritten_identity,
+            &rewritten,
+        )
+        .expect("write CAS marker");
+        drop(parent);
+        assert_ne!(marker_identity.inode, 0);
+
+        let state = store
+            .recover_pending_lock_cas(
+                &lock_path,
+                &report.fingerprint,
+                Some(&old_identity),
+                &report.entries,
+            )
+            .expect("recover pending CAS");
+
+        assert_eq!(state, PendingLockCasState::Released);
+        assert_eq!(
+            fs::read(&lock_path).expect("read recovered lock"),
+            rewritten
+        );
+        assert!(!temporary.exists(), "recovered CAS temp must be removed");
+        assert!(
+            !marker_path.exists(),
+            "recovered CAS marker must be removed"
+        );
+    }
+
+    #[test]
+    fn recovery_restores_an_external_claim_from_a_crashed_lock_exchange() {
+        let root = tempfile::tempdir().expect("temporary home");
+        let lock_path = root.path().join(DEFAULT_LOCK_RELATIVE_PATH);
+        fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
+        let original = br#"{"version":3,"skills":{"dupe":{"sourceType":"github","source":"acme/dupe","sourceUrl":"https://github.com/acme/dupe","skillPath":"skills/dupe","skillFolderHash":"0123456789abcdef0123456789abcdef01234567"}}}"#;
+        let external = br#"{"version":3,"skills":{"new-claim":{"sourceType":"github","source":"acme/new-claim","sourceUrl":"https://github.com/acme/new-claim","skillPath":"skills/new-claim","skillFolderHash":"0123456789abcdef0123456789abcdef01234567"}}}"#;
+        fs::write(&lock_path, original).expect("write original lock");
+        let store = SystemInstallerLockStore::new(root.path().to_path_buf());
+        let report = store
+            .discover()
+            .expect("discover")
+            .into_iter()
+            .next()
+            .expect("lock report");
+        let old_identity = store
+            .observed_identity(&lock_path, &report.fingerprint)
+            .expect("old lock identity");
+        let rewritten = release_lock_entry_bytes(original, &report.fingerprint, &report.entries[0])
+            .expect("rewrite lock bytes");
+        let temporary = lock_path.parent().unwrap().join(LOCK_CAS_TEMP_NAME);
+        fs::write(&temporary, external).expect("write external temporary claim");
+        let external_metadata = fs::symlink_metadata(&temporary).expect("external metadata");
+        let external_identity = LockFileIdentity {
+            device: external_metadata.dev(),
+            inode: external_metadata.ino(),
+        };
+        let backup = root.path().join("original-lock");
+        fs::rename(&lock_path, &backup).expect("move original lock aside");
+        fs::write(&lock_path, &rewritten).expect("leave rewritten lock live");
+        let (parent, _) = open_lock_parent(&lock_path).expect("open lock parent");
+        let marker_name = CString::new(LOCK_CAS_MARKER_NAME).expect("marker name");
+        let marker_path = lock_path.parent().unwrap().join(LOCK_CAS_MARKER_NAME);
+        let _marker_identity = write_cas_marker(
+            &parent,
+            &marker_name,
+            &marker_path,
+            &lock_path,
+            Some(&old_identity),
+            Some(&report.fingerprint),
+            &LockFileIdentity {
+                device: fs::symlink_metadata(&lock_path).unwrap().dev(),
+                inode: fs::symlink_metadata(&lock_path).unwrap().ino(),
+            },
+            &rewritten,
+        )
+        .expect("write CAS marker");
+        drop(parent);
+
+        // The temporary file is the external claim and the public path is
+        // the frozen rewrite: exactly the ambiguous post-exchange state.
+        let state = store
+            .recover_pending_lock_cas(
+                &lock_path,
+                &report.fingerprint,
+                Some(&old_identity),
+                &report.entries,
+            )
+            .expect("recover external claim");
+
+        assert_eq!(state, PendingLockCasState::Present);
+        assert_eq!(
+            fs::read(&lock_path).expect("read restored external lock"),
+            external
+        );
+        assert!(!temporary.exists());
+        assert!(!marker_path.exists());
+        assert_ne!(external_identity.inode, 0);
     }
 }
