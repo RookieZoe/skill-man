@@ -57,9 +57,9 @@ use crate::seams::agent_configuration_store::{
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
-    ActivationEntrySnapshot, ActivationReplacePhase, EnableCellAction, EnableJournal,
-    EnableJournalCell, EvidenceChainHop, FileSystem, FileSystemError, OccupantKind,
-    OccupantSnapshot, ProjectTargetFault, StagedEntryKind,
+    ActivationEntrySnapshot, ActivationReplacePhase, DirectoryFingerprint, EnableCellAction,
+    EnableJournal, EnableJournalCell, EvidenceChainHop, FileSystem, FileSystemError, OccupantKind,
+    OccupantSnapshot, ProjectTargetFault, ProjectTargetResolution, StagedEntryKind,
 };
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
@@ -204,6 +204,9 @@ pub enum CellResolution {
 pub struct ProjectRootEvidence {
     pub canonical_path: PathBuf,
     pub identity: String,
+    /// All configured project-directory walks frozen by this plan. This is
+    /// evidence only; the apply path re-runs each walk before writing.
+    pub hop_evidence: Vec<ProjectHopEvidence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,7 +351,15 @@ struct PlannedCell {
     frozen_source_kind: SourceKind,
     frozen_final_entity: PathBuf,
     frozen_availability: TargetGroupAvailability,
+    frozen_target: Option<DirectoryFingerprint>,
+    frozen_project_targets: Vec<FrozenProjectTarget>,
     before_desired: bool,
+}
+
+#[derive(Clone)]
+struct FrozenProjectTarget {
+    configured_relative_path: PathBuf,
+    resolution: ProjectTargetResolution,
 }
 
 #[derive(Clone)]
@@ -360,6 +371,7 @@ struct PlannedBatch {
     gate_generation: u64,
     catalog_generation: u64,
     agent_generation: u64,
+    project_root_identity: Option<DirectoryFingerprint>,
     created_at_millis: u128,
     cells: Vec<PlannedCell>,
 }
@@ -666,6 +678,7 @@ impl EnableService {
             agent_id: String,
             agent_name: String,
             configured_dir: PathBuf,
+            resolution: ProjectTargetResolution,
             resolved_container: PathBuf,
             hops: Vec<EvidenceChainHop>,
             create_steps: Vec<PathBuf>,
@@ -696,7 +709,7 @@ impl EnableService {
             let walked = self
                 .filesystem
                 .resolve_project_target(&canonical_project_root, &configured_dir)?;
-            let (fault, detail) = match walked.fault {
+            let (fault, detail) = match walked.fault.as_ref() {
                 Some(ProjectTargetFault::OutsideProjectRoot) => {
                     (Some(CellBlockedReason::OutsideProjectRoot), None)
                 }
@@ -709,15 +722,17 @@ impl EnableService {
                 Some(ProjectTargetFault::TargetNotDirectory) => {
                     (Some(CellBlockedReason::TargetNotDirectory), None)
                 }
-                Some(ProjectTargetFault::TargetUnavailable { diagnostic }) => {
-                    (Some(CellBlockedReason::TargetUnavailable), Some(diagnostic))
-                }
+                Some(ProjectTargetFault::TargetUnavailable { diagnostic }) => (
+                    Some(CellBlockedReason::TargetUnavailable),
+                    Some(diagnostic.clone()),
+                ),
                 None => (None, None),
             };
             resolved_agents.push(AgentResolution {
                 agent_id: agent.agent_id.clone(),
                 agent_name: agent.name.clone(),
                 configured_dir,
+                resolution: walked.clone(),
                 resolved_container: walked.resolved_container,
                 hops: walked.hops,
                 create_steps: walked.create_steps,
@@ -733,6 +748,8 @@ impl EnableService {
             affected_agent_names: Vec<String>,
             create_steps: Vec<PathBuf>,
             hop_evidences: Vec<ProjectHopEvidence>,
+            target_resolutions: Vec<FrozenProjectTarget>,
+            target_identity: Option<DirectoryFingerprint>,
             fault: Option<CellBlockedReason>,
             detail: Option<String>,
         }
@@ -742,7 +759,7 @@ impl EnableService {
             let hop_evidence = ProjectHopEvidence {
                 agent_id: resolved.agent_id.clone(),
                 agent_name: resolved.agent_name.clone(),
-                configured_relative_path: resolved.configured_dir,
+                configured_relative_path: resolved.configured_dir.clone(),
                 resolved_container: resolved.resolved_container.clone(),
                 hops: resolved.hops,
             };
@@ -754,6 +771,10 @@ impl EnableService {
                 existing.affected_agent_ids.push(resolved.agent_id);
                 existing.affected_agent_names.push(resolved.agent_name);
                 existing.hop_evidences.push(hop_evidence);
+                existing.target_resolutions.push(FrozenProjectTarget {
+                    configured_relative_path: resolved.configured_dir,
+                    resolution: resolved.resolution,
+                });
                 for step in resolved.create_steps {
                     if !existing.create_steps.contains(&step) {
                         existing.create_steps.push(step);
@@ -773,9 +794,29 @@ impl EnableService {
                     affected_agent_names: vec![resolved.agent_name],
                     create_steps: resolved.create_steps,
                     hop_evidences: vec![hop_evidence],
+                    target_resolutions: vec![FrozenProjectTarget {
+                        configured_relative_path: resolved.configured_dir,
+                        resolution: resolved.resolution,
+                    }],
+                    target_identity: None,
                     fault: resolved.fault,
                     detail: resolved.detail,
                 });
+            }
+        }
+
+        for group in &mut groups {
+            if group.fault.is_none() && group.create_steps.is_empty() {
+                group.target_identity = Some(
+                    self.filesystem
+                        .directory_fingerprint(&group.resolved_container)
+                        .map_err(|error| {
+                            EnableError::Validation(format!(
+                                "failed to fingerprint resolved project target '{}': {error}",
+                                group.resolved_container.display()
+                            ))
+                        })?,
+                );
             }
         }
 
@@ -906,18 +947,25 @@ impl EnableService {
                     frozen_source_kind: skill.summary.source_kind,
                     frozen_final_entity: final_entity,
                     frozen_availability: TargetGroupAvailability::Available,
+                    frozen_target: group.target_identity.clone(),
+                    frozen_project_targets: group.target_resolutions.clone(),
                     before_desired: false,
                 });
             }
         }
 
         resolve_batch_contention(&mut cells, cell_resolutions);
-        self.build_project_plan(canonical_project_root, cells, write_context)
+        let hop_evidence = groups
+            .iter()
+            .flat_map(|group| group.hop_evidences.clone())
+            .collect::<Vec<_>>();
+        self.build_project_plan(canonical_project_root, hop_evidence, cells, write_context)
     }
 
     fn build_project_plan(
         &self,
         canonical_project_root: PathBuf,
+        hop_evidence: Vec<ProjectHopEvidence>,
         cells: Vec<PlannedCell>,
         write_context: HomeWriteContext,
     ) -> Result<EnablePlan, EnableError> {
@@ -945,6 +993,7 @@ impl EnableService {
         let project_root = ProjectRootEvidence {
             canonical_path: canonical_project_root.clone(),
             identity,
+            hop_evidence,
         };
         let batch = PlannedBatch {
             operation_id: self.new_id()?,
@@ -954,6 +1003,7 @@ impl EnableService {
             gate_generation,
             catalog_generation,
             agent_generation,
+            project_root_identity: Some(fp),
             created_at_millis: self.clock.monotonic_millis(),
             cells,
         };
@@ -1004,6 +1054,7 @@ impl EnableService {
             gate_generation,
             catalog_generation,
             agent_generation,
+            project_root_identity: None,
             created_at_millis: self.clock.monotonic_millis(),
             cells,
         };
@@ -1053,7 +1104,33 @@ impl EnableService {
                     "the Target group '{target_group_id}' does not exist"
                 ))
             })?;
-        let entry_path = root.configured_path.join(&skill.summary.directory_name);
+        if !snapshot
+            .configurations
+            .iter()
+            .any(|configuration| references_target(configuration, root))
+        {
+            return Err(EnableError::Validation(format!(
+                "Global Enable target '{target_group_id}' is not an Agent Activation Target"
+            )));
+        }
+        let probe = self.agent_fs.probe_root(&root.configured_path)?;
+        let frozen_target = match &probe {
+            AgentRootProbe::Present { canonical_path } => {
+                let fingerprint = self
+                    .filesystem
+                    .directory_fingerprint(&root.configured_path)?;
+                if fingerprint.canonical_path != canonical_path.clone() {
+                    return Err(EnableError::PlanStale);
+                }
+                Some(fingerprint)
+            }
+            AgentRootProbe::Absent | AgentRootProbe::Unavailable { .. } => None,
+        };
+        let target_path = frozen_target
+            .as_ref()
+            .map(|target| target.canonical_path.clone())
+            .unwrap_or_else(|| root.configured_path.clone());
+        let entry_path = target_path.join(&skill.summary.directory_name);
         let final_entity = PathBuf::from(skill.final_entity_path.clone());
         let cell_key = format!("{}|{}", skill_id.0, root.root_id);
         let directory_identity_key = self
@@ -1085,7 +1162,6 @@ impl EnableService {
             EnableAction::Disable => GateCode::Ok,
         };
 
-        let probe = self.agent_fs.probe_root(&root.configured_path)?;
         let availability = match probe {
             AgentRootProbe::Present { .. } => TargetGroupAvailability::Available,
             AgentRootProbe::Absent => TargetGroupAvailability::Absent,
@@ -1133,7 +1209,7 @@ impl EnableService {
             directory_name: skill.summary.directory_name.clone(),
             directory_identity_key: directory_identity_key.clone(),
             target_root_id: root.root_id.clone(),
-            target_path: root.configured_path.clone(),
+            target_path,
             entry_path,
             final_entity_path: final_entity.clone(),
             action,
@@ -1155,6 +1231,8 @@ impl EnableService {
             frozen_source_kind: skill.summary.source_kind,
             frozen_final_entity: final_entity,
             frozen_availability: availability,
+            frozen_target,
+            frozen_project_targets: Vec::new(),
             before_desired,
             cell,
         })
@@ -1318,6 +1396,7 @@ impl EnableService {
                     index,
                     &library_root,
                     batch.scope,
+                    batch.project_root_identity.as_ref(),
                 ) {
                     Ok(version) => {
                         snapshot_version = version;
@@ -1460,6 +1539,7 @@ impl EnableService {
                     directory_identity_key: planned.cell.directory_identity_key.clone(),
                     entry_path: planned.cell.entry_path.clone(),
                     target_path: planned.cell.final_entity_path.clone(),
+                    target_parent: planned.frozen_target.clone(),
                     after_desired: grid_after_desired(planned),
                     before_desired: planned.before_desired,
                     backup_path: backup_path_for(batch, index, library_root),
@@ -1492,12 +1572,42 @@ impl EnableService {
                 .canonical_project_root
                 .as_ref()
                 .ok_or(EnableError::PlanStale)?;
-            let _fp = match self.filesystem.directory_fingerprint(canonical_root) {
-                Ok(fp) => fp,
-                Err(_) => return Err(EnableError::PlanStale),
-            };
+            let expected_root = batch
+                .project_root_identity
+                .as_ref()
+                .ok_or(EnableError::PlanStale)?;
+            let actual_root = self
+                .filesystem
+                .directory_fingerprint(canonical_root)
+                .map_err(|_| EnableError::PlanStale)?;
+            if &actual_root != expected_root {
+                return Err(EnableError::PlanStale);
+            }
             for planned in &batch.cells {
                 let cell = &planned.cell;
+                for frozen_target in &planned.frozen_project_targets {
+                    let current = self
+                        .filesystem
+                        .resolve_project_target(
+                            canonical_root,
+                            &frozen_target.configured_relative_path,
+                        )
+                        .map_err(|_| EnableError::PlanStale)?;
+                    if current != frozen_target.resolution
+                        || current.resolved_container != cell.target_path
+                    {
+                        return Err(EnableError::PlanStale);
+                    }
+                }
+                if let Some(expected_target) = &planned.frozen_target {
+                    let actual_target = self
+                        .filesystem
+                        .directory_fingerprint(&cell.target_path)
+                        .map_err(|_| EnableError::PlanStale)?;
+                    if &actual_target != expected_target {
+                        return Err(EnableError::PlanStale);
+                    }
+                }
                 let skill = self
                     .catalog
                     .inspect(&cell.skill_id)?
@@ -1544,19 +1654,31 @@ impl EnableService {
             {
                 return Err(EnableError::PlanStale);
             }
-            let root = self
-                .agent_store
-                .agent_configuration_snapshot()?
+            let root = agent_snapshot
                 .roots
-                .into_iter()
+                .iter()
                 .find(|root| root.root_id == cell.target_root_id)
                 .ok_or(EnableError::PlanStale)?;
-            if root.configured_path != cell.target_path {
+            if !agent_snapshot
+                .configurations
+                .iter()
+                .any(|configuration| references_target(configuration, &root))
+            {
                 return Err(EnableError::PlanStale);
             }
-            match self.agent_fs.probe_root(&cell.target_path)? {
-                AgentRootProbe::Present { .. }
-                    if planned.frozen_availability == TargetGroupAvailability::Available => {}
+            match self.agent_fs.probe_root(&root.configured_path)? {
+                AgentRootProbe::Present { canonical_path }
+                    if planned.frozen_availability == TargetGroupAvailability::Available
+                        && planned.frozen_target.as_ref().is_some_and(|target| {
+                            target.canonical_path == canonical_path
+                                && target.canonical_path == cell.target_path
+                        })
+                        && self
+                            .filesystem
+                            .directory_fingerprint(&root.configured_path)
+                            .is_ok_and(|actual| {
+                                planned.frozen_target.as_ref() == Some(&actual)
+                            }) => {}
                 AgentRootProbe::Absent
                     if planned.frozen_availability == TargetGroupAvailability::Absent => {}
                 AgentRootProbe::Unavailable { .. }
@@ -1614,22 +1736,23 @@ impl EnableService {
         index: usize,
         library_root: &Path,
         scope: &str,
+        project_root_identity: Option<&DirectoryFingerprint>,
     ) -> Result<u64, EnableError> {
         let cell = &planned.cell;
         if scope == "project" {
-            self.filesystem.ensure_directory_tree(&cell.target_path)?;
             match effective_action(planned) {
                 EnableCellAction::Enable | EnableCellAction::Repair => {
-                    if !matches!(
-                        self.filesystem.activation_snapshot(&cell.entry_path)?,
-                        ActivationEntrySnapshot::Missing
-                    ) {
-                        return Err(EnableError::CellConflict(
-                            "the entry is no longer missing".into(),
-                        ));
-                    }
-                    self.filesystem
-                        .create_activation(&cell.final_entity_path, &cell.entry_path)?;
+                    let project_root_identity =
+                        project_root_identity.ok_or(EnableError::PlanStale)?;
+                    let target_identity = self.filesystem.create_project_activation(
+                        project_root_identity,
+                        &cell.target_path,
+                        &cell.create_steps,
+                        &cell.entry_path,
+                        &cell.final_entity_path,
+                        planned.frozen_target.as_ref(),
+                    )?;
+                    journal.cells[index].target_parent = Some(target_identity);
                     journal.cells[index].phase = ActivationReplacePhase::Committed;
                     journal.cells[index].after_desired = true;
                     self.filesystem
@@ -1651,14 +1774,28 @@ impl EnableService {
                             "the occupant changed before the replace".into(),
                         ));
                     }
-                    self.filesystem.move_occupant_to_backup(
+                    let target_parent = planned
+                        .frozen_target
+                        .as_ref()
+                        .ok_or(EnableError::PlanStale)?;
+                    self.filesystem.move_occupant_to_backup_nofollow(
                         &cell.entry_path,
                         &backup_path,
                         library_root,
                         &occupant,
+                        target_parent,
                     )?;
-                    self.filesystem
-                        .create_activation(&cell.final_entity_path, &cell.entry_path)?;
+                    let project_root_identity =
+                        project_root_identity.ok_or(EnableError::PlanStale)?;
+                    let target_identity = self.filesystem.create_project_activation(
+                        project_root_identity,
+                        &cell.target_path,
+                        &cell.create_steps,
+                        &cell.entry_path,
+                        &cell.final_entity_path,
+                        Some(target_parent),
+                    )?;
+                    journal.cells[index].target_parent = Some(target_identity);
                     journal.cells[index].phase = ActivationReplacePhase::Committed;
                     journal.cells[index].after_desired = true;
                     self.filesystem
@@ -1696,17 +1833,26 @@ impl EnableService {
                         "the entry is no longer missing".into(),
                     ));
                 }
-                self.filesystem
-                    .create_activation(&cell.final_entity_path, &cell.entry_path)?;
+                let target_parent = planned
+                    .frozen_target
+                    .as_ref()
+                    .ok_or(EnableError::PlanStale)?;
+                self.filesystem.create_activation_nofollow(
+                    &cell.final_entity_path,
+                    &cell.entry_path,
+                    target_parent,
+                )?;
                 journal.cells[index].phase = ActivationReplacePhase::Committed;
                 if cell.action == EnableAction::Enable {
                     journal.cells[index].after_desired = true;
                     let version = match self.store.write_activation_cells(&[write_owner]) {
                         Ok(version) => version,
                         Err(error) => {
-                            if let Err(compensation) =
-                                self.compensate_create(&cell.entry_path, &cell.final_entity_path)
-                            {
+                            if let Err(compensation) = self.compensate_create(
+                                &cell.entry_path,
+                                &cell.final_entity_path,
+                                target_parent,
+                            ) {
                                 journal.cells[index].phase = ActivationReplacePhase::Applying;
                                 self.filesystem
                                     .write_enable_journal(library_root, journal)?;
@@ -1739,7 +1885,15 @@ impl EnableService {
                     ActivationEntrySnapshot::Symlink { target }
                         if target == cell.final_entity_path =>
                     {
-                        self.filesystem.remove_activation(&cell.entry_path)?;
+                        let target_parent = planned
+                            .frozen_target
+                            .as_ref()
+                            .ok_or(EnableError::PlanStale)?;
+                        self.filesystem.remove_activation_nofollow(
+                            &cell.final_entity_path,
+                            &cell.entry_path,
+                            target_parent,
+                        )?;
                         true
                     }
                     ActivationEntrySnapshot::Missing => false,
@@ -1755,10 +1909,14 @@ impl EnableService {
                     Ok(version) => version,
                     Err(error) => {
                         if removed {
-                            if let Err(compensation) = self
-                                .filesystem
-                                .create_activation(&cell.final_entity_path, &cell.entry_path)
-                            {
+                            if let Err(compensation) = self.filesystem.create_activation_nofollow(
+                                &cell.final_entity_path,
+                                &cell.entry_path,
+                                planned
+                                    .frozen_target
+                                    .as_ref()
+                                    .ok_or(EnableError::PlanStale)?,
+                            ) {
                                 journal.cells[index].phase = ActivationReplacePhase::Applying;
                                 self.filesystem
                                     .write_enable_journal(library_root, journal)?;
@@ -1794,14 +1952,22 @@ impl EnableService {
                         "the occupant changed before the replace".into(),
                     ));
                 }
-                self.filesystem.move_occupant_to_backup(
+                let target_parent = planned
+                    .frozen_target
+                    .as_ref()
+                    .ok_or(EnableError::PlanStale)?;
+                self.filesystem.move_occupant_to_backup_nofollow(
                     &cell.entry_path,
                     &backup_path,
                     library_root,
                     &occupant,
+                    target_parent,
                 )?;
-                self.filesystem
-                    .create_activation(&cell.final_entity_path, &cell.entry_path)?;
+                self.filesystem.create_activation_nofollow(
+                    &cell.final_entity_path,
+                    &cell.entry_path,
+                    target_parent,
+                )?;
                 journal.cells[index].phase = ActivationReplacePhase::Committed;
                 journal.cells[index].after_desired = true;
                 // Deactivate the old owner FIRST: the partial enabled-entry
@@ -1837,15 +2003,20 @@ impl EnableService {
                             ActivationEntrySnapshot::Symlink { target }
                                 if target == cell.final_entity_path =>
                             {
-                                self.filesystem.remove_activation(&cell.entry_path)?;
+                                self.filesystem.remove_activation_nofollow(
+                                    &cell.final_entity_path,
+                                    &cell.entry_path,
+                                    target_parent,
+                                )?;
                             }
                             _ => {}
                         }
-                        let restore = self.filesystem.restore_occupant_from_backup(
+                        let restore = self.filesystem.restore_occupant_from_backup_nofollow(
                             &backup_path,
                             &cell.entry_path,
                             library_root,
                             &occupant,
+                            target_parent,
                         );
                         match restore {
                             Ok(()) => {
@@ -1875,10 +2046,19 @@ impl EnableService {
 
     /// Compensate a failed plain create: remove the entry we just created
     /// (only when it still is our link).
-    fn compensate_create(&self, entry_path: &Path, final_entity: &Path) -> Result<(), EnableError> {
+    fn compensate_create(
+        &self,
+        entry_path: &Path,
+        final_entity: &Path,
+        expected_parent: &DirectoryFingerprint,
+    ) -> Result<(), EnableError> {
         match self.filesystem.activation_snapshot(entry_path)? {
             ActivationEntrySnapshot::Symlink { target } if target == final_entity => {
-                self.filesystem.remove_activation(entry_path)?;
+                self.filesystem.remove_activation_nofollow(
+                    final_entity,
+                    entry_path,
+                    expected_parent,
+                )?;
                 Ok(())
             }
             _ => Ok(()),
@@ -1914,7 +2094,12 @@ impl EnableService {
         let mut snapshot_version = self.store.catalog_generation()?;
         for index in succeeded.into_iter().rev() {
             let planned = &batch.cells[index];
-            match self.verify_undo_cas(planned, &journal.cells[index], batch.scope) {
+            match self.verify_undo_cas(
+                planned,
+                &journal.cells[index],
+                batch.scope,
+                batch.project_root_identity.as_ref(),
+            ) {
                 Ok(()) => {}
                 Err(EnableError::Validation(message)) => {
                     results.push(EnableUndoCellResult {
@@ -1926,7 +2111,14 @@ impl EnableService {
                 }
                 Err(error) => return Err(error),
             }
-            match self.undo_cell(planned, &mut journal, index, &library_root, batch.scope) {
+            match self.undo_cell(
+                planned,
+                &mut journal,
+                index,
+                &library_root,
+                batch.scope,
+                batch.project_root_identity.as_ref(),
+            ) {
                 Ok(version) => {
                     snapshot_version = version;
                     results.push(EnableUndoCellResult {
@@ -1972,9 +2164,58 @@ impl EnableService {
         planned: &PlannedCell,
         journal_cell: &EnableJournalCell,
         scope: &str,
+        project_root_identity: Option<&DirectoryFingerprint>,
     ) -> Result<(), EnableError> {
         let cell = &planned.cell;
         if scope == "project" {
+            let project_root_identity = project_root_identity.ok_or(EnableError::PlanStale)?;
+            let actual_root = self
+                .filesystem
+                .directory_fingerprint(&project_root_identity.canonical_path)
+                .map_err(|_| EnableError::PlanStale)?;
+            if &actual_root != project_root_identity {
+                return Err(EnableError::Validation(
+                    "the project root changed since the operation; skipping".into(),
+                ));
+            }
+            for frozen_target in &planned.frozen_project_targets {
+                let current = self
+                    .filesystem
+                    .resolve_project_target(
+                        &project_root_identity.canonical_path,
+                        &frozen_target.configured_relative_path,
+                    )
+                    .map_err(|_| {
+                        EnableError::Validation(
+                            "the project target changed since the operation; skipping".into(),
+                        )
+                    })?;
+                let resolution_matches = if frozen_target.resolution.create_steps.is_empty() {
+                    current == frozen_target.resolution
+                } else {
+                    current.fault.is_none()
+                        && current.resolved_container == cell.target_path
+                        && current.create_steps.is_empty()
+                };
+                if !resolution_matches {
+                    return Err(EnableError::Validation(
+                        "the project target changed since the operation; skipping".into(),
+                    ));
+                }
+            }
+            let actual_target = self
+                .filesystem
+                .directory_fingerprint(&cell.target_path)
+                .map_err(|_| {
+                    EnableError::Validation("the project target is unavailable; skipping".into())
+                })?;
+            if let Some(expected_target) = &planned.frozen_target
+                && &actual_target != expected_target
+            {
+                return Err(EnableError::Validation(
+                    "the project target changed since the operation; skipping".into(),
+                ));
+            }
             let entry_state = self.filesystem.activation_snapshot(&cell.entry_path)?;
             if !matches!(
                 entry_state,
@@ -2007,6 +2248,23 @@ impl EnableService {
                 }
             }
             return Ok(());
+        }
+        let expected_target = planned
+            .frozen_target
+            .as_ref()
+            .ok_or(EnableError::PlanStale)?;
+        let actual_target = self
+            .filesystem
+            .directory_fingerprint(&cell.target_path)
+            .map_err(|_| {
+                EnableError::Validation(
+                    "the Activation Target changed since the operation; skipping".into(),
+                )
+            })?;
+        if &actual_target != expected_target {
+            return Err(EnableError::Validation(
+                "the Activation Target changed since the operation; skipping".into(),
+            ));
         }
         let entry_state = self.filesystem.activation_snapshot(&cell.entry_path)?;
         match cell.action {
@@ -2073,9 +2331,12 @@ impl EnableService {
         index: usize,
         library_root: &Path,
         scope: &str,
+        project_root_identity: Option<&DirectoryFingerprint>,
     ) -> Result<u64, EnableError> {
         let cell = &planned.cell;
         if scope == "project" {
+            let _project_root_identity = project_root_identity.ok_or(EnableError::PlanStale)?;
+            let target_parent = self.filesystem.directory_fingerprint(&cell.target_path)?;
             journal.cells[index].phase = ActivationReplacePhase::Undoing;
             self.filesystem
                 .write_enable_journal(library_root, journal)?;
@@ -2084,17 +2345,22 @@ impl EnableService {
                 ActivationEntrySnapshot::Symlink { ref target }
                     if target == &cell.final_entity_path
             ) {
-                self.filesystem.remove_activation(&cell.entry_path)?;
+                self.filesystem.remove_activation_nofollow(
+                    &cell.final_entity_path,
+                    &cell.entry_path,
+                    &target_parent,
+                )?;
             }
             if let (Some(backup_path), Some(occupant)) = (
                 journal.cells[index].backup_path.clone(),
                 journal.cells[index].occupant.clone(),
             ) {
-                self.filesystem.restore_occupant_from_backup(
+                self.filesystem.restore_occupant_from_backup_nofollow(
                     &backup_path,
                     &cell.entry_path,
                     library_root,
                     &occupant,
+                    &target_parent,
                 )?;
             }
             return Ok(self.store.catalog_generation()?);
@@ -2110,6 +2376,10 @@ impl EnableService {
             expected_entry_path: cell.entry_path.clone(),
             expected_target_path: cell.final_entity_path.clone(),
         };
+        let target_parent = planned
+            .frozen_target
+            .as_ref()
+            .ok_or(EnableError::PlanStale)?;
         let effective = effective_action(planned);
         let restores_occupant = matches!(
             effective,
@@ -2122,13 +2392,20 @@ impl EnableService {
                     ActivationEntrySnapshot::Symlink { ref target }
                         if target == &cell.final_entity_path
                 ) {
-                    self.filesystem.remove_activation(&cell.entry_path)?;
+                    self.filesystem.remove_activation_nofollow(
+                        &cell.final_entity_path,
+                        &cell.entry_path,
+                        target_parent,
+                    )?;
                 }
                 Ok(self.store.write_activation_cells(&[write_owner])?)
             }
             EnableCellAction::Disable => {
-                self.filesystem
-                    .create_activation(&cell.final_entity_path, &cell.entry_path)?;
+                self.filesystem.create_activation_nofollow(
+                    &cell.final_entity_path,
+                    &cell.entry_path,
+                    target_parent,
+                )?;
                 self.store.write_activation_cells(&[write_owner])?;
                 Ok(self.store.catalog_generation()?)
             }
@@ -2138,17 +2415,22 @@ impl EnableService {
                     ActivationEntrySnapshot::Symlink { ref target }
                         if target == &cell.final_entity_path
                 ) {
-                    self.filesystem.remove_activation(&cell.entry_path)?;
+                    self.filesystem.remove_activation_nofollow(
+                        &cell.final_entity_path,
+                        &cell.entry_path,
+                        target_parent,
+                    )?;
                 }
                 if let (Some(backup_path), Some(occupant)) = (
                     journal.cells[index].backup_path.clone(),
                     journal.cells[index].occupant.clone(),
                 ) {
-                    self.filesystem.restore_occupant_from_backup(
+                    self.filesystem.restore_occupant_from_backup_nofollow(
                         &backup_path,
                         &cell.entry_path,
                         library_root,
                         &occupant,
+                        target_parent,
                     )?;
                 }
                 let mut writes = vec![write_owner];

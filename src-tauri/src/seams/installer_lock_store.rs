@@ -5,9 +5,9 @@
 //! file-level faults block every candidate the lock's installer root
 //! governs while per-entry faults block only that entry.
 //!
-//! This slice is strictly read-only. The exact-entry CAS rewrite is the
-//! Ownership Handoff logical commit point and is owned by the handoff
-//! ticket; nothing here can write or rewrite a lock file.
+//! Discovery is read-only. The exact-entry CAS rewrite is the Ownership
+//! Handoff logical commit point; system adapters must bind the frozen
+//! fingerprint and lstat identity to the atomic publication.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -81,6 +81,12 @@ pub struct LockFileReport {
     pub entry_faults: Vec<LockEntryFault>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LockFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum InstallerLockError {
     #[error("{0}")]
@@ -119,6 +125,17 @@ pub trait InstallerLockStore: Send + Sync {
     /// report, valid or faulted.
     fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError>;
 
+    /// Return the lstat identity captured with a previously discovered full
+    /// fingerprint. Pure/test stores may return `None`; the system store
+    /// keeps this fact out of the public report while retaining it for CAS.
+    fn observed_identity(
+        &self,
+        _lock_path: &Path,
+        _frozen_fingerprint: &str,
+    ) -> Option<LockFileIdentity> {
+        None
+    }
+
     /// CAS-release exactly one lock entry (the Ownership Handoff logical
     /// commit point): the full-file fingerprint and the exact entry must
     /// still match, then the entry is removed while every other top-level
@@ -135,6 +152,20 @@ pub trait InstallerLockStore: Send + Sync {
         Err(LockReleaseError::Invalid(
             "this lock store cannot rewrite lock files".into(),
         ))
+    }
+
+    /// Identity-aware release used by recovery journals. The default keeps
+    /// older adapters source-compatible; a system adapter must bind this
+    /// identity to its atomic rename exchange.
+    fn release_entries_with_identity(
+        &self,
+        lock_path: &Path,
+        frozen_fingerprint: &str,
+        frozen_identity: Option<&LockFileIdentity>,
+        entries: &[LockEntry],
+    ) -> Result<(), LockReleaseError> {
+        let _ = frozen_identity;
+        self.release_entries(lock_path, frozen_fingerprint, entries)
     }
 
     /// CAS-release the complete set of applicable claims for one Source

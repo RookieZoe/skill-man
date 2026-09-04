@@ -15,8 +15,8 @@ use crate::core::source_transition::SourceTransitionService;
 use crate::core::write_gate::{HomeWriteContext, ProductWriteGuard, WriteGate, WriteGateError};
 use crate::seams::clock::{Clock, uuid_v4_shape};
 use crate::seams::filesystem::{
-    ActivationEntrySnapshot, FileSystem, FileSystemError, LocalCopyJournal, LocalCopyPhase,
-    RemoveSourceActivationJournal, RemoveSourceJournal, RemoveSourceMemberJournal,
+    ActivationEntrySnapshot, DirectoryFingerprint, FileSystem, FileSystemError, LocalCopyJournal,
+    LocalCopyPhase, RemoveSourceActivationJournal, RemoveSourceJournal, RemoveSourceMemberJournal,
     RemoveSourcePhase, RestoreSourceJournal, RestoreSourceMember, RestoreSourcePhase,
     SourceLifecycleJournal, StagedTreeSnapshot,
 };
@@ -296,7 +296,19 @@ impl SourceLifecycleService {
             ));
         }
         let source_path = library_root.join(&member.storage_relpath);
-        self.validate_local_copy_destination(destination, &source_path, &current)?;
+        let destination_parent =
+            self.validate_local_copy_destination(destination, &source_path, &current)?;
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| {
+                SourceLifecycleError::Validation(
+                    "the Local Source Copy destination has no directory name".into(),
+                )
+            })?
+            .to_owned();
+        // Persist the canonical final path, not an alias whose parent could
+        // later resolve through a different filesystem component.
+        let destination = destination_parent.canonical_path.join(destination_name);
         let operation_id = self.next_operation_id("local-copy");
         let staged_path = destination
             .parent()
@@ -320,7 +332,8 @@ impl SourceLifecycleService {
             display_name: member.display_name.clone(),
             description: member.description.clone(),
             source_path: source_path.clone(),
-            destination: destination.to_path_buf(),
+            destination: destination.clone(),
+            destination_parent: Some(destination_parent),
             staged_path: staged_path.clone(),
             content_hash,
         };
@@ -604,10 +617,7 @@ impl SourceLifecycleService {
             SourceLifecycleJournal::LocalCopy(local) => {
                 let current = self.current_recovery_source(&local.remote_id)?;
                 let current_member = Self::current_recovery_member(&current, &local.skill_id)?;
-                let local_copy_registered = self
-                    .transition
-                    .update_store_handle()
-                    .local_copy_is_registered(&local.destination)?;
+                let local_copy_registered = self.local_copy_is_registered(&local.destination)?;
                 if current_member.presence != SourceMemberPresence::Current
                     || local.directory_name != current_member.directory_name
                     || local.identity_key != current_member.identity_key
@@ -643,11 +653,36 @@ impl SourceLifecycleService {
                         &local.source_path,
                         &current,
                     )
+                    .map(|_| ())
                     .map_err(|error| {
                         Self::invalid_recovery_journal(&format!(
                             "the Local Copy destination is unsafe: {error}"
                         ))
                     })?;
+                } else {
+                    let parent = local.destination.parent().ok_or_else(|| {
+                        Self::invalid_recovery_journal("the Local Copy destination has no parent")
+                    })?;
+                    let expected_parent = local.destination_parent.as_ref().ok_or_else(|| {
+                        Self::invalid_recovery_journal(
+                            "the Local Copy journal has no destination parent identity",
+                        )
+                    })?;
+                    if self
+                        .filesystem
+                        .path_has_no_symlink_component(&local.destination)
+                        .map_err(|error| Self::invalid_recovery_journal(&error.to_string()))?
+                        == false
+                        || self
+                            .filesystem
+                            .directory_fingerprint(parent)
+                            .map_err(|error| Self::invalid_recovery_journal(&error.to_string()))?
+                            != *expected_parent
+                    {
+                        return Err(Self::invalid_recovery_journal(
+                            "the Local Copy destination parent changed",
+                        ));
+                    }
                 }
             }
             SourceLifecycleJournal::RemoveSource(remove) => {
@@ -795,6 +830,26 @@ impl SourceLifecycleService {
         SourceLifecycleError::RecoveryRequired(format!(
             "the Source Lifecycle journal is unsafe: {message}"
         ))
+    }
+
+    fn local_copy_is_registered(&self, destination: &Path) -> Result<bool, SourceLifecycleError> {
+        if self
+            .transition
+            .update_store_handle()
+            .local_copy_is_registered(destination)?
+        {
+            return Ok(true);
+        }
+        let Ok(canonical) = self.filesystem.normalize_configured_path(destination) else {
+            return Ok(false);
+        };
+        if canonical == destination {
+            return Ok(false);
+        }
+        Ok(self
+            .transition
+            .update_store_handle()
+            .local_copy_is_registered(&canonical)?)
     }
 
     // ---- Restore ---------------------------------------------------------
@@ -1097,7 +1152,7 @@ impl SourceLifecycleService {
         destination: &Path,
         source_path: &Path,
         current: &SourceUpdateCurrentSource,
-    ) -> Result<(), SourceLifecycleError> {
+    ) -> Result<DirectoryFingerprint, SourceLifecycleError> {
         if !destination.is_absolute() {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy destination must be an absolute path".into(),
@@ -1108,39 +1163,67 @@ impl SourceLifecycleService {
                 "the Local Source Copy destination must not contain symlink components".into(),
             ));
         }
-        if destination == source_path || destination.starts_with(source_path) {
+        let parent = destination.parent().ok_or_else(|| {
+            SourceLifecycleError::Validation("the Local Copy destination has no parent".into())
+        })?;
+        if !self.filesystem.path_has_no_symlink_component(parent)? {
+            return Err(SourceLifecycleError::Validation(
+                "the Local Source Copy parent must not contain symlink components".into(),
+            ));
+        }
+        if !self.filesystem.path_is_occupied(parent)? {
+            return Err(SourceLifecycleError::Validation(
+                "the Local Source Copy parent directory must exist".into(),
+            ));
+        }
+        if matches!(
+            self.filesystem.activation_snapshot(source_path)?,
+            ActivationEntrySnapshot::Symlink { .. }
+        ) {
+            return Err(SourceLifecycleError::Validation(
+                "the Git Source Member snapshot is a symlink".into(),
+            ));
+        }
+        let parent_identity = self.filesystem.directory_fingerprint(parent)?;
+        let canonical_destination =
+            parent_identity
+                .canonical_path
+                .join(destination.file_name().ok_or_else(|| {
+                    SourceLifecycleError::Validation(
+                        "the Local Copy destination has no directory name".into(),
+                    )
+                })?);
+        let source_identity = self.filesystem.directory_fingerprint(source_path)?;
+        if canonical_destination == source_identity.canonical_path
+            || canonical_destination.starts_with(&source_identity.canonical_path)
+        {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy cannot be the source member itself".into(),
             ));
         }
         let library_root = self.active_library_root()?;
-        if destination.starts_with(&library_root) {
+        let library_root = self.filesystem.directory_fingerprint(&library_root)?;
+        if canonical_destination.starts_with(&library_root.canonical_path) {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy destination must be outside the Skill Man Home".into(),
             ));
         }
         if let Some(app_state_dir) = &self.app_state_dir
-            && destination.starts_with(app_state_dir)
+            && canonical_destination
+                .starts_with(&self.filesystem.normalize_configured_path(app_state_dir)?)
         {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy destination must be outside the App state directory".into(),
             ));
         }
         for forbidden in &current.forbidden_local_link_roots {
-            if destination.starts_with(forbidden) {
+            let forbidden = self.filesystem.normalize_configured_path(forbidden)?;
+            if canonical_destination.starts_with(&forbidden) {
                 return Err(SourceLifecycleError::Validation(format!(
                     "the Local Source Copy destination must be outside '{}'",
                     forbidden.display()
                 )));
             }
-        }
-        let parent = destination.parent().ok_or_else(|| {
-            SourceLifecycleError::Validation("the Local Copy destination has no parent".into())
-        })?;
-        if !self.filesystem.path_is_occupied(parent)? {
-            return Err(SourceLifecycleError::Validation(
-                "the Local Source Copy parent directory must exist".into(),
-            ));
         }
         if !self.filesystem.path_is_writable(parent)? {
             return Err(SourceLifecycleError::Validation(
@@ -1155,7 +1238,7 @@ impl SourceLifecycleService {
                 "the Local Source Copy destination must be absent or empty".into(),
             ));
         }
-        Ok(())
+        Ok(parent_identity)
     }
 
     fn apply_local_copy(
@@ -1163,8 +1246,28 @@ impl SourceLifecycleService {
         library_root: &Path,
         journal: &LocalCopyJournal,
     ) -> Result<(u64, String, String), SourceLifecycleError> {
-        self.filesystem
-            .copy_tree_verified(&journal.source_path, &journal.staged_path)?;
+        let destination_parent = journal.destination_parent.as_ref().ok_or_else(|| {
+            SourceLifecycleError::RecoveryRequired(
+                "the Local Source Copy journal has no destination parent identity".into(),
+            )
+        })?;
+        let current_parent =
+            self.filesystem
+                .directory_fingerprint(journal.destination.parent().ok_or_else(|| {
+                    SourceLifecycleError::Validation(
+                        "the Local Source Copy destination has no parent".into(),
+                    )
+                })?)?;
+        if &current_parent != destination_parent {
+            return Err(SourceLifecycleError::Validation(
+                "the Local Source Copy destination parent changed after planning".into(),
+            ));
+        }
+        self.filesystem.copy_tree_verified_nofollow(
+            &journal.source_path,
+            &journal.staged_path,
+            destination_parent,
+        )?;
         // The staged copy must still equal the snapshot bytes.
         let staged_snapshot = self.filesystem.staged_tree_snapshot(&journal.staged_path)?;
         if staged_snapshot.content_hash != journal.content_hash {
@@ -1178,8 +1281,14 @@ impl SourceLifecycleService {
             library_root,
             &SourceLifecycleJournal::LocalCopy(journal.clone()),
         )?;
-        self.filesystem
-            .rename_directory(&journal.staged_path, &journal.destination)?;
+        let staged_snapshot = self.filesystem.staged_tree_snapshot(&journal.staged_path)?;
+        self.filesystem.move_directory_nofollow(
+            &journal.staged_path,
+            &journal.destination,
+            &staged_snapshot,
+            destination_parent,
+            destination_parent,
+        )?;
         journal.phase = LocalCopyPhase::Registered;
         self.filesystem.write_source_lifecycle_journal(
             library_root,
@@ -1253,11 +1362,7 @@ impl SourceLifecycleService {
         }
         // The rename passed but the catalog registration may not have: a
         // Local Source that has no row is not a registered Local Source.
-        if !self
-            .transition
-            .update_store_handle()
-            .local_copy_is_registered(&journal.destination)?
-        {
+        if !self.local_copy_is_registered(&journal.destination)? {
             let directory_name = journal
                 .destination
                 .file_name()

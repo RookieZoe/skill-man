@@ -597,6 +597,85 @@ fn containment_violations_block_cell_without_override() {
 }
 
 #[test]
+fn apply_rejects_project_target_ancestor_replacement_as_plan_stale() {
+    let harness = harness();
+    set_agent_project_skills_dir(&harness, "claude-code", Some(".claude/skills"));
+
+    let temp_proj = tempfile::tempdir().expect("temp project dir");
+    let project_root = temp_proj.path().to_path_buf();
+    let target = project_root.join(".claude/skills");
+    std::fs::create_dir_all(&target).expect("create project target");
+    let skill_id = SkillId("skill-authoring".into());
+    let plan = harness
+        .enable
+        .plan_project_enable(
+            std::slice::from_ref(&skill_id),
+            &project_root,
+            &["claude-code".into()],
+            &[],
+        )
+        .expect("plan project enable");
+
+    let outside = tempfile::tempdir().expect("outside target");
+    let preserved = project_root.join(".claude-original");
+    std::fs::rename(project_root.join(".claude"), &preserved).expect("preserve target ancestor");
+    std::os::unix::fs::symlink(outside.path(), project_root.join(".claude"))
+        .expect("replace target ancestor");
+
+    let result = harness.enable.apply(&plan.plan_token);
+
+    assert!(matches!(
+        result,
+        Err(skill_man_lib::core::enable::EnableError::PlanStale)
+    ));
+    assert!(
+        !outside.path().join("skills/skill-authoring").exists(),
+        "a replaced project ancestor must not redirect the Activation write"
+    );
+    assert!(preserved.join("skills").is_dir());
+}
+
+#[test]
+fn apply_rejects_project_root_replacement_as_plan_stale() {
+    let harness = harness();
+    set_agent_project_skills_dir(&harness, "claude-code", Some(".claude/skills"));
+
+    let temp_parent = tempfile::tempdir().expect("project parent");
+    let project_root = temp_parent.path().join("project");
+    std::fs::create_dir_all(project_root.join(".claude/skills")).expect("create project");
+    let skill_id = SkillId("skill-authoring".into());
+    let plan = harness
+        .enable
+        .plan_project_enable(
+            std::slice::from_ref(&skill_id),
+            &project_root,
+            &["claude-code".into()],
+            &[],
+        )
+        .expect("plan project enable");
+
+    let outside = tempfile::tempdir().expect("outside project");
+    let preserved = temp_parent.path().join("project-original");
+    std::fs::rename(&project_root, &preserved).expect("preserve project root");
+    std::os::unix::fs::symlink(outside.path(), &project_root).expect("replace project root");
+
+    let result = harness.enable.apply(&plan.plan_token);
+
+    assert!(matches!(
+        result,
+        Err(skill_man_lib::core::enable::EnableError::PlanStale)
+    ));
+    assert!(
+        !outside
+            .path()
+            .join(".claude/skills/skill-authoring")
+            .exists(),
+        "a replaced project root must not redirect the Activation write"
+    );
+    assert!(preserved.join(".claude/skills").is_dir());
+}
+
+#[test]
 fn recent_project_folders_mru_and_clear() {
     let harness = harness();
     set_agent_project_skills_dir(&harness, "claude-code", Some(".skills"));

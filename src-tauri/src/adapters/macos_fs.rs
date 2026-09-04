@@ -673,6 +673,25 @@ impl FileSystem for MacOsFileSystem {
         ))
     }
 
+    fn create_project_activation(
+        &self,
+        project_root: &DirectoryFingerprint,
+        target_path: &Path,
+        create_steps: &[PathBuf],
+        entry_path: &Path,
+        final_entity_path: &Path,
+        expected_target: Option<&DirectoryFingerprint>,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        create_project_activation_nofollow(
+            project_root,
+            target_path,
+            create_steps,
+            entry_path,
+            final_entity_path,
+            expected_target,
+        )
+    }
+
     fn read_entropy(&self, buffer: &mut [u8]) -> Result<(), FileSystemError> {
         use std::io::Read;
         let mut file =
@@ -1352,6 +1371,62 @@ impl FileSystem for MacOsFileSystem {
             }
         }
         copy_directory_verified(source, destination)
+    }
+
+    fn copy_tree_verified_nofollow(
+        &self,
+        source: &Path,
+        destination: &Path,
+        expected_destination_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let source_metadata =
+            fs::symlink_metadata(source).map_err(|source_error| FileSystemError::Io {
+                operation: "inspect Local Source Copy source",
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+        if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
+            return Err(FileSystemError::NotDirectory {
+                path: source.to_path_buf(),
+            });
+        }
+        let destination_parent_path =
+            destination
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: destination.to_path_buf(),
+                })?;
+        let (destination_parent, metadata) = open_absolute_directory_chain_nofollow(
+            destination_parent_path,
+            "open Local Source Copy destination parent without following links",
+        )?;
+        let actual_parent = DirectoryFingerprint {
+            canonical_path: destination_parent_path.to_path_buf(),
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino,
+        };
+        if actual_parent != *expected_destination_parent {
+            return Err(FileSystemError::PlanStale {
+                path: destination_parent_path.to_path_buf(),
+            });
+        }
+        let destination_name = cstring_path_component(
+            destination.file_name(),
+            destination,
+            "encode Local Source Copy staging name",
+        )?;
+        ensure_entry_missing_at(
+            &destination_parent,
+            &destination_name,
+            destination,
+            "reserve Local Source Copy staging path",
+        )?;
+        copy_directory_verified_to_at(source, &destination_parent, &destination_name, destination)?;
+        sync_descriptor(
+            &destination_parent,
+            destination_parent_path,
+            "sync Local Source Copy destination parent",
+        )
     }
 
     fn tree_size(&self, path: &Path) -> Result<u64, FileSystemError> {
@@ -2263,6 +2338,64 @@ impl FileSystem for MacOsFileSystem {
             path: entry_path.to_path_buf(),
             source,
         })
+    }
+
+    fn create_activation_nofollow(
+        &self,
+        target_path: &Path,
+        entry_path: &Path,
+        expected_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        create_activation_nofollow_at(target_path, entry_path, expected_parent)
+    }
+
+    fn remove_activation_nofollow(
+        &self,
+        target_path: &Path,
+        entry_path: &Path,
+        expected_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        remove_activation_nofollow_at(target_path, entry_path, expected_parent)
+    }
+
+    fn move_occupant_to_backup_nofollow(
+        &self,
+        entry_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+        expected_entry_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let entry_path = self.normalize_entry_path(entry_path)?;
+        let backup_path = self.normalize_entry_path(backup_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        move_occupant_to_backup_nofollow_at(
+            &entry_path,
+            &backup_path,
+            &library_root,
+            expected,
+            expected_entry_parent,
+        )
+    }
+
+    fn restore_occupant_from_backup_nofollow(
+        &self,
+        backup_path: &Path,
+        entry_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+        expected_entry_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let backup_path = self.normalize_entry_path(backup_path)?;
+        let entry_path = self.normalize_entry_path(entry_path)?;
+        let library_root = self.normalize_configured_path(library_root)?;
+        restore_occupant_from_backup_nofollow_at(
+            &backup_path,
+            &entry_path,
+            &library_root,
+            expected,
+            expected_entry_parent,
+        )
     }
 
     fn create_directory(&self, path: &Path) -> Result<(), FileSystemError> {
@@ -4492,42 +4625,22 @@ impl FileSystem for MacOsFileSystem {
         source: &Path,
         operation_id: &str,
     ) -> Result<PathBuf, FileSystemError> {
-        validate_isolation_operation_id(operation_id)?;
-        let source = self.normalize_configured_path(source)?;
-        let source_parent =
-            source
-                .parent()
-                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
-                    path: source.clone(),
-                })?;
-        let source_name =
-            source
-                .file_name()
-                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
-                    path: source.clone(),
-                })?;
-        let isolation_prefix = if operation_id.starts_with("source-transition-") {
-            "source-transition"
-        } else {
-            "handoff"
-        };
-        let isolated = source_parent.join(format!(
-            ".skill-man-{isolation_prefix}-{operation_id}-{}",
-            source_name.to_string_lossy()
-        ));
-        if fs::symlink_metadata(&isolated).is_ok() {
-            return Err(FileSystemError::Io {
-                operation: "isolate external source",
-                path: isolated,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "the hidden operation path is occupied",
-                ),
-            });
-        }
-        move_directory_verified(&source, &isolated)?;
-        sync_directory(source_parent, "sync external source parent")?;
-        Ok(isolated)
+        isolate_external_source_nofollow(source, operation_id, None, None)
+    }
+
+    fn isolate_external_source_verified(
+        &self,
+        source: &Path,
+        operation_id: &str,
+        expected: &DirectoryFingerprint,
+        expected_tree_hash: &str,
+    ) -> Result<PathBuf, FileSystemError> {
+        isolate_external_source_nofollow(
+            source,
+            operation_id,
+            Some(expected),
+            Some(expected_tree_hash),
+        )
     }
 
     fn restore_isolated_source(
@@ -4536,8 +4649,36 @@ impl FileSystem for MacOsFileSystem {
         source: &Path,
         expected_tree_hash: &str,
     ) -> Result<(), FileSystemError> {
-        let isolated = self.normalize_configured_path(isolated)?;
-        let source = self.normalize_configured_path(source)?;
+        let isolated = canonical_entry_path_nofollow(&self.expand_home(isolated))?;
+        let source = canonical_entry_path_nofollow(&self.expand_home(source))?;
+        let isolated_parent_path =
+            isolated
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: isolated.clone(),
+                })?;
+        let isolated_name = cstring_path_component(
+            isolated.file_name(),
+            &isolated,
+            "encode isolated external source name",
+        )?;
+        let (isolated_parent, _) = open_absolute_directory_chain_nofollow(
+            isolated_parent_path,
+            "open isolated external source parent without following links",
+        )?;
+        let isolated_metadata = metadata_at_nofollow(
+            &isolated_parent,
+            &isolated_name,
+            &isolated,
+            "inspect isolated external source before restore",
+        )?;
+        if isolated_metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore isolated external source",
+                path: isolated,
+                message: "the isolated source is no longer a real directory".into(),
+            });
+        }
         let snapshot = staged_tree_snapshot_at(&isolated)?;
         if snapshot.content_hash != expected_tree_hash {
             return Err(FileSystemError::RecoveryRequired {
@@ -4546,22 +4687,57 @@ impl FileSystem for MacOsFileSystem {
                 message: "the isolated source no longer matches the frozen tree".into(),
             });
         }
-        if fs::symlink_metadata(&source).is_ok() {
-            return Err(FileSystemError::RecoveryRequired {
-                operation: "restore isolated external source",
-                path: source,
-                message: "the original location is occupied".into(),
-            });
+        let source_parent_path =
+            source
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: source.clone(),
+                })?;
+        let source_name = cstring_path_component(
+            source.file_name(),
+            &source,
+            "encode restored external source name",
+        )?;
+        let (source_parent, _) = open_absolute_directory_chain_nofollow(
+            source_parent_path,
+            "open restored external source parent without following links",
+        )?;
+        match metadata_at_nofollow(
+            &source_parent,
+            &source_name,
+            &source,
+            "inspect restored external source destination",
+        ) {
+            Ok(_) => {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "restore isolated external source",
+                    path: source,
+                    message: "the original location is occupied".into(),
+                });
+            }
+            Err(error) if file_system_error_is_not_found(&error) => {}
+            Err(error) => return Err(error),
         }
-        move_directory_verified(&isolated, &source)?;
-        if let Some(parent) = source.parent() {
-            sync_directory(parent, "sync restored external source parent")?;
-        }
+        // The same-parent source move uses the existing no-follow
+        // descriptor-relative primitive; destination parent identity is
+        // captured above so an ancestor replacement cannot redirect it.
+        let isolated_parent_fingerprint =
+            directory_descriptor_fingerprint(&isolated_parent, isolated_parent_path)?;
+        let destination_parent_fingerprint =
+            directory_descriptor_fingerprint(&source_parent, source_parent_path)?;
+        self.move_directory_nofollow(
+            &isolated,
+            &source,
+            &snapshot,
+            &isolated_parent_fingerprint,
+            &destination_parent_fingerprint,
+        )?;
+        sync_directory(source_parent_path, "sync restored external source parent")?;
         Ok(())
     }
 
     fn discard_isolated_source(&self, isolated: &Path) -> Result<(), FileSystemError> {
-        let isolated = self.normalize_configured_path(isolated)?;
+        let isolated = canonical_entry_path_nofollow(&self.expand_home(isolated))?;
         let name = isolated
             .file_name()
             .and_then(|name| name.to_str())
@@ -4577,7 +4753,51 @@ impl FileSystem for MacOsFileSystem {
                 message: "the path is not a hidden handoff isolation copy".into(),
             });
         }
-        remove_owned_directory_if_present(&isolated, None, "discard isolated external source")?;
+        let parent_path =
+            isolated
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: isolated.clone(),
+                })?;
+        let name = cstring_path_component(
+            isolated.file_name(),
+            &isolated,
+            "encode isolated source discard name",
+        )?;
+        let (parent, _) = open_absolute_directory_chain_nofollow(
+            parent_path,
+            "open isolated source discard parent without following links",
+        )?;
+        let metadata = match metadata_at_nofollow(
+            &parent,
+            &name,
+            &isolated,
+            "inspect isolated source before discard",
+        ) {
+            Ok(metadata) => metadata,
+            Err(error) if file_system_error_is_not_found(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "discard isolated external source",
+                path: isolated,
+                message: "the isolation entry is not a real directory".into(),
+            });
+        }
+        remove_child_directory_at(
+            &parent,
+            metadata.st_dev,
+            metadata.st_ino,
+            &name,
+            &isolated,
+            "discard isolated external source",
+        )?;
+        sync_descriptor(
+            &parent,
+            parent_path,
+            "sync discarded external source parent",
+        )?;
         Ok(())
     }
 
@@ -6441,6 +6661,51 @@ fn move_directory_verified(source: &Path, destination: &Path) -> Result<(), File
     }
 }
 
+fn open_or_create_absolute_directory_chain_nofollow(
+    path: &Path,
+    operation: &'static str,
+) -> Result<(OwnedFd, libc::stat), FileSystemError> {
+    if !path.is_absolute() {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: path.to_path_buf(),
+        });
+    }
+    let root = CString::new("/").expect("root path has no NUL");
+    let descriptor = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    let mut current = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let mut current_path = PathBuf::from("/");
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir) {
+                continue;
+            }
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            });
+        };
+        current_path.push(name);
+        let encoded = cstring_path_component(Some(name), &current_path, operation)?;
+        let _ = mkdirat_if_missing(&current, &encoded, &current_path, operation)?;
+        let (next, _) = open_directory_at_nofollow(&current, &encoded, &current_path, operation)?;
+        current = next;
+    }
+    let metadata = directory_descriptor_metadata(&current, path)?;
+    Ok((current, metadata))
+}
+
 fn occupant_snapshot_at(path: &Path) -> Result<OccupantSnapshot, FileSystemError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| FileSystemError::Io {
         operation: "inspect Activation occupant",
@@ -6448,6 +6713,324 @@ fn occupant_snapshot_at(path: &Path) -> Result<OccupantSnapshot, FileSystemError
         source,
     })?;
     occupant_snapshot_from_metadata(path, &metadata)
+}
+
+fn occupant_snapshot_at_descriptor(
+    parent: &OwnedFd,
+    name: &CString,
+    path: &Path,
+    operation: &'static str,
+) -> Result<OccupantSnapshot, FileSystemError> {
+    let metadata = metadata_at_nofollow(parent, name, path, operation)?;
+    let kind = match metadata.st_mode & libc::S_IFMT {
+        libc::S_IFLNK => OccupantKind::Symlink {
+            target: read_link_at(parent, name, path, operation)?,
+        },
+        libc::S_IFDIR => OccupantKind::RealDirectory,
+        libc::S_IFREG => OccupantKind::File {
+            length: metadata.st_size as u64,
+        },
+        _ => {
+            return Err(FileSystemError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unsupported Activation occupant entry type",
+                ),
+            });
+        }
+    };
+    Ok(OccupantSnapshot {
+        kind,
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino,
+    })
+}
+
+fn move_occupant_to_backup_nofollow_at(
+    entry_path: &Path,
+    backup_path: &Path,
+    library_root: &Path,
+    expected: &OccupantSnapshot,
+    expected_entry_parent: &DirectoryFingerprint,
+) -> Result<(), FileSystemError> {
+    let entry_parent_path =
+        entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+    let (entry_parent, entry_parent_metadata) = open_absolute_directory_chain_nofollow(
+        entry_parent_path,
+        "open Activation occupant parent without following links",
+    )?;
+    let actual_entry_parent = DirectoryFingerprint {
+        canonical_path: entry_parent_path.to_path_buf(),
+        device: entry_parent_metadata.st_dev as u64,
+        inode: entry_parent_metadata.st_ino,
+    };
+    if actual_entry_parent != *expected_entry_parent {
+        return Err(FileSystemError::PlanStale {
+            path: entry_parent_path.to_path_buf(),
+        });
+    }
+    let backup_root = library_root.join("operations");
+    if !backup_path.starts_with(&backup_root) {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: backup_path.to_path_buf(),
+        });
+    }
+    let backup_parent_path =
+        backup_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: backup_path.to_path_buf(),
+            })?;
+    let (backup_parent, _) = open_or_create_absolute_directory_chain_nofollow(
+        backup_parent_path,
+        "create Activation occupant backup parent without following links",
+    )?;
+    let entry_name = cstring_path_component(
+        entry_path.file_name(),
+        entry_path,
+        "encode Activation occupant entry name",
+    )?;
+    let backup_name = cstring_path_component(
+        backup_path.file_name(),
+        backup_path,
+        "encode Activation occupant backup name",
+    )?;
+    ensure_entry_missing_at(
+        &backup_parent,
+        &backup_name,
+        backup_path,
+        "reserve Activation occupant backup",
+    )?;
+    let current = occupant_snapshot_at_descriptor(
+        &entry_parent,
+        &entry_name,
+        entry_path,
+        "inspect Activation occupant before backup",
+    )?;
+    if current != *expected {
+        return Err(FileSystemError::PlanStale {
+            path: entry_path.to_path_buf(),
+        });
+    }
+    let status = unsafe {
+        libc::renameat(
+            entry_parent.as_raw_fd(),
+            entry_name.as_ptr(),
+            backup_parent.as_raw_fd(),
+            backup_name.as_ptr(),
+        )
+    };
+    if status == 0 {
+        let moved = occupant_snapshot_at_descriptor(
+            &backup_parent,
+            &backup_name,
+            backup_path,
+            "reidentify Activation occupant backup",
+        )?;
+        if moved != *expected {
+            return Err(FileSystemError::PlanStale {
+                path: backup_path.to_path_buf(),
+            });
+        }
+        sync_descriptor(
+            &entry_parent,
+            entry_parent_path,
+            "sync Activation occupant source parent",
+        )?;
+        sync_descriptor(
+            &backup_parent,
+            backup_parent_path,
+            "sync Activation occupant backup parent",
+        )?;
+        return Ok(());
+    }
+    let source = std::io::Error::last_os_error();
+    if source.raw_os_error() != Some(libc::EXDEV) {
+        return Err(FileSystemError::Io {
+            operation: "move Activation occupant",
+            path: entry_path.to_path_buf(),
+            source,
+        });
+    }
+
+    copy_occupant_verified(entry_path, backup_path, expected)?;
+    let current = occupant_snapshot_at_descriptor(
+        &entry_parent,
+        &entry_name,
+        entry_path,
+        "reinspect Activation occupant after copy",
+    )?;
+    if current != *expected {
+        return Err(FileSystemError::PlanStale {
+            path: entry_path.to_path_buf(),
+        });
+    }
+    let status = unsafe { libc::unlinkat(entry_parent.as_raw_fd(), entry_name.as_ptr(), 0) };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "remove copied Activation occupant",
+            path: entry_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    sync_descriptor(
+        &entry_parent,
+        entry_parent_path,
+        "sync copied Activation occupant source parent",
+    )?;
+    sync_descriptor(
+        &backup_parent,
+        backup_parent_path,
+        "sync copied Activation occupant backup parent",
+    )
+}
+
+fn restore_occupant_from_backup_nofollow_at(
+    backup_path: &Path,
+    entry_path: &Path,
+    library_root: &Path,
+    expected: &OccupantSnapshot,
+    expected_entry_parent: &DirectoryFingerprint,
+) -> Result<(), FileSystemError> {
+    let entry_parent_path =
+        entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+    let (entry_parent, entry_parent_metadata) = open_absolute_directory_chain_nofollow(
+        entry_parent_path,
+        "open Activation restore parent without following links",
+    )?;
+    let actual_entry_parent = DirectoryFingerprint {
+        canonical_path: entry_parent_path.to_path_buf(),
+        device: entry_parent_metadata.st_dev as u64,
+        inode: entry_parent_metadata.st_ino,
+    };
+    if actual_entry_parent != *expected_entry_parent {
+        return Err(FileSystemError::PlanStale {
+            path: entry_parent_path.to_path_buf(),
+        });
+    }
+    let backup_root = library_root.join("operations");
+    if !backup_path.starts_with(&backup_root) {
+        return Err(FileSystemError::InvalidConfiguredPath {
+            path: backup_path.to_path_buf(),
+        });
+    }
+    let backup_parent_path =
+        backup_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: backup_path.to_path_buf(),
+            })?;
+    let (backup_parent, _) = open_absolute_directory_chain_nofollow(
+        backup_parent_path,
+        "open Activation occupant backup without following links",
+    )?;
+    let entry_name = cstring_path_component(
+        entry_path.file_name(),
+        entry_path,
+        "encode Activation restore entry name",
+    )?;
+    let backup_name = cstring_path_component(
+        backup_path.file_name(),
+        backup_path,
+        "encode Activation restore backup name",
+    )?;
+    ensure_entry_missing_at(
+        &entry_parent,
+        &entry_name,
+        entry_path,
+        "reserve Activation restore entry",
+    )?;
+    let current = occupant_snapshot_at_descriptor(
+        &backup_parent,
+        &backup_name,
+        backup_path,
+        "inspect Activation occupant backup before restore",
+    )?;
+    if current != *expected {
+        return Err(FileSystemError::PlanStale {
+            path: backup_path.to_path_buf(),
+        });
+    }
+    let status = unsafe {
+        libc::renameat(
+            backup_parent.as_raw_fd(),
+            backup_name.as_ptr(),
+            entry_parent.as_raw_fd(),
+            entry_name.as_ptr(),
+        )
+    };
+    if status == 0 {
+        let restored = occupant_snapshot_at_descriptor(
+            &entry_parent,
+            &entry_name,
+            entry_path,
+            "reidentify restored Activation occupant",
+        )?;
+        if restored != *expected {
+            return Err(FileSystemError::PlanStale {
+                path: entry_path.to_path_buf(),
+            });
+        }
+        sync_descriptor(
+            &backup_parent,
+            backup_parent_path,
+            "sync Activation occupant backup parent",
+        )?;
+        return sync_descriptor(
+            &entry_parent,
+            entry_parent_path,
+            "sync Activation restore parent",
+        );
+    }
+    let source = std::io::Error::last_os_error();
+    if source.raw_os_error() != Some(libc::EXDEV) {
+        return Err(FileSystemError::Io {
+            operation: "restore Activation occupant",
+            path: backup_path.to_path_buf(),
+            source,
+        });
+    }
+
+    copy_occupant_verified(backup_path, entry_path, expected)?;
+    let current = occupant_snapshot_at_descriptor(
+        &backup_parent,
+        &backup_name,
+        backup_path,
+        "reinspect Activation occupant backup after copy",
+    )?;
+    if current != *expected {
+        return Err(FileSystemError::PlanStale {
+            path: backup_path.to_path_buf(),
+        });
+    }
+    let status = unsafe { libc::unlinkat(backup_parent.as_raw_fd(), backup_name.as_ptr(), 0) };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "remove copied Activation occupant backup",
+            path: backup_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    sync_descriptor(
+        &backup_parent,
+        backup_parent_path,
+        "sync copied Activation occupant backup parent",
+    )?;
+    sync_descriptor(
+        &entry_parent,
+        entry_parent_path,
+        "sync copied Activation restore parent",
+    )
 }
 
 fn occupant_snapshot_from_metadata(
@@ -7561,6 +8144,526 @@ fn open_absolute_directory_chain_nofollow(
     }
     let metadata = directory_descriptor_metadata(&current, path)?;
     Ok((current, metadata))
+}
+
+/// Same-parent Source Transition isolation. The final source component is
+/// inspected with `lstat` before any canonicalization, so a lock claim that
+/// is a symlink is rejected and its target is never renamed.
+fn canonical_entry_path_nofollow(path: &Path) -> Result<PathBuf, FileSystemError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+            path: path.to_path_buf(),
+        })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+            path: path.to_path_buf(),
+        })?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|source| FileSystemError::Io {
+            operation: "canonicalize entry parent",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    Ok(canonical_parent.join(name))
+}
+
+fn isolate_external_source_nofollow(
+    source: &Path,
+    operation_id: &str,
+    expected_identity: Option<&DirectoryFingerprint>,
+    expected_tree_hash: Option<&str>,
+) -> Result<PathBuf, FileSystemError> {
+    validate_isolation_operation_id(operation_id)?;
+    let source = source.to_path_buf();
+    let source_name_os = source
+        .file_name()
+        .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+            path: source.clone(),
+        })?
+        .to_owned();
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+            path: source.clone(),
+        })?
+        .canonicalize()
+        .map_err(|source_error| FileSystemError::Io {
+            operation: "canonicalize external source parent",
+            path: source.parent().unwrap_or(&source).to_path_buf(),
+            source: source_error,
+        })?;
+    let source = source_parent.join(source_name_os);
+    let source_name =
+        cstring_path_component(source.file_name(), &source, "encode external source name")?;
+    let (parent, parent_metadata) = open_absolute_directory_chain_nofollow(
+        &source_parent,
+        "open external source parent without following links",
+    )?;
+    let source_metadata = metadata_at_nofollow(
+        &parent,
+        &source_name,
+        &source,
+        "inspect external source before isolation",
+    )?;
+    if source_metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(FileSystemError::PlanStale { path: source });
+    }
+    if let Some(expected) = expected_identity
+        && (expected.canonical_path != source
+            || expected.device != source_metadata.st_dev as u64
+            || expected.inode != source_metadata.st_ino)
+    {
+        return Err(FileSystemError::PlanStale { path: source });
+    }
+    let source_snapshot = staged_tree_snapshot_at(&source)?;
+    if let Some(expected_hash) = expected_tree_hash
+        && source_snapshot.content_hash != expected_hash
+    {
+        return Err(FileSystemError::PlanStale { path: source });
+    }
+    let rechecked = metadata_at_nofollow(
+        &parent,
+        &source_name,
+        &source,
+        "reinspect external source before isolation",
+    )?;
+    if rechecked.st_dev != source_metadata.st_dev
+        || rechecked.st_ino != source_metadata.st_ino
+        || rechecked.st_dev != parent_metadata.st_dev
+    {
+        return Err(FileSystemError::PlanStale { path: source });
+    }
+    let isolation_prefix = if operation_id.starts_with("source-transition-") {
+        "source-transition"
+    } else {
+        "handoff"
+    };
+    let isolated = source_parent.join(format!(
+        ".skill-man-{isolation_prefix}-{operation_id}-{}",
+        source
+            .file_name()
+            .expect("source file name was validated")
+            .to_string_lossy()
+    ));
+    let isolated_name = cstring_path_component(
+        isolated.file_name(),
+        &isolated,
+        "encode external source isolation name",
+    )?;
+    ensure_entry_missing_at(
+        &parent,
+        &isolated_name,
+        &isolated,
+        "reserve external source isolation path",
+    )?;
+    let status = unsafe {
+        libc::renameatx_np(
+            parent.as_raw_fd(),
+            source_name.as_ptr(),
+            parent.as_raw_fd(),
+            isolated_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "isolate external source",
+            path: source,
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    let moved_metadata = metadata_at_nofollow(
+        &parent,
+        &isolated_name,
+        &isolated,
+        "reidentify isolated external source",
+    )?;
+    let moved_snapshot = staged_tree_snapshot_at(&isolated)?;
+    let expected_device = expected_identity
+        .map(|expected| expected.device)
+        .unwrap_or(source_metadata.st_dev as u64);
+    let expected_inode = expected_identity
+        .map(|expected| expected.inode)
+        .unwrap_or(source_metadata.st_ino);
+    let expected_hash = expected_tree_hash.unwrap_or(&source_snapshot.content_hash);
+    if moved_metadata.st_dev as u64 != expected_device
+        || moved_metadata.st_ino != expected_inode
+        || moved_snapshot.content_hash != expected_hash
+    {
+        let restore_status = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                isolated_name.as_ptr(),
+                parent.as_raw_fd(),
+                source_name.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if restore_status != 0 {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore external source after isolation mismatch",
+                path: isolated,
+                message: std::io::Error::last_os_error().to_string(),
+            });
+        }
+        return Err(FileSystemError::PlanStale { path: source });
+    }
+    sync_descriptor(&parent, &source_parent, "sync external source parent")?;
+    Ok(isolated)
+}
+
+fn duplicate_directory_descriptor(
+    directory: &OwnedFd,
+    path: &Path,
+    operation: &'static str,
+) -> Result<OwnedFd, FileSystemError> {
+    let descriptor = unsafe { libc::dup(directory.as_raw_fd()) };
+    if descriptor < 0 {
+        return Err(FileSystemError::Io {
+            operation,
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: `dup` returned a new owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+}
+
+/// Open a canonical directory below a pinned project-root descriptor. Every
+/// component is opened with `O_NOFOLLOW`, so the descriptor never follows a
+/// replacement symlink after the root has been verified.
+fn open_project_relative_directory_nofollow(
+    root: &OwnedFd,
+    root_path: &Path,
+    path: &Path,
+    operation: &'static str,
+) -> Result<(OwnedFd, libc::stat), FileSystemError> {
+    let relative = path
+        .strip_prefix(root_path)
+        .map_err(|_| FileSystemError::PlanStale {
+            path: path.to_path_buf(),
+        })?;
+    let mut current = duplicate_directory_descriptor(root, root_path, operation)?;
+    let mut current_path = root_path.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(FileSystemError::InvalidConfiguredPath {
+                path: path.to_path_buf(),
+            });
+        };
+        current_path.push(name);
+        let encoded = cstring_path_component(Some(name), &current_path, operation)?;
+        let (next, _) = open_directory_at_nofollow(&current, &encoded, &current_path, operation)?;
+        current = next;
+    }
+    let metadata = directory_descriptor_metadata(&current, path)?;
+    Ok((current, metadata))
+}
+
+fn create_project_activation_nofollow(
+    project_root: &DirectoryFingerprint,
+    target_path: &Path,
+    create_steps: &[PathBuf],
+    entry_path: &Path,
+    final_entity_path: &Path,
+    expected_target: Option<&DirectoryFingerprint>,
+) -> Result<DirectoryFingerprint, FileSystemError> {
+    let (root, root_metadata) = open_directory_nofollow(
+        &project_root.canonical_path,
+        "open canonical project root without following links",
+    )?;
+    if root_metadata.st_dev as u64 != project_root.device
+        || root_metadata.st_ino != project_root.inode
+    {
+        return Err(FileSystemError::PlanStale {
+            path: project_root.canonical_path.clone(),
+        });
+    }
+    if !target_path.starts_with(&project_root.canonical_path) {
+        return Err(FileSystemError::PlanStale {
+            path: target_path.to_path_buf(),
+        });
+    }
+
+    let (target, target_metadata) = if create_steps.is_empty() {
+        open_project_relative_directory_nofollow(
+            &root,
+            &project_root.canonical_path,
+            target_path,
+            "open project Activation target without following links",
+        )?
+    } else {
+        if create_steps.last().is_none_or(|step| step != target_path) {
+            return Err(FileSystemError::PlanStale {
+                path: target_path.to_path_buf(),
+            });
+        }
+        let first_parent = create_steps
+            .first()
+            .and_then(|step| step.parent())
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: target_path.to_path_buf(),
+            })?;
+        if !first_parent.starts_with(&project_root.canonical_path) {
+            return Err(FileSystemError::PlanStale {
+                path: first_parent.to_path_buf(),
+            });
+        }
+        let (mut parent, _) = open_project_relative_directory_nofollow(
+            &root,
+            &project_root.canonical_path,
+            first_parent,
+            "open project Activation creation parent without following links",
+        )?;
+        let mut parent_path = first_parent.to_path_buf();
+        let mut target_metadata = None;
+        for step in create_steps {
+            if step.parent() != Some(parent_path.as_path())
+                || !step.starts_with(&project_root.canonical_path)
+            {
+                return Err(FileSystemError::PlanStale { path: step.clone() });
+            }
+            let name = cstring_path_component(
+                step.file_name(),
+                step,
+                "encode project Activation creation component",
+            )?;
+            let _created = mkdirat_if_missing(
+                &parent,
+                &name,
+                step,
+                "create project Activation target component",
+            )?;
+            let (child, metadata) = open_directory_at_nofollow(
+                &parent,
+                &name,
+                step,
+                "open created project Activation target component without following links",
+            )?;
+            if metadata.st_dev != root_metadata.st_dev {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "create project Activation target",
+                    path: step.clone(),
+                    message: "the project target crossed the project root filesystem boundary"
+                        .into(),
+                });
+            }
+            sync_descriptor(
+                &parent,
+                &parent_path,
+                "sync project Activation target parent",
+            )?;
+            parent = child;
+            parent_path = step.clone();
+            target_metadata = Some(metadata);
+        }
+        (
+            parent,
+            target_metadata.ok_or_else(|| FileSystemError::PlanStale {
+                path: target_path.to_path_buf(),
+            })?,
+        )
+    };
+
+    let target_fingerprint = DirectoryFingerprint {
+        canonical_path: target_path.to_path_buf(),
+        device: target_metadata.st_dev as u64,
+        inode: target_metadata.st_ino,
+    };
+    if let Some(expected) = expected_target
+        && &target_fingerprint != expected
+    {
+        return Err(FileSystemError::PlanStale {
+            path: target_path.to_path_buf(),
+        });
+    }
+    if entry_path.parent() != Some(target_path) {
+        return Err(FileSystemError::PlanStale {
+            path: entry_path.to_path_buf(),
+        });
+    }
+    let entry_name = cstring_path_component(
+        entry_path.file_name(),
+        entry_path,
+        "encode project Activation entry name",
+    )?;
+    ensure_entry_missing_at(
+        &target,
+        &entry_name,
+        entry_path,
+        "reserve project Activation entry",
+    )?;
+    let target_bytes =
+        CString::new(final_entity_path.as_os_str().as_bytes()).map_err(|source| {
+            FileSystemError::Io {
+                operation: "encode project Activation target",
+                path: final_entity_path.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+            }
+        })?;
+    let status = unsafe {
+        libc::symlinkat(
+            target_bytes.as_ptr(),
+            target.as_raw_fd(),
+            entry_name.as_ptr(),
+        )
+    };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "create project Activation",
+            path: entry_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    sync_descriptor(&target, target_path, "sync project Activation target")?;
+    Ok(target_fingerprint)
+}
+
+fn create_activation_nofollow_at(
+    target_path: &Path,
+    entry_path: &Path,
+    expected_parent: &DirectoryFingerprint,
+) -> Result<(), FileSystemError> {
+    let parent_path =
+        entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+    let (parent, metadata) = open_absolute_directory_chain_nofollow(
+        parent_path,
+        "open Activation parent without following links",
+    )?;
+    let actual = DirectoryFingerprint {
+        canonical_path: parent_path.to_path_buf(),
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino,
+    };
+    if actual != *expected_parent {
+        return Err(FileSystemError::PlanStale {
+            path: parent_path.to_path_buf(),
+        });
+    }
+    let entry_name = cstring_path_component(
+        entry_path.file_name(),
+        entry_path,
+        "encode Activation entry name",
+    )?;
+    ensure_entry_missing_at(&parent, &entry_name, entry_path, "reserve Activation entry")?;
+    let target =
+        CString::new(target_path.as_os_str().as_bytes()).map_err(|source| FileSystemError::Io {
+            operation: "encode Activation target",
+            path: target_path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
+        })?;
+    let status =
+        unsafe { libc::symlinkat(target.as_ptr(), parent.as_raw_fd(), entry_name.as_ptr()) };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "create Activation",
+            path: entry_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    sync_descriptor(&parent, parent_path, "sync Activation parent")
+}
+
+fn remove_activation_nofollow_at(
+    target_path: &Path,
+    entry_path: &Path,
+    expected_parent: &DirectoryFingerprint,
+) -> Result<(), FileSystemError> {
+    let parent_path =
+        entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+    let (parent, metadata) = open_absolute_directory_chain_nofollow(
+        parent_path,
+        "open Activation removal parent without following links",
+    )?;
+    let actual = DirectoryFingerprint {
+        canonical_path: parent_path.to_path_buf(),
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino,
+    };
+    if actual != *expected_parent {
+        return Err(FileSystemError::PlanStale {
+            path: parent_path.to_path_buf(),
+        });
+    }
+    let entry_name = cstring_path_component(
+        entry_path.file_name(),
+        entry_path,
+        "encode Activation removal entry name",
+    )?;
+    let entry_metadata = metadata_at_nofollow(
+        &parent,
+        &entry_name,
+        entry_path,
+        "inspect Activation before removal",
+    )?;
+    if entry_metadata.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Err(FileSystemError::PlanStale {
+            path: entry_path.to_path_buf(),
+        });
+    }
+    let target = read_link_at(
+        &parent,
+        &entry_name,
+        entry_path,
+        "read Activation target before removal",
+    )?;
+    if target != target_path {
+        return Err(FileSystemError::PlanStale {
+            path: entry_path.to_path_buf(),
+        });
+    }
+    let status = unsafe { libc::unlinkat(parent.as_raw_fd(), entry_name.as_ptr(), 0) };
+    if status != 0 {
+        return Err(FileSystemError::Io {
+            operation: "remove Activation",
+            path: entry_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    sync_descriptor(&parent, parent_path, "sync Activation removal parent")
+}
+
+fn read_link_at(
+    parent: &OwnedFd,
+    name: &CString,
+    path: &Path,
+    operation: &'static str,
+) -> Result<PathBuf, FileSystemError> {
+    let mut buffer = vec![0_u8; 256];
+    loop {
+        let count = unsafe {
+            libc::readlinkat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if count < 0 {
+            return Err(FileSystemError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        let count = count as usize;
+        if count < buffer.len() {
+            buffer.truncate(count);
+            return Ok(PathBuf::from(OsString::from_vec(buffer)));
+        }
+        buffer.resize(buffer.len().saturating_mul(2), 0);
+    }
 }
 
 fn cstring_path_component(
@@ -9322,6 +10425,61 @@ mod tests {
         assert!(source.join("SKILL.md").is_file());
         assert!(!target.exists(), "the substituted parent remains empty");
         assert!(!replacement_parent.join("local-link-skill").exists());
+    }
+
+    #[test]
+    fn source_transition_isolation_rejects_a_lock_claim_symlink() {
+        let root = tempfile::tempdir().expect("temporary source transition root");
+        let parent = root.path().join("external-skills");
+        let target = root.path().join("real-target");
+        let claim = parent.join("claimed-skill");
+        fs::create_dir_all(&parent).expect("create external parent");
+        fs::create_dir(&target).expect("create target");
+        fs::write(target.join("SKILL.md"), "# Target\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &claim).expect("create lock claim symlink");
+
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let result = filesystem.isolate_external_source(&claim, "source-transition-test-1");
+
+        assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
+        assert!(claim.is_symlink(), "the link entry must remain in place");
+        assert!(
+            target.join("SKILL.md").is_file(),
+            "a symlink claim must never move its target"
+        );
+    }
+
+    #[test]
+    fn verified_source_transition_isolation_rejects_a_replaced_entity_identity() {
+        let root = tempfile::tempdir().expect("temporary source transition root");
+        let parent = root.path().join("external-skills");
+        let source = parent.join("claimed-skill");
+        let preserved = parent.join("claimed-skill-original");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("SKILL.md"), "# Original\n").expect("write source");
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let expected_identity = filesystem
+            .directory_fingerprint(&source)
+            .expect("source identity");
+        let expected_tree = filesystem
+            .staged_tree_snapshot(&source)
+            .expect("source tree")
+            .content_hash;
+
+        fs::rename(&source, &preserved).expect("preserve original source");
+        fs::create_dir(&source).expect("create replacement source");
+        fs::write(source.join("SKILL.md"), "# Original\n").expect("write replacement source");
+
+        let result = filesystem.isolate_external_source_verified(
+            &source,
+            "source-transition-test-2",
+            &expected_identity,
+            &expected_tree,
+        );
+
+        assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
+        assert!(source.join("SKILL.md").is_file());
+        assert!(preserved.join("SKILL.md").is_file());
     }
 
     #[test]

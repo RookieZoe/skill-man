@@ -850,6 +850,12 @@ fn create_local_copy_happy_path_registers_and_recovery_is_idempotent() {
                 description: String::new(),
                 source_path: member_namespace(&fixture, &remote_id, "skills/alpha"),
                 destination: destination.clone(),
+                destination_parent: Some(
+                    fixture
+                        .filesystem
+                        .directory_fingerprint(&fixture.export_root)
+                        .expect("destination parent identity"),
+                ),
                 staged_path: fixture.export_root.join(".staging-never"),
                 content_hash,
             }),
@@ -887,6 +893,7 @@ fn create_local_copy_recovery_blocks_when_the_registered_destination_vanished() 
                 description: String::new(),
                 source_path: member_namespace(&fixture, &remote_id, "skills/alpha"),
                 destination: destination.clone(),
+                destination_parent: None,
                 staged_path: fixture.export_root.join(".staging-never"),
                 content_hash: content_hash.into(),
             }),
@@ -939,6 +946,7 @@ fn tampered_local_copy_recovery_keeps_an_external_destination_untouched() {
                 description: member.description,
                 source_path,
                 destination: destination.clone(),
+                destination_parent: None,
                 staged_path,
                 content_hash,
             }),
@@ -970,6 +978,32 @@ fn create_local_copy_rejects_destinations_inside_the_home() {
     assert!(
         matches!(result, Err(SourceLifecycleError::Validation(_))),
         "a destination inside Home must be rejected, got {result:?}"
+    );
+}
+
+#[test]
+fn create_local_copy_rejects_a_symlinked_destination_parent() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let outside = tempfile::tempdir().expect("outside copy parent");
+    let redirected_parent = fixture.export_root.join("redirected-parent");
+    std::os::unix::fs::symlink(outside.path(), &redirected_parent)
+        .expect("create destination parent symlink");
+    let destination = redirected_parent.join("alpha-copy");
+
+    let result = fixture.lifecycle.create_local_copy(
+        &remote_id,
+        &member_id_by_path(&fixture, &remote_id, "skills/alpha"),
+        &destination,
+    );
+
+    assert!(
+        matches!(result, Err(SourceLifecycleError::Validation(_))),
+        "a symlinked Local Copy parent must be rejected, got {result:?}"
+    );
+    assert!(
+        !outside.path().join("alpha-copy").exists(),
+        "a rejected destination must not be written through its symlink parent"
     );
 }
 
@@ -1308,6 +1342,7 @@ fn local_copy_rolls_back_a_pre_commit_crash_journal() {
                 description: member.description.clone(),
                 source_path: alpha,
                 destination: destination.clone(),
+                destination_parent: None,
                 staged_path: staged.clone(),
                 content_hash: snapshot.content_hash.clone(),
             }),

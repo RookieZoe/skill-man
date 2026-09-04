@@ -81,6 +81,82 @@ fn entry_path(harness: &Harness, directory_name: &str, agent: &str) -> PathBuf {
     root_path.join(directory_name)
 }
 
+#[test]
+fn scan_only_root_id_cannot_plan_global_activation() {
+    let harness = harness();
+    let scan_only_root = harness.home.path().join("scan-only-root");
+    harness.home.with_sql("seed scan-only root", |connection| {
+        connection
+            .execute(
+                "INSERT INTO global_skill_roots (
+                    root_id, configured_path, path_identity_key, created_at, updated_at
+                 ) VALUES ('root-scan-only', ?1, ?2, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+                params![
+                    scan_only_root.to_string_lossy(),
+                    skill_man_lib::core::domain::configured_path_identity_key(
+                        &scan_only_root.to_string_lossy()
+                    ),
+                ],
+            )
+            .expect("insert scan-only root");
+        connection
+            .execute(
+                "INSERT INTO agent_global_roots (agent_id, root_id, role)
+                 VALUES ('claude-code', 'root-scan-only', 'scan_only')",
+                [],
+            )
+            .expect("insert scan-only membership");
+    });
+
+    let result = harness.enable.plan_global_enable(
+        &[SkillId("skill-authoring".into())],
+        &["root-scan-only".into()],
+        &[],
+    );
+
+    assert!(matches!(
+        result,
+        Err(skill_man_lib::core::enable::EnableError::Validation(_))
+    ));
+    assert!(
+        !scan_only_root.exists(),
+        "a scan-only root must never be created by Global Enable"
+    );
+}
+
+#[test]
+fn apply_rejects_global_target_ancestor_replacement_as_plan_stale() {
+    let harness = harness();
+    let skill_id = SkillId("skill-authoring".into());
+    let plan = harness
+        .enable
+        .plan_global_enable(
+            std::slice::from_ref(&skill_id),
+            &[harness.home.activation_root_id("claude-code")],
+            &[],
+        )
+        .expect("plan global enable");
+
+    let outside = tempfile::tempdir().expect("outside target");
+    let claude_root = harness.home.path().join(".claude");
+    let preserved = harness.home.path().join(".claude-original");
+    std::fs::rename(&claude_root, &preserved).expect("preserve global target ancestor");
+    std::os::unix::fs::symlink(outside.path(), &claude_root)
+        .expect("replace global target ancestor");
+
+    let result = harness.enable.apply(&plan.plan_token);
+
+    assert!(matches!(
+        result,
+        Err(skill_man_lib::core::enable::EnableError::PlanStale)
+    ));
+    assert!(
+        !outside.path().join("skills/skill-authoring").exists(),
+        "Global Enable must not follow a replaced Target ancestor"
+    );
+    assert!(preserved.join("skills").is_dir());
+}
+
 struct FixtureClock;
 
 impl Clock for FixtureClock {
@@ -722,6 +798,7 @@ fn enable_cell(
         directory_identity_key: skill_id.to_owned(),
         entry_path: entry_path.to_path_buf(),
         target_path: target_path.to_path_buf(),
+        target_parent: None,
         after_desired,
         before_desired: after_desired,
         backup_path,

@@ -473,6 +473,7 @@ export type CellBlockedReason =
 export interface ProjectRootEvidence {
   canonicalPath: string;
   identity: string;
+  hopEvidence?: ProjectHopEvidence[];
 }
 
 export interface ProjectHopEvidence {

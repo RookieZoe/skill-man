@@ -1,6 +1,7 @@
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -177,18 +178,62 @@ impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
             return Err(AgentConfigurationFileSystemError::PlanStale);
         }
         let mut path = planned.nearest_existing_ancestor.canonical_path.clone();
+        let descriptor =
+            open_directory_nofollow(&path, "open Agent Target ancestor without following links")?;
+        let ancestor_metadata = descriptor_metadata(&descriptor, &path)?;
+        if ancestor_metadata.st_dev as u64 != planned.nearest_existing_ancestor.device
+            || ancestor_metadata.st_ino != planned.nearest_existing_ancestor.inode
+        {
+            return Err(AgentConfigurationFileSystemError::PlanStale);
+        }
+        let mut parent = descriptor;
         let mut receipt = CreatedAgentTargetDirectory {
             created: Vec::with_capacity(planned.missing_components.len()),
         };
         for component in &planned.missing_components {
             path.push(component);
-            if let Err(error) = fs::create_dir(&path) {
+            let name = CString::new(component.as_bytes())
+                .map_err(|_| AgentConfigurationFileSystemError::InvalidPath)?;
+            let status = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), libc::S_IRWXU) };
+            if status != 0 {
+                let error = std::io::Error::last_os_error();
                 let _ = self.rollback_created_target(&receipt);
-                return Err(AgentConfigurationFileSystemError::Create(error.to_string()));
+                return if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    Err(AgentConfigurationFileSystemError::PlanStale)
+                } else {
+                    Err(AgentConfigurationFileSystemError::Create(error.to_string()))
+                };
             }
-            let metadata = fs::metadata(&path)
-                .map_err(|error| AgentConfigurationFileSystemError::Create(error.to_string()))?;
-            receipt.created.push(fingerprint(&path, &metadata));
+            let child = match open_directory_at_nofollow(&parent, &name, &path) {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = self.rollback_created_target(&receipt);
+                    return Err(error);
+                }
+            };
+            let metadata = match descriptor_metadata(&child, &path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    let _ = self.rollback_created_target(&receipt);
+                    return Err(error);
+                }
+            };
+            receipt.created.push(AgentRootFingerprint {
+                canonical_path: path.clone(),
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino,
+            });
+            if metadata.st_dev != ancestor_metadata.st_dev {
+                let _ = self.rollback_created_target(&receipt);
+                return Err(AgentConfigurationFileSystemError::Create(
+                    "the Target creation crossed a filesystem boundary".into(),
+                ));
+            }
+            if let Err(error) = sync_descriptor(&parent, &path) {
+                let _ = self.rollback_created_target(&receipt);
+                return Err(error);
+            }
+            parent = child;
         }
         Ok(receipt)
     }
@@ -226,6 +271,98 @@ impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
         File::open("/dev/urandom")
             .and_then(|mut random| random.read_exact(buffer))
             .map_err(|error| AgentConfigurationFileSystemError::Unavailable(error.to_string()))
+    }
+}
+
+fn open_directory_nofollow(
+    path: &Path,
+    operation: &'static str,
+) -> Result<OwnedFd, AgentConfigurationFileSystemError> {
+    let encoded = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| AgentConfigurationFileSystemError::InvalidPath)?;
+    let descriptor = unsafe {
+        libc::open(
+            encoded.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        let source = std::io::Error::last_os_error();
+        if matches!(
+            source.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::TooManyLinks
+        ) {
+            return Err(AgentConfigurationFileSystemError::PlanStale);
+        }
+        return Err(AgentConfigurationFileSystemError::Unavailable(format!(
+            "{operation}: {}",
+            source
+        )));
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+}
+
+fn open_directory_at_nofollow(
+    parent: &OwnedFd,
+    name: &CString,
+    path: &Path,
+) -> Result<OwnedFd, AgentConfigurationFileSystemError> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        let source = std::io::Error::last_os_error();
+        return if matches!(
+            source.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::TooManyLinks
+        ) {
+            Err(AgentConfigurationFileSystemError::PlanStale)
+        } else {
+            Err(AgentConfigurationFileSystemError::Unavailable(
+                source.to_string(),
+            ))
+        };
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let metadata = descriptor_metadata(&descriptor, path)?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(AgentConfigurationFileSystemError::NotDirectory);
+    }
+    Ok(descriptor)
+}
+
+fn descriptor_metadata(
+    descriptor: &OwnedFd,
+    _path: &Path,
+) -> Result<libc::stat, AgentConfigurationFileSystemError> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+        return Err(AgentConfigurationFileSystemError::Unavailable(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    // SAFETY: a zero `fstat` return initialized the output.
+    Ok(unsafe { metadata.assume_init() })
+}
+
+fn sync_descriptor(
+    descriptor: &OwnedFd,
+    path: &Path,
+) -> Result<(), AgentConfigurationFileSystemError> {
+    if unsafe { libc::fsync(descriptor.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(AgentConfigurationFileSystemError::Create(format!(
+            "sync {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )))
     }
 }
 
@@ -390,5 +527,33 @@ mod tests {
             filesystem.probe_root(Path::new("~other/skills")),
             Err(AgentConfigurationFileSystemError::InvalidPath)
         ));
+    }
+
+    #[test]
+    fn create_target_rejects_a_replaced_ancestor_without_mkdir_redirect() {
+        let temp = tempfile::tempdir().expect("temporary Agent Target root");
+        let ancestor = temp.path().join("agent");
+        let outside = tempfile::tempdir().expect("outside target");
+        fs::create_dir(&ancestor).expect("create ancestor");
+        let filesystem = MacOsAgentConfigurationFileSystem::new(temp.path().to_path_buf());
+        let planned = filesystem
+            .inspect_root(Path::new("~/agent/skills"))
+            .expect("inspect missing target");
+
+        let preserved = temp.path().join("preserved-agent");
+        fs::rename(&ancestor, &preserved).expect("preserve original ancestor");
+        std::os::unix::fs::symlink(outside.path(), &ancestor).expect("replace ancestor");
+
+        let result = filesystem.create_target(&planned);
+
+        assert!(matches!(
+            result,
+            Err(AgentConfigurationFileSystemError::PlanStale)
+        ));
+        assert!(
+            !outside.path().join("skills").exists(),
+            "an ancestor symlink must never redirect Target creation"
+        );
+        assert!(preserved.exists());
     }
 }

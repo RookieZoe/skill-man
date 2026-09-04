@@ -4982,6 +4982,8 @@ pub struct ProjectRootEvidenceDto {
     #[serde(rename = "canonicalPath")]
     pub canonical_path: String,
     pub identity: String,
+    #[serde(rename = "hopEvidence")]
+    pub hop_evidence: Vec<ProjectHopEvidenceDto>,
 }
 
 impl From<ProjectRootEvidence> for ProjectRootEvidenceDto {
@@ -4989,6 +4991,7 @@ impl From<ProjectRootEvidence> for ProjectRootEvidenceDto {
         Self {
             canonical_path: value.canonical_path.to_string_lossy().into_owned(),
             identity: value.identity,
+            hop_evidence: value.hop_evidence.into_iter().map(Into::into).collect(),
         }
     }
 }

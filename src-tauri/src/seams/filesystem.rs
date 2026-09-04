@@ -109,6 +109,11 @@ pub struct EnableJournalCell {
     pub entry_path: PathBuf,
     /// The canonical final entity path the Activation points at.
     pub target_path: PathBuf,
+    /// The canonical identity of the Activation Target parent. `None` is
+    /// retained only for legacy/project journals whose target was created
+    /// after the journal was first written.
+    #[serde(default)]
+    pub target_parent: Option<DirectoryFingerprint>,
     /// The catalog desired state the commit point writes.
     pub after_desired: bool,
     /// The catalog desired state when the operation was planned.
@@ -604,6 +609,11 @@ pub struct SourceTransitionJournalMember {
     /// directory name).
     #[serde(default)]
     pub canonical_entity: Option<PathBuf>,
+    /// The external canonical entity's real directory identity, frozen
+    /// before isolation. A lock claim that is itself a symlink is rejected
+    /// rather than canonicalized to its target.
+    #[serde(default)]
+    pub canonical_entity_fingerprint: Option<DirectoryFingerprint>,
     pub isolated_path: Option<PathBuf>,
     pub staged_root: PathBuf,
     pub staged_snapshot: Option<StagedTreeSnapshot>,
@@ -638,6 +648,10 @@ pub struct SourceTransitionRemovedMember {
     /// The legacy Home entity path; absent from the target release.
     pub legacy_path: PathBuf,
     pub tree_hash: String,
+    /// The legacy entity identity frozen before Source Transition
+    /// isolation. Older journals without this fact recover fail-closed.
+    #[serde(default)]
+    pub legacy_fingerprint: Option<DirectoryFingerprint>,
     pub isolated_path: Option<PathBuf>,
 }
 
@@ -665,6 +679,10 @@ pub struct SourceTransitionJournal {
     pub target_manifest: Option<RemoteParentManifest>,
     pub lock_path: PathBuf,
     pub lock_fingerprint: String,
+    /// lstat identity of the lock file at plan time; older journals may not
+    /// carry it and are recovered fail-closed before any lock write.
+    #[serde(default)]
+    pub lock_identity: Option<crate::seams::installer_lock_store::LockFileIdentity>,
     pub lock_entries: Vec<crate::seams::installer_lock_store::LockEntry>,
     pub members: Vec<SourceTransitionJournalMember>,
     /// Every legacy member absent from the target release (a Promotion
@@ -849,6 +867,11 @@ impl SourceLifecycleJournal {
                 "description": journal.description,
                 "sourcePath": journal.source_path.to_string_lossy(),
                 "destination": journal.destination.to_string_lossy(),
+                "destinationParent": journal.destination_parent.as_ref().map(|parent| json!({
+                    "canonicalPath": parent.canonical_path.to_string_lossy(),
+                    "device": parent.device,
+                    "inode": parent.inode,
+                })),
                 "stagedPath": journal.staged_path.to_string_lossy(),
                 "contentHash": journal.content_hash,
             }),
@@ -949,6 +972,28 @@ impl SourceLifecycleJournal {
                 description: text("description")?,
                 source_path: path("sourcePath")?,
                 destination: path("destination")?,
+                destination_parent: value
+                    .get("destinationParent")
+                    .and_then(Value::as_object)
+                    .map(|parent| {
+                        Ok::<DirectoryFingerprint, String>(DirectoryFingerprint {
+                            canonical_path: parent
+                                .get("canonicalPath")
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from)
+                                .ok_or_else(|| {
+                                    "local copy journal destination parent lacks canonicalPath"
+                                        .to_string()
+                                })?,
+                            device: parent.get("device").and_then(Value::as_u64).ok_or_else(
+                                || "local copy journal destination parent lacks device".to_string(),
+                            )?,
+                            inode: parent.get("inode").and_then(Value::as_u64).ok_or_else(
+                                || "local copy journal destination parent lacks inode".to_string(),
+                            )?,
+                        })
+                    })
+                    .transpose()?,
                 staged_path: path("stagedPath")?,
                 content_hash: text("contentHash")?,
             })),
@@ -1127,6 +1172,10 @@ pub struct LocalCopyJournal {
     /// The user-chosen final (canonical) destination outside Home/Agent/
     /// installer roots.
     pub destination: PathBuf,
+    /// The destination parent identity frozen before any copy bytes are
+    /// written. This prevents an ancestor replacement from redirecting the
+    /// staged copy or its final rename.
+    pub destination_parent: Option<DirectoryFingerprint>,
     pub staged_path: PathBuf,
     pub content_hash: String,
 }
@@ -1446,6 +1495,62 @@ pub trait FileSystem: Send + Sync {
         })
     }
 
+    /// Create a Project Enable entry while binding the project root and
+    /// resolved target through no-follow, descriptor-relative operations.
+    /// The system adapter also rechecks every planned missing component.
+    fn create_project_activation(
+        &self,
+        project_root: &DirectoryFingerprint,
+        target_path: &Path,
+        create_steps: &[PathBuf],
+        entry_path: &Path,
+        final_entity_path: &Path,
+        expected_target: Option<&DirectoryFingerprint>,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let actual_root = self.directory_fingerprint(&project_root.canonical_path)?;
+        if actual_root != *project_root {
+            return Err(FileSystemError::PlanStale {
+                path: project_root.canonical_path.clone(),
+            });
+        }
+        self.ensure_directory_tree(target_path)?;
+        let target = self.directory_fingerprint(target_path)?;
+        if let Some(expected) = expected_target
+            && &target != expected
+        {
+            return Err(FileSystemError::PlanStale {
+                path: target_path.to_path_buf(),
+            });
+        }
+        self.create_activation_nofollow(final_entity_path, entry_path, &target)?;
+        let _ = create_steps;
+        Ok(target)
+    }
+
+    /// Copy a tree into a newly-created child of an identity-pinned
+    /// destination parent. The macOS implementation uses `openat`/`mkdirat`
+    /// with `O_NOFOLLOW`; the fallback is for in-memory test adapters.
+    fn copy_tree_verified_nofollow(
+        &self,
+        source: &Path,
+        destination: &Path,
+        expected_destination_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let parent =
+            destination
+                .parent()
+                .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                    path: destination.to_path_buf(),
+                })?;
+        let actual_parent = self.directory_fingerprint(parent)?;
+        if actual_parent != *expected_destination_parent {
+            return Err(FileSystemError::PlanStale {
+                path: parent.to_path_buf(),
+            });
+        }
+        self.copy_tree_verified(source, destination)
+    }
+
     fn discard_staging(
         &self,
         staging_operation_root: &Path,
@@ -1573,7 +1678,56 @@ pub trait FileSystem: Send + Sync {
         entry_path: &Path,
     ) -> Result<(), FileSystemError>;
 
+    /// Create an Activation entry after checking the identity of its parent.
+    /// Implementations must not follow a symlink in the parent chain.
+    fn create_activation_nofollow(
+        &self,
+        target_path: &Path,
+        entry_path: &Path,
+        expected_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let parent = entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+        if self.directory_fingerprint(parent)? != *expected_parent {
+            return Err(FileSystemError::PlanStale {
+                path: parent.to_path_buf(),
+            });
+        }
+        self.create_activation(target_path, entry_path)
+    }
+
     fn remove_activation(&self, entry_path: &Path) -> Result<(), FileSystemError>;
+
+    /// Remove only the expected Activation symlink from an identity-pinned
+    /// parent. This is the checked counterpart used by Enable undo.
+    fn remove_activation_nofollow(
+        &self,
+        target_path: &Path,
+        entry_path: &Path,
+        expected_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let parent = entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+        if self.directory_fingerprint(parent)? != *expected_parent {
+            return Err(FileSystemError::PlanStale {
+                path: parent.to_path_buf(),
+            });
+        }
+        match self.activation_snapshot(entry_path)? {
+            ActivationEntrySnapshot::Symlink { target } if target == target_path => {
+                self.remove_activation(entry_path)
+            }
+            _ => Err(FileSystemError::PlanStale {
+                path: entry_path.to_path_buf(),
+            }),
+        }
+    }
 
     /// Snapshot the content occupying an Activation entry: kind, symlink
     /// target or file length, and the device+inode identity.
@@ -1609,6 +1763,30 @@ pub trait FileSystem: Send + Sync {
         })
     }
 
+    /// Back up an Activation occupant after checking the identity of the
+    /// entry parent. The system adapter additionally performs the move with
+    /// descriptor-relative paths.
+    fn move_occupant_to_backup_nofollow(
+        &self,
+        entry_path: &Path,
+        backup_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+        expected_entry_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let parent = entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+        if self.directory_fingerprint(parent)? != *expected_entry_parent {
+            return Err(FileSystemError::PlanStale {
+                path: parent.to_path_buf(),
+            });
+        }
+        self.move_occupant_to_backup(entry_path, backup_path, library_root, expected)
+    }
+
     /// Move the backed-up occupant back to its entry; the entry must be
     /// absent and the backup must still match `expected`.
     fn restore_occupant_from_backup(
@@ -1627,6 +1805,29 @@ pub trait FileSystem: Send + Sync {
                 "Activation occupant restores are not supported by this filesystem",
             ),
         })
+    }
+
+    /// Restore an Activation occupant after checking the identity of the
+    /// entry parent. The system adapter keeps the restore descriptor-relative.
+    fn restore_occupant_from_backup_nofollow(
+        &self,
+        backup_path: &Path,
+        entry_path: &Path,
+        library_root: &Path,
+        expected: &OccupantSnapshot,
+        expected_entry_parent: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let parent = entry_path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath {
+                path: entry_path.to_path_buf(),
+            })?;
+        if self.directory_fingerprint(parent)? != *expected_entry_parent {
+            return Err(FileSystemError::PlanStale {
+                path: parent.to_path_buf(),
+            });
+        }
+        self.restore_occupant_from_backup(backup_path, entry_path, library_root, expected)
     }
 
     /// Discard a committed backup after verifying it still matches `expected`
@@ -2531,6 +2732,26 @@ pub trait FileSystem: Send + Sync {
                 "source isolation is not supported by this filesystem",
             ),
         })
+    }
+
+    /// Verified Source Transition isolation. The system adapter binds the
+    /// expected inode/tree facts to the descriptor-relative rename; the
+    /// default is retained for lightweight test adapters.
+    fn isolate_external_source_verified(
+        &self,
+        source: &Path,
+        operation_id: &str,
+        expected: &DirectoryFingerprint,
+        expected_tree_hash: &str,
+    ) -> Result<PathBuf, FileSystemError> {
+        if self.directory_fingerprint(source)? != *expected
+            || self.tree_hash(source)? != expected_tree_hash
+        {
+            return Err(FileSystemError::PlanStale {
+                path: source.to_path_buf(),
+            });
+        }
+        self.isolate_external_source(source, operation_id)
     }
 
     /// Reverse of `isolate_external_source`: rename the hidden operation
