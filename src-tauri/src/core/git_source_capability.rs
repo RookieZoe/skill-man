@@ -38,6 +38,11 @@ pub struct GitSourceCapabilitySource {
     pub kind: GitSourceCapabilityKind,
     /// Complete only for `GitRepositorySource`; every other kind is empty.
     pub members: Vec<GitSourceCapabilityMember>,
+    pub provider: Option<String>,
+    pub tracking_mode: Option<String>,
+    pub tracking_value: Option<String>,
+    pub selected_ref: Option<String>,
+    pub resolved_commit: Option<String>,
 }
 
 impl GitSourceCapabilitySource {
@@ -80,23 +85,46 @@ impl GitSourceCapabilityScan {
             .into_iter()
             .map(|source| {
                 let kind = classify(&facts.catalog_structure, &source);
-                let members = match (&kind, source.repository.as_ref()) {
-                    (GitSourceCapabilityKind::GitRepositorySource, Some(repository)) => repository
-                        .current_members
-                        .iter()
-                        .map(|member| GitSourceCapabilityMember {
-                            skill_id: member.skill_id.clone(),
-                            skill_path: member.skill_path.clone(),
-                            presence: member.presence,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
+                let (
+                    members,
+                    provider,
+                    tracking_mode,
+                    tracking_value,
+                    selected_ref,
+                    resolved_commit,
+                ) = match (&kind, source.repository.as_ref()) {
+                    (GitSourceCapabilityKind::GitRepositorySource, Some(repository)) => {
+                        let members = repository
+                            .current_members
+                            .iter()
+                            .map(|member| GitSourceCapabilityMember {
+                                skill_id: member.skill_id.clone(),
+                                skill_path: member.skill_path.clone(),
+                                presence: member.presence,
+                            })
+                            .collect();
+                        let release = repository.current_release.as_ref();
+                        (
+                            members,
+                            repository.provider.clone(),
+                            repository.tracking_mode.clone(),
+                            repository.tracking_value.clone(),
+                            repository.current_selected_ref.clone(),
+                            release.map(|r| r.resolved_commit.clone()),
+                        )
+                    }
+                    _ => (Vec::new(), None, None, None, None, None),
                 };
                 GitSourceCapabilitySource {
                     remote_id: source.remote_id.clone(),
                     canonical_url: source.canonical_url.clone(),
                     kind,
                     members,
+                    provider,
+                    tracking_mode,
+                    tracking_value,
+                    selected_ref,
+                    resolved_commit,
                 }
             })
             .collect();

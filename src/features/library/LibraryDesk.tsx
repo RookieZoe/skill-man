@@ -42,6 +42,9 @@ import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
+import { BrokenDisableSheet } from "./BrokenDisableSheet";
+import { EvidenceRail } from "./EvidenceRail";
+import { SourceGroupCard } from "./SourceGroupCard";
 import {
   GitSourceCapabilityNotice,
   type GitSourceCapabilityFailure,
@@ -274,6 +277,11 @@ export function LibraryDesk({
   const [surface, setSurface] = useState<"library" | "agents">("library");
   const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
   const [isBatchGlobalEnableOpen, setIsBatchGlobalEnableOpen] = useState(false);
+  const [brokenSkill, setBrokenSkill] = useState<{
+    skillId: string;
+    skillPath: string;
+    opener?: HTMLElement | null;
+  } | null>(null);
   const [isBatchProjectEnableOpen, setIsBatchProjectEnableOpen] =
     useState(false);
   const [isSelectMode, setIsSelectMode] = useState(false);
@@ -302,6 +310,7 @@ export function LibraryDesk({
   };
 
   const hasOtherOverlay =
+    brokenSkill !== null ||
     isBatchGlobalEnableOpen ||
     isBatchProjectEnableOpen ||
     agentOverlayOpen ||
@@ -478,23 +487,47 @@ export function LibraryDesk({
           </div>
         ) : null}
         {surface === "library" ? (
-          <GitSourceCapabilityNotice
-            report={gitSourceCapability}
-            failure={gitSourceCapabilityFailure}
-            onPromote={(remoteId, trigger) => {
-              promotionTrigger.current = trigger;
-              onPreviewSourcePromotion(remoteId);
-            }}
-            onUpdate={(remoteId, trigger) => {
-              promotionTrigger.current = trigger;
-              onPreviewSourceUpdate(remoteId);
-            }}
-            actionActivity={sourceActionActivity}
-            actionNotice={sourceActionNotice}
-            onRestore={onRestoreSource}
-            onCopyMember={onCopySourceMember}
-            onRemove={onRemoveSource}
-          />
+          <>
+            {gitSourceCapability?.sources
+              .filter((s) => s.kind === "git_repository_source")
+              .map((source) => (
+                <SourceGroupCard
+                  key={source.remoteId}
+                  source={source}
+                  skills={skills}
+                  actionActivity={sourceActionActivity}
+                  actionNotice={sourceActionNotice}
+                  onUpdate={(remoteId, trigger) => {
+                    promotionTrigger.current = trigger;
+                    onPreviewSourceUpdate(remoteId);
+                  }}
+                  onRestore={onRestoreSource}
+                  onCopyMember={onCopySourceMember}
+                  onRemove={onRemoveSource}
+                  onOpenBrokenDisable={(skillId, skillPath, trigger) => {
+                    setBrokenSkill({ skillId, skillPath, opener: trigger });
+                  }}
+                />
+              ))}
+            <GitSourceCapabilityNotice
+              report={
+                gitSourceCapability
+                  ? {
+                      sources: gitSourceCapability.sources.filter(
+                        (s) => s.kind !== "git_repository_source",
+                      ),
+                    }
+                  : null
+              }
+              failure={gitSourceCapabilityFailure}
+              onPromote={(remoteId, trigger) => {
+                promotionTrigger.current = trigger;
+                onPreviewSourcePromotion(remoteId);
+              }}
+              actionActivity={sourceActionActivity}
+              actionNotice={sourceActionNotice}
+            />
+          </>
         ) : null}
       </div>
       <div className="app-background" inert={hasOverlay ? true : undefined}>
@@ -551,6 +584,7 @@ export function LibraryDesk({
               onOpenRemove={onOpenRemove}
               onOpenProjectEnable={() => setIsProjectEnableOpen(true)}
               gitMemberSkillIds={gitMemberSkillIds}
+              gitSourceCapability={gitSourceCapability}
             />
             <div
               className="agent-drawer"
@@ -599,6 +633,18 @@ export function LibraryDesk({
           onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
           onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
           onExit={exitSelectMode}
+        />
+      ) : null}
+      {brokenSkill !== null ? (
+        <BrokenDisableSheet
+          client={client}
+          skillId={brokenSkill.skillId}
+          skillPath={brokenSkill.skillPath}
+          opener={brokenSkill.opener}
+          onClose={() => {
+            setBrokenSkill(null);
+            if (selectedId) onSelect(selectedId);
+          }}
         />
       ) : null}
       {isBatchGlobalEnableOpen ? (
@@ -968,6 +1014,7 @@ function SkillDetailPanel({
   onOpenRemove,
   onOpenProjectEnable,
   gitMemberSkillIds,
+  gitSourceCapability,
 }: {
   detail: SkillDetail | null;
   error: string | null;
@@ -978,9 +1025,44 @@ function SkillDetailPanel({
   onOpenRemove: () => void;
   onOpenProjectEnable: () => void;
   gitMemberSkillIds: Set<string>;
+  gitSourceCapability: GitSourceCapabilityReport | null;
 }) {
-  const { t, locale } = useLocale();
+  const { t, locale, tPlural } = useLocale();
   const isGitMember = detail ? gitMemberSkillIds.has(detail.id) : false;
+
+  const gitSource = useMemo(() => {
+    if (!detail) return null;
+    return (
+      gitSourceCapability?.sources.find((s) =>
+        s.members.some((m) => m.skillId === detail.id),
+      ) ?? null
+    );
+  }, [detail, gitSourceCapability]);
+
+  const sourceReleaseText = useMemo(() => {
+    if (!detail) return null;
+    if (gitSource) {
+      if (gitSource.selectedRef && gitSource.resolvedCommit) {
+        return t("evidenceRail.releaseCommit", {
+          ref: gitSource.selectedRef,
+          commit: gitSource.resolvedCommit.slice(0, 7),
+        });
+      }
+      return gitSource.selectedRef || gitSource.canonicalUrl;
+    }
+    if (detail.sourceKind === "link") {
+      return t("evidenceRail.sourceReleaseNone");
+    }
+    return detail.fileSourceOriginalPath ?? null;
+  }, [detail, gitSource, t]);
+
+  const activationEvidenceText = useMemo(() => {
+    if (!detail) return null;
+    return detail.enabledAgentCount > 0
+      ? tPlural("evidenceRail.activationActive", detail.enabledAgentCount)
+      : t("evidenceRail.activationNone");
+  }, [detail, t, tPlural]);
+
   return (
     <main
       id="skill-detail"
@@ -1006,6 +1088,13 @@ function SkillDetailPanel({
               onOpenRelocate={onOpenRelocate}
             />
           ) : null}
+          <EvidenceRail
+            directoryIdentity={detail.directoryName}
+            canonicalEntity={detail.finalEntityPath}
+            sourceRelease={sourceReleaseText}
+            activationEvidence={activationEvidenceText}
+            health={detail.health}
+          />
           <div className="detail-actions">
             <button
               type="button"

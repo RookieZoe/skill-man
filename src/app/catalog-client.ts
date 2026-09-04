@@ -14,6 +14,11 @@ export interface GitSourceCapabilitySource {
   kind: GitSourceCapabilityKind;
   /** Complete only for `git_repository_source`; every other kind is empty. */
   members: GitSourceCapabilityMember[];
+  provider?: string;
+  trackingMode?: string;
+  trackingValue?: string | null;
+  selectedRef?: string;
+  resolvedCommit?: string;
 }
 
 export interface GitSourceCapabilityMember {

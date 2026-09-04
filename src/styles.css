@@ -353,6 +353,168 @@ button:active:not(:disabled) {
   }
 }
 
+/* ==========================================================================
+   Evidence rail signature (spec §7.3; ADR-0021)
+   ========================================================================== */
+
+.evidence-rail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3, 12px);
+  margin: var(--space-3, 12px) 0;
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  background: var(--surface-muted, #f7f6f3);
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: var(--radius-md, 8px);
+  font-size: 12px;
+}
+
+.evidence-rail--warning {
+  border-color: var(--warning, #b8860b);
+  background: oklch(96% 0.04 85);
+}
+
+.evidence-rail--danger {
+  border-color: var(--danger, #a33);
+  background: oklch(96% 0.05 25);
+}
+
+.evidence-rail-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.evidence-rail-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary, #8a857b);
+}
+
+.evidence-rail-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text, #1c1b18);
+}
+
+@media (max-width: 759px) {
+  .evidence-rail {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2, 8px);
+  }
+}
+
+/* ==========================================================================
+   Git Source Group Card & Mismatch Panel (spec §7.6; ADR-0018, ADR-0021)
+   ========================================================================== */
+
+.source-group-card {
+  margin-bottom: var(--space-4, 16px);
+  padding: var(--space-4, 16px);
+  background: var(--surface-raised, #ffffff);
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.source-group-card--mismatch {
+  border-color: var(--warning, #b8860b);
+}
+
+.source-group-header {
+  margin-bottom: var(--space-3, 12px);
+}
+
+.source-group-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  flex-wrap: wrap;
+}
+
+.source-group-ref,
+.source-group-commit {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-tertiary, #8a857b);
+}
+
+.source-group-policy-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4, 16px);
+  margin: var(--space-3, 12px) 0;
+  padding: var(--space-3, 12px);
+  background: var(--surface-muted, #f7f6f3);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.policy-cascade-list {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+}
+
+.policy-override-value {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text, #1c1b18);
+}
+
+.source-snapshot-mismatch-panel {
+  margin: var(--space-3, 12px) 0;
+  padding: var(--space-3, 12px);
+  background: oklch(97% 0.03 85);
+  border-left: 4px solid var(--warning, #b8860b);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.source-member-list {
+  list-style: none;
+  margin: var(--space-2, 8px) 0 0;
+  padding: 0;
+}
+
+.source-member-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr auto;
+  gap: var(--space-3, 12px);
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border, #d9d5cc);
+  font-size: 12px;
+}
+
+.member-skill-path {
+  font-family: var(--font-mono, monospace);
+}
+
+/* ==========================================================================
+   Broken member disable sheet (spec §7.4, §7.5)
+   ========================================================================== */
+
+.broken-disable-sheet .broken-step-content {
+  display: grid;
+  gap: var(--space-4, 16px);
+  padding: 0 var(--space-6, 24px) var(--space-6, 24px);
+}
+
+.broken-target-card,
+.broken-confirm-card {
+  padding: var(--space-3, 12px);
+  background: var(--surface-muted, #f7f6f3);
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: var(--radius-sm, 6px);
+  font-size: 13px;
+}
+
 /* Selection shelf (spec §7.4, fixed action bar at bottom) */
 .selection-shelf {
   position: fixed;

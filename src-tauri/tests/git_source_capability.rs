@@ -354,6 +354,11 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                         presence: true,
                     },
                 ],
+                provider: Some("github".into()),
+                tracking_mode: Some("branch".into()),
+                tracking_value: Some("main".into()),
+                selected_ref: Some("main".into()),
+                resolved_commit: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
             }
         ]
     );

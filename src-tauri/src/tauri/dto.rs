@@ -83,6 +83,16 @@ pub struct GitSourceCapabilitySourceDto {
     pub canonical_url: String,
     pub kind: GitSourceCapabilityKindDto,
     pub members: Vec<GitSourceCapabilityMemberDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -110,6 +120,11 @@ impl From<crate::core::git_source_capability::GitSourceCapabilitySource>
                     presence: member.presence,
                 })
                 .collect(),
+            provider: value.provider,
+            tracking_mode: value.tracking_mode,
+            tracking_value: value.tracking_value,
+            selected_ref: value.selected_ref,
+            resolved_commit: value.resolved_commit,
         }
     }
 }

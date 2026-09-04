@@ -244,7 +244,9 @@ test("same Source Content renders byte-identical in both locales", async () => {
 
   const first = renderWithLocale(clientEn, <App client={clientEn} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
-  const enPath = screen.getByText("/Users/zoe/Codes/AI/skills/skill-authoring");
+  const enPath = screen.getAllByText(
+    "/Users/zoe/Codes/AI/skills/skill-authoring",
+  )[0];
   const enMarkdown = screen.getByText(/# Skill authoring/);
   const enMarkdownText = enMarkdown.textContent;
   first.unmount();
@@ -263,7 +265,9 @@ test("same Source Content renders byte-identical in both locales", async () => {
   );
   await waitFor(() => expect(document.documentElement.lang).toBe("zh-Hans"));
   await screen.findByRole("heading", { name: "skill-authoring" });
-  const zhPath = screen.getByText("/Users/zoe/Codes/AI/skills/skill-authoring");
+  const zhPath = screen.getAllByText(
+    "/Users/zoe/Codes/AI/skills/skill-authoring",
+  )[0];
   expect(zhPath.textContent).toBe(enPath.textContent);
   const zhMarkdown = screen.getByText(/# Skill authoring/);
   expect(zhMarkdown.textContent).toBe(enMarkdownText);
