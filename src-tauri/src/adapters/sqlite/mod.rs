@@ -3574,16 +3574,45 @@ impl ImportStore for SqliteCatalogStore {
     fn set_remote_requested_ref(
         &self,
         skill_id: &SkillId,
+        expected_requested_ref: &str,
+        expected_verification_anchor: &str,
         requested_ref: &str,
     ) -> Result<(), ImportStoreError> {
-        self.connection
+        let mut connection = self
+            .connection
             .lock()
-            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?
+            .map_err(|_| ImportStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_import_error)?;
+        let changed = transaction
             .execute(
-                "UPDATE remote_bindings SET requested_ref = ?2 WHERE skill_id = ?1",
-                params![skill_id.0, requested_ref],
+                "UPDATE remote_bindings
+                    SET requested_ref = ?4
+                  WHERE skill_id = ?1
+                    AND requested_ref = ?2
+                    AND verification_anchor_commit = ?3",
+                params![
+                    skill_id.0,
+                    expected_requested_ref,
+                    expected_verification_anchor,
+                    requested_ref,
+                ],
             )
             .map_err(sqlite_import_error)?;
+        if changed != 1 {
+            return Err(ImportStoreError::Stale(format!(
+                "Skill '{}' no longer matches its pin preview",
+                skill_id.0
+            )));
+        }
+        transaction
+            .execute(
+                "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
+                [],
+            )
+            .map_err(sqlite_import_error)?;
+        transaction.commit().map_err(sqlite_import_error)?;
         Ok(())
     }
 

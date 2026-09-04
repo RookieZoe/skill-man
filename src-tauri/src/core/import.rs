@@ -12,7 +12,9 @@ use crate::core::git_source::{
     ResolvedGitRef, discover_skills_from_paths, git_mirror_path, parse_git_source_input,
     repo_name_from_url, resolve_git_ref, skill_document_path, validate_skill_path,
 };
-use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
+use crate::core::write_gate::{
+    HomeWriteContext, PlanCheck, PlanTicket, ProductWriteGuard, WriteGate, WriteGateError,
+};
 use crate::seams::activation_store::DesiredActivation;
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
@@ -192,6 +194,7 @@ struct PlannedLinkImport {
     skill_id: SkillId,
     fingerprint: SkillFingerprint,
     conflict: Option<LibraryConflict>,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at_millis: u128,
 }
@@ -207,6 +210,7 @@ struct PlannedFileImport {
     tree_snapshot: StagedTreeSnapshot,
     conflict: Option<LibraryConflict>,
     operation_id: String,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at_millis: u128,
     reinstall: Option<PlannedFileReinstall>,
@@ -283,6 +287,7 @@ struct PlannedFileImportBatch {
     staging_operation_root: PathBuf,
     staging_fingerprint: DirectoryFingerprint,
     operation_id: String,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at_millis: u128,
     commit_remotes: bool,
@@ -315,6 +320,7 @@ impl ImportService {
         clock: Arc<dyn Clock>,
         file_source: Arc<dyn FileSource>,
         library_root: PathBuf,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             store,
@@ -331,20 +337,16 @@ impl ImportService {
             next_plan_id: AtomicU64::new(1),
             next_skill_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
         }
-    }
-
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
     }
 
     /// Use the bootstrap-verified Home instead of the construction-time
     /// root. The context becomes available only after a Bound transition;
     /// its absence fails closed rather than falling back to the default Home.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -364,6 +366,35 @@ impl ImportService {
                 ImportError::Internal(format!("active Home unavailable: {error}"))
             }),
             None => Ok(self.configured_library_root.clone()),
+        }
+    }
+
+    fn capture_write_context(&self) -> Result<HomeWriteContext, ImportError> {
+        self.write_gate.capture_open_context().map_err(|_| {
+            ImportError::RecoveryRequired("startup recovery is still in progress".into())
+        })
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, ImportError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => ImportError::PlanStale,
+                WriteGateError::Closed => {
+                    ImportError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => ImportError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(&self, context: &HomeWriteContext) -> Result<PathBuf, ImportError> {
+        if self.home_context.is_some() {
+            Ok(context.home.path.clone())
+        } else {
+            self.active_library_root()
         }
     }
 
@@ -423,6 +454,7 @@ impl ImportService {
     }
 
     pub fn plan_link(&self, source_path: &Path) -> Result<LinkImportPreview, ImportError> {
+        let write_context = self.capture_write_context()?;
         let (candidate, source_snapshot) = self.discover_link_with_snapshot(source_path)?;
         let fingerprint = self
             .filesystem
@@ -454,7 +486,8 @@ impl ImportService {
                 skill_id,
                 fingerprint,
                 conflict: conflict.clone(),
-                gate_generation: self.write_gate.generation(),
+                write_context: write_context.clone(),
+                gate_generation: write_context.generation,
                 created_at_millis: now,
             },
         );
@@ -487,7 +520,17 @@ impl ImportService {
         {
             return Err(ImportError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&plan.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => ImportError::PlanStale,
+                WriteGateError::Closed => {
+                    ImportError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => ImportError::RecoveryRequired(other.to_string()),
+            })?;
         drop(plans);
+        let _write_guard = self.acquire_write_guard(&plan.write_context)?;
         if let Some(conflict) = plan.conflict {
             return Err(ImportError::Conflict(conflict.directory_name));
         }
@@ -547,6 +590,8 @@ impl ImportService {
 
     pub fn discover_file(&self, source_path: &Path) -> Result<FileImportCandidate, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let operation_id = self.next_file_operation_id();
         let staging_operation_root = self
             .active_library_root()?
@@ -579,6 +624,8 @@ impl ImportService {
         source_path: &Path,
     ) -> Result<FileImportDiscovery, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let operation_id = self.next_file_operation_id();
         let staging_operation_root = self
             .active_library_root()?
@@ -611,6 +658,8 @@ impl ImportService {
         selected_directory_names: &[String],
     ) -> Result<FileImportSelectionPreview, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let operation_id = self.next_file_operation_id();
         let staging_operation_root = self
             .active_library_root()?
@@ -707,7 +756,8 @@ impl ImportService {
                 tree_snapshot,
                 conflict: conflict.clone(),
                 operation_id: operation_id.clone(),
-                gate_generation: self.write_gate.generation(),
+                write_context: write_context.clone(),
+                gate_generation: write_context.generation,
                 created_at_millis,
                 reinstall: None,
                 remote: None,
@@ -730,7 +780,8 @@ impl ImportService {
             staging_operation_root,
             staging_fingerprint,
             operation_id,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis,
             commit_remotes: false,
         };
@@ -787,6 +838,16 @@ impl ImportService {
         {
             return Err(ImportError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&batch.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => ImportError::PlanStale,
+                WriteGateError::Closed => {
+                    ImportError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => ImportError::RecoveryRequired(other.to_string()),
+            })?;
+        let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         if self
             .clock
             .monotonic_millis()
@@ -861,9 +922,10 @@ impl ImportService {
             &batch.staging_fingerprint,
             &batch.items,
         );
+        let library_root = self.library_root_for_context(&batch.write_context)?;
         if let Err(error) = self
             .filesystem
-            .write_file_import_journal(&self.active_library_root()?, &journal)
+            .write_file_import_journal(&library_root, &journal)
         {
             return self.abort_unapplied_file_journal(
                 &batch.operation_id,
@@ -1049,6 +1111,8 @@ impl ImportService {
 
     pub fn plan_file(&self, source_path: &Path) -> Result<FileImportPreview, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let operation_id = self.next_file_operation_id();
         let staging_operation_root = self
             .active_library_root()?
@@ -1128,7 +1192,8 @@ impl ImportService {
             tree_snapshot,
             conflict: conflict.clone(),
             operation_id,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: None,
             remote: None,
@@ -1180,6 +1245,8 @@ impl ImportService {
         source_path: &Path,
     ) -> Result<FileImportPreview, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let operation_id = self.next_file_operation_id();
         let staging_operation_root = self
             .active_library_root()?
@@ -1307,7 +1374,8 @@ impl ImportService {
             tree_snapshot,
             conflict: None,
             operation_id,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: Some(PlannedFileReinstall {
                 existing_record: ReinstallBaseline::File(existing_record),
@@ -1379,6 +1447,16 @@ impl ImportService {
     /// `abandon_changes` on the plan so Modified entities are never silently
     /// replaced.
     fn apply_planned_file(&self, plan: PlannedFileImport) -> Result<FileImportResult, ImportError> {
+        self.write_gate
+            .validate_open_context(&plan.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => ImportError::PlanStale,
+                WriteGateError::Closed => {
+                    ImportError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => ImportError::RecoveryRequired(other.to_string()),
+            })?;
+        let _write_guard = self.acquire_write_guard(&plan.write_context)?;
         if self
             .clock
             .monotonic_millis()
@@ -1838,6 +1916,7 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("file Import plan lock poisoned".into()))?
             .remove(plan_token);
         if let Some(plan) = plan {
+            let _write_guard = self.acquire_write_guard(&plan.write_context)?;
             self.finish_cancelled_file_plan(
                 &plan.operation_id,
                 &plan.staging_operation_root,
@@ -1851,6 +1930,7 @@ impl ImportService {
             .map_err(|_| ImportError::Internal("file Import batch plan lock poisoned".into()))?
             .remove(plan_token);
         if let Some(batch) = batch {
+            let _write_guard = self.acquire_write_guard(&batch.write_context)?;
             self.finish_cancelled_file_plan(
                 &batch.operation_id,
                 &batch.staging_operation_root,
@@ -1871,6 +1951,8 @@ impl ImportService {
         source: &str,
         force_full_depth: bool,
     ) -> Result<GitImportDiscovery, ImportError> {
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let (spec, mirror, resolved) = self.git_setup(source)?;
         let mut candidates =
             self.discover_git_candidates(&spec, &mirror, &resolved, force_full_depth)?;
@@ -1895,6 +1977,8 @@ impl ImportService {
         selected_directory_names: &[String],
     ) -> Result<GitImportSelectionPreview, ImportError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let (spec, mirror, resolved) = self.git_setup(source)?;
         let all = self.discover_git_candidates(&spec, &mirror, &resolved, force_full_depth)?;
         let selected = selected_directory_names
@@ -2021,7 +2105,8 @@ impl ImportService {
                 tree_snapshot,
                 conflict: conflict.clone(),
                 operation_id: operation_id.clone(),
-                gate_generation: self.write_gate.generation(),
+                write_context: write_context.clone(),
+                gate_generation: write_context.generation,
                 created_at_millis,
                 reinstall: None,
                 remote: Some(PlannedRemoteImport {
@@ -2049,7 +2134,8 @@ impl ImportService {
             staging_operation_root,
             staging_fingerprint,
             operation_id,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis,
             commit_remotes: true,
         };
@@ -2125,7 +2211,31 @@ impl ImportService {
         new_skill_path: Option<&str>,
         abandon_changes: bool,
     ) -> Result<FileImportPreview, ImportError> {
+        let write_context = self.capture_write_context()?;
+        self.plan_git_reinstall_with_context(
+            identity_key,
+            source_url,
+            resolved_commit,
+            new_skill_path,
+            abandon_changes,
+            &write_context,
+        )
+    }
+
+    /// UpdateService passes the context frozen before its repository fetch.
+    /// The nested Import plan must not silently adopt a Home that changed
+    /// during that fetch.
+    pub(crate) fn plan_git_reinstall_with_context(
+        &self,
+        identity_key: &str,
+        source_url: &str,
+        resolved_commit: &str,
+        new_skill_path: Option<&str>,
+        abandon_changes: bool,
+        write_context: &HomeWriteContext,
+    ) -> Result<FileImportPreview, ImportError> {
         self.ensure_writes_ready()?;
+        let _write_guard = self.acquire_write_guard(write_context)?;
         let record = self
             .store
             .load_remote_install(identity_key)?
@@ -2283,7 +2393,8 @@ impl ImportService {
             tree_snapshot,
             conflict: None,
             operation_id,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis: self.clock.monotonic_millis(),
             reinstall: Some(PlannedFileReinstall {
                 existing_record: ReinstallBaseline::Remote(record.clone()),

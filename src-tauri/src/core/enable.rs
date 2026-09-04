@@ -40,7 +40,9 @@ use thiserror::Error;
 use crate::core::domain::{ActivationObservedState, Compatibility, Health, SkillId, SourceKind};
 use crate::core::source_update::SourceUpdateError;
 use crate::core::source_update::SourceUpdateService;
-use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
+use crate::core::write_gate::{
+    HomeWriteContext, PlanCheck, PlanTicket, ProductWriteGuard, WriteGate, WriteGateError,
+};
 use crate::seams::activation_store::{
     ActivationCellRow, ActivationCellWrite, ActivationStore, ActivationStoreError,
 };
@@ -354,6 +356,7 @@ struct PlannedBatch {
     operation_id: String,
     scope: &'static str,
     canonical_project_root: Option<PathBuf>,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     catalog_generation: u64,
     agent_generation: u64,
@@ -392,6 +395,7 @@ impl EnableService {
         filesystem: Arc<dyn FileSystem>,
         clock: Arc<dyn Clock>,
         library_root: PathBuf,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             store,
@@ -407,19 +411,15 @@ impl EnableService {
             applied: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
         }
-    }
-
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
     }
 
     /// Make Home-scoped plans resolve their paths from the bootstrap-verified
     /// Home rather than from the process's startup configuration.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -459,6 +459,33 @@ impl EnableService {
     fn block_for_recovery(&self, context: &str, error: impl std::fmt::Display) -> EnableError {
         self.write_gate.mark_blocked();
         EnableError::RecoveryRequired(format!("{context}: {error}"))
+    }
+
+    fn capture_write_context(&self) -> Result<HomeWriteContext, EnableError> {
+        self.write_gate
+            .capture_open_context()
+            .map_err(|_| EnableError::WriteGateClosed)
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, EnableError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => EnableError::PlanStale,
+                WriteGateError::Closed => EnableError::WriteGateClosed,
+                other => EnableError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(&self, context: &HomeWriteContext) -> Result<PathBuf, EnableError> {
+        if self.home_context.is_some() {
+            Ok(context.home.path.clone())
+        } else {
+            self.active_library_root()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -562,6 +589,7 @@ impl EnableService {
         target_group_ids: &[String],
         cell_resolutions: &[(String, CellResolution)],
     ) -> Result<EnablePlan, EnableError> {
+        let write_context = self.capture_write_context()?;
         if skill_ids.is_empty() {
             return Err(EnableError::Validation(
                 "at least one Skill is required for Global Enable".into(),
@@ -586,7 +614,7 @@ impl EnableService {
             }
         }
         resolve_batch_contention(&mut cells, cell_resolutions);
-        self.build_plan(cells)
+        self.build_plan(cells, write_context)
     }
 
     /// Plan one Global lifecycle action on one Target group (spec §4.9):
@@ -597,8 +625,9 @@ impl EnableService {
         target_group_id: &str,
         action: EnableAction,
     ) -> Result<EnablePlan, EnableError> {
+        let write_context = self.capture_write_context()?;
         let cell = self.plan_cell(skill_id, target_group_id, action, None, false)?;
-        self.build_plan(vec![cell])
+        self.build_plan(vec![cell], write_context)
     }
 
     /// Plan a Project Enable for one or more Skills in one project folder
@@ -610,6 +639,7 @@ impl EnableService {
         agent_ids: &[String],
         cell_resolutions: &[(String, CellResolution)],
     ) -> Result<EnablePlan, EnableError> {
+        let write_context = self.capture_write_context()?;
         if skill_ids.is_empty() {
             return Err(EnableError::Validation(
                 "at least one Skill is required for Project Enable".into(),
@@ -882,16 +912,24 @@ impl EnableService {
         }
 
         resolve_batch_contention(&mut cells, cell_resolutions);
-        self.build_project_plan(canonical_project_root, cells)
+        self.build_project_plan(canonical_project_root, cells, write_context)
     }
 
     fn build_project_plan(
         &self,
         canonical_project_root: PathBuf,
         cells: Vec<PlannedCell>,
+        write_context: HomeWriteContext,
     ) -> Result<EnablePlan, EnableError> {
         let plan_token = self.new_id()?;
-        let gate_generation = self.write_gate.generation();
+        self.write_gate
+            .validate_open_context(&write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => EnableError::PlanStale,
+                WriteGateError::Closed => EnableError::WriteGateClosed,
+                other => EnableError::RecoveryRequired(other.to_string()),
+            })?;
+        let gate_generation = write_context.generation;
         let catalog_generation = self.store.catalog_generation()?;
         let agent_generation = self
             .agent_store
@@ -912,6 +950,7 @@ impl EnableService {
             operation_id: self.new_id()?,
             scope: "project",
             canonical_project_root: Some(canonical_project_root),
+            write_context,
             gate_generation,
             catalog_generation,
             agent_generation,
@@ -938,9 +977,20 @@ impl EnableService {
         })
     }
 
-    fn build_plan(&self, cells: Vec<PlannedCell>) -> Result<EnablePlan, EnableError> {
+    fn build_plan(
+        &self,
+        cells: Vec<PlannedCell>,
+        write_context: HomeWriteContext,
+    ) -> Result<EnablePlan, EnableError> {
         let plan_token = self.new_id()?;
-        let gate_generation = self.write_gate.generation();
+        self.write_gate
+            .validate_open_context(&write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => EnableError::PlanStale,
+                WriteGateError::Closed => EnableError::WriteGateClosed,
+                other => EnableError::RecoveryRequired(other.to_string()),
+            })?;
+        let gate_generation = write_context.generation;
         let catalog_generation = self.store.catalog_generation()?;
         let agent_generation = self
             .agent_store
@@ -950,6 +1000,7 @@ impl EnableService {
             operation_id: self.new_id()?,
             scope: "global",
             canonical_project_root: None,
+            write_context,
             gate_generation,
             catalog_generation,
             agent_generation,
@@ -1212,6 +1263,13 @@ impl EnableService {
         {
             return Err(EnableError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&batch.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => EnableError::PlanStale,
+                WriteGateError::Closed => EnableError::WriteGateClosed,
+                other => EnableError::RecoveryRequired(other.to_string()),
+            })?;
         drop(plans);
         if self
             .clock
@@ -1221,9 +1279,9 @@ impl EnableService {
         {
             return Err(EnableError::PlanNotFound);
         }
+        let library_root = self.library_root_for_context(&batch.write_context)?;
+        let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         self.verify_plan(&batch)?;
-
-        let library_root = self.active_library_root()?;
         let mut journal = self.build_journal(&batch, &library_root);
         let has_runnable = journal
             .cells
@@ -1838,7 +1896,8 @@ impl EnableService {
             .map_err(|_| EnableError::Internal("Enable applied lock poisoned".into()))?
             .remove(operation_id)
             .ok_or(EnableError::PlanNotFound)?;
-        let library_root = self.active_library_root()?;
+        let library_root = self.library_root_for_context(&batch.write_context)?;
+        let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         let mut journal = self.build_journal(&batch, &library_root);
         let succeeded = batch
             .cells
@@ -2131,7 +2190,8 @@ impl EnableService {
             .map_err(|_| EnableError::Internal("Enable applied lock poisoned".into()))?
             .remove(operation_id)
             .ok_or(EnableError::PlanNotFound)?;
-        let library_root = self.active_library_root()?;
+        let library_root = self.library_root_for_context(&batch.write_context)?;
+        let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         let journal = self.build_journal(&batch, &library_root);
         for cell in &journal.cells {
             if let (Some(backup_path), Some(occupant)) = (&cell.backup_path, &cell.occupant) {
@@ -2153,6 +2213,8 @@ impl EnableService {
     }
 
     pub fn clear_recent_project_folders(&self) -> Result<(), EnableError> {
+        let context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&context)?;
         Ok(self.agent_store.clear_recent_project_folders()?)
     }
 }

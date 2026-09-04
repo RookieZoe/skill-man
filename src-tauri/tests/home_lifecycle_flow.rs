@@ -27,6 +27,7 @@ use skill_man_lib::core::home_binding::{
     CandidateMode, HOME_CANDIDATE_KIND, HomeBindingConfig, HomeBindingService,
 };
 use skill_man_lib::core::home_lifecycle::{HomeLifecycleError, HomeLifecycleService};
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::app_state_store::{
     AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
 };
@@ -188,6 +189,7 @@ fn compose(home_path: Option<&Path>) -> Composition {
         filesystem.clone(),
         Arc::new(SqlitePreparedCatalogFactory),
         bootstrap.clone(),
+        Arc::new(WriteGate::open_for_tests()),
         BootstrapConfig {
             state_dir: state_dir.clone(),
             default_home_path: default_home.clone(),
@@ -197,6 +199,7 @@ fn compose(home_path: Option<&Path>) -> Composition {
     let lifecycle = Arc::new(HomeLifecycleService::new(
         app_state.clone(),
         bootstrap.clone(),
+        Arc::new(WriteGate::open_for_tests()),
     ));
     let binding = Arc::new(HomeBindingService::new(
         app_state,
@@ -211,6 +214,7 @@ fn compose(home_path: Option<&Path>) -> Composition {
         Arc::new(skill_man_lib::adapters::sqlite::SqliteLegacyCatalogMigrator),
         Arc::new(SqlitePreparedCatalogFactory),
         bootstrap.clone(),
+        Arc::new(WriteGate::open_for_tests()),
         HomeBindingConfig {
             state_dir: state_dir.clone(),
             default_home_path: default_home.clone(),
@@ -609,6 +613,7 @@ fn restore_resumes_after_a_crash_mid_operation() {
         Arc::new(MacOsFileSystem::new(composition.root.clone())),
         Arc::new(SqlitePreparedCatalogFactory),
         composition.bootstrap.clone(),
+        Arc::new(WriteGate::open_for_tests()),
         BootstrapConfig {
             state_dir: composition.state_dir.clone(),
             default_home_path: composition.default_home.clone(),
@@ -704,6 +709,7 @@ fn abandon_requires_the_typed_home_id_and_commits_via_locator_cas() {
     let racer = HomeLifecycleService::new(
         Arc::new(AppStateStoreFileSystem::new(composition.state_dir.clone())),
         composition.bootstrap.clone(),
+        Arc::new(WriteGate::open_for_tests()),
     );
     assert!(matches!(
         racer.plan_abandon(),

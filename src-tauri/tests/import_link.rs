@@ -37,6 +37,7 @@ fn link_import_stays_at_its_source_and_enters_the_library_without_distribution()
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
 
@@ -110,6 +111,7 @@ fn library_conflict_is_visible_in_preview_and_cannot_be_applied() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
     let before = catalog
@@ -161,6 +163,7 @@ fn apply_reports_plan_stale_when_the_link_source_changes_after_preview() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root,
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
 
@@ -213,6 +216,7 @@ fn link_identity_comes_from_the_selected_entry_and_retargeting_makes_the_plan_st
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root,
+        home.write_gate.clone(),
     ));
 
     let discovered = import

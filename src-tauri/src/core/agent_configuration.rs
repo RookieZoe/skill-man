@@ -6,7 +6,10 @@ use thiserror::Error;
 
 pub use crate::core::domain::Compatibility;
 use crate::core::domain::{agent_name_identity_key, configured_path_identity_key};
-use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
+use crate::core::write_gate::{
+    HomeWriteContext, PlanCheck, PlanTicket, ProductWriteGuard, WriteGate, WriteGateError,
+    WriteGateState,
+};
 use crate::seams::agent_configuration_fs::{
     AgentConfigurationFileSystem, AgentConfigurationFileSystemError, AgentRootInspection,
     CreatedAgentTargetDirectory,
@@ -306,6 +309,7 @@ struct PlannedRoot {
 #[derive(Clone)]
 struct PendingPlan {
     ticket: PlanTicket,
+    write_context: HomeWriteContext,
     snapshot_version: u64,
     kind: AgentConfigurationPlanKind,
     change: AgentConfigurationStoreChange,
@@ -366,6 +370,7 @@ impl AgentConfigurationService {
         agent_id: &str,
     ) -> Result<AgentConfigurationPlan, AgentConfigurationError> {
         self.require_open_gate()?;
+        let write_context = self.capture_write_context()?;
         let snapshot = self
             .store
             .agent_configuration_snapshot()
@@ -403,8 +408,9 @@ impl AgentConfigurationService {
         let plan_token = self.new_id()?;
         let plan = PendingPlan {
             ticket: PlanTicket {
-                generation: self.write_gate.generation(),
+                generation: write_context.generation,
             },
+            write_context,
             snapshot_version: snapshot.snapshot_version,
             kind: AgentConfigurationPlanKind::Delete,
             change: AgentConfigurationStoreChange::Delete {
@@ -442,6 +448,14 @@ impl AgentConfigurationService {
         if self.write_gate.check_plan(plan.ticket) != PlanCheck::Current {
             return Err(AgentConfigurationError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&plan.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AgentConfigurationError::PlanStale,
+                WriteGateError::Closed => AgentConfigurationError::WriteGateClosed,
+                other => AgentConfigurationError::Store(other.to_string()),
+            })?;
+        let _write_guard = self.acquire_write_guard(&plan.write_context)?;
         if !plan.blocking_activation_skill_ids.is_empty() {
             return Err(AgentConfigurationError::TargetInUse {
                 skill_ids: plan.blocking_activation_skill_ids,
@@ -552,6 +566,7 @@ impl AgentConfigurationService {
         draft: AgentConfigurationDraft,
     ) -> Result<AgentConfigurationPlan, AgentConfigurationError> {
         self.require_open_gate()?;
+        let write_context = self.capture_write_context()?;
         let snapshot = self
             .store
             .agent_configuration_snapshot()
@@ -752,8 +767,9 @@ impl AgentConfigurationService {
                 plan_token.clone(),
                 PendingPlan {
                     ticket: PlanTicket {
-                        generation: self.write_gate.generation(),
+                        generation: write_context.generation,
                     },
+                    write_context: write_context.clone(),
                     snapshot_version: snapshot.snapshot_version,
                     kind,
                     change,
@@ -833,6 +849,25 @@ impl AgentConfigurationService {
             }
         }
         Ok(())
+    }
+
+    fn capture_write_context(&self) -> Result<HomeWriteContext, AgentConfigurationError> {
+        self.write_gate
+            .capture_open_context()
+            .map_err(|_| AgentConfigurationError::WriteGateClosed)
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, AgentConfigurationError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AgentConfigurationError::PlanStale,
+                WriteGateError::Closed => AgentConfigurationError::WriteGateClosed,
+                other => AgentConfigurationError::Store(other.to_string()),
+            })
     }
 
     fn require_open_gate(&self) -> Result<(), AgentConfigurationError> {

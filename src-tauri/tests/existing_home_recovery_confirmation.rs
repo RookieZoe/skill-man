@@ -17,6 +17,7 @@ use skill_man_lib::core::existing_home_recovery::{
 use skill_man_lib::core::fixture_recovery::SystemFixtureClassifier;
 use skill_man_lib::core::home::{BoundHome, HomeId, HomeMarker};
 use skill_man_lib::core::home_binding::STANDARD_LAYOUT_DIRS;
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::app_state_store::{
     AppStateFiles, AppStateStore, AppStateStoreError, HomeBindingFile, RecoveryLedgerFile,
 };
@@ -162,6 +163,7 @@ fn confirmation_rebuilds_only_the_lost_locator_and_immediately_binds_the_existin
             probe.clone(),
             filesystem.clone(),
             classifier.clone(),
+            Arc::new(WriteGate::open_for_tests()),
             ExistingHomeRecoveryConfig {
                 catalog_file_name: CATALOG_FILE_NAME.into(),
             },
@@ -208,6 +210,7 @@ fn confirmation_rebuilds_only_the_lost_locator_and_immediately_binds_the_existin
         probe,
         filesystem,
         classifier,
+        Arc::new(WriteGate::open_for_tests()),
         ExistingHomeRecoveryConfig {
             catalog_file_name: CATALOG_FILE_NAME.into(),
         },

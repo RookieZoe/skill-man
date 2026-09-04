@@ -44,10 +44,12 @@ fn harness() -> TestHarness {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     );
     let catalog = CatalogService::new(runtime.clone());
-    let maintenance = MaintenanceService::new(runtime.clone(), filesystem)
-        .with_library_root(library_root.clone());
+    let maintenance =
+        MaintenanceService::for_tests(runtime.clone(), filesystem, home.write_gate.clone())
+            .with_library_root(library_root.clone());
     TestHarness {
         home,
         library_root,

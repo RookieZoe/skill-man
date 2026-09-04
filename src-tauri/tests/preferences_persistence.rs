@@ -11,6 +11,7 @@ use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::core::domain::Health;
 use skill_man_lib::core::preferences::PreferencesService;
 use skill_man_lib::core::startup::StartupService;
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::catalog_store::CatalogStore;
 use skill_man_lib::seams::locale_store::EffectiveLocale;
 use skill_man_lib::seams::preferences_store::{AppPreferences, PreferenceUpdates};
@@ -23,12 +24,16 @@ fn runtime(home: &BoundTestHome) -> Arc<RuntimeCatalogStore> {
     home.runtime.clone()
 }
 
+fn test_gate() -> Arc<WriteGate> {
+    Arc::new(WriteGate::open_for_tests())
+}
+
 #[test]
 fn preferences_defaults_match_the_spec_and_partial_updates_persist() {
     let home = BoundTestHome::new();
     home.seed_standard_library();
     let runtime = runtime(&home);
-    let service = PreferencesService::new(runtime.clone());
+    let service = PreferencesService::new(runtime.clone(), test_gate());
 
     let defaults = service.load().expect("load Preferences");
     assert_eq!(
@@ -54,7 +59,7 @@ fn preferences_defaults_match_the_spec_and_partial_updates_persist() {
     assert!(updated.check_skill_updates);
 
     // The update survives a fresh service over the same store.
-    let reloaded = PreferencesService::new(runtime.clone())
+    let reloaded = PreferencesService::new(runtime.clone(), test_gate())
         .load()
         .expect("reload Preferences");
     assert!(reloaded.launch_at_login);
@@ -67,7 +72,7 @@ fn first_run_flag_flips_after_onboarding_completes() {
     home.seed_standard_library();
     let runtime = runtime(&home);
     let filesystem = home.filesystem.clone();
-    let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem);
+    let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem, test_gate());
 
     let info = startup.startup_info().expect("startup info");
     assert!(info.first_run, "a fresh catalog is still a first run");
@@ -207,7 +212,7 @@ fn create_agent_directory_only_creates_known_missing_presets() {
     home.seed_standard_library();
     let runtime = runtime(&home);
     let filesystem = home.filesystem.clone();
-    let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem);
+    let startup = StartupService::new(runtime.clone(), runtime.clone(), filesystem, test_gate());
 
     // An unknown Agent is rejected.
     let error = startup

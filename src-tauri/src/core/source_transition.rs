@@ -22,7 +22,7 @@ use crate::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreview, SourceGroupPreviewError,
     SourceGroupPreviewOutcome, SourceGroupPreviewService, SourceTrackingOverride,
 };
-use crate::core::write_gate::WriteGate;
+use crate::core::write_gate::{HomeWriteContext, ProductWriteGuard, WriteGate, WriteGateError};
 use crate::seams::clock::{Clock, iso_timestamp, uuid_v4_shape};
 use crate::seams::filesystem::{
     FileSystem, FileSystemError, RemoteParentManifest, SourceTransitionJournal,
@@ -177,6 +177,7 @@ impl SourceTransitionService {
         clock: Arc<dyn Clock>,
         library_root: PathBuf,
         home_directory: PathBuf,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             preview,
@@ -190,18 +191,18 @@ impl SourceTransitionService {
             configured_library_root: library_root,
             home_directory,
             home_context: None,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
             next_id: AtomicU64::new(1),
         }
     }
 
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
+    pub(crate) fn write_gate(&self) -> Arc<WriteGate> {
+        self.write_gate.clone()
     }
 
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -216,7 +217,7 @@ impl SourceTransitionService {
         &self,
         request: ConfirmSourceTransitionRequest,
     ) -> Result<SourceTransitionResult, SourceTransitionError> {
-        self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
         let preview = self.refresh_preview(
             &request.source_type,
             &request.source_url,
@@ -236,7 +237,7 @@ impl SourceTransitionService {
                 "the Git Repository Source is already managed; use Update".into(),
             ));
         }
-        let library_root = self.active_library_root()?;
+        let library_root = self.library_root_for_context(&write_context)?;
         let claims = self.clean_claim_set(&preview, true)?;
         let operation_id = self.next_operation_id();
         let remote_id = self.next_uuid();
@@ -309,8 +310,8 @@ impl SourceTransitionService {
             promotion_legacy: None,
             update_previous: None,
         };
-        self.filesystem
-            .write_source_transition_journal(&library_root, &journal)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
+        self.persist_transition_intent(&library_root, &journal)?;
 
         let result = self.apply_confirmed_transition(&library_root, &mut journal);
         match result {
@@ -334,9 +335,18 @@ impl SourceTransitionService {
                         | SourceTransitionPhase::DestinationsReserved
                 ) =>
             {
-                self.rollback_pre_commit(&library_root, &mut journal)?;
-                self.filesystem
-                    .finish_source_transition_journal(&library_root, &journal.operation_id)?;
+                if let Err(compensation) = self.rollback_pre_commit(&library_root, &mut journal) {
+                    return Err(
+                        self.block_for_recovery("roll back failed Source Transition", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_transition_journal(&library_root, &journal.operation_id)
+                {
+                    return Err(self
+                        .block_for_recovery("archive failed Source Transition journal", archive));
+                }
                 Err(error)
             }
             Err(error) => Err(self.block_for_recovery("continue Source Transition", error)),
@@ -347,7 +357,7 @@ impl SourceTransitionService {
         &self,
         request: ConfirmSourcePromotionRequest,
     ) -> Result<SourceTransitionResult, SourceTransitionError> {
-        self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
         let legacy = self
             .promotion_store
             .read_legacy_source_promotion(&request.remote_id)
@@ -376,7 +386,7 @@ impl SourceTransitionService {
         {
             return Err(SourceTransitionError::PreviewStale);
         }
-        let library_root = self.active_library_root()?;
+        let library_root = self.library_root_for_context(&write_context)?;
         let claims = self.clean_claim_set(&preview, false)?;
         let operation_id = self.next_operation_id();
         let release_id = format!("source-release-{operation_id}");
@@ -482,8 +492,8 @@ impl SourceTransitionService {
             promotion_legacy: Some(legacy),
             update_previous: None,
         };
-        self.filesystem
-            .write_source_transition_journal(&library_root, &journal)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
+        self.persist_transition_intent(&library_root, &journal)?;
 
         let result = self.apply_confirmed_transition(&library_root, &mut journal);
         match result {
@@ -507,9 +517,19 @@ impl SourceTransitionService {
                         | SourceTransitionPhase::DestinationsReserved
                 ) =>
             {
-                self.rollback_pre_commit(&library_root, &mut journal)?;
-                self.filesystem
-                    .finish_source_transition_journal(&library_root, &journal.operation_id)?;
+                if let Err(compensation) = self.rollback_pre_commit(&library_root, &mut journal) {
+                    return Err(
+                        self.block_for_recovery("roll back failed Source Promotion", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_transition_journal(&library_root, &journal.operation_id)
+                {
+                    return Err(
+                        self.block_for_recovery("archive failed Source Promotion journal", archive)
+                    );
+                }
                 Err(error)
             }
             Err(error) => Err(self.block_for_recovery("continue Source Promotion", error)),
@@ -536,8 +556,8 @@ impl SourceTransitionService {
         &self,
         request: ConfirmSourceUpdateRequest,
     ) -> Result<SourceTransitionResult, SourceTransitionError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
         let current = self
             .update_store
             .read_current(&request.remote_id)?
@@ -746,8 +766,8 @@ impl SourceTransitionService {
             promotion_legacy: None,
             update_previous: Some(update_previous.to_json()),
         };
-        self.filesystem
-            .write_source_transition_journal(&library_root, &journal)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
+        self.persist_transition_intent(&library_root, &journal)?;
         let mut frozen_record = update_record;
 
         let result = self.apply_confirmed_update(&library_root, &mut journal, &mut frozen_record);
@@ -772,9 +792,21 @@ impl SourceTransitionService {
                         | SourceTransitionPhase::DestinationsReserved
                 ) =>
             {
-                self.rollback_pre_commit_update(&library_root, &mut journal, &frozen_record)?;
-                self.filesystem
-                    .finish_source_transition_journal(&library_root, &journal.operation_id)?;
+                if let Err(compensation) =
+                    self.rollback_pre_commit_update(&library_root, &mut journal, &frozen_record)
+                {
+                    return Err(
+                        self.block_for_recovery("roll back failed Source Update", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_transition_journal(&library_root, &journal.operation_id)
+                {
+                    return Err(
+                        self.block_for_recovery("archive failed Source Update journal", archive)
+                    );
+                }
                 Err(error)
             }
             Err(error) => Err(self.block_for_recovery("continue Source Update", error)),
@@ -916,8 +948,9 @@ impl SourceTransitionService {
     }
 
     pub fn undo(&self, operation_id: &str) -> Result<SourceUndoResult, SourceTransitionError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let mut journal = self.journal_for(&library_root, operation_id)?;
         self.validate_journal_layout(&library_root, &journal)?;
         let update_record_present = journal.update_previous.is_some();
@@ -966,8 +999,9 @@ impl SourceTransitionService {
     }
 
     pub fn finalize(&self, operation_id: &str) -> Result<(), SourceTransitionError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let journal = self.journal_for(&library_root, operation_id)?;
         self.validate_journal_layout(&library_root, &journal)?;
         let update_record_present = journal.update_previous.is_some();
@@ -3085,13 +3119,41 @@ impl SourceTransitionService {
         }
     }
 
-    fn ensure_writes_ready(&self) -> Result<(), SourceTransitionError> {
-        if self.write_gate.is_product_write_open() {
-            Ok(())
+    fn capture_write_context(&self) -> Result<HomeWriteContext, SourceTransitionError> {
+        self.write_gate
+            .capture_open_context()
+            .map_err(|error| match error {
+                WriteGateError::Stale => SourceTransitionError::PreviewStale,
+                WriteGateError::Closed => SourceTransitionError::RecoveryRequired(
+                    "startup recovery is still in progress".into(),
+                ),
+                other => SourceTransitionError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, SourceTransitionError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => SourceTransitionError::PreviewStale,
+                WriteGateError::Closed => SourceTransitionError::RecoveryRequired(
+                    "startup recovery is still in progress".into(),
+                ),
+                other => SourceTransitionError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<PathBuf, SourceTransitionError> {
+        if self.home_context.is_some() {
+            Ok(context.home.path.clone())
         } else {
-            Err(SourceTransitionError::RecoveryRequired(
-                "startup recovery is still in progress".into(),
-            ))
+            self.active_library_root()
         }
     }
 
@@ -3112,6 +3174,16 @@ impl SourceTransitionService {
             bytes[8..].copy_from_slice(&(value.rotate_left(17)).to_be_bytes());
         }
         uuid_v4_shape(&mut bytes)
+    }
+
+    fn persist_transition_intent(
+        &self,
+        library_root: &Path,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        self.filesystem
+            .write_source_transition_journal(library_root, journal)
+            .map_err(|error| self.block_for_recovery("persist Source Transition intent", error))
     }
 
     fn block_for_recovery(

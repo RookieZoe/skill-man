@@ -204,7 +204,7 @@ fn command_error(error: EnableError) -> CommandFailureDto {
         EnableError::Validation(_) => PublicErrorDto::Validation,
         EnableError::SkillNotFound { .. } => PublicErrorDto::NotFound,
         EnableError::PlanStale | EnableError::PlanNotFound => PublicErrorDto::PlanStale,
-        EnableError::WriteGateClosed => PublicErrorDto::StateUnavailable,
+        EnableError::WriteGateClosed => PublicErrorDto::RecoveryRequired,
         EnableError::SourceSnapshotMismatch => PublicErrorDto::SourceSnapshotMismatch,
         EnableError::TombstonedMember => PublicErrorDto::SourceSnapshotMismatch,
         EnableError::CellConflict(_) => PublicErrorDto::Validation,

@@ -11,6 +11,7 @@ use std::thread;
 use skill_man_lib::core::app_update::{
     AppUpdateCheck, AppUpdateError, AppUpdateOffer, AppUpdateService, DownloadedAppUpdate,
 };
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::app_updater::{AppUpdater, AppUpdaterError};
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::preferences_store::{
@@ -24,6 +25,10 @@ use skill_man_lib::tauri_adapter::dto::{
 };
 
 type UpdateFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AppUpdaterError>> + Send + 'a>>;
+
+fn test_gate() -> Arc<WriteGate> {
+    Arc::new(WriteGate::open_for_tests())
+}
 
 struct FixedClock {
     unix_seconds: i64,
@@ -284,6 +289,7 @@ fn automatic_app_update_check_skips_during_the_twenty_four_hour_cooldown() {
         updater.clone(),
         preferences,
         Arc::new(FixedClock { unix_seconds: now }),
+        test_gate(),
     );
 
     let result = tauri::async_runtime::block_on(service.check(false)).expect("check App Update");
@@ -308,6 +314,7 @@ fn forced_app_update_check_bypasses_cooldown_and_returns_complete_offer() {
         updater.clone(),
         preferences.clone(),
         Arc::new(FixedClock { unix_seconds: now }),
+        test_gate(),
     );
 
     let result = tauri::async_runtime::block_on(service.check(true)).expect("force App Update");
@@ -346,6 +353,7 @@ fn a_second_check_cannot_replace_an_offer_while_the_first_check_is_in_flight() {
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     ));
     let first_service = service.clone();
     let first = thread::spawn(move || tauri::async_runtime::block_on(first_service.check(true)));
@@ -379,6 +387,7 @@ fn failed_or_unverified_download_cannot_be_installed() {
         updater.clone(),
         preferences,
         Arc::new(FixedClock { unix_seconds: now }),
+        test_gate(),
     );
     tauri::async_runtime::block_on(service.check(true)).expect("offer App Update");
 
@@ -404,11 +413,12 @@ fn verified_download_can_be_installed_and_restarted_exactly_once() {
         download_size_bytes: 8_388_608,
     };
     let updater = Arc::new(FakeUpdater::with_offer(offer.clone()));
-    let service = AppUpdateService::new(
+    let service = Arc::new(AppUpdateService::new(
         updater.clone(),
         Arc::new(MemoryPreferences::new(None)),
         Arc::new(FixedClock { unix_seconds: now }),
-    );
+        test_gate(),
+    ));
     tauri::async_runtime::block_on(service.check(true)).expect("offer App Update");
 
     let downloaded = tauri::async_runtime::block_on(service.download(&offer.update_id))
@@ -455,6 +465,7 @@ fn cancelling_an_in_flight_download_prevents_it_from_becoming_installable() {
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     ));
     tauri::async_runtime::block_on(service.check(true)).expect("offer App Update");
     let download_service = service.clone();
@@ -498,6 +509,7 @@ fn cancelling_a_downloaded_update_discards_it_and_allows_a_fresh_check() {
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     );
     tauri::async_runtime::block_on(service.check(true)).expect("offer App Update");
     tauri::async_runtime::block_on(service.download(&offer.update_id))
@@ -523,6 +535,7 @@ fn automatic_and_manual_check_failures_keep_the_same_typed_command_error() {
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     ));
 
     let automatic = tauri::async_runtime::block_on(
@@ -586,6 +599,7 @@ fn typed_app_update_api_keeps_download_and_install_as_separate_confirmed_phases(
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     ));
     tauri::async_runtime::block_on(api.check_app_update(CheckAppUpdateRequestDto { force: true }))
         .expect("offer App Update");
@@ -624,6 +638,7 @@ fn typed_app_update_api_returns_the_cancelled_update_identity() {
         Arc::new(FixedClock {
             unix_seconds: 2_000_000,
         }),
+        test_gate(),
     ));
     tauri::async_runtime::block_on(api.check_app_update(CheckAppUpdateRequestDto { force: true }))
         .expect("offer App Update");

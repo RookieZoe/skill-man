@@ -2,7 +2,8 @@
 //! Release, Create Local Source Copy and whole-source Remove. Each uses its
 //! own journaled phases; recovery reads the frozen journals only.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,7 +12,7 @@ use thiserror::Error;
 use crate::core::domain::{Health, SkillId, skill_identity_key};
 use crate::core::git_source::{git_mirror_path, parse_git_source_input, resolve_git_ref};
 use crate::core::source_transition::SourceTransitionService;
-use crate::core::write_gate::WriteGate;
+use crate::core::write_gate::{HomeWriteContext, ProductWriteGuard, WriteGate, WriteGateError};
 use crate::seams::clock::{Clock, uuid_v4_shape};
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, FileSystem, FileSystemError, LocalCopyJournal, LocalCopyPhase,
@@ -21,7 +22,8 @@ use crate::seams::filesystem::{
 };
 use crate::seams::source::{GitSource, SourceError};
 use crate::seams::source_update_store::{
-    LocalSourceCopyRecord, SourceMemberPresence, SourceUpdateCurrentSource, SourceUpdateStoreError,
+    LocalSourceCopyRecord, SourceMemberPresence, SourceUpdateCurrentMember,
+    SourceUpdateCurrentSource, SourceUpdateStoreError,
 };
 
 const LIFECYCLE_JOURNAL_VERSION: u32 = 1;
@@ -89,6 +91,7 @@ impl SourceLifecycleService {
         clock: Arc<dyn Clock>,
         library_root: PathBuf,
     ) -> Self {
+        let write_gate = transition.write_gate();
         Self {
             transition,
             filesystem,
@@ -97,18 +100,13 @@ impl SourceLifecycleService {
             configured_library_root: library_root,
             home_context: None,
             app_state_dir: None,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
             next_id: AtomicU64::new(1),
         }
     }
 
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
-    }
-
-    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+    pub fn with_home_context(mut self) -> Self {
+        self.home_context = Some(self.write_gate.clone());
         self
     }
 
@@ -124,8 +122,9 @@ impl SourceLifecycleService {
         &self,
         remote_id: &str,
     ) -> Result<SourceRestoreResult, SourceLifecycleError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let current = self
             .transition
             .update_store_handle()
@@ -185,13 +184,17 @@ impl SourceLifecycleService {
                 })
                 .collect(),
         };
-        self.filesystem.write_source_lifecycle_journal(
+        self.persist_lifecycle_intent(
             &library_root,
             &SourceLifecycleJournal::Restore(journal.clone()),
         )?;
         if journal.members.is_empty() {
-            self.filesystem
-                .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+            if let Err(error) = self
+                .filesystem
+                .finish_source_lifecycle_journal(&library_root, &operation_id)
+            {
+                return Err(self.block_for_recovery("archive empty Source Restore journal", error));
+            }
             let snapshot_version = self
                 .transition
                 .update_store_handle()
@@ -210,11 +213,17 @@ impl SourceLifecycleService {
         match result {
             Ok(snapshot_version) => {
                 journal.phase = RestoreSourcePhase::Finalized;
-                let _ = self.filesystem.write_source_lifecycle_journal(
+                if let Err(error) = self.filesystem.write_source_lifecycle_journal(
                     &library_root,
                     &SourceLifecycleJournal::Restore(journal.clone()),
-                );
-                self.cleanup_restore(&library_root, &journal)?;
+                ) {
+                    return Err(
+                        self.block_for_recovery("persist finalized Source Restore journal", error)
+                    );
+                }
+                if let Err(error) = self.cleanup_restore(&library_root, &journal) {
+                    return Err(self.block_for_recovery("clean up completed Source Restore", error));
+                }
                 Ok(SourceRestoreResult {
                     remote_id: remote_id.into(),
                     restored_members: u32::try_from(journal.members.len()).map_err(|_| {
@@ -227,9 +236,19 @@ impl SourceLifecycleService {
                 if journal.phase != RestoreSourcePhase::Restored
                     && journal.phase != RestoreSourcePhase::Committed =>
             {
-                self.rollback_restore(&library_root, &journal)?;
-                self.filesystem
-                    .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+                if let Err(compensation) = self.rollback_restore(&library_root, &journal) {
+                    return Err(
+                        self.block_for_recovery("roll back failed Source Restore", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_lifecycle_journal(&library_root, &operation_id)
+                {
+                    return Err(
+                        self.block_for_recovery("archive failed Source Restore journal", archive)
+                    );
+                }
                 Err(error)
             }
             Err(error) => {
@@ -249,8 +268,9 @@ impl SourceLifecycleService {
         skill_id: &str,
         destination: &Path,
     ) -> Result<SourceLocalCopyResult, SourceLifecycleError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let current = self
             .transition
             .update_store_handle()
@@ -304,7 +324,7 @@ impl SourceLifecycleService {
             staged_path: staged_path.clone(),
             content_hash,
         };
-        self.filesystem.write_source_lifecycle_journal(
+        self.persist_lifecycle_intent(
             &library_root,
             &SourceLifecycleJournal::LocalCopy(journal.clone()),
         )?;
@@ -312,8 +332,13 @@ impl SourceLifecycleService {
         let result = self.apply_local_copy(&library_root, &journal);
         match result {
             Ok((snapshot_version, local_skill_id, local_directory_name)) => {
-                self.filesystem
-                    .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+                if let Err(error) = self
+                    .filesystem
+                    .finish_source_lifecycle_journal(&library_root, &operation_id)
+                {
+                    return Err(self
+                        .block_for_recovery("archive completed Local Source Copy journal", error));
+                }
                 Ok(SourceLocalCopyResult {
                     operation_id,
                     skill_id: SkillId(local_skill_id),
@@ -323,9 +348,18 @@ impl SourceLifecycleService {
                 })
             }
             Err(error) => {
-                self.rollback_local_copy(&library_root, &journal)?;
-                self.filesystem
-                    .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+                if let Err(compensation) = self.rollback_local_copy(&library_root, &journal) {
+                    return Err(
+                        self.block_for_recovery("roll back failed Local Source Copy", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_lifecycle_journal(&library_root, &operation_id)
+                {
+                    return Err(self
+                        .block_for_recovery("archive failed Local Source Copy journal", archive));
+                }
                 Err(error)
             }
         }
@@ -339,8 +373,9 @@ impl SourceLifecycleService {
         &self,
         remote_id: &str,
     ) -> Result<SourceRemoveResult, SourceLifecycleError> {
-        self.ensure_writes_ready()?;
-        let library_root = self.active_library_root()?;
+        let write_context = self.capture_write_context()?;
+        let library_root = self.library_root_for_context(&write_context)?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let current = self
             .transition
             .update_store_handle()
@@ -413,7 +448,7 @@ impl SourceLifecycleService {
                 })
                 .collect(),
         };
-        self.filesystem.write_source_lifecycle_journal(
+        self.persist_lifecycle_intent(
             &library_root,
             &SourceLifecycleJournal::RemoveSource(journal.clone()),
         )?;
@@ -421,9 +456,17 @@ impl SourceLifecycleService {
         let result = self.apply_remove_source(&library_root, &mut journal);
         match result {
             Ok(snapshot_version) => {
-                self.cleanup_remove_source(&library_root, &journal)?;
-                self.filesystem
-                    .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+                if let Err(error) = self.cleanup_remove_source(&library_root, &journal) {
+                    return Err(self.block_for_recovery("clean up completed Source Remove", error));
+                }
+                if let Err(error) = self
+                    .filesystem
+                    .finish_source_lifecycle_journal(&library_root, &operation_id)
+                {
+                    return Err(
+                        self.block_for_recovery("archive completed Source Remove journal", error)
+                    );
+                }
                 Ok(SourceRemoveResult {
                     operation_id,
                     remote_id: remote_id.into(),
@@ -434,9 +477,19 @@ impl SourceLifecycleService {
                 })
             }
             Err(error) if journal.phase != RemoveSourcePhase::CatalogCommitted => {
-                self.rollback_remove_source(&library_root, &journal)?;
-                self.filesystem
-                    .finish_source_lifecycle_journal(&library_root, &operation_id)?;
+                if let Err(compensation) = self.rollback_remove_source(&library_root, &journal) {
+                    return Err(
+                        self.block_for_recovery("roll back failed Source Remove", compensation)
+                    );
+                }
+                if let Err(archive) = self
+                    .filesystem
+                    .finish_source_lifecycle_journal(&library_root, &operation_id)
+                {
+                    return Err(
+                        self.block_for_recovery("archive failed Source Remove journal", archive)
+                    );
+                }
                 Err(error)
             }
             Err(error) => Err(self.block_for_recovery("continue whole-source Remove", error)),
@@ -450,6 +503,7 @@ impl SourceLifecycleService {
             .filesystem
             .list_source_lifecycle_journals(library_root)?
         {
+            self.validate_recovery_journal(library_root, &journal)?;
             match &journal {
                 SourceLifecycleJournal::Restore(restore)
                     if matches!(
@@ -493,6 +547,254 @@ impl SourceLifecycleService {
             }
         }
         Ok(())
+    }
+
+    fn validate_recovery_journal(
+        &self,
+        library_root: &Path,
+        journal: &SourceLifecycleJournal,
+    ) -> Result<(), SourceLifecycleError> {
+        let operation_id = journal.operation_id();
+        if !(operation_id.starts_with("source-transition-restore-")
+            || operation_id.starts_with("source-transition-local-copy-")
+            || operation_id.starts_with("source-transition-remove-"))
+            || !is_safe_path_component(operation_id)
+        {
+            return Err(Self::invalid_recovery_journal(
+                "the operation id is not a safe Source Lifecycle identity",
+            ));
+        }
+        let staging_root = library_root.join("staging").join(operation_id);
+        match journal {
+            SourceLifecycleJournal::Restore(restore) => {
+                if restore.staging_operation_root != staging_root {
+                    return Err(Self::invalid_recovery_journal(
+                        "the Restore staging root is not operation-scoped",
+                    ));
+                }
+                let current = self.current_recovery_source(&restore.remote_id)?;
+                for member in &restore.members {
+                    let current_member = Self::current_recovery_member(&current, &member.skill_id)?;
+                    if current_member.presence != SourceMemberPresence::Current
+                        || member.skill_path != current_member.skill_path
+                        || member.release_tree_hash
+                            != current_member.tree_hash.as_deref().unwrap_or_default()
+                        || member.namespace_path
+                            != library_root.join(&current_member.storage_relpath)
+                        || !is_safe_path_component(&member.directory_name)
+                        || member.staged_root != staging_root.join(&member.directory_name)
+                    {
+                        return Err(Self::invalid_recovery_journal(
+                            "the Restore journal does not match the current Source member",
+                        ));
+                    }
+                    if let Some(backup) = &member.backup_path {
+                        let normalized_namespace = self
+                            .filesystem
+                            .normalize_configured_path(&member.namespace_path)?;
+                        let expected = isolated_source_path(&normalized_namespace, operation_id)?;
+                        if backup != &expected {
+                            return Err(Self::invalid_recovery_journal(
+                                "the Restore isolation path is not source-scoped",
+                            ));
+                        }
+                    }
+                }
+            }
+            SourceLifecycleJournal::LocalCopy(local) => {
+                let current = self.current_recovery_source(&local.remote_id)?;
+                let current_member = Self::current_recovery_member(&current, &local.skill_id)?;
+                let local_copy_registered = self
+                    .transition
+                    .update_store_handle()
+                    .local_copy_is_registered(&local.destination)?;
+                if current_member.presence != SourceMemberPresence::Current
+                    || local.directory_name != current_member.directory_name
+                    || local.identity_key != current_member.identity_key
+                    || local.source_path != library_root.join(&current_member.storage_relpath)
+                    || !is_safe_path_component(&local.directory_name)
+                    || !is_safe_destination_path(&local.destination)
+                    || local.staged_path
+                        != local
+                            .destination
+                            .parent()
+                            .unwrap_or_else(|| Path::new("/"))
+                            .join(format!(
+                                ".skill-man-source-transition-{operation_id}-{}",
+                                local.directory_name
+                            ))
+                        && !matches!(local.phase, LocalCopyPhase::Registered)
+                    || (!local_copy_registered
+                        && (local.display_name != current_member.display_name
+                            || local.description != current_member.description))
+                    || self
+                        .filesystem
+                        .staged_tree_snapshot(&local.source_path)
+                        .map(|snapshot| snapshot.content_hash != local.content_hash)
+                        .unwrap_or(true)
+                {
+                    return Err(Self::invalid_recovery_journal(
+                        "the Local Copy journal does not match the current Source member",
+                    ));
+                }
+                if !local_copy_registered {
+                    self.validate_local_copy_destination(
+                        &local.destination,
+                        &local.source_path,
+                        &current,
+                    )
+                    .map_err(|error| {
+                        Self::invalid_recovery_journal(&format!(
+                            "the Local Copy destination is unsafe: {error}"
+                        ))
+                    })?;
+                }
+            }
+            SourceLifecycleJournal::RemoveSource(remove) => {
+                if remove.staging_operation_root != staging_root {
+                    return Err(Self::invalid_recovery_journal(
+                        "the Remove staging root is not operation-scoped",
+                    ));
+                }
+                if matches!(
+                    remove.phase,
+                    RemoveSourcePhase::CatalogCommitted | RemoveSourcePhase::Finalized
+                ) {
+                    if !is_safe_path_component(&remove.remote_id) {
+                        return Err(Self::invalid_recovery_journal(
+                            "the Remove Source identity is not path-safe",
+                        ));
+                    }
+                    for member in &remove.members {
+                        if !is_safe_path_component(&member.skill_id)
+                            || !is_safe_path_component(&member.directory_name)
+                        {
+                            return Err(Self::invalid_recovery_journal(
+                                "the committed Remove member identity is not path-safe",
+                            ));
+                        }
+                        let expected = library_root
+                            .join("skills")
+                            .join("git")
+                            .join(&remove.remote_id)
+                            .join(&member.skill_id);
+                        if member.namespace_path != expected {
+                            return Err(Self::invalid_recovery_journal(
+                                "the committed Remove namespace escapes the Git source root",
+                            ));
+                        }
+                        if let Some(isolated) = &member.isolated_path {
+                            let normalized_namespace = self
+                                .filesystem
+                                .normalize_configured_path(&member.namespace_path)?;
+                            let expected =
+                                isolated_source_path(&normalized_namespace, operation_id)?;
+                            if isolated != &expected {
+                                return Err(Self::invalid_recovery_journal(
+                                    "the committed Remove isolation path is not source-scoped",
+                                ));
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                let current = self.current_recovery_source(&remove.remote_id)?;
+                if remove.canonical_url != current.canonical_url {
+                    return Err(Self::invalid_recovery_journal(
+                        "the Remove journal Source identity changed",
+                    ));
+                }
+                for member in &remove.members {
+                    let current_member = Self::current_recovery_member(&current, &member.skill_id)?;
+                    if member.directory_name != current_member.directory_name
+                        || member.namespace_path
+                            != library_root.join(&current_member.storage_relpath)
+                    {
+                        return Err(Self::invalid_recovery_journal(
+                            "the Remove journal does not match the current Source member",
+                        ));
+                    }
+                    if let Some(isolated) = &member.isolated_path {
+                        let normalized_namespace = self
+                            .filesystem
+                            .normalize_configured_path(&member.namespace_path)?;
+                        let expected = isolated_source_path(&normalized_namespace, operation_id)?;
+                        if isolated != &expected {
+                            return Err(Self::invalid_recovery_journal(
+                                "the Remove isolation path is not source-scoped",
+                            ));
+                        }
+                    }
+                }
+                let facts = self
+                    .transition
+                    .update_store_handle()
+                    .source_remove_facts(&remove.remote_id)?;
+                let expected = facts
+                    .activations
+                    .iter()
+                    .map(|activation| {
+                        (
+                            activation.skill_id.0.clone(),
+                            activation.entry_path.clone(),
+                            activation.target_path.clone(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                let actual = remove
+                    .activations
+                    .iter()
+                    .map(|activation| {
+                        (
+                            activation.skill_id.clone(),
+                            activation.entry_path.clone(),
+                            activation.target_path.clone(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                if actual != expected {
+                    return Err(Self::invalid_recovery_journal(
+                        "the Remove journal Activation set changed",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn current_recovery_source(
+        &self,
+        remote_id: &str,
+    ) -> Result<SourceUpdateCurrentSource, SourceLifecycleError> {
+        self.transition
+            .update_store_handle()
+            .read_current(remote_id)?
+            .ok_or_else(|| {
+                Self::invalid_recovery_journal(
+                    "the journal Source no longer exists in the current Catalog",
+                )
+            })
+    }
+
+    fn current_recovery_member<'a>(
+        current: &'a SourceUpdateCurrentSource,
+        skill_id: &str,
+    ) -> Result<&'a SourceUpdateCurrentMember, SourceLifecycleError> {
+        current
+            .members
+            .iter()
+            .find(|member| member.skill_id.0 == skill_id)
+            .ok_or_else(|| {
+                Self::invalid_recovery_journal(
+                    "the journal member no longer exists in the current Catalog",
+                )
+            })
+    }
+
+    fn invalid_recovery_journal(message: &str) -> SourceLifecycleError {
+        SourceLifecycleError::RecoveryRequired(format!(
+            "the Source Lifecycle journal is unsafe: {message}"
+        ))
     }
 
     // ---- Restore ---------------------------------------------------------
@@ -799,6 +1101,11 @@ impl SourceLifecycleService {
         if !destination.is_absolute() {
             return Err(SourceLifecycleError::Validation(
                 "the Local Source Copy destination must be an absolute path".into(),
+            ));
+        }
+        if !self.filesystem.path_has_no_symlink_component(destination)? {
+            return Err(SourceLifecycleError::Validation(
+                "the Local Source Copy destination must not contain symlink components".into(),
             ));
         }
         if destination == source_path || destination.starts_with(source_path) {
@@ -1139,13 +1446,37 @@ impl SourceLifecycleService {
         Ok(())
     }
 
-    fn ensure_writes_ready(&self) -> Result<(), SourceLifecycleError> {
-        if self.write_gate.is_product_write_open() {
-            Ok(())
+    fn capture_write_context(&self) -> Result<HomeWriteContext, SourceLifecycleError> {
+        self.write_gate.capture_open_context().map_err(|_| {
+            SourceLifecycleError::RecoveryRequired("startup recovery is still in progress".into())
+        })
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, SourceLifecycleError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => SourceLifecycleError::RecoveryRequired(
+                    "the Bound Home changed before the operation could commit".into(),
+                ),
+                WriteGateError::Closed => SourceLifecycleError::RecoveryRequired(
+                    "startup recovery is still in progress".into(),
+                ),
+                other => SourceLifecycleError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<PathBuf, SourceLifecycleError> {
+        if self.home_context.is_some() {
+            Ok(context.home.path.clone())
         } else {
-            Err(SourceLifecycleError::RecoveryRequired(
-                "startup recovery is still in progress".into(),
-            ))
+            self.active_library_root()
         }
     }
 
@@ -1157,6 +1488,16 @@ impl SourceLifecycleService {
                 .map_err(|error| SourceLifecycleError::RecoveryRequired(error.to_string())),
             None => Ok(self.configured_library_root.clone()),
         }
+    }
+
+    fn persist_lifecycle_intent(
+        &self,
+        library_root: &Path,
+        journal: &SourceLifecycleJournal,
+    ) -> Result<(), SourceLifecycleError> {
+        self.filesystem
+            .write_source_lifecycle_journal(library_root, journal)
+            .map_err(|error| self.block_for_recovery("persist Source Lifecycle intent", error))
     }
 
     fn block_for_recovery(
@@ -1187,4 +1528,37 @@ impl SourceLifecycleService {
         }
         uuid_v4_shape(&mut bytes)
     }
+}
+
+fn is_safe_path_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn is_safe_destination_path(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+}
+
+fn isolated_source_path(
+    namespace: &Path,
+    operation_id: &str,
+) -> Result<PathBuf, SourceLifecycleError> {
+    let parent = namespace.parent().ok_or_else(|| {
+        SourceLifecycleService::invalid_recovery_journal("the source namespace has no parent")
+    })?;
+    let name = namespace
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| is_safe_path_component(name))
+        .ok_or_else(|| {
+            SourceLifecycleService::invalid_recovery_journal(
+                "the source namespace has no safe member name",
+            )
+        })?;
+    Ok(parent.join(format!(
+        ".skill-man-source-transition-{operation_id}-{name}"
+    )))
 }

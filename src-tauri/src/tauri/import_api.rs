@@ -200,6 +200,7 @@ pub fn import_command_error(error: &ImportError) -> CommandFailureDto {
                 directory_name: directory_name.clone(),
             }
         }
+        ImportError::Store(ImportStoreError::Stale(_)) => PublicErrorDto::PlanStale,
         ImportError::SourceUnavailable(_) => PublicErrorDto::SourceUnavailable,
         ImportError::PlanStale | ImportError::PlanNotFound => PublicErrorDto::PlanStale,
         ImportError::DiskFull {

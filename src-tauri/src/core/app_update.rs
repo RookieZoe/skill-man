@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
+use crate::core::write_gate::WriteGate;
 use crate::seams::app_updater::{AppUpdater, AppUpdaterError};
 use crate::seams::clock::Clock;
 use crate::seams::preferences_store::{PreferencesStore, PreferencesStoreError};
@@ -49,6 +50,8 @@ pub enum AppUpdateError {
     Updater(#[from] AppUpdaterError),
     #[error("invalid App Update state: {0}")]
     InvalidState(String),
+    #[error("the write gate is closed for App Update state")]
+    WriteGateClosed,
     #[error("internal App Update error: {0}")]
     Internal(String),
 }
@@ -67,6 +70,7 @@ pub struct AppUpdateService {
     updater: Arc<dyn AppUpdater>,
     preferences: Arc<dyn PreferencesStore>,
     clock: Arc<dyn Clock>,
+    write_gate: Arc<WriteGate>,
     phase: Mutex<AppUpdatePhase>,
 }
 
@@ -75,16 +79,22 @@ impl AppUpdateService {
         updater: Arc<dyn AppUpdater>,
         preferences: Arc<dyn PreferencesStore>,
         clock: Arc<dyn Clock>,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             updater,
             preferences,
             clock,
+            write_gate,
             phase: Mutex::new(AppUpdatePhase::Idle),
         }
     }
 
     pub async fn check(&self, force: bool) -> Result<AppUpdateCheck, AppUpdateError> {
+        let write_context = self
+            .write_gate
+            .capture_open_context()
+            .map_err(|_| AppUpdateError::WriteGateClosed)?;
         let previous_phase = {
             let mut phase = self.phase()?;
             match &*phase {
@@ -132,6 +142,10 @@ impl AppUpdateService {
             }
         };
         drop(phase);
+        let _write_guard = self
+            .write_gate
+            .acquire_product_write(&write_context)
+            .map_err(|_| AppUpdateError::WriteGateClosed)?;
         self.preferences.record_app_update_check_at(now)?;
         Ok(check)
     }

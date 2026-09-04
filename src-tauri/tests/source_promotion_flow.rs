@@ -15,6 +15,7 @@ use skill_man_lib::core::source_promotion::{
     ConfirmSourcePromotionRequest, SourcePromotionDraftOutcome, SourcePromotionService,
 };
 use skill_man_lib::core::source_transition::SourceTransitionService;
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::clock::Clock;
 
 #[derive(Default)]
@@ -255,6 +256,7 @@ fn fixture() -> Fixture {
         locks.clone(),
     ));
     let filesystem = Arc::new(MacOsFileSystem::new(home.clone()));
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let transition = Arc::new(
         SourceTransitionService::new(
             preview.clone(),
@@ -265,6 +267,7 @@ fn fixture() -> Fixture {
             Arc::new(FixtureClock),
             library.clone(),
             home.clone(),
+            write_gate,
         )
         .with_promotion_store(catalog.clone()),
     );

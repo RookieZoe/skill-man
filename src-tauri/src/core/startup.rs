@@ -10,7 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::core::domain::{AgentId, AgentKind};
-use crate::core::write_gate::WriteGate;
+use crate::core::write_gate::{ProductWriteGuard, WriteGate};
 use crate::seams::adopt_store::{AdoptStore, AdoptStoreError};
 use crate::seams::catalog_store::{CatalogStore, CatalogStoreError};
 use crate::seams::filesystem::{FileSystem, FileSystemError};
@@ -41,6 +41,7 @@ pub struct StartupService {
     agents: Arc<dyn AdoptStore>,
     filesystem: Arc<dyn FileSystem>,
     home_context: Option<Arc<WriteGate>>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl StartupService {
@@ -48,12 +49,14 @@ impl StartupService {
         store: Arc<dyn CatalogStore>,
         agents: Arc<dyn AdoptStore>,
         filesystem: Arc<dyn FileSystem>,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             store,
             agents,
             filesystem,
             home_context: None,
+            write_gate,
         }
     }
 
@@ -61,7 +64,8 @@ impl StartupService {
     /// Onboarding reads this once and renders the actual bound path instead
     /// of inventing the historical default.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -99,6 +103,7 @@ impl StartupService {
     }
 
     pub fn complete_onboarding(&self) -> Result<(), StartupError> {
+        let _write_guard = self.acquire_write_guard()?;
         self.store.mark_first_run_completed()?;
         Ok(())
     }
@@ -108,6 +113,7 @@ impl StartupService {
     /// is unknown; the persisted configuration is untouched — detection is
     /// never written back.
     pub fn create_agent_directory(&self, agent_id: &AgentId) -> Result<(), StartupError> {
+        let _write_guard = self.acquire_write_guard()?;
         let agent = self
             .agents
             .list_agents()?
@@ -126,6 +132,16 @@ impl StartupService {
         self.filesystem.create_directory(&agent.skills_path)?;
         Ok(())
     }
+
+    fn acquire_write_guard(&self) -> Result<ProductWriteGuard<'_>, StartupError> {
+        let context = self
+            .write_gate
+            .capture_open_context()
+            .map_err(|_| StartupError::WriteGateClosed)?;
+        self.write_gate
+            .acquire_product_write(&context)
+            .map_err(|_| StartupError::WriteGateClosed)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -138,6 +154,8 @@ pub enum StartupError {
     Agents(#[from] AdoptStoreError),
     #[error(transparent)]
     FileSystem(#[from] FileSystemError),
+    #[error("the write gate is closed for Startup writes")]
+    WriteGateClosed,
     #[error("internal Startup error: {0}")]
     Internal(String),
 }

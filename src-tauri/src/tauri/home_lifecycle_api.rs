@@ -40,13 +40,20 @@ impl HomeLifecycleApi {
 
     /// Reconnect Same Home: re-runs the three-way verification. Success
     /// reopens the Catalog facade for the restored identity and re-aligns
-    /// the write gate; failure returns the unchanged closed snapshot with
-    /// zero locator/path side effects.
+    /// under the same identity; failure returns the unchanged closed snapshot
+    /// with zero locator/path side effects.
     pub fn reconnect_same_home(&self) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-        let snapshot = self
-            .service
-            .reconnect_same_home()
-            .map_err(|error| failure(&error))?;
+        let snapshot = match self.service.reconnect_same_home() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // Reconnect may have closed the gate before discovering a
+                // stale/error condition. Reconcile the fresh authority even
+                // on failure so the gate cannot remain in the internal
+                // HomeTransition state.
+                self.bootstrap.get_bootstrap_snapshot()?;
+                return Err(failure(&error));
+            }
+        };
         // Re-verify with a fresh access decision (a stale writable-open
         // failure is cleared) and reopen the store facade for the restored
         // identity (ADR-0012 §6: 成功则重新打开 SQLite、放行写).
@@ -89,10 +96,13 @@ impl HomeLifecycleApi {
         if crate::core::home::HomeId::parse(&home_id.0).is_none() {
             return Err(failure(&HomeLifecycleError::ConfirmationMismatch));
         }
-        let snapshot = self
-            .service
-            .apply_abandon(&request.plan_token, &home_id)
-            .map_err(|error| failure(&error))?;
+        let snapshot = match self.service.apply_abandon(&request.plan_token, &home_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.bootstrap.get_bootstrap_snapshot()?;
+                return Err(failure(&error));
+            }
+        };
         self.store_switch
             .reconcile_after_transition(&self.bootstrap_service, &snapshot)
             .map_err(|error| CommandFailureDto {
@@ -112,6 +122,13 @@ fn failure(error: &HomeLifecycleError) -> CommandFailureDto {
             PublicErrorDto::ReconnectNotAvailable,
             Some(DiagnosticDto {
                 code: "reconnect_not_available".into(),
+                message: error.to_string(),
+            }),
+        ),
+        HomeLifecycleError::ReconnectStale => (
+            PublicErrorDto::PlanStale,
+            Some(DiagnosticDto {
+                code: "reconnect_plan_stale".into(),
                 message: error.to_string(),
             }),
         ),
@@ -141,6 +158,13 @@ fn failure(error: &HomeLifecycleError) -> CommandFailureDto {
             Some(DiagnosticDto {
                 code: "abandon_cas_conflict".into(),
                 message: message.clone(),
+            }),
+        ),
+        HomeLifecycleError::RecoveryInProgress => (
+            PublicErrorDto::RecoveryRequired,
+            Some(DiagnosticDto {
+                code: "home_change_recovery_in_progress".into(),
+                message: error.to_string(),
             }),
         ),
         HomeLifecycleError::PlanStale => (
@@ -203,10 +227,14 @@ mod tests {
 
     #[test]
     fn invalid_home_id_confirmation_is_rejected_before_the_service() {
+        let gate = Arc::new(WriteGate::new(WriteGateState::Closed {
+            reason: ClosedReason::Unconfigured,
+        }));
         let api = HomeLifecycleApi::new(
             Arc::new(HomeLifecycleService::new(
                 Arc::new(RejectingStore),
                 Arc::new(dummy_bootstrap()),
+                gate.clone(),
             )),
             Arc::new(dummy_bootstrap()),
             Arc::new(RuntimeStoreSwitch::new(
@@ -216,12 +244,11 @@ mod tests {
                     )),
                 ))),
                 "skill-man.sqlite3".into(),
+                gate.clone(),
             )),
             Arc::new(BootstrapApi::new(
                 Arc::new(dummy_bootstrap()),
-                Arc::new(WriteGate::new(WriteGateState::Closed {
-                    reason: ClosedReason::Unconfigured,
-                })),
+                gate,
                 Arc::new(NoopEmitter),
             )),
         );

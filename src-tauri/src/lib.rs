@@ -176,6 +176,7 @@ pub fn run() {
                 filesystem.clone(),
                 Arc::new(SqlitePreparedCatalogFactory),
                 bootstrap.clone(),
+                write_gate.clone(),
                 BootstrapConfig {
                     state_dir: state_dir.clone(),
                     default_home_path: default_home_path.clone(),
@@ -200,6 +201,7 @@ pub fn run() {
                 Arc::new(SqliteLegacyCatalogMigrator),
                 Arc::new(SqlitePreparedCatalogFactory),
                 bootstrap.clone(),
+                write_gate.clone(),
                 HomeBindingConfig {
                     state_dir: state_dir.clone(),
                     default_home_path: default_home_path.clone(),
@@ -218,6 +220,7 @@ pub fn run() {
                 catalog_probe.clone(),
                 filesystem.clone(),
                 classifier,
+                write_gate.clone(),
                 ExistingHomeRecoveryConfig {
                     catalog_file_name: catalog_file_name.clone(),
                 },
@@ -238,6 +241,18 @@ pub fn run() {
                 None => default_home_path.clone(),
             };
             let mut gate_state = snapshot.write_gate_state(bound_home.as_ref());
+            // A verified writable Home still starts behind the narrow
+            // recovery capability. The Catalog may be opened so recovery can
+            // inspect it, but no product write is admitted until every
+            // durable operation journal has converged.
+            if matches!(gate_state, WriteGateState::Open(_)) {
+                gate_state = WriteGateState::Recovery {
+                    operation_id: "startup-recovery".into(),
+                };
+            }
+            write_gate
+                .transition_to(gate_state.clone())
+                .map_err(|error| error.to_string())?;
             // The one facade every service holds: the concrete SQLite store
             // when Bound, the fail-closed closed store otherwise. Reconnect,
             // Restore and Abandon swap the inner store through the same
@@ -305,7 +320,11 @@ pub fn run() {
                 }
                 _ => RuntimeCatalogStore::closed(filesystem.clone()),
             });
-            let _ = write_gate.transition_to(gate_state);
+            if write_gate.snapshot().state != gate_state {
+                write_gate
+                    .transition_to(gate_state)
+                    .map_err(|error| error.to_string())?;
+            }
             write_gate
                 .synchronize_bound_home(bound_home.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -334,6 +353,7 @@ pub fn run() {
                 Arc::new(RuntimeStoreSwitch::new(
                     runtime_store.clone(),
                     catalog_file_name.clone(),
+                    write_gate.clone(),
                 )),
                 // A second BootstrapApi instance over the same service and
                 // gate; used only to publish `bootstrap://changed` after a
@@ -350,6 +370,7 @@ pub fn run() {
                 Arc::new(RuntimeStoreSwitch::new(
                     runtime_store.clone(),
                     catalog_file_name.clone(),
+                    write_gate.clone(),
                 )),
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
@@ -363,6 +384,7 @@ pub fn run() {
                 Arc::new(RuntimeStoreSwitch::new(
                     runtime_store.clone(),
                     catalog_file_name.clone(),
+                    write_gate.clone(),
                 )),
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
@@ -374,11 +396,13 @@ pub fn run() {
                 Arc::new(HomeLifecycleService::new(
                     app_state.clone(),
                     bootstrap.clone(),
+                    write_gate.clone(),
                 )),
                 bootstrap.clone(),
                 Arc::new(RuntimeStoreSwitch::new(
                     runtime_store.clone(),
                     catalog_file_name.clone(),
+                    write_gate.clone(),
                 )),
                 Arc::new(BootstrapApi::new(
                     bootstrap.clone(),
@@ -397,6 +421,7 @@ pub fn run() {
                 Arc::new(TauriAppUpdater::new(app.handle().clone())),
                 preferences_store.clone(),
                 Arc::new(SystemClock::new()),
+                write_gate.clone(),
             )));
             let git_cache_root = resolved_library_root.join("cache");
             let import_service = ImportService::new(
@@ -405,8 +430,8 @@ pub fn run() {
                 Arc::new(SystemClock::new()),
                 Arc::new(LocalFileSource::new()),
                 resolved_library_root.clone(),
+                write_gate.clone(),
             )
-            .with_write_gate(write_gate.clone())
             .with_home_context(write_gate.clone())
             .with_git_source(Arc::new(SystemGitSource::new()))
             .with_git_cache_root(git_cache_root.clone());
@@ -465,21 +490,6 @@ pub fn run() {
                 .service_handle()
                 .set_observation_observer(observation_api.clone());
             app.manage(observation_api.clone());
-            // Priority at startup: Activation health, Startup Probe, Agent
-            // Detection (ADR-0020). Health is asynchronous; probe/detection
-            // are single-flight join runs on their own threads so the
-            // first interactive Library Desk never waits for them.
-            let health_trigger = observation_api.clone();
-            std::thread::spawn(move || {
-                let _ = health_trigger.refresh_activation_health(None);
-            });
-            let probe_trigger = observation_api.clone();
-            std::thread::spawn(move || {
-                let _ = probe_trigger.refresh_startup_probe();
-            });
-            std::thread::spawn(move || {
-                let _ = observation_api.refresh_detection();
-            });
             let git_source_capability_scan = Arc::new(GitSourceCapabilityScan::new(Arc::new(
                 SqliteGitSourceCapabilityReader::new(
                     write_gate.clone(),
@@ -505,8 +515,8 @@ pub fn run() {
                     Arc::new(SystemClock::new()),
                     resolved_library_root.clone(),
                     home_directory.clone(),
+                    write_gate.clone(),
                 )
-                .with_write_gate(write_gate.clone())
                 .with_home_context(write_gate.clone())
                 .with_promotion_store(runtime_store.clone())
                 .with_update_store(runtime_store.clone()),
@@ -523,7 +533,7 @@ pub fn run() {
                     filesystem.clone(),
                     resolved_library_root.clone(),
                 )
-                .with_home_context(write_gate.clone()),
+                .with_home_context(),
             );
             app.manage(SourceGroupPreviewApi::new(source_group_preview));
             app.manage(SourcePromotionApi::new(source_promotion.clone()));
@@ -537,8 +547,8 @@ pub fn run() {
                 filesystem.clone(),
                 Arc::new(SystemClock::new()),
                 resolved_library_root.clone(),
+                write_gate.clone(),
             )
-            .with_write_gate(write_gate.clone())
             .with_home_context(write_gate.clone())
             .with_source_update(source_update.clone());
             app.manage(EnableApi::new(enable_service));
@@ -550,24 +560,43 @@ pub fn run() {
                     Arc::new(SystemClock::new()),
                     resolved_library_root.clone(),
                 )
-                .with_write_gate(write_gate.clone())
-                .with_home_context(write_gate.clone())
+                .with_home_context()
                 .with_app_state_dir(state_dir.clone()),
             );
             app.manage(crate::tauri_adapter::source_lifecycle_api::SourceLifecycleApi::new(
                 source_lifecycle.clone(),
             ));
-            app.manage(HealthApi::new(
-                MaintenanceService::new(maintenance_store.clone(), filesystem.clone())
-                    .with_library_root(resolved_library_root.clone())
-                    .with_write_gate(write_gate.clone())
-                    .with_home_context(write_gate.clone())
-                    .with_source_transition_recovery(source_transition)
-                    .with_source_promotion_recovery(source_promotion)
-                    .with_source_update_recovery(source_update)
-                    .with_source_lifecycle_recovery(source_lifecycle)
-                    .begin_startup(),
-            ));
+            let startup_maintenance = MaintenanceService::new(
+                maintenance_store.clone(),
+                filesystem.clone(),
+                write_gate.clone(),
+                crate::core::maintenance::StartupRecoveryServices::new(
+                    source_transition.clone(),
+                    source_update.clone(),
+                    source_lifecycle.clone(),
+                ),
+            )
+            .with_library_root(resolved_library_root.clone())
+            .with_home_context(write_gate.clone())
+            .begin_startup();
+            // Priority at startup: Activation health, Startup Probe, Agent
+            // Detection (ADR-0020). All three are asynchronous, but none may
+            // observe or write while operation recovery still owns the gate.
+            let startup_observation = observation_api.clone();
+            startup_maintenance.after_startup_recovery(move || {
+                let health_trigger = startup_observation.clone();
+                std::thread::spawn(move || {
+                    let _ = health_trigger.refresh_activation_health(None);
+                });
+                let probe_trigger = startup_observation.clone();
+                std::thread::spawn(move || {
+                    let _ = probe_trigger.refresh_startup_probe();
+                });
+                std::thread::spawn(move || {
+                    let _ = startup_observation.refresh_detection();
+                });
+            });
+            app.manage(HealthApi::new(startup_maintenance));
             app.manage(ImportApi::new(import_service));
             app.manage(UpdateApi::new(UpdateService::new(
                 import_store.clone(),
@@ -587,8 +616,8 @@ pub fn run() {
                     Arc::new(SystemClock::new()),
                     resolved_library_root.clone(),
                     home_directory.clone(),
+                    write_gate.clone(),
                 )
-                .with_write_gate(write_gate.clone())
                 .with_home_context(write_gate.clone())
                 // The Adopt plan surface consumes the terminal Scan Report
                 // through the Observation and Scan Module (spec §4.6); no
@@ -596,9 +625,14 @@ pub fn run() {
                 .with_scan_coordinator(scan_coordinator.clone()),
             ));
             app.manage(StartupApi::new(
-                PreferencesService::new(preferences_store.clone()),
-                StartupService::new(catalog_store.clone(), adopt_store.clone(), filesystem.clone())
-                    .with_home_context(write_gate.clone()),
+                PreferencesService::new(preferences_store.clone(), write_gate.clone()),
+                StartupService::new(
+                    catalog_store.clone(),
+                    adopt_store.clone(),
+                    filesystem.clone(),
+                    write_gate.clone(),
+                )
+                .with_home_context(write_gate.clone()),
             ));
             // The concrete store surface is also managed directly so the run
             // loop can refresh the tray without a command round-trip.

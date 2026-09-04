@@ -81,6 +81,9 @@ fn command_error(error: UpdateError) -> CommandFailureDto {
             return crate::tauri_adapter::import_api::import_command_error(import_error);
         }
         UpdateError::Validation(_) => PublicErrorDto::Validation,
+        UpdateError::Store(crate::seams::import_store::ImportStoreError::Stale(_)) => {
+            PublicErrorDto::PlanStale
+        }
         UpdateError::Store(_) => PublicErrorDto::StateUnavailable,
         UpdateError::Source(crate::seams::source::SourceError::Git(_)) => {
             PublicErrorDto::SourceUnavailable

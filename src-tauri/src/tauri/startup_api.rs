@@ -70,8 +70,12 @@ impl StartupApi {
 }
 
 fn preferences_command_error(error: PreferencesError) -> CommandFailureDto {
+    let public_error = match &error {
+        PreferencesError::WriteGateClosed => PublicErrorDto::RecoveryRequired,
+        PreferencesError::Store(_) => PublicErrorDto::StateUnavailable,
+    };
     CommandFailureDto {
-        error: PublicErrorDto::StateUnavailable,
+        error: public_error,
         diagnostic: Some(DiagnosticDto {
             code: "command_error".into(),
             message: error.to_string(),
@@ -83,6 +87,7 @@ fn startup_command_error(error: StartupError) -> CommandFailureDto {
     let public_error = match &error {
         StartupError::Validation(_) => PublicErrorDto::Validation,
         StartupError::Store(_) | StartupError::Agents(_) => PublicErrorDto::StateUnavailable,
+        StartupError::WriteGateClosed => PublicErrorDto::RecoveryRequired,
         StartupError::FileSystem(FileSystemError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::PermissionDenied =>
         {

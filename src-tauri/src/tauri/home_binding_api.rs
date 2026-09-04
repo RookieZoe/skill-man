@@ -56,10 +56,10 @@ impl HomeBindingApi {
         &self,
         request: ConfirmHomeRequestDto,
     ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-        let snapshot = self
-            .service
-            .confirm_home(&request.candidate_token)
-            .map_err(|error| failure(&error))?;
+        let snapshot = match self.service.confirm_home(&request.candidate_token) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.failure_after_reconcile(error)),
+        };
         self.finish_transition(&snapshot)
     }
 
@@ -68,10 +68,10 @@ impl HomeBindingApi {
         &self,
         request: CandidateOperationRequestDto,
     ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-        let snapshot = self
-            .service
-            .continue_candidate(&request.operation_id)
-            .map_err(|error| failure(&error))?;
+        let snapshot = match self.service.continue_candidate(&request.operation_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.failure_after_reconcile(error)),
+        };
         self.finish_transition(&snapshot)
     }
 
@@ -81,10 +81,10 @@ impl HomeBindingApi {
         &self,
         request: CandidateOperationRequestDto,
     ) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-        let snapshot = self
-            .service
-            .cancel_candidate(&request.operation_id)
-            .map_err(|error| failure(&error))?;
+        let snapshot = match self.service.cancel_candidate(&request.operation_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(self.failure_after_reconcile(error)),
+        };
         self.finish_transition(&snapshot)
     }
 
@@ -105,6 +105,13 @@ impl HomeBindingApi {
                 }),
             })?;
         self.bootstrap.get_bootstrap_snapshot()
+    }
+
+    fn failure_after_reconcile(&self, error: HomeBindingError) -> CommandFailureDto {
+        match self.bootstrap.get_bootstrap_snapshot() {
+            Ok(_) => failure(&error),
+            Err(reconcile_error) => reconcile_error,
+        }
     }
 }
 
@@ -172,6 +179,13 @@ fn failure(error: &HomeBindingError) -> CommandFailureDto {
             Some(DiagnosticDto {
                 code: "binding_state_ambiguous".into(),
                 message: message.clone(),
+            }),
+        ),
+        HomeBindingError::RecoveryInProgress => (
+            PublicErrorDto::RecoveryRequired,
+            Some(DiagnosticDto {
+                code: "binding_recovery_in_progress".into(),
+                message: error.to_string(),
             }),
         ),
         HomeBindingError::StateStore(message) => (

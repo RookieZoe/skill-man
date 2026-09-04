@@ -27,7 +27,7 @@ use skill_man_lib::core::home_binding::{
     CandidateInvalidReason, CandidateMode, HomeBindingConfig, HomeBindingError, HomeBindingService,
 };
 use skill_man_lib::core::startup::StartupService;
-use skill_man_lib::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGate, WriteGateState};
+use skill_man_lib::core::write_gate::{ReadOnlyReason, WriteGate, WriteGateState};
 use skill_man_lib::seams::app_state_store::{
     AppStateStore, HomeBindingFile, RecoveryLedgerFile, RecoveryOperationRecord,
 };
@@ -79,6 +79,7 @@ struct Composition {
     bootstrap: Arc<BootstrapService>,
     binding: Arc<HomeBindingService>,
     filesystem: Arc<MacOsFileSystem>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl Composition {
@@ -127,6 +128,7 @@ fn compose_with_volume_source(volume: Arc<dyn VolumeIdentitySource>) -> Composit
         classifier,
         bootstrap_config,
     ));
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let binding = Arc::new(HomeBindingService::new(
         app_state,
         volume,
@@ -140,6 +142,7 @@ fn compose_with_volume_source(volume: Arc<dyn VolumeIdentitySource>) -> Composit
         Arc::new(SqliteLegacyCatalogMigrator),
         Arc::new(SqlitePreparedCatalogFactory),
         bootstrap.clone(),
+        write_gate.clone(),
         HomeBindingConfig {
             state_dir: state_dir.clone(),
             default_home_path: default_home.clone(),
@@ -156,6 +159,7 @@ fn compose_with_volume_source(volume: Arc<dyn VolumeIdentitySource>) -> Composit
         bootstrap,
         binding,
         filesystem,
+        write_gate,
     }
 }
 
@@ -413,15 +417,14 @@ fn fresh_default_confirm_binds_and_verifies() {
 fn fresh_custom_confirm_opens_runtime_catalog_and_write_gate() {
     let composition = compose(Some(volume()));
     let runtime_store = Arc::new(RuntimeCatalogStore::closed(composition.filesystem.clone()));
-    let gate = Arc::new(WriteGate::new(WriteGateState::Closed {
-        reason: ClosedReason::Unconfigured,
-    }));
+    let gate = composition.write_gate.clone();
     let api = HomeBindingApi::new(
         composition.binding.clone(),
         composition.bootstrap.clone(),
         Arc::new(RuntimeStoreSwitch::new(
             runtime_store.clone(),
             CATALOG_FILE_NAME.into(),
+            gate.clone(),
         )),
         Arc::new(BootstrapApi::new(
             composition.bootstrap.clone(),
@@ -455,6 +458,7 @@ fn fresh_custom_confirm_opens_runtime_catalog_and_write_gate() {
         runtime_store.clone(),
         runtime_store,
         composition.filesystem.clone(),
+        gate.clone(),
     )
     .with_home_context(gate);
     let info = startup.startup_info().expect("read onboarding data");
@@ -473,15 +477,14 @@ fn fresh_custom_confirm_opens_runtime_catalog_and_write_gate() {
 fn confirmed_home_publishes_a_read_only_snapshot_when_catalog_reopen_fails() {
     let composition = compose(Some(volume()));
     let runtime_store = Arc::new(RuntimeCatalogStore::closed(composition.filesystem.clone()));
-    let gate = Arc::new(WriteGate::new(WriteGateState::Closed {
-        reason: ClosedReason::Unconfigured,
-    }));
+    let gate = composition.write_gate.clone();
     let api = HomeBindingApi::new(
         composition.binding.clone(),
         composition.bootstrap.clone(),
         Arc::new(RuntimeStoreSwitch::new(
             runtime_store.clone(),
             "missing-catalog.sqlite3".into(),
+            gate.clone(),
         )),
         Arc::new(BootstrapApi::new(
             composition.bootstrap.clone(),

@@ -164,6 +164,7 @@ fn source_snapshot_mismatch_blocks_new_project_enable() {
             Arc::new(SystemClock::new()),
             library_root.clone(),
             home.path().to_path_buf(),
+            home.write_gate.clone(),
         )
         .with_update_store(home.runtime.clone()),
     );
@@ -174,7 +175,7 @@ fn source_snapshot_mismatch_blocks_new_project_enable() {
             home.filesystem.clone(),
             library_root.clone(),
         )
-        .with_home_context(home.write_gate.clone()),
+        .with_home_context(),
     );
 
     let enable = EnableService::new(
@@ -187,8 +188,8 @@ fn source_snapshot_mismatch_blocks_new_project_enable() {
         home.filesystem.clone(),
         Arc::new(SystemClock::new()),
         library_root,
+        home.write_gate.clone(),
     )
-    .with_write_gate(home.write_gate.clone())
     .with_home_context(home.write_gate.clone())
     .with_source_update(source_update);
 
@@ -222,8 +223,8 @@ fn harness() -> Harness {
         home.filesystem.clone(),
         Arc::new(SystemClock::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     )
-    .with_write_gate(home.write_gate.clone())
     .with_home_context(home.write_gate.clone());
     Harness { home, enable }
 }

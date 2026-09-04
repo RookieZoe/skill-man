@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use crate::core::bootstrap::{BootstrapService, BootstrapSnapshot};
 use crate::core::home::HomeId;
+use crate::core::write_gate::{ClosedReason, WriteGate};
 use crate::seams::app_state_store::{AbandonedHomeRecord, AppStateStore, AppStateStoreError};
 
 /// The high-friction preview a user confirms before Abandon (ADR-0012 §6).
@@ -44,6 +45,10 @@ pub enum HomeLifecycleError {
     ConfirmationMismatch,
     #[error("the bootstrap locator changed before the Abandon could be committed: {0}")]
     CasConflict(String),
+    #[error("the Home binding changed during Reconnect; retry the operation")]
+    ReconnectStale,
+    #[error("Home changes are blocked while recovery is in progress")]
+    RecoveryInProgress,
     #[error("the Abandon plan is stale; review it again")]
     PlanStale,
     #[error("the app state could not be read or written: {0}")]
@@ -74,15 +79,50 @@ struct AbandonPlan {
 pub struct HomeLifecycleService {
     app_state: Arc<dyn AppStateStore>,
     bootstrap: Arc<BootstrapService>,
+    write_gate: Arc<WriteGate>,
     plans: RwLock<HashMap<String, AbandonPlan>>,
 }
 
 impl HomeLifecycleService {
-    pub fn new(app_state: Arc<dyn AppStateStore>, bootstrap: Arc<BootstrapService>) -> Self {
+    pub fn new(
+        app_state: Arc<dyn AppStateStore>,
+        bootstrap: Arc<BootstrapService>,
+        write_gate: Arc<WriteGate>,
+    ) -> Self {
         Self {
             app_state,
             bootstrap,
+            write_gate,
             plans: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn close_reconnect_transition(
+        &self,
+        transition: crate::core::write_gate::HomeTransitionGuard<'_>,
+        reason: ClosedReason,
+    ) -> Result<(), HomeLifecycleError> {
+        transition
+            .commit_to(crate::core::write_gate::WriteGateState::Closed { reason })
+            .map_err(|error| HomeLifecycleError::Internal(error.to_string()))
+    }
+
+    fn active_operation_gate_state(
+        operation_id: &str,
+        kind: &str,
+    ) -> crate::core::write_gate::WriteGateState {
+        match kind {
+            "fixture_recovery" | "restore" => crate::core::write_gate::WriteGateState::Recovery {
+                operation_id: operation_id.into(),
+            },
+            "home_candidate" | "legacy_transition" => {
+                crate::core::write_gate::WriteGateState::Closed {
+                    reason: ClosedReason::HomeCandidatePending,
+                }
+            }
+            _ => crate::core::write_gate::WriteGateState::Closed {
+                reason: ClosedReason::HomeTransition,
+            },
         }
     }
 
@@ -96,25 +136,156 @@ impl HomeLifecycleService {
     /// carries. Read-only; a current binding must exist.
     pub fn reconnect_same_home(&self) -> Result<BootstrapSnapshot, HomeLifecycleError> {
         let files = self.app_state.load()?;
-        if files.binding.current.is_none() {
-            return Err(HomeLifecycleError::ReconnectNotAvailable);
+        let expected = files
+            .binding
+            .current
+            .clone()
+            .ok_or(HomeLifecycleError::ReconnectNotAvailable)?;
+        if files.recovery_ledger.active.is_some() {
+            // Wait for any in-flight recovery/binding continuation before
+            // deciding which operation owns the closed route. Otherwise a
+            // stale ledger read could overwrite a successful completion
+            // with a dead Recovery owner.
+            let transition = self
+                .write_gate
+                .begin_exclusive_home_write()
+                .map_err(|error| match error {
+                    crate::core::write_gate::WriteGateError::Closed => {
+                        HomeLifecycleError::RecoveryInProgress
+                    }
+                    other => HomeLifecycleError::Internal(other.to_string()),
+                })?;
+            let latest = self.app_state.load()?;
+            if let Some(active) = &latest.recovery_ledger.active {
+                transition
+                    .commit_to(Self::active_operation_gate_state(
+                        &active.operation_id,
+                        &active.kind,
+                    ))
+                    .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
+                return Err(HomeLifecycleError::ActiveOperation {
+                    operation_id: active.operation_id.clone(),
+                });
+            }
+            drop(transition);
         }
-        Ok(self.bootstrap.inspect())
+        let home_transition =
+            self.write_gate
+                .begin_home_transition()
+                .map_err(|error| match error {
+                    crate::core::write_gate::WriteGateError::Closed => {
+                        HomeLifecycleError::RecoveryInProgress
+                    }
+                    other => HomeLifecycleError::Internal(other.to_string()),
+                })?;
+        let latest = match self.app_state.load() {
+            Ok(files) => files,
+            Err(error) => {
+                self.close_reconnect_transition(
+                    home_transition,
+                    ClosedReason::AppStateUnavailable,
+                )?;
+                return Err(HomeLifecycleError::from(error));
+            }
+        };
+        if latest.binding.current.as_ref() != Some(&expected) {
+            self.close_reconnect_transition(home_transition, ClosedReason::HomeIdentityMismatch)?;
+            return Err(HomeLifecycleError::ReconnectStale);
+        }
+        if let Some(active) = &latest.recovery_ledger.active {
+            let state = Self::active_operation_gate_state(&active.operation_id, &active.kind);
+            home_transition
+                .commit_to(state)
+                .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
+            return Err(HomeLifecycleError::ActiveOperation {
+                operation_id: active.operation_id.clone(),
+            });
+        }
+        let snapshot = self.bootstrap.inspect();
+        if matches!(
+            &snapshot,
+            BootstrapSnapshot::Bound { home_id, .. } if *home_id != expected.home_id
+        ) {
+            self.close_reconnect_transition(home_transition, ClosedReason::HomeIdentityMismatch)?;
+            return Err(HomeLifecycleError::ReconnectStale);
+        }
+        if matches!(snapshot, BootstrapSnapshot::Bound { .. }) {
+            let Some(verified) = self.bootstrap.verified_bound_home() else {
+                self.close_reconnect_transition(
+                    home_transition,
+                    ClosedReason::HomeIdentityMismatch,
+                )?;
+                return Err(HomeLifecycleError::ReconnectStale);
+            };
+            if verified.home_id != expected.home_id
+                || verified.path != expected.path
+                || verified.volume_fsid != expected.volume_fsid
+                || verified.volume_uuid != expected.volume_uuid
+            {
+                self.close_reconnect_transition(
+                    home_transition,
+                    ClosedReason::HomeIdentityMismatch,
+                )?;
+                return Err(HomeLifecycleError::ReconnectStale);
+            }
+        }
+        match &snapshot {
+            BootstrapSnapshot::HomeUnavailable { .. } => {
+                home_transition
+                    .commit_to(crate::core::write_gate::WriteGateState::Closed {
+                        reason: crate::core::write_gate::ClosedReason::HomeUnavailable,
+                    })
+                    .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
+            }
+            BootstrapSnapshot::HomeIdentityMismatch { .. } => {
+                home_transition
+                    .commit_to(crate::core::write_gate::WriteGateState::Closed {
+                        reason: crate::core::write_gate::ClosedReason::HomeIdentityMismatch,
+                    })
+                    .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
+            }
+            _ => home_transition.commit(),
+        }
+        Ok(snapshot)
     }
 
     /// Abandon Home and Start New — preview step (ADR-0012 §6). Eligible in
     /// every bound state (Bound, HomeUnavailable, HomeIdentityMismatch and
     /// the bound Fixture Recovery Lock); never in Legacy Lock (no binding),
-    /// which would constitute a bypass. An active recovery/binding
-    /// operation blocks Abandon so a half-done operation is never abandoned
-    /// under the app; the operation must be continued or cancelled first.
+    /// recovery/binding operation blocks Abandon so a half-done operation is
+    /// never abandoned under the app; the operation must be continued or
+    /// cancelled first.
     /// Read-only: no locator, Home or ledger mutation.
     pub fn plan_abandon(&self) -> Result<AbandonPreview, HomeLifecycleError> {
-        let files = self.app_state.load()?;
-        if let Some(active) = &files.recovery_ledger.active {
-            return Err(HomeLifecycleError::ActiveOperation {
-                operation_id: active.operation_id.clone(),
-            });
+        let mut files = self.app_state.load()?;
+        if files.recovery_ledger.active.is_some() {
+            // Wait for any in-flight binding continuation to finish before
+            // deciding which operation owns the closed route. Otherwise a
+            // stale active-ledger read could overwrite a successfully
+            // completed operation with a dead Recovery owner.
+            let transition = self
+                .write_gate
+                .begin_exclusive_home_write()
+                .map_err(|error| match error {
+                    crate::core::write_gate::WriteGateError::Closed => {
+                        HomeLifecycleError::RecoveryInProgress
+                    }
+                    other => HomeLifecycleError::Internal(other.to_string()),
+                })?;
+            let latest = self.app_state.load()?;
+            if let Some(active) = &latest.recovery_ledger.active {
+                transition
+                    .commit_to(Self::active_operation_gate_state(
+                        &active.operation_id,
+                        &active.kind,
+                    ))
+                    .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
+                return Err(HomeLifecycleError::ActiveOperation {
+                    operation_id: active.operation_id.clone(),
+                });
+            }
+            drop(transition);
+            files = latest;
         }
         match self.bootstrap.inspect() {
             BootstrapSnapshot::Bound { .. }
@@ -173,11 +344,52 @@ impl HomeLifecycleService {
         if plan.home_id != *confirmation_home_id {
             return Err(HomeLifecycleError::ConfirmationMismatch);
         }
-        let files = self.app_state.load()?;
+        // Invalidate and fence product mutations before the locator CAS. A
+        // concurrent long-running operation either finishes before this
+        // barrier or receives a stale context; it can never continue against
+        // a newly bound Home.
+        let home_transition =
+            self.write_gate
+                .begin_home_transition()
+                .map_err(|error| match error {
+                    crate::core::write_gate::WriteGateError::Closed => {
+                        HomeLifecycleError::RecoveryInProgress
+                    }
+                    other => HomeLifecycleError::Internal(other.to_string()),
+                })?;
+        let files = match self.app_state.load() {
+            Ok(files) => files,
+            Err(error) => {
+                home_transition.commit();
+                return Err(HomeLifecycleError::from(error));
+            }
+        };
         if let Some(active) = &files.recovery_ledger.active {
+            home_transition
+                .commit_to(Self::active_operation_gate_state(
+                    &active.operation_id,
+                    &active.kind,
+                ))
+                .map_err(|error| HomeLifecycleError::Internal(error.to_string()))?;
             return Err(HomeLifecycleError::ActiveOperation {
                 operation_id: active.operation_id.clone(),
             });
+        }
+        let Some(current) = files.binding.current.as_ref() else {
+            home_transition.commit();
+            return Err(HomeLifecycleError::CasConflict(
+                "the current Home binding disappeared before Abandon".into(),
+            ));
+        };
+        if current.home_id != plan.home_id
+            || current.path != plan.path
+            || current.volume_fsid != plan.volume_fsid
+            || current.volume_uuid != plan.volume_uuid
+        {
+            home_transition.commit();
+            return Err(HomeLifecycleError::CasConflict(
+                "the current Home binding changed before Abandon".into(),
+            ));
         }
         // The CAS is the single authority: a missing, replaced or
         // concurrently-committed current binding all fail the same compare
@@ -191,9 +403,11 @@ impl HomeLifecycleService {
             volume_uuid: plan.volume_uuid.clone(),
             abandoned_at: rfc3339_now(),
         });
-        self.app_state
-            .cas_locator(Some(&plan.home_id), &next)
-            .map_err(HomeLifecycleError::from)?;
+        if let Err(error) = self.app_state.cas_locator(Some(&plan.home_id), &next) {
+            home_transition.commit();
+            return Err(HomeLifecycleError::from(error));
+        }
+        home_transition.commit();
         if let Ok(mut plans) = self.plans.write() {
             plans.remove(plan_token);
         }
@@ -228,7 +442,8 @@ mod tests {
     use crate::core::fixture_recovery::{
         FixtureClassification, FixtureClassifier, FixtureShapeMode,
     };
-    use crate::core::home::{HomeMarker, VolumeIdentity};
+    use crate::core::home::{BoundHome, HomeMarker, VolumeIdentity};
+    use crate::core::write_gate::{WriteGate, WriteGateState};
     use crate::seams::app_state_store::{
         AppStateFiles, HomeBindingFile, HomeBindingRecord, RecoveryLedgerFile,
         RecoveryOperationRecord,
@@ -367,6 +582,24 @@ mod tests {
         probe: CatalogProbeReport,
         classifier: FixtureClassification,
     ) -> HomeLifecycleService {
+        compose_lifecycle_with_gate(
+            dir,
+            app_state,
+            volume,
+            probe,
+            classifier,
+            Arc::new(WriteGate::open_for_tests()),
+        )
+    }
+
+    fn compose_lifecycle_with_gate(
+        dir: &Path,
+        app_state: Arc<MemoryAppStateStore>,
+        volume: Arc<ToggleVolumeIdentitySource>,
+        probe: CatalogProbeReport,
+        classifier: FixtureClassification,
+        write_gate: Arc<WriteGate>,
+    ) -> HomeLifecycleService {
         let bootstrap = BootstrapService::new(
             app_state.clone(),
             volume,
@@ -379,7 +612,7 @@ mod tests {
                 catalog_file_name: "skill-man.sqlite3".into(),
             },
         );
-        HomeLifecycleService::new(app_state, Arc::new(bootstrap))
+        HomeLifecycleService::new(app_state, Arc::new(bootstrap), write_gate)
     }
 
     fn volume() -> VolumeIdentity {
@@ -700,6 +933,79 @@ mod tests {
         ));
         let binding = app_state.load().expect("app state").binding;
         assert_eq!(binding.abandoned.len(), 1, "the CAS never double-records");
+    }
+
+    #[test]
+    fn abandon_waits_for_an_admitted_product_write_before_locator_cas() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = dir.path().join("home");
+        marker(dir.path(), &home, &volume());
+        let files = bound_files(&home, &volume());
+        let app_state = Arc::new(MemoryAppStateStore::new(files));
+        let volume_source = Arc::new(ToggleVolumeIdentitySource {
+            volume: Mutex::new(Some(volume())),
+        });
+        let gate = Arc::new(WriteGate::new(WriteGateState::Open(BoundHome::test_value(
+            HOME_ID,
+            home.clone(),
+        ))));
+        let context = gate.capture_open_context().expect("open context");
+        let permit = gate
+            .acquire_product_write(&context)
+            .expect("product write permit");
+        let lifecycle = Arc::new(compose_lifecycle_with_gate(
+            dir.path(),
+            app_state.clone(),
+            volume_source,
+            probe_report(&volume()),
+            FixtureClassification::Clean,
+            gate.clone(),
+        ));
+        let preview = lifecycle.plan_abandon().expect("abandon plan");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let applying = lifecycle.clone();
+        std::thread::spawn(move || {
+            started_tx.send(()).expect("abandon started");
+            result_tx
+                .send(applying.apply_abandon(&preview.plan_token, &HomeId(HOME_ID.into())))
+                .expect("abandon result");
+        });
+
+        started_rx.recv().expect("abandon thread started");
+        assert!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "the locator CAS must remain blocked by the product write permit"
+        );
+        assert!(
+            app_state
+                .load()
+                .expect("app state")
+                .binding
+                .current
+                .is_some(),
+            "the locator CAS waits behind the in-flight product write"
+        );
+        drop(permit);
+
+        let snapshot = result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("abandon should finish after the write permit releases")
+            .expect("abandon");
+        assert!(
+            matches!(snapshot, BootstrapSnapshot::Unconfigured),
+            "a non-default abandoned Home returns to Unconfigured, got {snapshot:?}"
+        );
+        assert!(
+            app_state
+                .load()
+                .expect("app state")
+                .binding
+                .current
+                .is_none()
+        );
     }
 
     #[test]

@@ -50,8 +50,8 @@ pub(crate) fn transition_command_error(error: &SourceTransitionError) -> Command
         SourceTransitionError::SourceSnapshotMismatch => PublicErrorDto::SourceSnapshotMismatch,
         SourceTransitionError::RecoveryRequired(_) => PublicErrorDto::RecoveryRequired,
         SourceTransitionError::ExternalOwnershipReappeared
-        | SourceTransitionError::Validation(_)
-        | SourceTransitionError::PreviewStale => PublicErrorDto::Validation,
+        | SourceTransitionError::Validation(_) => PublicErrorDto::Validation,
+        SourceTransitionError::PreviewStale => PublicErrorDto::PlanStale,
         SourceTransitionError::Preview(_) | SourceTransitionError::Source(_) => {
             PublicErrorDto::SourceUnavailable
         }

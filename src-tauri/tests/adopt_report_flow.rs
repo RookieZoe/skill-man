@@ -169,8 +169,8 @@ fn adopt_service(home: &BoundTestHome, coordinator: Arc<ScanCoordinator>) -> Ado
         Arc::new(SystemClock::new()),
         home.library_root.clone(),
         home.path().to_path_buf(),
+        home.write_gate.clone(),
     )
-    .with_write_gate(home.write_gate.clone())
     .with_home_context(home.write_gate.clone())
     .with_scan_coordinator(coordinator)
 }

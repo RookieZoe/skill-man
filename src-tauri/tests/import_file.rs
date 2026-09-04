@@ -53,6 +53,7 @@ fn folder_file_import_installs_a_snapshot_at_the_stable_library_path() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
 
@@ -160,6 +161,7 @@ fn zip_file_import_extracts_and_installs_a_single_skill_snapshot() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime));
 
@@ -226,6 +228,7 @@ fn zip_file_import_rejects_parent_path_traversal_without_leaving_staging() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let error = import
@@ -282,6 +285,7 @@ fn zip_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skill()
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let preview = import
@@ -333,6 +337,7 @@ fn folder_file_import_preserves_a_relative_symlink_that_resolves_inside_the_skil
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let preview = import
@@ -402,9 +407,12 @@ fn folder_file_import_accepts_a_contained_relative_skill_document_symlink() {
 
     let filesystem = home.filesystem.clone();
     let runtime = home.reopen();
-    HealthApi::new(MaintenanceService::new(runtime.clone(), filesystem).begin_startup())
-        .run_activation_health_check()
-        .expect("health scan accepts contained SKILL.md symlink");
+    HealthApi::new(
+        MaintenanceService::for_tests(runtime.clone(), filesystem, home.write_gate.clone())
+            .begin_startup(),
+    )
+    .run_activation_health_check()
+    .expect("health scan accepts contained SKILL.md symlink");
     assert_eq!(
         CatalogApi::new(CatalogService::new(runtime))
             .inspect_skill(result.skill_id)
@@ -479,6 +487,7 @@ fn zip_file_import_rejects_an_absolute_archive_path() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let error = import
@@ -528,6 +537,7 @@ fn zip_file_import_rejects_a_symlink_that_resolves_outside_the_skill() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root,
+        home.write_gate.clone(),
     ));
 
     let error = import
@@ -577,6 +587,7 @@ fn zip_file_import_uses_the_archive_stem_for_a_skill_at_the_archive_root() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let preview = import
@@ -615,9 +626,15 @@ fn health_check_marks_a_file_install_modified_when_its_entity_changes() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
-    let health = HealthApi::new(MaintenanceService::new(runtime, filesystem).begin_startup());
+    let health = HealthApi::new(
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone()).begin_startup(),
+    );
+    health
+        .run_activation_health_check()
+        .expect("startup recovery completes before Import");
 
     let preview = import
         .plan_file_import(PlanFileImportRequestDto {
@@ -685,6 +702,7 @@ fn folder_file_import_rejects_missing_skill_invalid_identity_and_oversized_files
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     for source in [missing_document, invalid_identity, oversized] {
@@ -722,6 +740,7 @@ fn file_import_apply_reports_plan_stale_when_the_stable_path_becomes_occupied() 
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let preview = import
@@ -799,9 +818,15 @@ fn tree_hash_framing_detects_a_file_boundary_collision_as_modified() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let catalog = CatalogApi::new(CatalogService::new(runtime.clone()));
-    let health = HealthApi::new(MaintenanceService::new(runtime, filesystem).begin_startup());
+    let health = HealthApi::new(
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone()).begin_startup(),
+    );
+    health
+        .run_activation_health_check()
+        .expect("startup recovery completes before Import");
     let preview = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -1027,6 +1052,7 @@ fn explicit_file_reinstall_replaces_the_stable_entity_and_preserves_activation()
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let first_preview = import
         .plan_file_import(PlanFileImportRequestDto {
@@ -1148,7 +1174,7 @@ fn startup_maintenance_rolls_back_an_uncommitted_file_import_journal() {
         .expect("persist interrupted operation journal");
 
     let health = HealthApi::new(
-        MaintenanceService::new(runtime, filesystem)
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone())
             .with_library_root(library_root.clone())
             .begin_startup(),
     );
@@ -1180,6 +1206,7 @@ fn startup_recovery_idempotently_finishes_an_already_rolled_back_reinstall() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let preview = import
         .plan_file_import(PlanFileImportRequestDto {
@@ -1241,7 +1268,7 @@ fn startup_recovery_idempotently_finishes_an_already_rolled_back_reinstall() {
         .expect("persist post-rollback journal");
 
     HealthApi::new(
-        MaintenanceService::new(runtime, filesystem)
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone())
             .with_library_root(library_root.clone())
             .begin_startup(),
     )
@@ -1270,6 +1297,7 @@ fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
     let initial = import
         .plan_file_import(PlanFileImportRequestDto {
@@ -1292,7 +1320,7 @@ fn startup_recovery_requires_attention_when_a_planned_reinstall_original_changed
     std::fs::write(&stable_document, "# Externally changed original\n")
         .expect("change original after plan");
     let error = HealthApi::new(
-        MaintenanceService::new(runtime, filesystem)
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone())
             .with_library_root(library_root.clone())
             .begin_startup(),
     )
@@ -1324,7 +1352,7 @@ fn startup_recovery_removes_staging_left_before_a_journal_was_durable() {
     let runtime = home.runtime.clone();
 
     HealthApi::new(
-        MaintenanceService::new(runtime, filesystem)
+        MaintenanceService::for_tests(runtime, filesystem, home.write_gate.clone())
             .with_library_root(library_root)
             .begin_startup(),
     )
@@ -1377,6 +1405,7 @@ fn file_import_disk_preflight_returns_a_typed_error_and_cleans_staging() {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
+        home.write_gate.clone(),
     ));
 
     let error = import
@@ -1405,16 +1434,14 @@ fn startup_write_gate_blocks_import_writes() {
     let write_gate = Arc::new(WriteGate::new(WriteGateState::Closed {
         reason: skill_man_lib::core::write_gate::ClosedReason::AppStateUnavailable,
     }));
-    let import = ImportApi::new(
-        ImportService::new(
-            runtime.clone(),
-            filesystem.clone(),
-            Arc::new(SystemClock::new()),
-            Arc::new(LocalFileSource::new()),
-            library_root.clone(),
-        )
-        .with_write_gate(write_gate.clone()),
-    );
+    let import = ImportApi::new(ImportService::new(
+        runtime.clone(),
+        filesystem.clone(),
+        Arc::new(SystemClock::new()),
+        Arc::new(LocalFileSource::new()),
+        library_root.clone(),
+        write_gate.clone(),
+    ));
     let import_error = import
         .plan_file_import(PlanFileImportRequestDto {
             source_path: source.to_string_lossy().into_owned(),
@@ -1669,5 +1696,6 @@ fn file_import_api(home: &BoundTestHome) -> ImportApi {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         home.library_root.clone(),
+        home.write_gate.clone(),
     ))
 }

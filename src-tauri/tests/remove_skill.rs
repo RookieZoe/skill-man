@@ -52,12 +52,12 @@ fn harness_with_gate(write_gate: Arc<WriteGate>) -> TestHarness {
         Arc::new(SystemClock::new()),
         Arc::new(LocalFileSource::new()),
         library_root.clone(),
-    )
-    .with_write_gate(write_gate.clone());
+        write_gate.clone(),
+    );
     let catalog = CatalogService::new(runtime.clone());
-    let maintenance = MaintenanceService::new(runtime.clone(), filesystem)
-        .with_library_root(library_root.clone())
-        .with_write_gate(write_gate);
+    let maintenance =
+        MaintenanceService::for_tests(runtime.clone(), filesystem, write_gate.clone())
+            .with_library_root(library_root.clone());
     TestHarness {
         home,
         library_root,

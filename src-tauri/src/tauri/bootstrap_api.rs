@@ -60,10 +60,26 @@ impl BootstrapApi {
     }
 
     pub fn get_bootstrap_snapshot(&self) -> Result<BootstrapSnapshotDto, CommandFailureDto> {
-        let snapshot = self.service.inspect();
-        let bound_home = self.service.verified_bound_home();
-        self.write_gate
-            .synchronize_bound_home(bound_home.as_ref())
+        let current = self.write_gate.snapshot();
+        // A Recovery state is operation-owned (startup recovery in progress):
+        // the recovery pass, not a snapshot query, reopens product writes.
+        if matches!(current.state, WriteGateState::Recovery { .. }) {
+            return Ok(BootstrapSnapshotDto::from(&self.service.inspect()));
+        }
+        let (reconciled, snapshot) = self
+            .write_gate
+            .reconcile_with(|_| {
+                // Resolve the bootstrap state after acquiring the barrier.
+                // A Home lifecycle CAS that won the race is therefore the
+                // state this query reconciles, never the stale pre-wait view.
+                let snapshot = self.service.inspect();
+                let bound_home = self.service.verified_bound_home();
+                (
+                    snapshot.write_gate_state(bound_home.as_ref()),
+                    bound_home,
+                    snapshot,
+                )
+            })
             .map_err(|error| CommandFailureDto {
                 error: PublicErrorDto::BootstrapUnavailable,
                 diagnostic: Some(DiagnosticDto {
@@ -71,21 +87,7 @@ impl BootstrapApi {
                     message: error.to_string(),
                 }),
             })?;
-        let desired = snapshot.write_gate_state(bound_home.as_ref());
-        let current = self.write_gate.snapshot();
-        // A Recovery state is operation-owned (startup recovery in progress):
-        // the recovery pass, not a snapshot query, reopens product writes.
-        let recovery_owned = matches!(current.state, WriteGateState::Recovery { .. });
-        if !recovery_owned && current.state != desired {
-            self.write_gate
-                .transition_to(desired)
-                .map_err(|error| CommandFailureDto {
-                    error: PublicErrorDto::BootstrapUnavailable,
-                    diagnostic: Some(DiagnosticDto {
-                        code: "write_gate_poisoned".into(),
-                        message: error.to_string(),
-                    }),
-                })?;
+        if reconciled.generation != current.generation {
             self.publish_changed();
         }
         Ok(BootstrapSnapshotDto::from(&snapshot))

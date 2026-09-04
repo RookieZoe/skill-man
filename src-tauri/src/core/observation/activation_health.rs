@@ -32,7 +32,7 @@ use crate::core::domain::{ActivationObservedState, SkillId};
 use crate::core::observation::types::{
     ActivationHealthCounts, ActivationHealthRow, ObservationStatus,
 };
-use crate::core::write_gate::{WriteGate, WriteGateState};
+use crate::core::write_gate::{HomeWriteContext, WriteGate, WriteGateState};
 use crate::seams::activation_health::ActivationEntryFileSystem;
 use crate::seams::activation_store::{
     ActivationObservation, ActivationStore, StoredActivationObservation,
@@ -686,7 +686,35 @@ fn check_target(
         return;
     };
 
-    let cas = cas_and_persist(context, frozen, target, &frozen_target, &observed);
+    let frozen_rows = {
+        let state = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let group = state
+            .groups
+            .iter()
+            .find(|group| group.target_root_id == target)
+            .expect("group exists");
+        group
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.skill_id.clone(),
+                    row.entry_path.clone(),
+                    row.expected_target_path.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let cas = cas_and_persist(
+        context,
+        frozen,
+        target,
+        &frozen_target,
+        &frozen_rows,
+        &observed,
+    );
     match cas {
         Ok(()) => {
             let mut state = shared
@@ -776,6 +804,7 @@ fn cas_and_persist(
     facts: &FrozenHealthFacts,
     target: &str,
     frozen_target: &FrozenTarget,
+    frozen_rows: &[(String, PathBuf, PathBuf)],
     observations: &[ActivationObservation],
 ) -> Result<(), String> {
     let gate = context.write_gate.snapshot();
@@ -788,6 +817,14 @@ fn cas_and_persist(
     if gate.generation != facts.write_gate_generation {
         return Err("the WriteGate generation changed during the health run".into());
     }
+    let write_context = HomeWriteContext {
+        home: home.clone(),
+        generation: facts.write_gate_generation,
+    };
+    let _write_guard = context
+        .write_gate
+        .acquire_product_write(&write_context)
+        .map_err(|error| format!("activation health write context is stale: {error}"))?;
     let current = context
         .agent_store
         .agent_configuration_snapshot()
@@ -812,6 +849,24 @@ fn cas_and_persist(
     };
     if canonical_now != frozen_target.canonical_path {
         return Err("the Target identity changed during the health run".into());
+    }
+    let mut current_rows = context
+        .activation_store
+        .activation_observations()
+        .map_err(|error| format!("Activation rows unavailable: {error}"))?
+        .into_iter()
+        .filter(|row| row.target_root_id == target)
+        .map(|row| {
+            (
+                row.skill_id.0,
+                row.expected_entry_path,
+                row.expected_target_path,
+            )
+        })
+        .collect::<Vec<_>>();
+    current_rows.sort_by(|left, right| left.0.cmp(&right.0));
+    if current_rows != frozen_rows {
+        return Err("the Activation rows changed during the health run".into());
     }
     context
         .activation_store

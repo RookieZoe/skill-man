@@ -23,6 +23,7 @@ use skill_man_lib::core::fixture_recovery::{
 };
 use skill_man_lib::core::home::VolumeIdentity;
 use skill_man_lib::core::scan::qualifier::SnapshotDeleteQualifier;
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::app_state_store::{AppStateStore, RecoveryOperationRecord};
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::scan_evidence_store as scan;
@@ -71,6 +72,7 @@ fn recovery(home: &BoundTestHome) -> FixtureRecoveryService {
         filesystem,
         Arc::new(SqlitePreparedCatalogFactory),
         bootstrap,
+        Arc::new(WriteGate::open_for_tests()),
         BootstrapConfig {
             state_dir: home.state_dir.clone(),
             default_home_path: home.library_root.clone(),

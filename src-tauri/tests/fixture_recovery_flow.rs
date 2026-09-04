@@ -24,6 +24,7 @@ use skill_man_lib::core::fixture_recovery::{
 };
 use skill_man_lib::core::home::VolumeIdentity;
 use skill_man_lib::core::scan::qualifier::SnapshotDeleteQualifier;
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::app_state_store::{AppStateStore, RecoveryLedgerFile};
 use skill_man_lib::seams::catalog_probe::{CatalogHomeIdentity, CatalogProbe};
 use skill_man_lib::seams::filesystem::FileSystem;
@@ -83,6 +84,7 @@ fn recovery_service(
         filesystem,
         Arc::new(SqlitePreparedCatalogFactory),
         bootstrap,
+        Arc::new(WriteGate::open_for_tests()),
         BootstrapConfig {
             state_dir,
             default_home_path,

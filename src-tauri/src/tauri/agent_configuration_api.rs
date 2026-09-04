@@ -68,10 +68,9 @@ impl AgentConfigurationApi {
 
 fn command_error(error: AgentConfigurationError) -> CommandFailureDto {
     let (public_error, code) = match &error {
-        AgentConfigurationError::WriteGateClosed => (
-            PublicErrorDto::CatalogUnavailable,
-            "agent_write_gate_closed",
-        ),
+        AgentConfigurationError::WriteGateClosed => {
+            (PublicErrorDto::RecoveryRequired, "agent_write_gate_closed")
+        }
         AgentConfigurationError::InvalidName => (
             PublicErrorDto::AgentConfigurationNameInvalid,
             "agent_name_invalid",

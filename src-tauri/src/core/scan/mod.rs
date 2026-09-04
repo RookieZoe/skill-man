@@ -838,6 +838,19 @@ impl ScanCoordinator {
             home_id: bound.home_id.0.clone(),
             marked_at_ms: (self.clock.unix_epoch_nanos() / 1_000_000) as u64,
         };
+        let write_context = self
+            .write_gate
+            .capture_open_context()
+            .map_err(|error| ScanError::NotWritable(error.to_string()))?;
+        if write_context.home != *bound {
+            return Err(ScanError::NotWritable(
+                "the Bound Home changed before the startup marker write".into(),
+            ));
+        }
+        let _write_guard = self
+            .write_gate
+            .acquire_product_write(&write_context)
+            .map_err(|error| ScanError::NotWritable(error.to_string()))?;
         self.factory
             .store_for(bound)
             .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?

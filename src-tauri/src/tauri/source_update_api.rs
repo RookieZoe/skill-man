@@ -137,9 +137,11 @@ fn update_error(error: SourceUpdateError) -> CommandFailureDto {
         SourceUpdateError::Transition(inner) => {
             crate::tauri_adapter::source_transition_api::transition_command_error(inner)
         }
-        SourceUpdateError::Store(_) | SourceUpdateError::FileSystem(_) => {
-            failure(PublicErrorDto::StateUnavailable, &error)
-        }
+        SourceUpdateError::Store(_) => failure(PublicErrorDto::StateUnavailable, &error),
+        SourceUpdateError::FileSystem(
+            crate::seams::filesystem::FileSystemError::RecoveryRequired { .. },
+        ) => failure(PublicErrorDto::RecoveryRequired, &error),
+        SourceUpdateError::FileSystem(_) => failure(PublicErrorDto::StateUnavailable, &error),
     }
 }
 
@@ -153,9 +155,11 @@ fn lifecycle_error(error: SourceLifecycleError) -> CommandFailureDto {
             failure(PublicErrorDto::RecoveryRequired, &error)
         }
         SourceLifecycleError::Source(_) => failure(PublicErrorDto::SourceUnavailable, &error),
-        SourceLifecycleError::Store(_) | SourceLifecycleError::FileSystem(_) => {
-            failure(PublicErrorDto::StateUnavailable, &error)
-        }
+        SourceLifecycleError::Store(_) => failure(PublicErrorDto::StateUnavailable, &error),
+        SourceLifecycleError::FileSystem(
+            crate::seams::filesystem::FileSystemError::RecoveryRequired { .. },
+        ) => failure(PublicErrorDto::RecoveryRequired, &error),
+        SourceLifecycleError::FileSystem(_) => failure(PublicErrorDto::StateUnavailable, &error),
     }
 }
 

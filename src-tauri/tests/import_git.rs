@@ -186,6 +186,7 @@ impl Harness {
             Arc::new(SystemClock::new()),
             Arc::new(LocalFileSource::new()),
             self.library_root.clone(),
+            Arc::new(WriteGate::open_for_tests()),
         )
         .with_git_source(Arc::new(SystemGitSource::new()))
         .with_git_cache_root(self.cache_root.clone())
@@ -1006,9 +1007,21 @@ fn branch_tracked_installs_resolve_their_own_branch_in_check_and_plan() {
     git(&repo, &["checkout", "-q", "main"]);
     write_files(&repo, &[("skills/alpha/SKILL.md", "# Alpha main\n")]);
     commit(&repo, "main moves on differently");
+    let before_pin = harness
+        .runtime
+        .load_remote_installs()
+        .expect("load remote binding before pin")
+        .into_iter()
+        .find(|record| record.skill_id == skill_id)
+        .expect("remote Install before pin");
     harness
         .runtime
-        .set_remote_requested_ref(&skill_id, "dev")
+        .set_remote_requested_ref(
+            &skill_id,
+            &before_pin.requested_ref,
+            &before_pin.verification_anchor_commit,
+            "dev",
+        )
         .expect("track the dev branch");
 
     let update = harness.update();

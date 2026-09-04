@@ -11,10 +11,12 @@ use crate::core::domain::{
     ActivationObservedState, Health, SkillId, SourceKind, parse_skill_metadata,
 };
 use crate::core::source_lifecycle::SourceLifecycleService;
-use crate::core::source_promotion::SourcePromotionService;
 use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
 use crate::core::source_update::SourceUpdateService;
-use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate, WriteGateState};
+use crate::core::write_gate::{
+    HomeWriteContext, PlanCheck, PlanTicket, ProductWriteGuard, WriteGate, WriteGateError,
+    WriteGateState,
+};
 use crate::seams::activation_store::{ActivationObservation, ActivationStoreError};
 use crate::seams::filesystem::ActivationRecoveryBaseline;
 use crate::seams::filesystem::{
@@ -105,6 +107,7 @@ struct PlannedRelocate {
     candidate: RelocateCandidate,
     fingerprint: SkillFingerprint,
     activations: Vec<RelocateActivationBaseline>,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at: Instant,
 }
@@ -131,8 +134,9 @@ struct PlannedRemove {
     target: RemoveTarget,
     activations: Vec<RelocateActivationBaseline>,
     /// Install entity fingerprint at plan time; `None` when the entity is
-    /// already gone (Broken Install).
+    /// already absent (Broken Install).
     entity_fingerprint: Option<DirectoryFingerprint>,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at: Instant,
 }
@@ -158,10 +162,34 @@ pub struct MaintenanceService {
     remove_plans: Arc<Mutex<HashMap<String, PlannedRemove>>>,
     next_plan_id: Arc<AtomicU64>,
     plan_ttl: Duration,
-    source_transition_recovery: Option<Arc<SourceTransitionService>>,
-    source_promotion_recovery: Option<Arc<SourcePromotionService>>,
-    source_update_recovery: Option<Arc<SourceUpdateService>>,
-    source_lifecycle_recovery: Option<Arc<SourceLifecycleService>>,
+    startup_recovery: StartupRecovery,
+}
+
+#[derive(Clone)]
+pub struct StartupRecoveryServices {
+    source_transition: Arc<SourceTransitionService>,
+    source_update: Arc<SourceUpdateService>,
+    source_lifecycle: Arc<SourceLifecycleService>,
+}
+
+impl StartupRecoveryServices {
+    pub fn new(
+        source_transition: Arc<SourceTransitionService>,
+        source_update: Arc<SourceUpdateService>,
+        source_lifecycle: Arc<SourceLifecycleService>,
+    ) -> Self {
+        Self {
+            source_transition,
+            source_update,
+            source_lifecycle,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum StartupRecovery {
+    Configured(StartupRecoveryServices),
+    TestOnly,
 }
 
 impl Clone for MaintenanceService {
@@ -176,30 +204,51 @@ impl Clone for MaintenanceService {
             remove_plans: self.remove_plans.clone(),
             next_plan_id: self.next_plan_id.clone(),
             plan_ttl: self.plan_ttl,
-            source_transition_recovery: self.source_transition_recovery.clone(),
-            source_promotion_recovery: self.source_promotion_recovery.clone(),
-            source_update_recovery: self.source_update_recovery.clone(),
-            source_lifecycle_recovery: self.source_lifecycle_recovery.clone(),
+            startup_recovery: self.startup_recovery.clone(),
         }
     }
 }
 
 impl MaintenanceService {
-    pub fn new(store: Arc<dyn MaintenanceStore>, filesystem: Arc<dyn FileSystem>) -> Self {
+    pub fn new(
+        store: Arc<dyn MaintenanceStore>,
+        filesystem: Arc<dyn FileSystem>,
+        write_gate: Arc<WriteGate>,
+        startup_recovery: StartupRecoveryServices,
+    ) -> Self {
         Self {
             store,
             filesystem,
             configured_library_root: None,
             home_context: None,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
             relocate_plans: Arc::new(Mutex::new(HashMap::new())),
             remove_plans: Arc::new(Mutex::new(HashMap::new())),
             next_plan_id: Arc::new(AtomicU64::new(1)),
             plan_ttl: DEFAULT_PLAN_TTL,
-            source_transition_recovery: None,
-            source_promotion_recovery: None,
-            source_update_recovery: None,
-            source_lifecycle_recovery: None,
+            startup_recovery: StartupRecovery::Configured(startup_recovery),
+        }
+    }
+
+    /// Test composition without the production source-recovery graph. This
+    /// explicit constructor keeps production `new` fail-closed when a
+    /// recovery dependency is omitted.
+    pub fn for_tests(
+        store: Arc<dyn MaintenanceStore>,
+        filesystem: Arc<dyn FileSystem>,
+        write_gate: Arc<WriteGate>,
+    ) -> Self {
+        Self {
+            store,
+            filesystem,
+            configured_library_root: None,
+            home_context: None,
+            write_gate,
+            relocate_plans: Arc::new(Mutex::new(HashMap::new())),
+            remove_plans: Arc::new(Mutex::new(HashMap::new())),
+            next_plan_id: Arc::new(AtomicU64::new(1)),
+            plan_ttl: DEFAULT_PLAN_TTL,
+            startup_recovery: StartupRecovery::TestOnly,
         }
     }
 
@@ -208,15 +257,11 @@ impl MaintenanceService {
         self
     }
 
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
-    }
-
     /// Make Home-owned recovery, relocation and removal paths resolve from
     /// the active Bound Home instead of the root chosen at process startup.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -232,64 +277,103 @@ impl MaintenanceService {
         }
     }
 
+    fn capture_write_context(&self) -> Result<HomeWriteContext, MaintenanceError> {
+        self.write_gate
+            .capture_open_context()
+            .map_err(|_| MaintenanceError::RecoveryInProgress)
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, MaintenanceError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => MaintenanceError::PlanStale,
+                WriteGateError::Closed => MaintenanceError::RecoveryInProgress,
+                other => MaintenanceError::Internal(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<Option<PathBuf>, MaintenanceError> {
+        if self.home_context.is_some() {
+            Ok(Some(context.home.path.clone()))
+        } else {
+            self.active_library_root()
+        }
+    }
+
     pub fn with_plan_ttl(mut self, plan_ttl: Duration) -> Self {
         self.plan_ttl = plan_ttl;
         self
     }
 
-    /// Source Transition has its own whole-source journal and must recover
-    /// before the startup write gate opens. It is intentionally separate
-    /// from legacy per-Skill Ownership Handoff recovery below.
-    pub fn with_source_transition_recovery(
-        mut self,
-        source_transition: Arc<SourceTransitionService>,
-    ) -> Self {
-        self.source_transition_recovery = Some(source_transition);
-        self
-    }
-
-    /// Legacy Source Promotion is also a whole-source transition and must
-    /// settle its frozen journal before normal product writes reopen.
-    pub fn with_source_promotion_recovery(
-        mut self,
-        source_promotion: Arc<SourcePromotionService>,
-    ) -> Self {
-        self.source_promotion_recovery = Some(source_promotion);
-        self
-    }
-
-    /// Source Update reuses the transition journal format, but only an update
-    /// service may validate and settle `source-update-*` operations.
-    pub fn with_source_update_recovery(mut self, source_update: Arc<SourceUpdateService>) -> Self {
-        self.source_update_recovery = Some(source_update);
-        self
-    }
-
-    pub fn with_source_lifecycle_recovery(
-        mut self,
-        source_lifecycle: Arc<SourceLifecycleService>,
-    ) -> Self {
-        self.source_lifecycle_recovery = Some(source_lifecycle);
-        self
-    }
-
     pub fn begin_startup(self) -> StartupMaintenance {
+        // Keep every composition behind the recovery gate from the moment
+        // startup recovery is scheduled. Production enters here already in
+        // Recovery; this branch also protects deterministic test and
+        // standalone compositions that start from Open.
+        if matches!(self.write_gate.snapshot().state, WriteGateState::Open(_))
+            && self
+                .write_gate
+                .transition_to(WriteGateState::Recovery {
+                    operation_id: "startup-recovery".into(),
+                })
+                .is_err()
+        {
+            // A poisoned transition barrier is itself a fail-closed
+            // startup condition; never leave the old Open capability
+            // usable when recovery could not claim the gate.
+            self.write_gate.mark_blocked();
+        }
         let worker_service = self.clone();
-        let worker = std::thread::spawn(move || worker_service.startup_check());
+        let startup_ready = Arc::new(StartupReadiness::default());
+        let worker_ready = startup_ready.clone();
+        let worker = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker_service.startup_check()
+            }))
+            .unwrap_or_else(|_| {
+                Err(MaintenanceError::Internal(
+                    "startup Maintenance task panicked".into(),
+                ))
+            });
+            worker_ready
+                .mark_finished(result.is_ok() && worker_service.write_gate.is_product_write_open());
+            result
+        });
         StartupMaintenance {
             maintenance: self,
-            startup_worker: Mutex::new(Some(worker)),
+            startup_worker: Arc::new(Mutex::new(Some(worker))),
+            startup_ready,
         }
     }
 
     pub fn startup_check(&self) -> Result<ActivationHealthReport, MaintenanceError> {
+        // Direct callers must observe the same ordering as
+        // `begin_startup`: close product writes before any journal recovery
+        // begins, even when the caller did not use the asynchronous wrapper.
+        if matches!(self.write_gate.snapshot().state, WriteGateState::Open(_)) {
+            if let Err(error) = self.write_gate.transition_to(WriteGateState::Recovery {
+                operation_id: "startup-recovery".into(),
+            }) {
+                self.write_gate.mark_blocked();
+                return Err(MaintenanceError::Internal(error.to_string()));
+            }
+        }
         // Operation recovery and the reopen only run when the session may
         // write: `Open` (regular) or `Recovery` (the narrow startup-recovery
         // capability). A `CatalogReadOnly` session skips both (spec §4.3:
         // read-only refuses every product write, recovery included).
         if matches!(
             self.write_gate.snapshot().state,
-            WriteGateState::Open(_) | WriteGateState::Recovery { .. }
+            WriteGateState::Recovery {
+                operation_id,
+            } if operation_id == "startup-recovery"
         ) {
             self.recover_startup_operations()?;
             self.write_gate.mark_ready();
@@ -372,23 +456,14 @@ impl MaintenanceService {
                 .collect::<Vec<_>>();
             self.filesystem
                 .recover_remove_journals(&library_root, &remove_baselines)?;
-            if let Some(source_transition) = &self.source_transition_recovery {
-                source_transition.recover_pending(&library_root)?;
-            }
-            if let Some(source_promotion) = &self.source_promotion_recovery {
-                // Promotion journals are Source Transition journals; the
-                // transition recovery pass above owns them all.
-                let _ = source_promotion;
-            }
-            if let Some(source_lifecycle) = &self.source_lifecycle_recovery {
-                source_lifecycle.recover_lifecycle(&library_root)?;
-            }
-            if let Some(source_update) = &self.source_update_recovery {
+            if let StartupRecovery::Configured(recovery) = &self.startup_recovery {
+                recovery.source_transition.recover_pending(&library_root)?;
+                recovery.source_lifecycle.recover_lifecycle(&library_root)?;
                 // Startup re-verification (spec §8.3): every current member
                 // snapshot is compared against the immutable current Source
                 // Release; mismatches persist `source_snapshot_mismatch` and
                 // block Update, new Enable and ordinary source writes.
-                source_update.verify_all_members()?;
+                recovery.source_update.verify_all_members()?;
             }
             self.recover_handoff_operations(&library_root)?;
         }
@@ -542,6 +617,8 @@ impl MaintenanceService {
     }
 
     fn run_health_check(&self) -> Result<ActivationHealthReport, MaintenanceError> {
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let desired = self.store.desired_activations()?;
         let observations = desired
             .iter()
@@ -646,6 +723,7 @@ impl MaintenanceService {
         source_path: &Path,
     ) -> Result<RelocatePreview, MaintenanceError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
         let Some(skill) = self.store.link_skill(skill_id)? else {
             return Err(MaintenanceError::NotLink(skill_id.0.clone()));
         };
@@ -669,7 +747,8 @@ impl MaintenanceService {
                 candidate: candidate.clone(),
                 fingerprint,
                 activations: activations.clone(),
-                gate_generation: self.write_gate.generation(),
+                write_context: write_context.clone(),
+                gate_generation: write_context.generation,
                 created_at: Instant::now(),
             },
         );
@@ -709,8 +788,21 @@ impl MaintenanceService {
         {
             return Err(MaintenanceError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&plan.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => MaintenanceError::PlanStale,
+                WriteGateError::Closed => MaintenanceError::RecoveryInProgress,
+                other => MaintenanceError::Internal(other.to_string()),
+            })?;
         drop(plans);
 
+        let library_root = self
+            .library_root_for_context(&plan.write_context)?
+            .ok_or_else(|| {
+                MaintenanceError::Internal("Maintenance library root is not configured".into())
+            })?;
+        let _write_guard = self.acquire_write_guard(&plan.write_context)?;
         // Re-preflight: the Link pointer, the new source and every Activation
         // entry must still match the plan.
         let current_skill = self
@@ -748,9 +840,6 @@ impl MaintenanceService {
             return Err(MaintenanceError::PlanStale);
         }
 
-        let library_root = self.active_library_root()?.ok_or_else(|| {
-            MaintenanceError::Internal("Maintenance library root is not configured".into())
-        })?;
         let operation_id = format!(
             "relocate-{}-{}",
             std::time::SystemTime::now()
@@ -1056,6 +1145,7 @@ impl MaintenanceService {
     /// Install has no entity and is fingerprinted as absent).
     pub fn plan_remove(&self, skill_id: &SkillId) -> Result<RemovePreview, MaintenanceError> {
         self.ensure_writes_ready()?;
+        let write_context = self.capture_write_context()?;
         let Some(target) = self.store.remove_target(skill_id)? else {
             return Err(MaintenanceError::SkillNotFound(skill_id.0.clone()));
         };
@@ -1110,7 +1200,8 @@ impl MaintenanceService {
                 target: target.clone(),
                 activations: activations.clone(),
                 entity_fingerprint,
-                gate_generation: self.write_gate.generation(),
+                write_context: write_context.clone(),
+                gate_generation: write_context.generation,
                 created_at: Instant::now(),
             },
         );
@@ -1147,8 +1238,21 @@ impl MaintenanceService {
         {
             return Err(MaintenanceError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&plan.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => MaintenanceError::PlanStale,
+                WriteGateError::Closed => MaintenanceError::RecoveryInProgress,
+                other => MaintenanceError::Internal(other.to_string()),
+            })?;
         drop(plans);
 
+        let library_root = self
+            .library_root_for_context(&plan.write_context)?
+            .ok_or_else(|| {
+                MaintenanceError::Internal("Maintenance library root is not configured".into())
+            })?;
+        let _write_guard = self.acquire_write_guard(&plan.write_context)?;
         // Re-preflight: the row, every Activation entry and the Install
         // entity must still match the plan.
         let current_target = self
@@ -1187,9 +1291,6 @@ impl MaintenanceService {
             }
         }
 
-        let library_root = self.active_library_root()?.ok_or_else(|| {
-            MaintenanceError::Internal("Maintenance library root is not configured".into())
-        })?;
         let operation_id = format!(
             "remove-{}-{}",
             std::time::SystemTime::now()
@@ -1459,31 +1560,112 @@ impl MaintenanceService {
 
 pub struct StartupMaintenance {
     maintenance: MaintenanceService,
-    startup_worker: Mutex<Option<JoinHandle<Result<ActivationHealthReport, MaintenanceError>>>>,
+    startup_worker: Arc<Mutex<Option<StartupWorker>>>,
+    startup_ready: Arc<StartupReadiness>,
+}
+
+type StartupWorker = JoinHandle<Result<ActivationHealthReport, MaintenanceError>>;
+
+impl Clone for StartupMaintenance {
+    fn clone(&self) -> Self {
+        Self {
+            maintenance: self.maintenance.clone(),
+            startup_worker: self.startup_worker.clone(),
+            startup_ready: self.startup_ready.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StartupReadiness {
+    succeeded: Mutex<bool>,
+    callbacks: Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>,
+}
+
+impl StartupReadiness {
+    fn mark_finished(&self, succeeded: bool) {
+        if !succeeded {
+            return;
+        }
+        let Ok(mut ready) = self.succeeded.lock() else {
+            return;
+        };
+        if *ready {
+            return;
+        };
+        *ready = true;
+        let callbacks = self
+            .callbacks
+            .lock()
+            .map(|mut callbacks| std::mem::take(&mut *callbacks))
+            .unwrap_or_default();
+        drop(ready);
+        for callback in callbacks {
+            std::thread::spawn(callback);
+        }
+    }
+
+    fn register<F>(&self, callback: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut callback: Option<Box<dyn FnOnce() + Send + 'static>> = Some(Box::new(callback));
+        let Ok(ready) = self.succeeded.lock() else {
+            return;
+        };
+        if *ready {
+            drop(ready);
+            if let Some(callback) = callback.take() {
+                std::thread::spawn(callback);
+            }
+            return;
+        }
+        let Ok(mut callbacks) = self.callbacks.lock() else {
+            return;
+        };
+        if let Some(callback) = callback.take() {
+            callbacks.push(callback);
+        }
+    }
 }
 
 impl StartupMaintenance {
+    /// Schedule startup observations only after the recovery worker has
+    /// reached a terminal state. A failed recovery leaves the gate closed,
+    /// so observers remain read-only and cannot publish product writes.
+    pub fn after_startup_recovery<F>(&self, callback: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let readiness = self.startup_ready.clone();
+        readiness.register(callback);
+    }
+
     pub fn run_activation_health_check(&self) -> Result<ActivationHealthReport, MaintenanceError> {
         let mut startup_worker = self
             .startup_worker
             .lock()
             .map_err(|_| MaintenanceError::Internal("startup Maintenance lock poisoned".into()))?;
-        if let Some(worker) = startup_worker.take() {
+        let _worker_result = startup_worker.take().map(|worker| {
             worker.join().unwrap_or_else(|_| {
                 Err(MaintenanceError::Internal(
                     "startup Maintenance task panicked".into(),
                 ))
-            })?;
-        }
+            })
+        });
         drop(startup_worker);
         // §10.4: a retry after a failed startup recovery must re-run the
         // journal recovery itself, not just a read-only scan — otherwise the
         // lock notice clears while writes stay refused.
-        if self.maintenance.write_gate.is_product_write_open() {
+        let result = if self.maintenance.write_gate.is_product_write_open() {
             self.maintenance.run_health_check()
         } else {
             self.maintenance.startup_check()
+        };
+        if result.is_ok() && self.maintenance.write_gate.is_product_write_open() {
+            self.startup_ready.mark_finished(true);
         }
+        result
     }
 
     pub fn relocate(
@@ -1512,5 +1694,76 @@ impl StartupMaintenance {
 
     pub fn cancel_remove(&self, plan_token: &str) -> Result<bool, MaintenanceError> {
         self.maintenance.cancel_remove(plan_token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc::sync_channel;
+
+    use crate::adapters::macos_fs::MacOsFileSystem;
+    use crate::adapters::runtime_catalog::RuntimeCatalogStore;
+    use crate::adapters::sqlite::SqliteCatalogStore;
+    use crate::core::home::BoundHome;
+    use crate::core::write_gate::WriteGate;
+
+    use super::*;
+
+    #[test]
+    fn startup_observers_wait_until_recovery_reopens_product_writes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let home = BoundHome::test_value(
+            "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+            dir.path().join("home"),
+        );
+        let filesystem = Arc::new(MacOsFileSystem::new(dir.path().to_path_buf()));
+        filesystem
+            .ensure_directory(&home.path)
+            .expect("home directory");
+        let sqlite = SqliteCatalogStore::create_bound(&home, &home.path.join("skill-man.sqlite3"))
+            .expect("bound Catalog");
+        let store = Arc::new(RuntimeCatalogStore::new(
+            Arc::new(sqlite),
+            filesystem.clone(),
+        ));
+        let gate = Arc::new(WriteGate::new(WriteGateState::Open(home.clone())));
+
+        let startup = MaintenanceService::for_tests(store, filesystem, gate.clone())
+            .with_library_root(home.path.clone())
+            .begin_startup();
+        let (ready_tx, ready_rx) = sync_channel(1);
+        startup.after_startup_recovery(move || {
+            ready_tx
+                .send(gate.is_product_write_open())
+                .expect("observer readiness");
+        });
+
+        assert!(
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("startup observer should run"),
+            "health/probe/detection must start only after product writes reopen"
+        );
+    }
+
+    #[test]
+    fn failed_startup_recovery_does_not_start_observer_callback() {
+        let readiness = Arc::new(StartupReadiness::default());
+        let (started_tx, started_rx) = sync_channel(1);
+        readiness.register(move || {
+            started_tx.send(()).expect("observer callback");
+        });
+        readiness.mark_finished(false);
+        assert!(
+            started_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "observers stay idle after failed recovery"
+        );
+        readiness.mark_finished(true);
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("observers start after recovery retry");
     }
 }

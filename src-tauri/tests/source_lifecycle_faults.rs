@@ -28,6 +28,7 @@ use skill_man_lib::core::source_transition::{
 use skill_man_lib::core::source_update::{
     SourceUpdateError, SourceUpdateMemberState, SourceUpdateService,
 };
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::{
     FileSystem, LocalCopyJournal, LocalCopyPhase, RemoveSourceActivationJournal,
@@ -203,6 +204,7 @@ struct Fixture {
     lifecycle: Arc<SourceLifecycleService>,
     update: Arc<SourceUpdateService>,
     lock_path: PathBuf,
+    write_gate: Arc<WriteGate>,
 }
 
 /// A managed v9 source with two members (alpha, beta) plus one desired
@@ -259,6 +261,7 @@ fn fixture() -> Fixture {
     let filesystem = Arc::new(MacOsFileSystem::new(home.clone()));
     let catalog =
         Arc::new(SqliteCatalogStore::open(&library.join("skill-man.sqlite3")).expect("Catalog"));
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     let transition = Arc::new(
         SourceTransitionService::new(
             preview.clone(),
@@ -269,6 +272,7 @@ fn fixture() -> Fixture {
             Arc::new(FixtureClock),
             library.clone(),
             home.clone(),
+            write_gate.clone(),
         )
         .with_update_store(catalog.clone()),
     );
@@ -300,6 +304,7 @@ fn fixture() -> Fixture {
         lifecycle,
         update,
         lock_path,
+        write_gate,
     }
 }
 
@@ -505,6 +510,7 @@ fn lifecycle_over_store(
             Arc::new(FixtureClock),
             fixture.library.clone(),
             fixture.home.clone(),
+            fixture.write_gate.clone(),
         )
         .with_update_store(store),
     );
@@ -892,6 +898,61 @@ fn create_local_copy_recovery_blocks_when_the_registered_destination_vanished() 
     assert!(
         matches!(result, Err(SourceLifecycleError::RecoveryRequired(_))),
         "a vanished registered Local Source must block for recovery, got {result:?}"
+    );
+}
+
+#[test]
+fn tampered_local_copy_recovery_keeps_an_external_destination_untouched() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let member = read_current(&fixture, &remote_id)
+        .members
+        .into_iter()
+        .find(|member| member.skill_path == "skills/alpha")
+        .expect("alpha member");
+    let source_path = member_namespace(&fixture, &remote_id, "skills/alpha");
+    let destination = fixture.export_root.join("tampered-destination");
+    std::fs::create_dir_all(&destination).expect("create protected destination");
+    std::fs::write(destination.join("keep.txt"), "keep").expect("write protected content");
+    let operation_id = "source-transition-local-copy-tampered";
+    let staged_path = fixture
+        .export_root
+        .join(format!(".skill-man-source-transition-{operation_id}-alpha"));
+    let content_hash = fixture
+        .filesystem
+        .staged_tree_snapshot(&source_path)
+        .expect("source snapshot")
+        .content_hash;
+    fixture
+        .filesystem
+        .write_source_lifecycle_journal(
+            &fixture.library,
+            &SourceLifecycleJournal::LocalCopy(LocalCopyJournal {
+                version: 1,
+                operation_id: operation_id.into(),
+                phase: LocalCopyPhase::Copied,
+                remote_id,
+                skill_id: member.skill_id.0,
+                directory_name: member.directory_name,
+                identity_key: member.identity_key,
+                display_name: member.display_name,
+                description: member.description,
+                source_path,
+                destination: destination.clone(),
+                staged_path,
+                content_hash,
+            }),
+        )
+        .expect("write tampered journal");
+
+    let result = fixture.lifecycle.recover_lifecycle(&fixture.library);
+    assert!(
+        matches!(result, Err(SourceLifecycleError::RecoveryRequired(_))),
+        "tampered journal must keep startup recovery locked, got {result:?}"
+    );
+    assert!(
+        destination.join("keep.txt").is_file(),
+        "unsafe destination must never be deleted"
     );
 }
 

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use thiserror::Error;
 
@@ -24,6 +24,7 @@ use crate::core::fixture_recovery::{
     FixtureClassifier, FixtureShapeMode, epoch_seconds_to_rfc3339,
 };
 use crate::core::home::{HomeId, HomeMarker, VolumeIdentity};
+use crate::core::write_gate::WriteGate;
 use crate::seams::app_state_store::{
     AppStateStore, AppStateStoreError, HOME_BINDING_SCHEMA_VERSION, HomeBindingFile,
     HomeBindingRecord, RecoveryOperationRecord,
@@ -122,6 +123,8 @@ pub enum HomeBindingError {
     StepFailed { cursor: String, message: String },
     #[error("the binding operation state is ambiguous and cannot be converged: {0}")]
     AmbiguousState(String),
+    #[error("Home Binding is blocked while another recovery owns the WriteGate")]
+    RecoveryInProgress,
     #[error("the app state could not be read or written: {0}")]
     StateStore(String),
     #[error("filesystem operation failed: {0}")]
@@ -181,8 +184,10 @@ pub struct HomeBindingService {
     migrator: Arc<dyn LegacyCatalogMigrator>,
     prepared: Arc<dyn PreparedCatalogFactory>,
     bootstrap: Arc<BootstrapService>,
+    write_gate: Arc<WriteGate>,
     config: HomeBindingConfig,
     plans: RwLock<HashMap<String, CandidatePlan>>,
+    operation_lock: Mutex<()>,
 }
 
 impl HomeBindingService {
@@ -196,6 +201,7 @@ impl HomeBindingService {
         migrator: Arc<dyn LegacyCatalogMigrator>,
         prepared: Arc<dyn PreparedCatalogFactory>,
         bootstrap: Arc<BootstrapService>,
+        write_gate: Arc<WriteGate>,
         config: HomeBindingConfig,
     ) -> Self {
         Self {
@@ -207,8 +213,10 @@ impl HomeBindingService {
             migrator,
             prepared,
             bootstrap,
+            write_gate,
             config,
             plans: RwLock::new(HashMap::new()),
+            operation_lock: Mutex::new(()),
         }
     }
 
@@ -283,6 +291,10 @@ impl HomeBindingService {
     /// copy), verifies every artifact, then commits the locator — the only
     /// binding commit point. Returns the fresh bootstrap snapshot.
     pub fn confirm_home(&self, token: &str) -> Result<BootstrapSnapshot, HomeBindingError> {
+        let _operation_lock = self
+            .operation_lock
+            .lock()
+            .map_err(|_| HomeBindingError::AmbiguousState("operation lock poisoned".into()))?;
         let plan = self
             .plans
             .read()
@@ -290,7 +302,91 @@ impl HomeBindingService {
             .get(token)
             .cloned()
             .ok_or(HomeBindingError::PlanStale)?;
-        self.confirm_plan(token, &plan)
+        let home_transition = self.begin_home_transition()?;
+        let result = self.confirm_plan(token, &plan);
+        match result {
+            Ok(snapshot) => {
+                home_transition.commit();
+                Ok(snapshot)
+            }
+            Err(error) => {
+                match self.app_state.load() {
+                    Ok(files) => {
+                        if files.recovery_ledger.active.is_some() {
+                            // Transfer an unfinished operation to the
+                            // recovery capability so Continue/Cancel can
+                            // reacquire it in the same process.
+                            home_transition
+                                .commit_to(crate::core::write_gate::WriteGateState::Closed {
+                                    reason:
+                                        crate::core::write_gate::ClosedReason::HomeCandidatePending,
+                                })
+                                .map_err(|gate_error| {
+                                    HomeBindingError::AmbiguousState(gate_error.to_string())
+                                })?;
+                        }
+                    }
+                    Err(_) => {
+                        // App-level state is unavailable; keep the gate
+                        // closed until the next bootstrap retry.
+                        home_transition.commit();
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn begin_home_transition(
+        &self,
+    ) -> Result<crate::core::write_gate::HomeTransitionGuard<'_>, HomeBindingError> {
+        self.write_gate.begin_home_transition().map_err(|error| {
+            if matches!(error, crate::core::write_gate::WriteGateError::Closed) {
+                HomeBindingError::RecoveryInProgress
+            } else {
+                HomeBindingError::AmbiguousState(format!(
+                    "the Home is changing or recovery already owns the WriteGate: {error}"
+                ))
+            }
+        })
+    }
+
+    fn begin_recovery_transition(
+        &self,
+    ) -> Result<crate::core::write_gate::HomeTransitionGuard<'_>, HomeBindingError> {
+        let mut transition = self
+            .write_gate
+            .begin_exclusive_home_write()
+            .map_err(|error| {
+                if matches!(error, crate::core::write_gate::WriteGateError::Closed) {
+                    HomeBindingError::RecoveryInProgress
+                } else {
+                    HomeBindingError::AmbiguousState(format!(
+                        "the Home is changing or recovery already owns the WriteGate: {error}"
+                    ))
+                }
+            })?;
+        transition
+            .set_state_while_held(crate::core::write_gate::WriteGateState::Closed {
+                reason: crate::core::write_gate::ClosedReason::HomeCandidatePending,
+            })
+            .map_err(|error| HomeBindingError::AmbiguousState(error.to_string()))?;
+        Ok(transition)
+    }
+
+    fn finish_recovery_transition(
+        &self,
+        transition: crate::core::write_gate::HomeTransitionGuard<'_>,
+    ) -> Result<(), HomeBindingError> {
+        let reason = match self.app_state.load() {
+            Ok(files) if files.recovery_ledger.active.is_none() => {
+                crate::core::write_gate::ClosedReason::HomeTransition
+            }
+            _ => crate::core::write_gate::ClosedReason::HomeCandidatePending,
+        };
+        transition
+            .commit_to(crate::core::write_gate::WriteGateState::Closed { reason })
+            .map_err(|error| HomeBindingError::AmbiguousState(error.to_string()))
     }
 
     /// Resume an interrupted binding operation from its durable cursor
@@ -300,6 +396,10 @@ impl HomeBindingService {
         &self,
         operation_id: &str,
     ) -> Result<BootstrapSnapshot, HomeBindingError> {
+        let _operation_lock = self
+            .operation_lock
+            .lock()
+            .map_err(|_| HomeBindingError::AmbiguousState("operation lock poisoned".into()))?;
         let files = self.app_state.load()?;
         let Some(active) = files.recovery_ledger.active.clone() else {
             return Err(HomeBindingError::NoActiveOperation);
@@ -309,13 +409,25 @@ impl HomeBindingService {
                 operation_id: operation_id.into(),
             });
         }
-        match active.kind.as_str() {
+        if !matches!(
+            active.kind.as_str(),
+            HOME_CANDIDATE_KIND | LEGACY_TRANSITION_KIND
+        ) {
+            return Err(HomeBindingError::AmbiguousState(format!(
+                "unknown active operation kind: {}",
+                active.kind
+            )));
+        }
+        let transition = self.begin_recovery_transition()?;
+        let result = match active.kind.as_str() {
             HOME_CANDIDATE_KIND => self.continue_home_candidate(&active),
             LEGACY_TRANSITION_KIND => self.continue_legacy_transition(&active),
             other => Err(HomeBindingError::AmbiguousState(format!(
                 "unknown active operation kind: {other}"
             ))),
-        }
+        };
+        self.finish_recovery_transition(transition)?;
+        result
     }
 
     /// Cancel an interrupted candidate: deletes only artifacts proven to be
@@ -328,6 +440,10 @@ impl HomeBindingService {
         &self,
         operation_id: &str,
     ) -> Result<BootstrapSnapshot, HomeBindingError> {
+        let _operation_lock = self
+            .operation_lock
+            .lock()
+            .map_err(|_| HomeBindingError::AmbiguousState("operation lock poisoned".into()))?;
         let files = self.app_state.load()?;
         if files.binding.current.is_some() {
             return Err(HomeBindingError::NotCancellable(
@@ -344,20 +460,31 @@ impl HomeBindingService {
                 operation_id: operation_id.into(),
             });
         }
-        match active.kind.as_str() {
+        if !matches!(
+            active.kind.as_str(),
+            HOME_CANDIDATE_KIND | LEGACY_TRANSITION_KIND
+        ) {
+            return Err(HomeBindingError::AmbiguousState(format!(
+                "unknown active operation kind: {}",
+                active.kind
+            )));
+        }
+        let transition = self.begin_recovery_transition()?;
+        let result = match active.kind.as_str() {
             HOME_CANDIDATE_KIND => {
                 let path = active.live_path.clone().ok_or_else(|| {
                     HomeBindingError::AmbiguousState("the candidate has no live path".into())
                 })?;
                 if !self.remove_candidate_if_owned(&path, active.home_id.as_ref())? {
-                    return Err(HomeBindingError::NotCancellable(
+                    Err(HomeBindingError::NotCancellable(
                         "the candidate directory contains content that this operation did not \
                          create; it is never deleted"
                             .into(),
-                    ));
+                    ))
+                } else {
+                    self.finish_operation(&active.operation_id, cursors::CANCELLED)?;
+                    Ok(self.bootstrap.inspect())
                 }
-                self.finish_operation(&active.operation_id, cursors::CANCELLED)?;
-                Ok(self.bootstrap.inspect())
             }
             LEGACY_TRANSITION_KIND => {
                 let destination = active.prepared_path.clone().ok_or_else(|| {
@@ -375,7 +502,9 @@ impl HomeBindingService {
             other => Err(HomeBindingError::AmbiguousState(format!(
                 "unknown active operation kind: {other}"
             ))),
-        }
+        };
+        self.finish_recovery_transition(transition)?;
+        result
     }
 
     // -- validation --------------------------------------------------------

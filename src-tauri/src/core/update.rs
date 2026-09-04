@@ -18,7 +18,7 @@ use crate::core::git_source::{
 };
 use crate::core::git_source_capability::{GitSourceCapabilityError, GitSourceCapabilityScan};
 use crate::core::import::{ImportError, ImportService};
-use crate::core::write_gate::WriteGate;
+use crate::core::write_gate::{HomeWriteContext, ProductWriteGuard, WriteGate, WriteGateError};
 use crate::seams::clock::Clock;
 use crate::seams::filesystem::FileSystem;
 use crate::seams::filesystem::RemoteParentManifest;
@@ -140,6 +140,7 @@ pub struct UpdateService {
     configured_git_cache_root: PathBuf,
     configured_remotes_root: PathBuf,
     home_context: Option<Arc<WriteGate>>,
+    write_gate: Arc<WriteGate>,
     source_capability_scan: Option<Arc<GitSourceCapabilityScan>>,
     import: ImportService,
 }
@@ -160,8 +161,8 @@ impl UpdateService {
             clock.clone(),
             Arc::new(crate::adapters::local_file_source::LocalFileSource::new()),
             library_root.clone(),
+            write_gate.clone(),
         )
-        .with_write_gate(write_gate)
         .with_git_source(git.clone())
         .with_git_cache_root(git_cache_root.clone());
         Self {
@@ -173,6 +174,7 @@ impl UpdateService {
             configured_git_cache_root: git_cache_root,
             configured_remotes_root: library_root.join("remotes"),
             home_context: None,
+            write_gate: write_gate.clone(),
             source_capability_scan: None,
             import,
         }
@@ -182,7 +184,8 @@ impl UpdateService {
     /// the current bootstrap-verified Home after a first-time bind.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
         self.import = self.import.with_home_context(home_context.clone());
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -207,13 +210,6 @@ impl UpdateService {
         }
     }
 
-    fn active_git_cache_root(&self) -> Result<PathBuf, UpdateError> {
-        if self.home_context.is_some() {
-            return Ok(self.active_library_root()?.join("cache"));
-        }
-        Ok(self.configured_git_cache_root.clone())
-    }
-
     fn active_remotes_root(&self) -> Result<PathBuf, UpdateError> {
         if self.home_context.is_some() {
             return Ok(self.active_library_root()?.join("remotes"));
@@ -221,11 +217,54 @@ impl UpdateService {
         Ok(self.configured_remotes_root.clone())
     }
 
+    fn capture_write_context(&self) -> Result<HomeWriteContext, UpdateError> {
+        self.write_gate
+            .capture_open_context()
+            .map_err(|error| UpdateError::Import(ImportError::RecoveryRequired(error.to_string())))
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, UpdateError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => UpdateError::Import(ImportError::PlanStale),
+                WriteGateError::Closed => UpdateError::Import(ImportError::RecoveryRequired(
+                    "startup recovery is still in progress".into(),
+                )),
+                other => UpdateError::Import(ImportError::RecoveryRequired(other.to_string())),
+            })
+    }
+
+    fn git_mirror_for_context(
+        &self,
+        context: &HomeWriteContext,
+        repo_url: &str,
+    ) -> Result<PathBuf, UpdateError> {
+        let cache_root = if self.home_context.is_some() {
+            context.home.path.join("cache")
+        } else {
+            self.configured_git_cache_root.clone()
+        };
+        Ok(git_mirror_path(&cache_root, repo_url))
+    }
+
+    fn remotes_root_for_context(&self, context: &HomeWriteContext) -> PathBuf {
+        if self.home_context.is_some() {
+            context.home.path.join("remotes")
+        } else {
+            self.configured_remotes_root.clone()
+        }
+    }
+
     /// Check trackable remote Installs for updates. Each repository is
     /// fetched once; results are grouped per repository. Successful checks
     /// record `last_checked_at` (the 24h cooldown), failures degrade into
     /// report errors without disturbing other repositories.
     pub fn check_updates(&self, force: bool) -> Result<UpdateCheckReport, UpdateError> {
+        let write_context = self.capture_write_context()?;
         let records = self.store.load_remote_installs()?;
         let updateable_remote_ids = self.updateable_remote_ids()?;
         let trackable = records
@@ -250,6 +289,7 @@ impl UpdateService {
         let mut groups = Vec::new();
         let mut errors = Vec::new();
         let mut parent_conflicts = Vec::new();
+        let mut checked_skills = Vec::new();
         for (repo_url, items) in by_repo {
             // Parent integrity gate (ADR-0013 §4.3): a manifest/row
             // mismatch closes only this parent's Update; other parents and
@@ -273,7 +313,8 @@ impl UpdateService {
                 // Within the cooldown: silent skip, as ADR-0004 requires.
                 continue;
             }
-            let mirror = self.git_mirror_for(repo_url)?;
+            let _fetch_guard = self.acquire_write_guard(&write_context)?;
+            let mirror = self.git_mirror_for_context(&write_context, repo_url)?;
             let report = match self.git.fetch_mirror(repo_url, &mirror) {
                 Ok(report) => report,
                 Err(error) => {
@@ -319,9 +360,7 @@ impl UpdateService {
                         entry.path.to_string_lossy() == skill_document_path(&item.skill_path)
                     });
                 }
-                if let Err(error) = self.store.record_remote_check(&item.skill_id) {
-                    errors.push(format!("{}: {error}", item.directory_name));
-                }
+                checked_skills.push((item.skill_id.clone(), item.directory_name.clone()));
                 group_items.push(UpdateCheckItem {
                     skill_id: item.skill_id.clone(),
                     directory_name: item.directory_name.clone(),
@@ -340,6 +379,12 @@ impl UpdateService {
                 items: group_items,
             });
         }
+        let _write_guard = self.acquire_write_guard(&write_context)?;
+        for (skill_id, directory_name) in checked_skills {
+            if let Err(error) = self.store.record_remote_check(&skill_id) {
+                errors.push(format!("{directory_name}: {error}"));
+            }
+        }
         Ok(UpdateCheckReport {
             groups,
             errors,
@@ -354,6 +399,7 @@ impl UpdateService {
     /// errors (already up to date, upstream path gone, offline) are reported
     /// on the item so the UI can present them next to the Skill.
     pub fn plan_updates(&self, selections: &[UpdateSelection]) -> Result<UpdatePlan, UpdateError> {
+        let write_context = self.capture_write_context()?;
         let records = self.store.load_remote_installs()?;
         let updateable_remote_ids = self.updateable_remote_ids()?;
         let mut items = Vec::new();
@@ -405,21 +451,25 @@ impl UpdateService {
                 }
                 continue;
             }
-            let mirror = self.git_mirror_for(&repo_url)?;
-            let fetch = self.git.fetch_mirror(&repo_url, &mirror);
-            let default_resolved = match fetch {
-                Ok(report) => match report.default_branch.as_deref() {
-                    Some(branch) => self
-                        .git
-                        .resolve_commit(&mirror, &format!("refs/heads/{branch}"))?,
-                    None => self.git.resolve_commit(&mirror, "HEAD")?,
-                },
-                Err(error) => {
-                    for (selection, record) in selections {
-                        items.push(update_item_error(selection, record, error.to_string()));
+            let (mirror, default_resolved) = {
+                let _fetch_guard = self.acquire_write_guard(&write_context)?;
+                let mirror = self.git_mirror_for_context(&write_context, &repo_url)?;
+                let fetch = self.git.fetch_mirror(&repo_url, &mirror);
+                let default_resolved = match fetch {
+                    Ok(report) => match report.default_branch.as_deref() {
+                        Some(branch) => self
+                            .git
+                            .resolve_commit(&mirror, &format!("refs/heads/{branch}"))?,
+                        None => self.git.resolve_commit(&mirror, "HEAD")?,
+                    },
+                    Err(error) => {
+                        for (selection, record) in selections {
+                            items.push(update_item_error(selection, record, error.to_string()));
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                };
+                (mirror, default_resolved)
             };
             let mut listed: Option<(String, Vec<GitTreeEntry>)> = None;
             for (selection, record) in selections {
@@ -475,12 +525,13 @@ impl UpdateService {
                     ));
                     continue;
                 }
-                match self.import.plan_git_reinstall(
+                match self.import.plan_git_reinstall_with_context(
                     &record.identity_key,
                     &record.source_url,
                     &resolved,
                     selection.new_skill_path.as_deref(),
                     false,
+                    &write_context,
                 ) {
                     Ok(preview) => items.push(UpdatePlanItem {
                         skill_id: selection.skill_id.clone(),
@@ -510,9 +561,10 @@ impl UpdateService {
         requests: &[UpdateApplyRequest],
         abandon_changes: bool,
     ) -> Result<UpdateResult, UpdateError> {
+        let write_context = self.capture_write_context()?;
         let records = self.store.load_remote_installs()?;
         let updateable_remote_ids = self.updateable_remote_ids()?;
-        let remotes_root = self.active_remotes_root()?;
+        let remotes_root = self.remotes_root_for_context(&write_context);
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             let source_updates_allowed = records
@@ -558,13 +610,14 @@ impl UpdateService {
                                         .map(|parent| parent.aliases)
                                 })
                                 .unwrap_or_default();
-                            let _ = ensure_parent_manifest(
+                            let _write_guard = self.acquire_write_guard(&write_context)?;
+                            ensure_parent_manifest(
                                 self.filesystem.as_ref(),
                                 &remotes_root,
                                 record,
                                 self.clock.unix_epoch_nanos(),
                                 aliases,
-                            );
+                            )?;
                         }
                     }
                     results.push(UpdateItemResult {
@@ -588,6 +641,8 @@ impl UpdateService {
     /// Pin one or more remote Installs to their current commit: the recorded
     /// ref becomes the resolved commit, so no further update checks apply.
     pub fn pin_updates(&self, skill_ids: &[SkillId]) -> Result<(), UpdateError> {
+        let write_context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let records = self.store.load_remote_installs()?;
         let updateable_remote_ids = self.updateable_remote_ids()?;
         for skill_id in skill_ids {
@@ -600,14 +655,14 @@ impl UpdateService {
             if !self.source_updates_are_allowed(updateable_remote_ids.as_ref(), &record.remote_id) {
                 return Err(UpdateError::SourceCapabilityClosed);
             }
-            self.store
-                .set_remote_requested_ref(skill_id, &record.verification_anchor_commit)?;
+            self.store.set_remote_requested_ref(
+                skill_id,
+                &record.requested_ref,
+                &record.verification_anchor_commit,
+                &record.verification_anchor_commit,
+            )?;
         }
         Ok(())
-    }
-
-    fn git_mirror_for(&self, repo_url: &str) -> Result<PathBuf, UpdateError> {
-        Ok(git_mirror_path(&self.active_git_cache_root()?, repo_url))
     }
 
     /// Resolve the commit for one tracked Install: "HEAD" uses the repository

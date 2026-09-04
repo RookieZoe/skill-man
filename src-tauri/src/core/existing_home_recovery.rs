@@ -16,6 +16,7 @@ use crate::core::existing_home_profile::{
 };
 use crate::core::fixture_recovery::FixtureClassifier;
 use crate::core::home::{HomeId, VolumeIdentity};
+use crate::core::write_gate::WriteGate;
 use crate::seams::app_state_store::{
     AppStateFiles, AppStateStore, AppStateStoreError, HOME_BINDING_SCHEMA_VERSION, HomeBindingFile,
     HomeBindingRecord,
@@ -71,6 +72,8 @@ pub enum ExistingHomeRecoveryError {
     StateStore(String),
     #[error("the selected Home could not be inspected: {0}")]
     FileSystem(String),
+    #[error("Existing Home Recovery is blocked while another recovery owns the WriteGate")]
+    RecoveryInProgress,
     #[error("the Existing Home Recovery Plan is no longer available")]
     PlanStale,
 }
@@ -88,11 +91,13 @@ pub struct ExistingHomeRecoveryService {
     probe: Arc<dyn CatalogProbe>,
     filesystem: Arc<dyn FileSystem>,
     classifier: Arc<dyn FixtureClassifier>,
+    write_gate: Arc<WriteGate>,
     config: ExistingHomeRecoveryConfig,
     plans: RwLock<HashMap<String, ExistingHomeRecoveryPlan>>,
 }
 
 impl ExistingHomeRecoveryService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app_state: Arc<dyn AppStateStore>,
         bootstrap: Arc<BootstrapService>,
@@ -100,6 +105,7 @@ impl ExistingHomeRecoveryService {
         probe: Arc<dyn CatalogProbe>,
         filesystem: Arc<dyn FileSystem>,
         classifier: Arc<dyn FixtureClassifier>,
+        write_gate: Arc<WriteGate>,
         config: ExistingHomeRecoveryConfig,
     ) -> Self {
         Self {
@@ -109,6 +115,7 @@ impl ExistingHomeRecoveryService {
             probe,
             filesystem,
             classifier,
+            write_gate,
             config,
             plans: RwLock::new(HashMap::new()),
         }
@@ -162,7 +169,19 @@ impl ExistingHomeRecoveryService {
             .cloned()
             .ok_or(ExistingHomeRecoveryError::PlanStale)?;
 
+        let home_transition =
+            self.write_gate
+                .begin_home_transition()
+                .map_err(|error| match error {
+                    crate::core::write_gate::WriteGateError::Closed => {
+                        ExistingHomeRecoveryError::RecoveryInProgress
+                    }
+                    other => ExistingHomeRecoveryError::StateStore(other.to_string()),
+                })?;
         let result = self.confirm_plan(&plan);
+        if result.is_ok() {
+            home_transition.commit();
+        }
         if result.is_ok() || matches!(result, Err(ExistingHomeRecoveryError::PlanStale)) {
             self.remove_plan(plan_token)?;
         }

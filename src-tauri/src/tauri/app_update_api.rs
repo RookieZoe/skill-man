@@ -67,6 +67,7 @@ fn command_error(error: AppUpdateError) -> CommandFailureDto {
         }
         AppUpdateError::Updater(AppUpdaterError::NoPendingUpdate)
         | AppUpdateError::InvalidState(_) => PublicErrorDto::StaleUpdate,
+        AppUpdateError::WriteGateClosed => PublicErrorDto::RecoveryRequired,
         AppUpdateError::Updater(AppUpdaterError::Cancelled) => PublicErrorDto::UpdateCancelled,
         AppUpdateError::Updater(AppUpdaterError::DownloadFailed(_)) => {
             PublicErrorDto::DownloadFailed

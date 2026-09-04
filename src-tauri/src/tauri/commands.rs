@@ -793,9 +793,14 @@ pub async fn apply_skill_updates(
 #[tauri::command]
 pub async fn pin_skill_updates(
     state: State<'_, UpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: PinSkillUpdatesRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.pin_skill_updates(request)
+    let result = state.pin_skill_updates(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -1046,9 +1051,14 @@ pub fn undo_global_enable(
 #[tauri::command]
 pub fn finalize_global_enable(
     state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: EnableOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize_global_enable(request)
+    let result = state.finalize_global_enable(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 // -- Project Enable (spec §4.9; ADR-0015; ADR-0019; #89) --
@@ -1061,8 +1071,15 @@ pub fn list_recent_project_folders(
 }
 
 #[tauri::command]
-pub fn clear_recent_project_folders(state: State<'_, EnableApi>) -> Result<(), CommandFailureDto> {
-    state.clear_recent_project_folders()
+pub fn clear_recent_project_folders(
+    state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+) -> Result<(), CommandFailureDto> {
+    let result = state.clear_recent_project_folders();
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
@@ -1076,23 +1093,38 @@ pub fn plan_project_enable(
 #[tauri::command]
 pub fn apply_project_enable(
     state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ApplyGlobalEnableRequestDto,
 ) -> Result<EnableResultDto, CommandFailureDto> {
-    state.apply_project_enable(request)
+    let result = state.apply_project_enable(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn undo_project_enable(
     state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: EnableOperationRequestDto,
 ) -> Result<EnableUndoResultDto, CommandFailureDto> {
-    state.undo_project_enable(request)
+    let result = state.undo_project_enable(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }
 
 #[tauri::command]
 pub fn finalize_project_enable(
     state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: EnableOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
-    state.finalize_project_enable(request)
+    let result = state.finalize_project_enable(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
 }

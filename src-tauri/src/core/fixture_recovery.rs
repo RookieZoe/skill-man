@@ -11,13 +11,15 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
 use crate::core::bootstrap::{BootstrapConfig, BootstrapService, BootstrapSnapshot, CatalogAccess};
 use crate::core::home::{HomeId, HomeMarker};
-use crate::core::write_gate::ReadOnlyReason;
+use crate::core::write_gate::{
+    ClosedReason, HomeTransitionGuard, ReadOnlyReason, WriteGate, WriteGateState,
+};
 use crate::seams::catalog_probe::{
     CatalogHomeIdentity, CatalogProbe, CatalogProbeError, FixtureAgentRowEvidence,
     FixtureCatalogEvidence, FixturePreferencesEvidence, FixtureSkillRowEvidence,
@@ -770,7 +772,9 @@ pub struct FixtureRecoveryService {
     filesystem: Arc<dyn FileSystem>,
     prepared: Arc<dyn PreparedCatalogFactory>,
     bootstrap: Arc<BootstrapService>,
+    write_gate: Arc<WriteGate>,
     config: BootstrapConfig,
+    operation_lock: Mutex<()>,
     /// Safety Snapshot deletion qualification (spec §2.1.6): the same
     /// Home must have had a later successful startup and a manual Complete
     /// Scan Report since the Restore. `None` fails closed — no Snapshot is
@@ -785,6 +789,7 @@ impl FixtureRecoveryService {
         filesystem: Arc<dyn FileSystem>,
         prepared: Arc<dyn PreparedCatalogFactory>,
         bootstrap: Arc<BootstrapService>,
+        write_gate: Arc<WriteGate>,
         config: BootstrapConfig,
     ) -> Self {
         Self {
@@ -793,7 +798,9 @@ impl FixtureRecoveryService {
             filesystem,
             prepared,
             bootstrap,
+            write_gate,
             config,
+            operation_lock: Mutex::new(()),
             delete_qualifier: None,
         }
     }
@@ -879,13 +886,36 @@ impl FixtureRecoveryService {
         if !preview.can_preview {
             return Err(FixtureRecoveryError::NotPure);
         }
-        let mut ledger = self.app_state.load()?.recovery_ledger;
+        let ledger = self.app_state.load()?.recovery_ledger;
         if let Some(active) = &ledger.active {
+            self.ensure_recovery_gate(&active.operation_id)?;
             return Err(FixtureRecoveryError::OperationAlreadyActive {
                 operation_id: active.operation_id.clone(),
             });
         }
         let (mode, live) = self.recovery_context()?;
+        let home_transition = self.begin_recovery_gate()?;
+        let current = self.inspect()?;
+        if !current.can_preview || current.mode != mode || current.path != live {
+            return Err(FixtureRecoveryError::AmbiguousState(
+                "the recovery Home changed before its operation could be recorded".into(),
+            ));
+        }
+        let mut ledger = self.app_state.load()?.recovery_ledger;
+        if let Some(active) = &ledger.active {
+            home_transition
+                .commit_to(WriteGateState::Recovery {
+                    operation_id: active.operation_id.clone(),
+                })
+                .map_err(|error| {
+                    FixtureRecoveryError::AmbiguousState(format!(
+                        "the WriteGate could not be claimed for recovery: {error}"
+                    ))
+                })?;
+            return Err(FixtureRecoveryError::OperationAlreadyActive {
+                operation_id: active.operation_id.clone(),
+            });
+        }
         let op = RecoveryOperationRecord {
             operation_id: new_operation_id(),
             kind: RECOVERY_KIND_FIXTURE.into(),
@@ -904,6 +934,15 @@ impl FixtureRecoveryService {
         };
         ledger.active = Some(op.clone());
         self.app_state.write_recovery_ledger(&ledger)?;
+        home_transition
+            .commit_to(WriteGateState::Recovery {
+                operation_id: op.operation_id.clone(),
+            })
+            .map_err(|error| {
+                FixtureRecoveryError::AmbiguousState(format!(
+                    "the WriteGate could not be claimed for recovery: {error}"
+                ))
+            })?;
         Ok(FixtureRecoveryPlan {
             plan_token: op.operation_id,
         })
@@ -1016,6 +1055,20 @@ impl FixtureRecoveryService {
                 )));
             }
         };
+        let home_transition = self.begin_recovery_gate()?;
+        let (current_home_id, current_live) = match self.restore_eligibility()? {
+            RestoreEligibility::RestoreRequired { home_id, path, .. } => (home_id, path),
+            _ => {
+                return Err(FixtureRecoveryError::AmbiguousState(
+                    "Restore eligibility changed before its operation could be recorded".into(),
+                ));
+            }
+        };
+        if current_home_id != home_id || current_live != live {
+            return Err(FixtureRecoveryError::AmbiguousState(
+                "the Restore Home changed before its operation could be recorded".into(),
+            ));
+        }
         let mut ledger = self.app_state.load()?.recovery_ledger;
         if let Some(active) = &ledger.active {
             return Err(FixtureRecoveryError::OperationAlreadyActive {
@@ -1037,6 +1090,15 @@ impl FixtureRecoveryService {
         };
         ledger.active = Some(op.clone());
         self.app_state.write_recovery_ledger(&ledger)?;
+        home_transition
+            .commit_to(WriteGateState::Recovery {
+                operation_id: op.operation_id.clone(),
+            })
+            .map_err(|error| {
+                FixtureRecoveryError::AmbiguousState(format!(
+                    "the WriteGate could not be claimed for Restore: {error}"
+                ))
+            })?;
         Ok(FixtureRecoveryPlan {
             plan_token: op.operation_id,
         })
@@ -1047,6 +1109,9 @@ impl FixtureRecoveryService {
     /// crash at any point resumes deterministically — rollback or
     /// roll-forward, never a guess.
     pub fn apply(&self, plan_token: &str) -> Result<RecoveryResult, FixtureRecoveryError> {
+        let _operation_lock = self.operation_lock.lock().map_err(|_| {
+            FixtureRecoveryError::AmbiguousState("the recovery operation lock is poisoned".into())
+        })?;
         let mut ledger = self.app_state.load()?.recovery_ledger;
         let Some(op) = ledger.active.clone() else {
             return Err(FixtureRecoveryError::NoActiveOperation);
@@ -1065,7 +1130,25 @@ impl FixtureRecoveryService {
                 "the Home path changed while the recovery operation was active".into(),
             ));
         }
-        self.advance(&mut ledger, op)
+        self.ensure_recovery_gate(plan_token)?;
+        ledger = self.app_state.load()?.recovery_ledger;
+        let Some(current) = ledger.active.clone() else {
+            return Err(FixtureRecoveryError::AmbiguousState(
+                "the recovery operation disappeared before it could run".into(),
+            ));
+        };
+        if current.operation_id != plan_token
+            || current.live_path.as_ref() != Some(&live)
+            || !matches!(
+                current.kind.as_str(),
+                RECOVERY_KIND_FIXTURE | RECOVERY_KIND_RESTORE
+            )
+        {
+            return Err(FixtureRecoveryError::AmbiguousState(
+                "the recovery operation changed before it could run".into(),
+            ));
+        }
+        self.advance(&mut ledger, current)
     }
 
     /// Final user confirmation: re-verifies the live Home, records the
@@ -1074,6 +1157,9 @@ impl FixtureRecoveryService {
         &self,
         operation_id: &str,
     ) -> Result<BootstrapSnapshot, FixtureRecoveryError> {
+        let _operation_lock = self.operation_lock.lock().map_err(|_| {
+            FixtureRecoveryError::AmbiguousState("the recovery operation lock is poisoned".into())
+        })?;
         let mut ledger = self.app_state.load()?.recovery_ledger;
         let Some(op) = ledger.active.clone() else {
             return Err(FixtureRecoveryError::NoActiveOperation);
@@ -1081,6 +1167,7 @@ impl FixtureRecoveryService {
         if op.operation_id != operation_id {
             return Err(FixtureRecoveryError::NoActiveOperation);
         }
+        self.ensure_recovery_gate(operation_id)?;
         if !matches!(
             op.cursor.as_deref(),
             Some(cursors::VERIFIED) | Some(cursors::AWAITING_COMMIT)
@@ -1120,6 +1207,7 @@ impl FixtureRecoveryService {
         ledger.active = None;
         ledger.completed.push(record);
         self.app_state.write_recovery_ledger(&ledger)?;
+        self.leave_recovery_gate()?;
         Ok(self.bootstrap.inspect())
     }
 
@@ -1188,6 +1276,9 @@ impl FixtureRecoveryService {
             if active.snapshot_path.as_deref() == Some(path.as_path()) {
                 return Err(FixtureRecoveryError::SnapshotInUse);
             }
+            return Err(FixtureRecoveryError::OperationAlreadyActive {
+                operation_id: active.operation_id.clone(),
+            });
         }
         self.verify_delete_qualification(&ledger, &path)?;
         Ok(DeleteSnapshotPreview {
@@ -1207,12 +1298,48 @@ impl FixtureRecoveryService {
             if active.snapshot_path.as_deref() == Some(path.as_path()) {
                 return Err(FixtureRecoveryError::SnapshotInUse);
             }
+            return Err(FixtureRecoveryError::OperationAlreadyActive {
+                operation_id: active.operation_id.clone(),
+            });
+        }
+        let home_transition = self
+            .write_gate
+            .begin_exclusive_home_write()
+            .map_err(|error| {
+                FixtureRecoveryError::AmbiguousState(format!(
+                    "the Home is changing or recovery already owns the WriteGate: {error}"
+                ))
+            })?;
+        let (current_path, _) = self.find_snapshot(plan_token)?;
+        if current_path != path {
+            return Err(FixtureRecoveryError::SnapshotNotQualified(
+                "the Safety Snapshot changed before deletion".into(),
+            ));
+        }
+        let path = current_path;
+        let ledger = self.app_state.load()?.recovery_ledger;
+        if let Some(active) = &ledger.active {
+            if active.snapshot_path.as_deref() == Some(path.as_path()) {
+                return Err(FixtureRecoveryError::SnapshotInUse);
+            }
+            return Err(FixtureRecoveryError::OperationAlreadyActive {
+                operation_id: active.operation_id.clone(),
+            });
         }
         self.verify_delete_qualification(&ledger, &path)?;
         let live = self.resolve_live_path()?;
-        self.filesystem
+        let result = self
+            .filesystem
             .remove_recovery_artifact(&path, &live)
-            .map_err(|error| FixtureRecoveryError::FileSystem(error.to_string()))
+            .map_err(|error| FixtureRecoveryError::FileSystem(error.to_string()));
+        match result {
+            Ok(()) => drop(home_transition),
+            Err(error) => {
+                home_transition.commit();
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Spec §2.1 invariant 6: the same `home_id`'s later successful startup
@@ -1274,6 +1401,56 @@ impl FixtureRecoveryService {
             } => Ok((RecoveryMode::LegacyUnbound, path)),
             _ => Err(FixtureRecoveryError::NotLocked),
         }
+    }
+
+    fn begin_recovery_gate(&self) -> Result<HomeTransitionGuard<'_>, FixtureRecoveryError> {
+        self.write_gate.begin_home_transition().map_err(|error| {
+            FixtureRecoveryError::AmbiguousState(format!(
+                "the Home is changing or recovery already owns the WriteGate: {error}"
+            ))
+        })
+    }
+
+    fn ensure_recovery_gate(&self, operation_id: &str) -> Result<(), FixtureRecoveryError> {
+        if let WriteGateState::Recovery {
+            operation_id: owner,
+        } = self.write_gate.snapshot().state
+        {
+            if owner == operation_id {
+                return Ok(());
+            }
+            return Err(FixtureRecoveryError::AmbiguousState(format!(
+                "the WriteGate is owned by recovery operation '{owner}'"
+            )));
+        }
+        self.write_gate
+            .transition_to(WriteGateState::Recovery {
+                operation_id: operation_id.into(),
+            })
+            .map_err(|error| {
+                FixtureRecoveryError::AmbiguousState(format!(
+                    "the WriteGate could not be claimed for recovery: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    fn leave_recovery_gate(&self) -> Result<(), FixtureRecoveryError> {
+        if matches!(
+            self.write_gate.snapshot().state,
+            WriteGateState::Recovery { .. }
+        ) {
+            self.write_gate
+                .transition_to(WriteGateState::Closed {
+                    reason: ClosedReason::HomeTransition,
+                })
+                .map_err(|error| {
+                    FixtureRecoveryError::AmbiguousState(format!(
+                        "the WriteGate could not leave recovery: {error}"
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     /// The Home root the recovery may touch: the bound path when a binding
@@ -1912,6 +2089,7 @@ impl FixtureRecoveryService {
         ledger.active = None;
         ledger.completed.push(op.clone());
         self.app_state.write_recovery_ledger(ledger)?;
+        self.leave_recovery_gate()?;
         Ok(())
     }
 
@@ -2694,6 +2872,7 @@ mod tests {
             )),
             Arc::new(crate::adapters::sqlite::SqlitePreparedCatalogFactory),
             Arc::new(bootstrap),
+            Arc::new(WriteGate::open_for_tests()),
             BootstrapConfig {
                 state_dir: dir.join("state"),
                 default_home_path: dir.join("default-home"),

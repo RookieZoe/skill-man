@@ -120,6 +120,13 @@ fn failure(error: &ExistingHomeRecoveryError) -> CommandFailureDto {
                 message: "selected Home could not be read".into(),
             }),
         ),
+        ExistingHomeRecoveryError::RecoveryInProgress => (
+            PublicErrorDto::RecoveryRequired,
+            Some(DiagnosticDto {
+                code: "existing_home_recovery_in_progress".into(),
+                message: error.to_string(),
+            }),
+        ),
     };
     CommandFailureDto {
         error: public,

@@ -117,6 +117,7 @@ pub struct SourceUpdateService {
     filesystem: Arc<dyn FileSystem>,
     configured_library_root: PathBuf,
     home_context: Option<Arc<WriteGate>>,
+    write_gate: Arc<WriteGate>,
 }
 
 impl SourceUpdateService {
@@ -126,17 +127,19 @@ impl SourceUpdateService {
         filesystem: Arc<dyn FileSystem>,
         library_root: PathBuf,
     ) -> Self {
+        let write_gate = transition.write_gate();
         Self {
             preview,
             transition,
             filesystem,
             configured_library_root: library_root,
             home_context: None,
+            write_gate,
         }
     }
 
-    pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+    pub fn with_home_context(mut self) -> Self {
+        self.home_context = Some(self.write_gate.clone());
         self
     }
 

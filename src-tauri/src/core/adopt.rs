@@ -26,7 +26,9 @@ use thiserror::Error;
 
 use crate::core::domain::{SkillId, parse_skill_metadata};
 use crate::core::scan::ScanCoordinator;
-use crate::core::write_gate::{PlanCheck, PlanTicket, WriteGate};
+use crate::core::write_gate::{
+    HomeWriteContext, PlanCheck, PlanTicket, ProductWriteGuard, WriteGate, WriteGateError,
+};
 use crate::seams::adopt_store::{
     AdoptStore, AdoptStoreError, AdoptedActivation, AdoptedSkillRecord,
 };
@@ -169,6 +171,7 @@ struct PlannedAdoptBatch {
     operation_id: String,
     items: Vec<PlannedAdoptItem>,
     journal: AdoptJournal,
+    write_context: HomeWriteContext,
     gate_generation: u64,
     created_at_millis: u128,
     frozen_report: AdoptFrozenReport,
@@ -227,6 +230,7 @@ impl AdoptService {
         clock: Arc<dyn Clock>,
         library_root: PathBuf,
         _home_directory: PathBuf,
+        write_gate: Arc<WriteGate>,
     ) -> Self {
         Self {
             store,
@@ -240,19 +244,15 @@ impl AdoptService {
             next_plan_id: AtomicU64::new(1),
             next_skill_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
-            write_gate: Arc::new(WriteGate::open_for_tests()),
+            write_gate,
         }
-    }
-
-    pub fn with_write_gate(mut self, write_gate: Arc<WriteGate>) -> Self {
-        self.write_gate = write_gate;
-        self
     }
 
     /// Make Home-scoped plans resolve their paths from the bootstrap-verified
     /// Home rather than from the process's startup configuration.
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
-        self.home_context = Some(home_context);
+        self.home_context = Some(home_context.clone());
+        self.write_gate = home_context;
         self
     }
 
@@ -273,19 +273,49 @@ impl AdoptService {
         }
     }
 
+    fn capture_write_context(&self) -> Result<HomeWriteContext, AdoptError> {
+        self.write_gate.capture_open_context().map_err(|_| {
+            AdoptError::RecoveryRequired("startup recovery is still in progress".into())
+        })
+    }
+
+    fn acquire_write_guard(
+        &self,
+        context: &HomeWriteContext,
+    ) -> Result<ProductWriteGuard<'_>, AdoptError> {
+        self.write_gate
+            .acquire_product_write(context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AdoptError::PlanStale,
+                WriteGateError::Closed => {
+                    AdoptError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => AdoptError::RecoveryRequired(other.to_string()),
+            })
+    }
+
+    fn library_root_for_context(&self, context: &HomeWriteContext) -> Result<PathBuf, AdoptError> {
+        if self.home_context.is_some() {
+            Ok(context.home.path.clone())
+        } else {
+            self.active_library_root()
+        }
+    }
+
     fn build_planned_batch(
         &self,
         plan_token: &str,
         items: Vec<PlanInputItem>,
         frozen_report: &AdoptFrozenReport,
     ) -> Result<PlannedAdoptBatch, AdoptError> {
+        let write_context = self.capture_write_context()?;
         // The operation id derives from the plan token so every plan maps to
         // exactly one durable operation id (deterministic under a fixed
         // clock, stable across plan/batch registration).
         let plan_number = plan_token.strip_prefix("adopt-plan-").unwrap_or("0");
         let operation_id = format!("adopt-{}-{}", self.clock.unix_epoch_nanos(), plan_number);
         let staging_operation_root = self
-            .active_library_root()?
+            .library_root_for_context(&write_context)?
             .join("staging")
             .join(&operation_id);
         let mut planned_items = Vec::with_capacity(items.len());
@@ -293,7 +323,7 @@ impl AdoptService {
             let final_entity_path = match item.kind {
                 AdoptPlanKind::Link => item.final_entity_path.clone(),
                 AdoptPlanKind::Migrate => self
-                    .active_library_root()?
+                    .library_root_for_context(&write_context)?
                     .join("skills")
                     .join(&item.directory_name),
             };
@@ -333,7 +363,7 @@ impl AdoptService {
                     .saturating_add(100 * 1024 * 1024);
                 let available_space = self
                     .filesystem
-                    .available_space(&self.active_library_root()?)?;
+                    .available_space(&self.library_root_for_context(&write_context)?)?;
                 if available_space < required_space {
                     return Err(AdoptError::Validation(format!(
                         "Adopt requires {required_space} bytes of free space, but only {available_space} bytes are available"
@@ -433,7 +463,8 @@ impl AdoptService {
             operation_id,
             items: planned_items,
             journal,
-            gate_generation: self.write_gate.generation(),
+            write_context: write_context.clone(),
+            gate_generation: write_context.generation,
             created_at_millis: self.clock.monotonic_millis(),
             frozen_report: frozen_report.clone(),
         };
@@ -465,6 +496,15 @@ impl AdoptService {
         {
             return Err(AdoptError::PlanStale);
         }
+        self.write_gate
+            .validate_open_context(&batch.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AdoptError::PlanStale,
+                WriteGateError::Closed => {
+                    AdoptError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => AdoptError::RecoveryRequired(other.to_string()),
+            })?;
         drop(plans);
         if self
             .clock
@@ -474,6 +514,8 @@ impl AdoptService {
         {
             return Err(AdoptError::PlanNotFound);
         }
+        let write_context = batch.write_context.clone();
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         self.verify_report_plan(&batch.frozen_report, &batch.items)?;
         self.preflight_batch(&batch)?;
         let mut journal = batch.journal.clone();
@@ -883,6 +925,17 @@ impl AdoptService {
             .map_err(|_| AdoptError::Internal("Adopt applied lock poisoned".into()))?
             .remove(operation_id)
             .ok_or(AdoptError::PlanNotFound)?;
+        self.write_gate
+            .validate_open_context(&batch.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AdoptError::PlanStale,
+                WriteGateError::Closed => {
+                    AdoptError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => AdoptError::RecoveryRequired(other.to_string()),
+            })?;
+        let write_context = batch.write_context.clone();
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         let successful_items = batch
             .items
             .iter()
@@ -1071,6 +1124,17 @@ impl AdoptService {
             // no-op); nothing left to archive.
             return Ok(());
         };
+        self.write_gate
+            .validate_open_context(&batch.write_context)
+            .map_err(|error| match error {
+                WriteGateError::Stale => AdoptError::PlanStale,
+                WriteGateError::Closed => {
+                    AdoptError::RecoveryRequired("startup recovery is still in progress".into())
+                }
+                other => AdoptError::RecoveryRequired(other.to_string()),
+            })?;
+        let write_context = batch.write_context.clone();
+        let _write_guard = self.acquire_write_guard(&write_context)?;
         if !batch.journal.items.is_empty() {
             self.filesystem
                 .finish_adopt_journal(&self.active_library_root()?, operation_id)?;

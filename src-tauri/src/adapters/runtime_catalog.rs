@@ -1,5 +1,6 @@
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::adapters::sqlite::SqliteCatalogStore;
 use crate::core::bootstrap::{BootstrapService, BootstrapSnapshot, CatalogAccess};
@@ -7,6 +8,7 @@ use crate::core::domain::{
     CatalogFilter, Health, SkillDetail, SkillId, SkillSummary, parse_skill_metadata,
 };
 use crate::core::home::BoundHome;
+use crate::core::write_gate::WriteGate;
 use crate::seams::activation_store::{
     ActivationCellRow, ActivationCellWrite, ActivationObservation, ActivationStore,
     ActivationStoreError, DesiredActivation, StoredActivationObservation,
@@ -51,6 +53,27 @@ pub struct RuntimeCatalogStore {
     filesystem: Arc<dyn FileSystem>,
 }
 
+struct StoreReadGuard<'a> {
+    slot: RwLockReadGuard<'a, Option<Arc<SqliteCatalogStore>>>,
+}
+
+impl Deref for StoreReadGuard<'_> {
+    type Target = SqliteCatalogStore;
+
+    fn deref(&self) -> &Self::Target {
+        self.slot
+            .as_ref()
+            .expect("StoreReadGuard is created only for an available store")
+            .as_ref()
+    }
+}
+
+impl AsRef<SqliteCatalogStore> for StoreReadGuard<'_> {
+    fn as_ref(&self) -> &SqliteCatalogStore {
+        self
+    }
+}
+
 /// Aligns the shared store facade with a fresh bootstrap snapshot: a Bound
 /// ReadWrite result reopens the Catalog writable, a Bound read-only result
 /// reopens it read-only, every other state closes the facade. Reconnect,
@@ -59,17 +82,23 @@ pub struct RuntimeCatalogStore {
 pub struct RuntimeStoreSwitch {
     store: Arc<RuntimeCatalogStore>,
     catalog_file_name: String,
+    write_gate: Arc<WriteGate>,
 }
 
 impl RuntimeStoreSwitch {
-    pub fn new(store: Arc<RuntimeCatalogStore>, catalog_file_name: String) -> Self {
+    pub fn new(
+        store: Arc<RuntimeCatalogStore>,
+        catalog_file_name: String,
+        write_gate: Arc<WriteGate>,
+    ) -> Self {
         Self {
             store,
             catalog_file_name,
+            write_gate,
         }
     }
 
-    pub fn reconcile(
+    fn reconcile(
         &self,
         snapshot: &BootstrapSnapshot,
         bound_home: Option<&BoundHome>,
@@ -93,10 +122,21 @@ impl RuntimeStoreSwitch {
             ) => self
                 .store
                 .reopen_read_only(&home.path.join(&self.catalog_file_name)),
-            _ => {
-                self.store.replace_store(None);
-                Ok(())
-            }
+            (BootstrapSnapshot::HomeUnavailable { path, .. }, _) => match self
+                .store
+                .reopen_read_only(&path.join(&self.catalog_file_name))
+            {
+                Ok(()) => Ok(()),
+                Err(_error) if self.store.store().is_some() => {
+                    // A disconnected volume can leave an already-open
+                    // read-only handle usable. Keep that same-Home handle
+                    // rather than turning a browseable HomeUnavailable
+                    // session into an empty Catalog.
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+            _ => self.store.replace_store(None),
         }
     }
 
@@ -112,7 +152,10 @@ impl RuntimeStoreSwitch {
         bootstrap: &BootstrapService,
         snapshot: &BootstrapSnapshot,
     ) -> Result<(), String> {
-        self.reconcile_after(bootstrap, snapshot, false)
+        let transition = self.begin_reconciliation(bootstrap, snapshot)?;
+        let result = self.reconcile_after(bootstrap, snapshot, false);
+        transition.commit();
+        result
     }
 
     /// Reconcile after Existing Home Recovery. The durable transition has
@@ -123,7 +166,28 @@ impl RuntimeStoreSwitch {
         bootstrap: &BootstrapService,
         snapshot: &BootstrapSnapshot,
     ) -> Result<(), String> {
-        self.reconcile_after(bootstrap, snapshot, true)
+        let transition = self.begin_reconciliation(bootstrap, snapshot)?;
+        let result = self.reconcile_after(bootstrap, snapshot, true);
+        transition.commit();
+        result
+    }
+
+    fn begin_reconciliation(
+        &self,
+        bootstrap: &BootstrapService,
+        expected: &BootstrapSnapshot,
+    ) -> Result<crate::core::write_gate::HomeTransitionGuard<'_>, String> {
+        let transition = self
+            .write_gate
+            .begin_exclusive_home_write()
+            .map_err(|error| format!("cannot reconcile the runtime Catalog: {error}"))?;
+        if bootstrap.inspect() != *expected {
+            drop(transition);
+            return Err(
+                "the Home changed before the runtime Catalog reconciliation could commit".into(),
+            );
+        }
+        Ok(transition)
     }
 
     fn reconcile_after(
@@ -146,7 +210,7 @@ impl RuntimeStoreSwitch {
             // Never retain a facade from a previous Home after its successor
             // was durably bound. The bootstrap snapshot records the failure
             // so BootstrapApi can publish the new Bound, read-only route.
-            self.store.replace_store(None);
+            let _ = self.store.replace_store(None);
             bootstrap.note_catalog_open_failure(error);
 
             // A read-only open can still succeed after a writable one fails.
@@ -155,7 +219,7 @@ impl RuntimeStoreSwitch {
             let degraded = bootstrap.inspect();
             let bound_home = bootstrap.verified_bound_home();
             if self.reconcile(&degraded, bound_home.as_ref()).is_err() {
-                self.store.replace_store(None);
+                let _ = self.store.replace_store(None);
             }
         }
         Ok(())
@@ -200,14 +264,23 @@ impl RuntimeCatalogStore {
     }
 
     /// The current store, or `None` when closed.
-    pub fn store(&self) -> Option<Arc<SqliteCatalogStore>> {
+    fn store(&self) -> Option<Arc<SqliteCatalogStore>> {
         self.sqlite.read().ok().and_then(|slot| slot.clone())
     }
 
     /// Swap the store (Reconnect / Restore success, Abandon close).
-    pub fn replace_store(&self, sqlite: Option<Arc<SqliteCatalogStore>>) {
-        if let Ok(mut slot) = self.sqlite.write() {
-            *slot = sqlite;
+    fn replace_store(&self, sqlite: Option<Arc<SqliteCatalogStore>>) -> Result<(), String> {
+        match self.sqlite.write() {
+            Ok(mut slot) => {
+                *slot = sqlite;
+                Ok(())
+            }
+            Err(poisoned) => {
+                // A poisoned facade must fail closed rather than retain an
+                // old Home's store after a transition.
+                *poisoned.into_inner() = None;
+                Err("Runtime Catalog store lock is poisoned; facade closed".into())
+            }
         }
     }
 
@@ -221,8 +294,7 @@ impl RuntimeCatalogStore {
     ) -> Result<(), String> {
         let sqlite = SqliteCatalogStore::open_bound(home, catalog_path)
             .map_err(|error| error.to_string())?;
-        self.replace_store(Some(Arc::new(sqlite)));
-        Ok(())
+        self.replace_store(Some(Arc::new(sqlite)))
     }
 
     /// Reopen only a current-schema verified Catalog without persisting
@@ -235,8 +307,7 @@ impl RuntimeCatalogStore {
     ) -> Result<(), String> {
         let sqlite = SqliteCatalogStore::open_bound_without_catalog_mutation(home, catalog_path)
             .map_err(|error| error.to_string())?;
-        self.replace_store(Some(Arc::new(sqlite)));
-        Ok(())
+        self.replace_store(Some(Arc::new(sqlite)))
     }
 
     /// Reopen a Catalog read-only (a Bound Home whose writable open must
@@ -244,36 +315,53 @@ impl RuntimeCatalogStore {
     pub fn reopen_read_only(&self, catalog_path: &std::path::Path) -> Result<(), String> {
         let sqlite =
             SqliteCatalogStore::open_read_only(catalog_path).map_err(|error| error.to_string())?;
-        self.replace_store(Some(Arc::new(sqlite)));
-        Ok(())
+        self.replace_store(Some(Arc::new(sqlite)))
     }
 
+    fn writable_store(&self) -> Option<StoreReadGuard<'_>> {
+        let slot = self.sqlite.read().ok()?;
+        let sqlite = slot.as_ref()?;
+        if sqlite.startup_status().access != StartupAccess::ReadWrite {
+            return None;
+        }
+        Some(StoreReadGuard { slot })
+    }
+
+    fn writable_store_or<E, F>(&self, unavailable: F) -> Result<StoreReadGuard<'_>, E>
+    where
+        F: FnOnce() -> E,
+    {
+        self.writable_store().ok_or_else(unavailable)
+    }
+
+    #[cfg(test)]
     fn is_writable(&self) -> bool {
-        self.store()
-            .is_some_and(|sqlite| sqlite.startup_status().access == StartupAccess::ReadWrite)
-    }
-
-    /// The current store; callers must have verified `is_writable` or the
-    /// closed path themselves.
-    fn require(&self) -> Arc<SqliteCatalogStore> {
-        self.store().expect("the store is present while writable")
+        self.writable_store().is_some()
     }
 
     /// The current store or the closed `CatalogStore` error — the fail-closed
     /// path for read commands outside `Bound`.
-    fn require_catalog(&self) -> Result<Arc<SqliteCatalogStore>, CatalogStoreError> {
-        self.store().ok_or_else(|| {
-            CatalogStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-        })
+    fn require_catalog(&self) -> Result<StoreReadGuard<'_>, CatalogStoreError> {
+        let slot = self.sqlite.read().map_err(|_| {
+            CatalogStoreError::Unavailable("the catalog store lock is poisoned".into())
+        })?;
+        if slot.is_none() {
+            return Err(CatalogStoreError::Unavailable(
+                "no Bound Home: the catalog is closed".into(),
+            ));
+        }
+        Ok(StoreReadGuard { slot })
     }
 }
 
 impl CatalogStore for RuntimeCatalogStore {
     fn snapshot_version(&self) -> u64 {
-        match self.store() {
-            Some(sqlite) => sqlite.persisted_snapshot_version().unwrap_or(0),
-            None => 0,
-        }
+        let Ok(slot) = self.sqlite.read() else {
+            return 0;
+        };
+        slot.as_ref()
+            .and_then(|sqlite| sqlite.persisted_snapshot_version().ok())
+            .unwrap_or(0)
     }
 
     fn list(&self, filter: CatalogFilter) -> Result<Vec<SkillSummary>, CatalogStoreError> {
@@ -289,7 +377,8 @@ impl CatalogStore for RuntimeCatalogStore {
     }
 
     fn inspect(&self, skill_id: &SkillId) -> Result<Option<SkillDetail>, CatalogStoreError> {
-        let Some(persisted) = self.require_catalog()?.persisted_skill_detail(skill_id)? else {
+        let catalog = self.require_catalog()?;
+        let Some(persisted) = catalog.persisted_skill_detail(skill_id)? else {
             return Ok(None);
         };
         let skill_markdown = match self
@@ -317,30 +406,21 @@ impl CatalogStore for RuntimeCatalogStore {
     }
 
     fn first_run_completed_at(&self) -> Result<Option<String>, CatalogStoreError> {
-        if !self.is_writable() {
-            // A read-only catalog must not masquerade as a first run: the
-            // locked state is an error surfaced elsewhere, not onboarding.
-            return Err(CatalogStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().first_run_completed_at()
+        self.require_catalog()?.first_run_completed_at()
     }
 
     fn mark_first_run_completed(&self) -> Result<(), CatalogStoreError> {
-        if !self.is_writable() {
-            return Err(CatalogStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().mark_first_run_completed()
+        let sqlite = self.writable_store_or(|| {
+            CatalogStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.mark_first_run_completed()
     }
 
     fn recently_enabled(&self, limit: u32) -> Result<Vec<SkillSummary>, CatalogStoreError> {
-        if !self.is_writable() {
+        let Some(sqlite) = self.writable_store() else {
             return Ok(Vec::new());
-        }
-        self.require().recently_enabled_skills(limit)
+        };
+        sqlite.recently_enabled_skills(limit)
     }
 }
 
@@ -349,48 +429,40 @@ impl SourcePromotionStore for RuntimeCatalogStore {
         &self,
         remote_id: &str,
     ) -> Result<LegacySourcePromotionRecord, SourcePromotionStoreError> {
-        if !self.is_writable() {
-            return Err(SourcePromotionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().read_legacy_source_promotion(remote_id)
+        let sqlite = self.writable_store_or(|| {
+            SourcePromotionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.read_legacy_source_promotion(remote_id)
     }
 
     fn validate_source_promotion(
         &self,
         record: &SourcePromotionRecord,
     ) -> Result<(), SourcePromotionStoreError> {
-        if !self.is_writable() {
-            return Err(SourcePromotionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().validate_source_promotion(record)
+        let sqlite = self.writable_store_or(|| {
+            SourcePromotionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.validate_source_promotion(record)
     }
 
     fn commit_source_promotion(
         &self,
         record: SourcePromotionRecord,
     ) -> Result<u64, SourcePromotionStoreError> {
-        if !self.is_writable() {
-            return Err(SourcePromotionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().commit_source_promotion(record)
+        let sqlite = self.writable_store_or(|| {
+            SourcePromotionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.commit_source_promotion(record)
     }
 
     fn source_promotion_is_committed(
         &self,
         record: &SourcePromotionRecord,
     ) -> Result<bool, SourcePromotionStoreError> {
-        if !self.is_writable() {
-            return Err(SourcePromotionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().source_promotion_is_committed(record)
+        let sqlite = self.writable_store_or(|| {
+            SourcePromotionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.source_promotion_is_committed(record)
     }
 
     fn undo_source_promotion(
@@ -398,12 +470,10 @@ impl SourcePromotionStore for RuntimeCatalogStore {
         record: &SourcePromotionRecord,
         legacy: &LegacySourcePromotionRecord,
     ) -> Result<u64, SourcePromotionStoreError> {
-        if !self.is_writable() {
-            return Err(SourcePromotionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().undo_source_promotion(record, legacy)
+        let sqlite = self.writable_store_or(|| {
+            SourcePromotionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.undo_source_promotion(record, legacy)
     }
 }
 
@@ -425,13 +495,10 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
         expected_snapshot_version: u64,
         change: AgentConfigurationStoreChange,
     ) -> Result<u64, AgentConfigurationStoreError> {
-        if !self.is_writable() {
-            return Err(AgentConfigurationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require()
-            .apply_agent_configuration_change(expected_snapshot_version, change)
+        let sqlite = self.writable_store_or(|| {
+            AgentConfigurationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.apply_agent_configuration_change(expected_snapshot_version, change)
     }
 
     fn list_recent_project_folders(
@@ -450,21 +517,17 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
         &self,
         folder: RecentProjectFolder,
     ) -> Result<(), AgentConfigurationStoreError> {
-        if !self.is_writable() {
-            return Err(AgentConfigurationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record_recent_project_folder(folder)
+        let sqlite = self.writable_store_or(|| {
+            AgentConfigurationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.record_recent_project_folder(folder)
     }
 
     fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
-        if !self.is_writable() {
-            return Err(AgentConfigurationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().clear_recent_project_folders()
+        let sqlite = self.writable_store_or(|| {
+            AgentConfigurationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.clear_recent_project_folders()
     }
 }
 
@@ -500,24 +563,20 @@ impl SourceUpdateStore for RuntimeCatalogStore {
         &self,
         record: &SourceUpdateRecord,
     ) -> Result<(), SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().validate_source_update(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.validate_source_update(record)
     }
 
     fn commit_source_update(
         &self,
         record: &SourceUpdateRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().commit_source_update(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.commit_source_update(record)
     }
 
     fn source_update_is_committed(
@@ -533,12 +592,10 @@ impl SourceUpdateStore for RuntimeCatalogStore {
         &self,
         record: &SourceUpdateRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().undo_source_update(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.undo_source_update(record)
     }
 
     fn set_source_member_health(
@@ -546,24 +603,20 @@ impl SourceUpdateStore for RuntimeCatalogStore {
         remote_id: &str,
         health: &[(crate::core::domain::SkillId, crate::core::domain::Health)],
     ) -> Result<u64, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().set_source_member_health(remote_id, health)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.set_source_member_health(remote_id, health)
     }
 
     fn register_local_copy(
         &self,
         record: &LocalSourceCopyRecord,
     ) -> Result<u64, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().register_local_copy(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.register_local_copy(record)
     }
 
     fn local_copy_is_registered(&self, destination: &Path) -> Result<bool, SourceUpdateStoreError> {
@@ -582,12 +635,10 @@ impl SourceUpdateStore for RuntimeCatalogStore {
     }
 
     fn commit_remove_source(&self, remote_id: &str) -> Result<u64, SourceUpdateStoreError> {
-        if !self.is_writable() {
-            return Err(SourceUpdateStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().commit_remove_source(remote_id)
+        let sqlite = self.writable_store_or(|| {
+            SourceUpdateStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.commit_remove_source(remote_id)
     }
 
     fn source_remove_is_committed(&self, remote_id: &str) -> Result<bool, SourceUpdateStoreError> {
@@ -605,12 +656,10 @@ impl SourceTransitionStore for RuntimeCatalogStore {
         Option<Vec<crate::seams::source_transition_store::ExistingSourceMember>>,
         SourceTransitionStoreError,
     > {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().existing_current_members(canonical_url)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.existing_current_members(canonical_url)
     }
 
     fn existing_source(
@@ -620,60 +669,50 @@ impl SourceTransitionStore for RuntimeCatalogStore {
         Option<crate::seams::source_transition_store::ExistingSourceFacts>,
         SourceTransitionStoreError,
     > {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().existing_source(remote_id)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.existing_source(remote_id)
     }
 
     fn validate_new_source_transition(
         &self,
         record: &SourceTransitionRecord,
     ) -> Result<(), SourceTransitionStoreError> {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().validate_new_source_transition(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.validate_new_source_transition(record)
     }
 
     fn commit_source_transition(
         &self,
         record: SourceTransitionRecord,
     ) -> Result<u64, SourceTransitionStoreError> {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().commit_source_transition(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.commit_source_transition(record)
     }
 
     fn source_transition_is_committed(
         &self,
         record: &SourceTransitionRecord,
     ) -> Result<bool, SourceTransitionStoreError> {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().source_transition_is_committed(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.source_transition_is_committed(record)
     }
 
     fn undo_source_transition(
         &self,
         record: &SourceTransitionRecord,
     ) -> Result<u64, SourceTransitionStoreError> {
-        if !self.is_writable() {
-            return Err(SourceTransitionStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().undo_source_transition(record)
+        let sqlite = self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.undo_source_transition(record)
     }
 }
 
@@ -682,161 +721,137 @@ impl ImportStore for RuntimeCatalogStore {
         &self,
         identity_key: &str,
     ) -> Result<Option<LibraryConflict>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::import_store::ImportStore::find_library_conflict(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             identity_key,
         )
     }
 
     fn insert_link(&self, record: LinkImportRecord) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_link(record)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_link(record)
     }
 
     fn insert_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_file(record)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_file(record)
     }
 
     fn insert_files(&self, records: Vec<FileImportRecord>) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_files(records)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_files(records)
     }
 
     fn load_file_install(
         &self,
         identity_key: &str,
     ) -> Result<Option<FileImportRecord>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().load_file_install(identity_key)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.load_file_install(identity_key)
     }
 
     fn desired_activations_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<DesiredActivation>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().desired_activations_for_skill(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.desired_activations_for_skill(skill_id)
     }
 
     fn replace_file(&self, record: FileImportRecord) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().replace_file(record)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.replace_file(record)
     }
 
     fn insert_remotes(&self, records: Vec<RemoteImportRecord>) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_remotes(records)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_remotes(records)
     }
 
     fn load_remote_installs(&self) -> Result<Vec<RemoteInstallRecord>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().load_remote_installs()
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.load_remote_installs()
     }
 
     fn load_remote_install(
         &self,
         identity_key: &str,
     ) -> Result<Option<RemoteInstallRecord>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().load_remote_install(identity_key)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.load_remote_install(identity_key)
     }
 
     fn update_remote_install(&self, record: RemoteImportRecord) -> Result<u64, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().update_remote_install(record)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.update_remote_install(record)
     }
 
     fn record_remote_check(&self, skill_id: &SkillId) -> Result<(), ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record_remote_check(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.record_remote_check(skill_id)
     }
 
     fn set_remote_requested_ref(
         &self,
         skill_id: &SkillId,
+        expected_requested_ref: &str,
+        expected_verification_anchor: &str,
         requested_ref: &str,
     ) -> Result<(), ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require()
-            .set_remote_requested_ref(skill_id, requested_ref)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.set_remote_requested_ref(
+            skill_id,
+            expected_requested_ref,
+            expected_verification_anchor,
+            requested_ref,
+        )
     }
 
     fn find_remote_parent_by_url(
         &self,
         canonical_url: &str,
     ) -> Result<Option<RemoteParentRecord>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::import_store::ImportStore::find_remote_parent_by_url(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             canonical_url,
         )
     }
 
     fn load_remote_parents(&self) -> Result<Vec<RemoteParentRecord>, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().load_remote_parents()
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.load_remote_parents()
     }
 
     fn insert_remote_alias(
@@ -844,25 +859,21 @@ impl ImportStore for RuntimeCatalogStore {
         remote_id: &str,
         alias_url: &str,
     ) -> Result<(), ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_remote_alias(remote_id, alias_url)
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_remote_alias(remote_id, alias_url)
     }
 
     fn delete_remote_parent_if_last_child(
         &self,
         remote_id: &str,
     ) -> Result<bool, ImportStoreError> {
-        if !self.is_writable() {
-            return Err(ImportStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            ImportStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::import_store::ImportStore::delete_remote_parent_if_last_child(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             remote_id,
         )
     }
@@ -874,52 +885,42 @@ impl AdoptStore for RuntimeCatalogStore {
     }
 
     fn list_agents(&self) -> Result<Vec<AdoptAgent>, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().list_agents()
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.list_agents()
     }
 
     fn insert_adopted(&self, record: AdoptedSkillRecord) -> Result<u64, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_adopted(record)
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_adopted(record)
     }
 
     fn remove_adopted_skill(&self, skill_id: &SkillId) -> Result<u64, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().remove_adopted_skill(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.remove_adopted_skill(skill_id)
     }
 
     fn insert_remote_adopted(
         &self,
         record: RemoteAdoptedSkillRecord,
     ) -> Result<u64, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_remote_adopted(record)
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_remote_adopted(record)
     }
 
     fn delete_remote_parent_if_last_child(&self, remote_id: &str) -> Result<bool, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::adopt_store::AdoptStore::delete_remote_parent_if_last_child(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             remote_id,
         )
     }
@@ -928,39 +929,30 @@ impl AdoptStore for RuntimeCatalogStore {
         &self,
         canonical_url: &str,
     ) -> Result<Option<RemoteParentRecord>, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::adopt_store::AdoptStore::find_remote_parent_by_url(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             canonical_url,
         )
     }
 
     fn binding_remote_id(&self, skill_id: &SkillId) -> Result<Option<String>, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        crate::seams::adopt_store::AdoptStore::binding_remote_id(self.require().as_ref(), skill_id)
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        crate::seams::adopt_store::AdoptStore::binding_remote_id(sqlite.as_ref(), skill_id)
     }
 
     fn find_library_conflict(
         &self,
         identity_key: &str,
     ) -> Result<Option<AdoptConflict>, AdoptStoreError> {
-        if !self.is_writable() {
-            return Err(AdoptStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        crate::seams::adopt_store::AdoptStore::find_library_conflict(
-            self.require().as_ref(),
-            identity_key,
-        )
+        let sqlite = self.writable_store_or(|| {
+            AdoptStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        crate::seams::adopt_store::AdoptStore::find_library_conflict(sqlite.as_ref(), identity_key)
     }
 }
 
@@ -987,24 +979,20 @@ impl ActivationStore for RuntimeCatalogStore {
         &self,
         observations: &[ActivationObservation],
     ) -> Result<u64, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record_observations(observations)
+        let sqlite = self.writable_store_or(|| {
+            ActivationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.record_observations(observations)
     }
 
     fn record_observation(
         &self,
         observation: &ActivationObservation,
     ) -> Result<u64, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record_observation(observation)
+        let sqlite = self.writable_store_or(|| {
+            ActivationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.record_observation(observation)
     }
 
     fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
@@ -1030,12 +1018,10 @@ impl ActivationStore for RuntimeCatalogStore {
         &self,
         writes: &[ActivationCellWrite],
     ) -> Result<u64, ActivationStoreError> {
-        if !self.is_writable() {
-            return Err(ActivationStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().write_activation_cells(writes)
+        let sqlite = self.writable_store_or(|| {
+            ActivationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.write_activation_cells(writes)
     }
 
     fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
@@ -1049,68 +1035,62 @@ impl ActivationStore for RuntimeCatalogStore {
 
 impl MaintenanceStore for RuntimeCatalogStore {
     fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable(
                 "catalog startup is read-only; Adopt recovery entities are unavailable".into(),
-            ));
-        }
-        self.require().adopted_skill_entities()
+            )
+        })?;
+        sqlite.adopted_skill_entities()
     }
 
     fn installed_skill_baselines(
         &self,
     ) -> Result<Vec<InstalledSkillBaseline>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable(
                 "catalog startup is read-only; recovery baselines are unavailable".into(),
-            ));
-        }
-        self.require().installed_skill_baselines()
+            )
+        })?;
+        sqlite.installed_skill_baselines()
     }
 
     fn record_skill_health(
         &self,
         observations: &[SkillHealthObservation],
     ) -> Result<u64, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().record_skill_health(observations)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.record_skill_health(observations)
     }
 
     fn managed_skill_baselines(&self) -> Result<Vec<ManagedSkillBaseline>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable(
                 "catalog startup is read-only; health baselines are unavailable".into(),
-            ));
-        }
-        self.require().managed_skill_baselines()
+            )
+        })?;
+        sqlite.managed_skill_baselines()
     }
 
     fn link_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<LinkSkillRecord>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().link_skill(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.link_skill(skill_id)
     }
 
     fn activation_baselines_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<RelocateActivationBaseline>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().activation_baselines_for_skill(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.activation_baselines_for_skill(skill_id)
     }
 
     fn commit_relocate(
@@ -1122,12 +1102,10 @@ impl MaintenanceStore for RuntimeCatalogStore {
         new_target_path: PathBuf,
         activations: &[RelocateActivationBaseline],
     ) -> Result<u64, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().commit_relocate(
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.commit_relocate(
             skill_id,
             final_entity_path,
             display_name,
@@ -1141,79 +1119,65 @@ impl MaintenanceStore for RuntimeCatalogStore {
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<RemoveTarget>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().remove_target(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.remove_target(skill_id)
     }
 
     fn is_git_source_member(&self, skill_id: &SkillId) -> Result<bool, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().is_git_source_member(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.is_git_source_member(skill_id)
     }
 
     fn delete_skill(&self, skill_id: &SkillId) -> Result<u64, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().delete_skill(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.delete_skill(skill_id)
     }
 
     fn binding_remote_id(
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<String>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().binding_remote_id(skill_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.binding_remote_id(skill_id)
     }
 
     fn delete_remote_parent_if_last_child(
         &self,
         remote_id: &str,
     ) -> Result<bool, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().delete_remote_parent_if_last_child(remote_id)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.delete_remote_parent_if_last_child(remote_id)
     }
 
     fn insert_handoff_recovered(
         &self,
         record: HandoffRecoveredRecord,
     ) -> Result<u64, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
-        self.require().insert_handoff_recovered(record)
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.insert_handoff_recovered(record)
     }
 
     fn find_remote_parent_by_url(
         &self,
         canonical_url: &str,
     ) -> Result<Option<RemoteParentRecord>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only".into(),
-            ));
-        }
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
         crate::seams::import_store::ImportStore::find_remote_parent_by_url(
-            self.require().as_ref(),
+            sqlite.as_ref(),
             canonical_url,
         )
         .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
@@ -1222,27 +1186,25 @@ impl MaintenanceStore for RuntimeCatalogStore {
     fn desired_activation_baselines(
         &self,
     ) -> Result<Vec<ActivationRecoveryBaseline>, MaintenanceStoreError> {
-        if !self.is_writable() {
-            return Err(MaintenanceStoreError::Unavailable(
-                "catalog startup is read-only; Activation replace recovery baselines are unavailable"
-                    .into(),
-            ));
-        }
-        crate::seams::activation_store::ActivationStore::desired_activations(
-            self.require().as_ref(),
+        let sqlite = self.writable_store_or(|| {
+            MaintenanceStoreError::Unavailable(
+            "catalog startup is read-only; Activation replace recovery baselines are unavailable"
+                .into(),
         )
-        .map(|activations| {
-            activations
-                .into_iter()
-                .map(|activation| ActivationRecoveryBaseline {
-                    skill_id: activation.skill_id.0,
-                    target_root_id: activation.target_root_id,
-                    expected_entry_path: activation.expected_entry_path,
-                    expected_target_path: activation.expected_target_path,
-                })
-                .collect()
-        })
-        .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
+        })?;
+        crate::seams::activation_store::ActivationStore::desired_activations(sqlite.as_ref())
+            .map(|activations| {
+                activations
+                    .into_iter()
+                    .map(|activation| ActivationRecoveryBaseline {
+                        skill_id: activation.skill_id.0,
+                        target_root_id: activation.target_root_id,
+                        expected_entry_path: activation.expected_entry_path,
+                        expected_target_path: activation.expected_target_path,
+                    })
+                    .collect()
+            })
+            .map_err(|error| MaintenanceStoreError::Unavailable(error.to_string()))
     }
 }
 
@@ -1253,14 +1215,12 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
         crate::seams::preferences_store::AppPreferences,
         crate::seams::preferences_store::PreferencesStoreError,
     > {
-        if !self.is_writable() {
-            return Err(
-                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                    "catalog startup is read-only".into(),
-                ),
-            );
-        }
-        self.require().load_preferences()
+        let sqlite = self.store().ok_or_else(|| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                "no Bound Home: the catalog is closed".into(),
+            )
+        })?;
+        sqlite.load_preferences()
     }
 
     fn update_preferences(
@@ -1270,41 +1230,35 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
         crate::seams::preferences_store::AppPreferences,
         crate::seams::preferences_store::PreferencesStoreError,
     > {
-        if !self.is_writable() {
-            return Err(
-                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                    "catalog startup is read-only".into(),
-                ),
-            );
-        }
-        self.require().update_preferences(updates)
+        let sqlite = self.writable_store_or(|| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            )
+        })?;
+        sqlite.update_preferences(updates)
     }
 
     fn last_app_update_check_at(
         &self,
     ) -> Result<Option<i64>, crate::seams::preferences_store::PreferencesStoreError> {
-        if !self.is_writable() {
-            return Err(
-                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                    "catalog startup is read-only".into(),
-                ),
-            );
-        }
-        self.require().last_app_update_check_at()
+        let sqlite = self.store().ok_or_else(|| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                "no Bound Home: the catalog is closed".into(),
+            )
+        })?;
+        sqlite.last_app_update_check_at()
     }
 
     fn record_app_update_check_at(
         &self,
         checked_at: i64,
     ) -> Result<(), crate::seams::preferences_store::PreferencesStoreError> {
-        if !self.is_writable() {
-            return Err(
-                crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                    "catalog startup is read-only".into(),
-                ),
-            );
-        }
-        self.require().record_app_update_check_at(checked_at)
+        let sqlite = self.writable_store_or(|| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
+                "catalog startup is read-only".into(),
+            )
+        })?;
+        sqlite.record_app_update_check_at(checked_at)
     }
 }
 
@@ -1384,7 +1338,7 @@ mod tests {
         );
 
         // Abandon closes the same facade.
-        store.replace_store(None);
+        store.replace_store(None).expect("close facade");
         assert!(store.store().is_none());
         assert!(matches!(
             store.list(CatalogFilter::All),
@@ -1393,10 +1347,36 @@ mod tests {
     }
 
     #[test]
+    fn an_in_flight_catalog_read_serializes_with_store_replacement() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _home) = open_store(dir.path());
+        let reader_store = store.clone();
+
+        // The facade holds its read lock through the delegated operation, so
+        // replacement waits for an in-flight call instead of exposing an old
+        // Home after the swap.
+        let reader = std::thread::spawn(move || reader_store.first_run_completed_at());
+        store.replace_store(None).expect("close facade");
+        assert!(matches!(
+            reader.join().expect("Catalog reader"),
+            Ok(_) | Err(CatalogStoreError::Unavailable(_))
+        ));
+        assert!(matches!(
+            store.first_run_completed_at(),
+            Err(CatalogStoreError::Unavailable(_))
+        ));
+        assert!(store.store().is_none());
+    }
+
+    #[test]
     fn store_switch_reconciles_snapshot_to_open_or_closed() {
         let dir = tempfile::tempdir().expect("temp dir");
         let (store, home) = open_store(dir.path());
-        let switch = RuntimeStoreSwitch::new(store.clone(), "skill-man.sqlite3".into());
+        let switch = RuntimeStoreSwitch::new(
+            store.clone(),
+            "skill-man.sqlite3".into(),
+            Arc::new(WriteGate::open_for_tests()),
+        );
 
         // Bound ReadWrite: the facade reopens writable.
         switch
@@ -1433,5 +1413,28 @@ mod tests {
             .reconcile(&BootstrapSnapshot::Unconfigured, None)
             .expect("reconcile closed");
         assert!(store.store().is_none());
+    }
+
+    #[test]
+    fn home_unavailable_preserves_an_existing_catalog_handle_when_reopen_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, home) = open_store(dir.path());
+        let switch = RuntimeStoreSwitch::new(
+            store.clone(),
+            "skill-man.sqlite3".into(),
+            Arc::new(WriteGate::open_for_tests()),
+        );
+        let missing_home = home.path.join("disconnected");
+        switch
+            .reconcile(
+                &BootstrapSnapshot::HomeUnavailable {
+                    home_id: home.home_id,
+                    path: missing_home,
+                    diagnostic: None,
+                },
+                None,
+            )
+            .expect("existing read-only handle remains usable");
+        assert!(store.store().is_some());
     }
 }

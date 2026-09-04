@@ -15,6 +15,7 @@ use skill_man_lib::core::source_group_preview::{
 use skill_man_lib::core::source_transition::{
     ConfirmSourceTransitionRequest, SourceTransitionError, SourceTransitionService,
 };
+use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::installer_lock_store::InstallerLockStore;
@@ -292,6 +293,7 @@ struct Fixture {
     locks: Arc<SystemInstallerLockStore>,
     filesystem: Arc<MacOsFileSystem>,
     catalog: Arc<SqliteCatalogStore>,
+    write_gate: Arc<WriteGate>,
 }
 
 fn fixture() -> Fixture {
@@ -347,6 +349,7 @@ fn fixture() -> Fixture {
     let filesystem = Arc::new(MacOsFileSystem::new(home.clone()));
     let catalog =
         Arc::new(SqliteCatalogStore::open(&library.join("skill-man.sqlite3")).expect("Catalog"));
+    let write_gate = Arc::new(WriteGate::open_for_tests());
     Fixture {
         _workspace: workspace,
         home,
@@ -356,6 +359,7 @@ fn fixture() -> Fixture {
         locks,
         filesystem,
         catalog,
+        write_gate,
     }
 }
 
@@ -405,6 +409,7 @@ fn service_with_locks(
         Arc::new(FixtureClock),
         fixture.library.clone(),
         fixture.home.clone(),
+        fixture.write_gate.clone(),
     )
 }
 
@@ -698,6 +703,7 @@ fn post_cas_failure_recovers_only_the_frozen_journal_without_refetching() {
         Arc::new(FixtureClock),
         fixture.library.clone(),
         fixture.home.clone(),
+        fixture.write_gate.clone(),
     );
     recovery
         .recover_pending(&fixture.library)
@@ -751,6 +757,7 @@ fn recovery_refuses_a_new_repository_claim_under_a_different_lock_key() {
         Arc::new(FixtureClock),
         fixture.library.clone(),
         fixture.home.clone(),
+        fixture.write_gate.clone(),
     );
 
     let error = recovery
@@ -811,6 +818,7 @@ fn recovery_refuses_a_frozen_claim_replaced_under_its_original_key() {
         Arc::new(FixtureClock),
         fixture.library.clone(),
         fixture.home.clone(),
+        fixture.write_gate.clone(),
     );
 
     let error = recovery
@@ -893,6 +901,7 @@ fn recovery_refuses_a_journal_isolation_path_outside_the_derived_source_root() {
         Arc::new(FixtureClock),
         fixture.library.clone(),
         fixture.home.clone(),
+        fixture.write_gate.clone(),
     );
 
     let error = recovery

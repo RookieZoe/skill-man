@@ -117,6 +117,8 @@ pub struct RemoteParentRecord {
 pub enum ImportStoreError {
     #[error("the Library already contains Managed Skill '{0}'")]
     Conflict(String),
+    #[error("the remote Install changed before its pin could be committed: {0}")]
+    Stale(String),
     #[error("the Import state could not be read or written: {0}")]
     Unavailable(String),
 }
@@ -161,6 +163,8 @@ pub trait ImportStore: Send + Sync {
     fn set_remote_requested_ref(
         &self,
         skill_id: &SkillId,
+        expected_requested_ref: &str,
+        expected_verification_anchor: &str,
         requested_ref: &str,
     ) -> Result<(), ImportStoreError>;
 
