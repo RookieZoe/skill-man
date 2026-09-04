@@ -8,7 +8,8 @@ use crate::tauri_adapter::dto::{
     ApplyGlobalEnableRequestDto, CellResolutionDto, CellResolutionRequestDto, CommandFailureDto,
     DiagnosticDto, EnableActionDto, EnableOperationRequestDto, EnablePlanDto, EnableResultDto,
     EnableUndoResultDto, GlobalTargetGroupSnapshotDto, PlanGlobalEnableRequestDto,
-    PlanGlobalLifecycleRequestDto, PublicErrorDto,
+    PlanGlobalLifecycleRequestDto, PlanProjectEnableRequestDto, PublicErrorDto,
+    RecentProjectFolderDto,
 };
 
 pub struct EnableApi {
@@ -95,6 +96,78 @@ impl EnableApi {
     }
 
     pub fn finalize_global_enable(
+        &self,
+        request: EnableOperationRequestDto,
+    ) -> Result<(), CommandFailureDto> {
+        self.service
+            .finalize(&request.operation_id)
+            .map_err(command_error)
+    }
+
+    pub fn list_recent_project_folders(
+        &self,
+    ) -> Result<Vec<RecentProjectFolderDto>, CommandFailureDto> {
+        self.service
+            .list_recent_project_folders()
+            .map(|folders| folders.into_iter().map(Into::into).collect())
+            .map_err(command_error)
+    }
+
+    pub fn clear_recent_project_folders(&self) -> Result<(), CommandFailureDto> {
+        self.service
+            .clear_recent_project_folders()
+            .map_err(command_error)
+    }
+
+    pub fn plan_project_enable(
+        &self,
+        request: PlanProjectEnableRequestDto,
+    ) -> Result<EnablePlanDto, CommandFailureDto> {
+        self.service
+            .plan_project_enable(
+                &request
+                    .skill_ids
+                    .into_iter()
+                    .map(SkillId)
+                    .collect::<Vec<_>>(),
+                std::path::Path::new(&request.project_folder),
+                &request.agent_ids,
+                &request
+                    .cell_resolutions
+                    .into_iter()
+                    .map(
+                        |CellResolutionRequestDto {
+                             cell_key,
+                             resolution,
+                         }| { (cell_key, resolution.into()) },
+                    )
+                    .collect::<Vec<_>>(),
+            )
+            .map(Into::into)
+            .map_err(command_error)
+    }
+
+    pub fn apply_project_enable(
+        &self,
+        request: ApplyGlobalEnableRequestDto,
+    ) -> Result<EnableResultDto, CommandFailureDto> {
+        self.service
+            .apply(&request.plan_token)
+            .map(Into::into)
+            .map_err(command_error)
+    }
+
+    pub fn undo_project_enable(
+        &self,
+        request: EnableOperationRequestDto,
+    ) -> Result<EnableUndoResultDto, CommandFailureDto> {
+        self.service
+            .undo(&request.operation_id)
+            .map(Into::into)
+            .map_err(command_error)
+    }
+
+    pub fn finalize_project_enable(
         &self,
         request: EnableOperationRequestDto,
     ) -> Result<(), CommandFailureDto> {

@@ -47,6 +47,7 @@ import {
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
 import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
+import { ProjectEnableSheet } from "./ProjectEnableSheet";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
@@ -269,6 +270,7 @@ export function LibraryDesk({
     return ids;
   }, [gitSourceCapability]);
   const [surface, setSurface] = useState<"library" | "agents">("library");
+  const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
   const [agentOverlayOpen, setAgentOverlayOpen] = useState(false);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [activePane, setActivePane] = useState<PaneKey>("library");
@@ -280,6 +282,7 @@ export function LibraryDesk({
   );
   const hasOtherOverlay =
     agentOverlayOpen ||
+    isProjectEnableOpen ||
     isLinkImportOpen ||
     relocatePanel.isOpen ||
     removePanel.isOpen ||
@@ -497,6 +500,7 @@ export function LibraryDesk({
               onOpenRelocate={onOpenRelocate}
               removePanel={removePanel}
               onOpenRemove={onOpenRemove}
+              onOpenProjectEnable={() => setIsProjectEnableOpen(true)}
               gitMemberSkillIds={gitMemberSkillIds}
             />
             <div
@@ -554,6 +558,18 @@ export function LibraryDesk({
           panel={removePanel}
           onApply={onApplyRemove}
           onClose={onCloseRemove}
+        />
+      ) : null}
+      {isProjectEnableOpen && detail ? (
+        <ProjectEnableSheet
+          client={client}
+          skillId={detail.id}
+          skillName={detail.displayName ?? detail.directoryName}
+          onClose={() => setIsProjectEnableOpen(false)}
+          onOpenAgentManagement={() => {
+            setIsProjectEnableOpen(false);
+            setSurface("agents");
+          }}
         />
       ) : null}
       {isLinkImportOpen ? (
@@ -818,6 +834,7 @@ function SkillDetailPanel({
   onOpenRelocate,
   removePanel,
   onOpenRemove,
+  onOpenProjectEnable,
   gitMemberSkillIds,
 }: {
   detail: SkillDetail | null;
@@ -827,6 +844,7 @@ function SkillDetailPanel({
   onOpenRelocate: () => void;
   removePanel: RemovePanelState;
   onOpenRemove: () => void;
+  onOpenProjectEnable: () => void;
   gitMemberSkillIds: Set<string>;
 }) {
   const { t, locale } = useLocale();
@@ -856,8 +874,15 @@ function SkillDetailPanel({
               onOpenRelocate={onOpenRelocate}
             />
           ) : null}
-          {!isGitMember ? (
-            <div className="detail-actions">
+          <div className="detail-actions">
+            <button
+              type="button"
+              className="toolbar-button"
+              onClick={onOpenProjectEnable}
+            >
+              {t("library.detail.enableToProject")}
+            </button>
+            {!isGitMember ? (
               <button
                 type="button"
                 className="toolbar-button danger-button"
@@ -868,8 +893,8 @@ function SkillDetailPanel({
               >
                 {t("library.detail.remove")}
               </button>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
           <dl className="metadata-grid">
             <div>
               <dt>{t("library.detail.source")}</dt>

@@ -459,7 +459,30 @@ export type CellBlockedReason =
   | "source_snapshot_mismatch"
   | "tombstoned_member"
   | "entity_broken"
-  | "entry_occupied";
+  | "entry_occupied"
+  | "outside_project_root"
+  | "symlink_cycle"
+  | "hop_limit_exceeded"
+  | "target_not_directory";
+
+export interface ProjectRootEvidence {
+  canonicalPath: string;
+  identity: string;
+}
+
+export interface ProjectHopEvidence {
+  agentId: string;
+  agentName: string;
+  configuredRelativePath: string;
+  resolvedContainer: string;
+  hops: EvidenceChainHop[];
+}
+
+export interface RecentProjectFolder {
+  canonicalPathKey: string;
+  canonicalPath: string;
+  lastUsedAt: string;
+}
 
 export interface DestructiveCounts {
   directories: number;
@@ -495,6 +518,8 @@ export interface EnableCell {
   blockedReason: CellBlockedReason | null;
   resolution: CellResolution;
   detail: string | null;
+  createSteps: string[];
+  hopEvidence: ProjectHopEvidence[];
 }
 
 export interface EnablePlan {
@@ -503,6 +528,7 @@ export interface EnablePlan {
   writeGateGeneration: number;
   catalogGeneration: number;
   agentGeneration: number;
+  projectRoot?: ProjectRootEvidence | null;
   cells: EnableCell[];
 }
 
@@ -1642,6 +1668,17 @@ export interface CatalogClient {
   applyGlobalEnable(planToken: string): Promise<EnableResult>;
   undoGlobalEnable(operationId: string): Promise<EnableUndoResult>;
   finalizeGlobalEnable(operationId: string): Promise<void>;
+  listRecentProjectFolders(): Promise<RecentProjectFolder[]>;
+  clearRecentProjectFolders(): Promise<void>;
+  planProjectEnable(
+    skillIds: string[],
+    projectFolder: string,
+    agentIds: string[],
+    cellResolutions: CellResolutionRequest[],
+  ): Promise<EnablePlan>;
+  applyProjectEnable(planToken: string): Promise<EnableResult>;
+  undoProjectEnable(operationId: string): Promise<EnableUndoResult>;
+  finalizeProjectEnable(operationId: string): Promise<void>;
   getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
   /** Single-flight Detection trigger (spec §4.10; ADR-0020). */
   refreshDetection(): Promise<ObservationAndScanSnapshot>;
@@ -1946,6 +1983,32 @@ const tauriCatalogClient: CatalogClient = {
   },
   finalizeGlobalEnable(operationId) {
     return invoke<void>("finalize_global_enable", {
+      request: { operationId },
+    });
+  },
+  listRecentProjectFolders() {
+    return invoke<RecentProjectFolder[]>("list_recent_project_folders");
+  },
+  clearRecentProjectFolders() {
+    return invoke<void>("clear_recent_project_folders");
+  },
+  planProjectEnable(skillIds, projectFolder, agentIds, cellResolutions) {
+    return invoke<EnablePlan>("plan_project_enable", {
+      request: { skillIds, projectFolder, agentIds, cellResolutions },
+    });
+  },
+  applyProjectEnable(planToken) {
+    return invoke<EnableResult>("apply_project_enable", {
+      request: { planToken },
+    });
+  },
+  undoProjectEnable(operationId) {
+    return invoke<EnableUndoResult>("undo_project_enable", {
+      request: { operationId },
+    });
+  },
+  finalizeProjectEnable(operationId) {
+    return invoke<void>("finalize_project_enable", {
       request: { operationId },
     });
   },

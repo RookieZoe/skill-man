@@ -1282,6 +1282,24 @@ pub struct EvidenceChain {
     pub fault: Option<ChainFault>,
 }
 
+/// Faults from bounded project symlink resolution (spec §4.9; ADR-0015; #89).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectTargetFault {
+    OutsideProjectRoot,
+    SymlinkCycle,
+    HopLimitExceeded,
+    TargetNotDirectory,
+    TargetUnavailable { diagnostic: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectTargetResolution {
+    pub resolved_container: PathBuf,
+    pub hops: Vec<EvidenceChainHop>,
+    pub create_steps: Vec<PathBuf>,
+    pub fault: Option<ProjectTargetFault>,
+}
+
 /// One skill-named entry discovered in an Adopt scan source, with its full
 /// evidence chain (spec §8.1). Non-UTF-8 entry names are reported as a
 /// `NonUtf8` fault at the entry hop instead of being silently skipped.
@@ -1391,6 +1409,39 @@ pub trait FileSystem: Send + Sync {
             source: std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "Git member snapshot install is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Resolve one Agent's `project_skills_dir` relative to a project root
+    /// with bounded symlink walk and containment enforcement (spec §4.9;
+    /// ADR-0015; ADR-0019; #89).
+    fn resolve_project_target(
+        &self,
+        canonical_project_root: &Path,
+        configured_relative: &Path,
+    ) -> Result<ProjectTargetResolution, FileSystemError> {
+        let _ = (canonical_project_root, configured_relative);
+        Err(FileSystemError::Io {
+            operation: "resolve project skills directory",
+            path: configured_relative.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "project target resolution is not supported by this filesystem",
+            ),
+        })
+    }
+
+    /// Ensure a directory tree exists for project activation (creates parent
+    /// directories safely if missing).
+    fn ensure_directory_tree(&self, path: &Path) -> Result<(), FileSystemError> {
+        let _ = path;
+        Err(FileSystemError::Io {
+            operation: "ensure directory tree exists",
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "ensure directory tree is not supported by this filesystem",
             ),
         })
     }

@@ -36,14 +36,15 @@ use crate::tauri_adapter::dto::{
     LocaleSnapshotDto, ObservationAndScanSnapshotDto, PinSkillUpdatesRequestDto,
     PlanAdoptRequestDto, PlanFileImportRequestDto, PlanFileImportSelectionRequestDto,
     PlanFileReinstallRequestDto, PlanFixtureRecoveryRequestDto, PlanGlobalEnableRequestDto,
-    PlanGlobalLifecycleRequestDto, PlanLinkImportRequestDto, PlanRemoveSkillRequestDto,
-    PlanSkillUpdatesRequestDto, PreferenceUpdatesDto, PreferencesWarningDto,
-    PrepareExistingHomeRecoveryRequestDto, PrepareHomeRequestDto, PreviewSourcePromotionRequestDto,
-    PublicErrorDto, RecoveryResultDto, RelocateLinkPreviewDto, RelocateLinkRequestDto,
-    RelocateLinkResultDto, RemoveSkillPreviewDto, RemoveSkillResultDto, RestoreEligibilityDto,
-    SafetySnapshotDto, SetLocaleSelectionRequestDto, SkillDetailDto, SourceGroupPreviewOutcomeDto,
-    SourceLocalCopyRequestDto, SourceLocalCopyResultDto, SourcePromotionResultDto,
-    SourceRemoveRequestDto, SourceRemoveResultDto, SourceRestoreRequestDto, SourceRestoreResultDto,
+    PlanGlobalLifecycleRequestDto, PlanLinkImportRequestDto, PlanProjectEnableRequestDto,
+    PlanRemoveSkillRequestDto, PlanSkillUpdatesRequestDto, PreferenceUpdatesDto,
+    PreferencesWarningDto, PrepareExistingHomeRecoveryRequestDto, PrepareHomeRequestDto,
+    PreviewSourcePromotionRequestDto, PublicErrorDto, RecentProjectFolderDto, RecoveryResultDto,
+    RelocateLinkPreviewDto, RelocateLinkRequestDto, RelocateLinkResultDto, RemoveSkillPreviewDto,
+    RemoveSkillResultDto, RestoreEligibilityDto, SafetySnapshotDto, SetLocaleSelectionRequestDto,
+    SkillDetailDto, SourceGroupPreviewOutcomeDto, SourceLocalCopyRequestDto,
+    SourceLocalCopyResultDto, SourcePromotionResultDto, SourceRemoveRequestDto,
+    SourceRemoveResultDto, SourceRestoreRequestDto, SourceRestoreResultDto,
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
     StartRescanRequestDto, StartupInfoDto, UndoAdoptRequestDto, UpdateCheckReportDto,
     UpdatePlanDto, UpdatePreferencesResultDto, UpdateResultDto,
@@ -1048,4 +1049,50 @@ pub fn finalize_global_enable(
     request: EnableOperationRequestDto,
 ) -> Result<(), CommandFailureDto> {
     state.finalize_global_enable(request)
+}
+
+// -- Project Enable (spec §4.9; ADR-0015; ADR-0019; #89) --
+
+#[tauri::command]
+pub fn list_recent_project_folders(
+    state: State<'_, EnableApi>,
+) -> Result<Vec<RecentProjectFolderDto>, CommandFailureDto> {
+    state.list_recent_project_folders()
+}
+
+#[tauri::command]
+pub fn clear_recent_project_folders(state: State<'_, EnableApi>) -> Result<(), CommandFailureDto> {
+    state.clear_recent_project_folders()
+}
+
+#[tauri::command]
+pub fn plan_project_enable(
+    state: State<'_, EnableApi>,
+    request: PlanProjectEnableRequestDto,
+) -> Result<EnablePlanDto, CommandFailureDto> {
+    state.plan_project_enable(request)
+}
+
+#[tauri::command]
+pub fn apply_project_enable(
+    state: State<'_, EnableApi>,
+    request: ApplyGlobalEnableRequestDto,
+) -> Result<EnableResultDto, CommandFailureDto> {
+    state.apply_project_enable(request)
+}
+
+#[tauri::command]
+pub fn undo_project_enable(
+    state: State<'_, EnableApi>,
+    request: EnableOperationRequestDto,
+) -> Result<EnableUndoResultDto, CommandFailureDto> {
+    state.undo_project_enable(request)
+}
+
+#[tauri::command]
+pub fn finalize_project_enable(
+    state: State<'_, EnableApi>,
+    request: EnableOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    state.finalize_project_enable(request)
 }

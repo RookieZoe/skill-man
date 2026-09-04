@@ -15,8 +15,8 @@ use crate::core::domain::{
 use crate::core::enable::{
     CellBlockedReason, CellEligibility, CellOutcome, CellResolution, EnableAction, EnableCell,
     EnableCellResult, EnablePlan, EnableResult, EnableUndoCellResult, EnableUndoResult,
-    GlobalTargetGroup, GlobalTargetGroupSnapshot, Occupier, TargetGroupAction,
-    TargetGroupAvailability, UntrackedOccupierKind,
+    GlobalTargetGroup, GlobalTargetGroupSnapshot, Occupier, ProjectHopEvidence,
+    ProjectRootEvidence, TargetGroupAction, TargetGroupAvailability, UntrackedOccupierKind,
 };
 use crate::core::git_source_capability::{GitSourceCapabilityKind, GitSourceCapabilityReport};
 use crate::core::import::{
@@ -51,6 +51,7 @@ use crate::core::update::{
     UpdateCheckGroup, UpdateCheckItem, UpdateCheckReport, UpdateItemResult, UpdatePlan,
     UpdatePlanItem, UpdateResult,
 };
+use crate::seams::agent_configuration_store::RecentProjectFolder;
 use crate::seams::preferences_store::{AppPreferences, PreferenceUpdates};
 
 // -- Git Repository Source capability scan (ADR-0014, spec §8.3) --
@@ -3555,14 +3556,14 @@ pub struct PlanAdoptRequestDto {
 
 /// The hop entry kind; the raw symlink target is a separate Source Content
 /// field (spec §4.7).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceChainHopKindDto {
     Directory,
     Symlink,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceChainHopDto {
     pub path: String,
@@ -3572,6 +3573,30 @@ pub struct EvidenceChainHopDto {
     pub target: Option<String>,
     pub device: u64,
     pub inode: u64,
+}
+
+impl From<crate::seams::filesystem::EvidenceChainHop> for EvidenceChainHopDto {
+    fn from(hop: crate::seams::filesystem::EvidenceChainHop) -> Self {
+        Self {
+            path: hop.path.to_string_lossy().into_owned(),
+            kind: match hop.kind {
+                crate::seams::filesystem::EvidenceChainHopKind::Directory => {
+                    EvidenceChainHopKindDto::Directory
+                }
+                crate::seams::filesystem::EvidenceChainHopKind::Symlink { .. } => {
+                    EvidenceChainHopKindDto::Symlink
+                }
+            },
+            target: match hop.kind {
+                crate::seams::filesystem::EvidenceChainHopKind::Symlink { target } => {
+                    Some(target.to_string_lossy().into_owned())
+                }
+                crate::seams::filesystem::EvidenceChainHopKind::Directory => None,
+            },
+            device: hop.device,
+            inode: hop.inode,
+        }
+    }
 }
 
 /// Closed chain-fault reasons (spec §8.1): a failure stops at the exact hop
@@ -4870,6 +4895,14 @@ pub enum CellBlockedReasonDto {
     EntityBroken,
     #[serde(rename = "entry_occupied")]
     EntryOccupied,
+    #[serde(rename = "outside_project_root")]
+    OutsideProjectRoot,
+    #[serde(rename = "symlink_cycle")]
+    SymlinkCycle,
+    #[serde(rename = "hop_limit_exceeded")]
+    HopLimitExceeded,
+    #[serde(rename = "target_not_directory")]
+    TargetNotDirectory,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -4922,6 +4955,78 @@ pub struct EnableCellDto {
     pub blocked_reason: Option<CellBlockedReasonDto>,
     pub resolution: CellResolutionDto,
     pub detail: Option<String>,
+    #[serde(rename = "createSteps")]
+    pub create_steps: Vec<String>,
+    #[serde(rename = "hopEvidence")]
+    pub hop_evidence: Vec<ProjectHopEvidenceDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRootEvidenceDto {
+    #[serde(rename = "canonicalPath")]
+    pub canonical_path: String,
+    pub identity: String,
+}
+
+impl From<ProjectRootEvidence> for ProjectRootEvidenceDto {
+    fn from(value: ProjectRootEvidence) -> Self {
+        Self {
+            canonical_path: value.canonical_path.to_string_lossy().into_owned(),
+            identity: value.identity,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectHopEvidenceDto {
+    #[serde(rename = "agentId")]
+    pub agent_id: String,
+    #[serde(rename = "agentName")]
+    pub agent_name: String,
+    #[serde(rename = "configuredRelativePath")]
+    pub configured_relative_path: String,
+    #[serde(rename = "resolvedContainer")]
+    pub resolved_container: String,
+    #[serde(rename = "hops")]
+    pub hops: Vec<EvidenceChainHopDto>,
+}
+
+impl From<ProjectHopEvidence> for ProjectHopEvidenceDto {
+    fn from(value: ProjectHopEvidence) -> Self {
+        Self {
+            agent_id: value.agent_id,
+            agent_name: value.agent_name,
+            configured_relative_path: value
+                .configured_relative_path
+                .to_string_lossy()
+                .into_owned(),
+            resolved_container: value.resolved_container.to_string_lossy().into_owned(),
+            hops: value.hops.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentProjectFolderDto {
+    #[serde(rename = "canonicalPathKey")]
+    pub canonical_path_key: String,
+    #[serde(rename = "canonicalPath")]
+    pub canonical_path: String,
+    #[serde(rename = "lastUsedAt")]
+    pub last_used_at: String,
+}
+
+impl From<RecentProjectFolder> for RecentProjectFolderDto {
+    fn from(value: RecentProjectFolder) -> Self {
+        Self {
+            canonical_path_key: value.canonical_path_key,
+            canonical_path: value.canonical_path.to_string_lossy().into_owned(),
+            last_used_at: value.last_used_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4955,6 +5060,8 @@ pub struct EnablePlanDto {
     pub catalog_generation: u64,
     #[serde(rename = "agentGeneration")]
     pub agent_generation: u64,
+    #[serde(rename = "projectRoot")]
+    pub project_root: Option<ProjectRootEvidenceDto>,
     pub cells: Vec<EnableCellDto>,
 }
 
@@ -5054,6 +5161,19 @@ pub struct EnableOperationRequestDto {
     pub operation_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanProjectEnableRequestDto {
+    #[serde(rename = "skillIds")]
+    pub skill_ids: Vec<String>,
+    #[serde(rename = "projectFolder")]
+    pub project_folder: String,
+    #[serde(rename = "agentIds")]
+    pub agent_ids: Vec<String>,
+    #[serde(rename = "cellResolutions")]
+    pub cell_resolutions: Vec<CellResolutionRequestDto>,
+}
+
 impl From<GlobalTargetGroupSnapshot> for GlobalTargetGroupSnapshotDto {
     fn from(value: GlobalTargetGroupSnapshot) -> Self {
         Self {
@@ -5106,6 +5226,7 @@ impl From<EnablePlan> for EnablePlanDto {
             write_gate_generation: value.write_gate_generation,
             catalog_generation: value.catalog_generation,
             agent_generation: value.agent_generation,
+            project_root: value.project_root.map(Into::into),
             cells: value.cells.into_iter().map(Into::into).collect(),
         }
     }
@@ -5177,6 +5298,10 @@ impl From<EnableCell> for EnableCellDto {
                 CellBlockedReason::TombstonedMember => CellBlockedReasonDto::TombstonedMember,
                 CellBlockedReason::EntityBroken => CellBlockedReasonDto::EntityBroken,
                 CellBlockedReason::EntryOccupied => CellBlockedReasonDto::EntryOccupied,
+                CellBlockedReason::OutsideProjectRoot => CellBlockedReasonDto::OutsideProjectRoot,
+                CellBlockedReason::SymlinkCycle => CellBlockedReasonDto::SymlinkCycle,
+                CellBlockedReason::HopLimitExceeded => CellBlockedReasonDto::HopLimitExceeded,
+                CellBlockedReason::TargetNotDirectory => CellBlockedReasonDto::TargetNotDirectory,
             }),
             resolution: match value.resolution {
                 CellResolution::Switch => CellResolutionDto::Switch,
@@ -5185,6 +5310,12 @@ impl From<EnableCell> for EnableCellDto {
                 CellResolution::Skip => CellResolutionDto::Skip,
             },
             detail: value.detail,
+            create_steps: value
+                .create_steps
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            hop_evidence: value.hop_evidence.into_iter().map(Into::into).collect(),
         }
     }
 }

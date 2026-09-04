@@ -20,6 +20,7 @@ import type {
   LocaleSelection,
   LocaleSnapshot,
   ObservationAndScanSnapshot,
+  RecentProjectFolder,
   PresetObservation,
   ScanReportRow,
   ScanReportSection,
@@ -69,7 +70,10 @@ export interface FixtureReportPublish {
 }
 
 export function createFixtureCatalogClient(
-  options: { emptyAgentConfigurations?: boolean } = {},
+  options: {
+    emptyAgentConfigurations?: boolean;
+    recentProjectFolders?: RecentProjectFolder[];
+  } = {},
 ): CatalogClient & FixtureReportPublish {
   let snapshotVersion = fixture.snapshotVersion;
   let nextPlanId = 1;
@@ -83,6 +87,8 @@ export function createFixtureCatalogClient(
     }
   >();
   const fixtureOperations = new Map<string, string>();
+  const recentProjectFolders: RecentProjectFolder[] =
+    options.recentProjectFolders ? [...options.recentProjectFolders] : [];
   let firstRunCompleted = true;
   let localeSelection: LocaleSelection = "system";
   let localeGeneration = 0;
@@ -156,7 +162,12 @@ export function createFixtureCatalogClient(
                 : null,
           name: agent.name,
           compatibility: agent.compatibility,
-          projectSkillsDir: null,
+          projectSkillsDir:
+            agent.kind === "claude_preset"
+              ? ".claude/skills"
+              : agent.kind === "codex_preset"
+                ? ".agents/skills"
+                : null,
           roots: [
             {
               rootId: `fixture-root:${agent.skillsPath.toLocaleLowerCase()}`,
@@ -530,6 +541,8 @@ export function createFixtureCatalogClient(
             blockedReason: null,
             resolution,
             detail: null,
+            createSteps: [],
+            hopEvidence: [],
           };
         }),
       );
@@ -596,6 +609,8 @@ export function createFixtureCatalogClient(
             blockedReason: null,
             resolution: "skip" as const,
             detail: null,
+            createSteps: [],
+            hopEvidence: [],
           },
         ],
       };
@@ -693,6 +708,104 @@ export function createFixtureCatalogClient(
     },
     async finalizeGlobalEnable() {
       return undefined;
+    },
+    async listRecentProjectFolders() {
+      return [...recentProjectFolders];
+    },
+    async clearRecentProjectFolders() {
+      recentProjectFolders.length = 0;
+    },
+    async planProjectEnable(
+      skillIds,
+      projectFolder,
+      agentIds,
+      cellResolutions,
+    ) {
+      const cellResolutionsMap = new Map(
+        cellResolutions.map((entry) => [entry.cellKey, entry.resolution]),
+      );
+      const selectedConfigs = agentConfigurations.filter((agent) =>
+        agentIds.includes(agent.agentId),
+      );
+
+      const groupsMap = new Map<string, typeof selectedConfigs>();
+      for (const config of selectedConfigs) {
+        const dir = config.projectSkillsDir ?? ".skills";
+        const container = `${projectFolder}/${dir}`;
+        const list = groupsMap.get(container) ?? [];
+        list.push(config);
+        groupsMap.set(container, list);
+      }
+
+      const cells: EnableCell[] = [];
+      for (const [container, configs] of groupsMap) {
+        const targetRootId = `project:${container}`;
+        for (const skillId of skillIds) {
+          const cellKey = `${skillId}|${targetRootId}`;
+          const resolution = cellResolutionsMap.get(cellKey) ?? "skip";
+          const skill = skills.find((s) => s.id === skillId);
+          cells.push({
+            cellKey,
+            skillId,
+            skillName: skill?.displayName ?? skillId,
+            directoryName: skill?.directoryName ?? skillId,
+            directoryIdentityKey: skillId,
+            targetRootId,
+            targetPath: container,
+            entryPath: `${container}/${skill?.directoryName ?? skillId}`,
+            finalEntityPath: skill?.finalEntityPath ?? "",
+            action: "enable",
+            affectedAgentIds: configs.map((c) => c.agentId),
+            affectedAgentNames: configs.map((c) => c.name),
+            occupier: "empty",
+            occExactDirect: false,
+            destructive: null,
+            eligibility: "ready",
+            blockedReason: null,
+            resolution,
+            detail: null,
+            createSteps: [container],
+            hopEvidence: configs.map((c) => ({
+              agentId: c.agentId,
+              agentName: c.name,
+              configuredRelativePath: c.projectSkillsDir ?? ".skills",
+              resolvedContainer: container,
+              hops: [
+                {
+                  path: container,
+                  kind: "directory" as const,
+                  target: null,
+                  device: 1,
+                  inode: 1,
+                },
+              ],
+            })),
+          });
+        }
+      }
+      const plan: EnablePlan = {
+        planToken: `fixture-project-enable-${nextPlanId++}`,
+        scope: "project",
+        writeGateGeneration: 0,
+        catalogGeneration: snapshotVersion,
+        agentGeneration: 1,
+        projectRoot: {
+          canonicalPath: projectFolder,
+          identity: "1:1",
+        },
+        cells,
+      };
+      pendingEnablePlans.set(plan.planToken, plan);
+      return plan;
+    },
+    async applyProjectEnable(planToken) {
+      return this.applyGlobalEnable(planToken);
+    },
+    async undoProjectEnable(operationId) {
+      return this.undoGlobalEnable(operationId);
+    },
+    async finalizeProjectEnable(operationId) {
+      return this.finalizeGlobalEnable(operationId);
     },
     async getObservationSnapshot() {
       return observationSnapshot();

@@ -17,12 +17,12 @@ use crate::seams::filesystem::{
     EnableJournalCell, EvidenceChain, EvidenceChainHop, EvidenceChainHopKind, FileImportJournal,
     FileImportJournalPhase, FileImportRecoveryBaseline, FileReplacement, FileSystem,
     FileSystemError, HandoffItemPhase, HandoffJournal, HandoffJournalItem, LinkSourceEntryKind,
-    LinkSourceHop, LinkSourceSnapshot, OccupantKind, OccupantSnapshot, RelocateInitialEntry,
-    RelocateJournal, RelocateJournalPhase, RelocateRecoveryBaseline, RemoteParentManifest,
-    RemoveInitialEntry, RemoveJournal, RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry,
-    ScannedSkillEvidence, SkillFingerprint, SourceLifecycleJournal, SourceTransitionJournal,
-    StagedEntryKind, StagedTreeEntry, StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind,
-    TreeScanStatistics,
+    LinkSourceHop, LinkSourceSnapshot, OccupantKind, OccupantSnapshot, ProjectTargetFault,
+    ProjectTargetResolution, RelocateInitialEntry, RelocateJournal, RelocateJournalPhase,
+    RelocateRecoveryBaseline, RemoteParentManifest, RemoveInitialEntry, RemoveJournal,
+    RemoveRecoveryBaseline, RemoveSourceKind, ScannedSkillEntry, ScannedSkillEvidence,
+    SkillFingerprint, SourceLifecycleJournal, SourceTransitionJournal, StagedEntryKind,
+    StagedTreeEntry, StagedTreeSnapshot, TreeScanEntry, TreeScanEntryKind, TreeScanStatistics,
 };
 
 const MAX_SKILL_DOCUMENT_BYTES: u64 = 512 * 1024;
@@ -423,7 +423,256 @@ impl MacOsFileSystem {
     }
 }
 
+const MAX_PROJECT_HOPS: usize = 16;
+
+fn resolve_project_skills_dir(
+    canonical_project_root: &Path,
+    configured_relative: &Path,
+) -> ProjectTargetResolution {
+    if configured_relative.is_absolute()
+        || configured_relative.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return ProjectTargetResolution {
+            resolved_container: canonical_project_root.join(configured_relative),
+            hops: Vec::new(),
+            create_steps: Vec::new(),
+            fault: Some(ProjectTargetFault::OutsideProjectRoot),
+        };
+    }
+
+    let mut pending: VecDeque<std::ffi::OsString> = configured_relative
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_os_string()),
+            _ => None,
+        })
+        .collect();
+
+    if pending.is_empty() {
+        return ProjectTargetResolution {
+            resolved_container: canonical_project_root.to_path_buf(),
+            hops: Vec::new(),
+            create_steps: Vec::new(),
+            fault: Some(ProjectTargetFault::OutsideProjectRoot),
+        };
+    }
+
+    let mut current_dir = canonical_project_root.to_path_buf();
+    let mut hops: Vec<EvidenceChainHop> = Vec::new();
+    let mut create_steps: Vec<PathBuf> = Vec::new();
+    let mut visited: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    let mut symlink_count = 0;
+
+    while let Some(comp) = pending.pop_front() {
+        let mut hop_candidate = current_dir.join(&comp);
+        loop {
+            let metadata = match fs::symlink_metadata(&hop_candidate) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let mut missing = hop_candidate;
+                    if !missing.starts_with(canonical_project_root) {
+                        return ProjectTargetResolution {
+                            resolved_container: missing,
+                            hops,
+                            create_steps,
+                            fault: Some(ProjectTargetFault::OutsideProjectRoot),
+                        };
+                    }
+                    create_steps.push(missing.clone());
+                    while let Some(rem) = pending.pop_front() {
+                        missing = missing.join(rem);
+                        if !missing.starts_with(canonical_project_root) {
+                            return ProjectTargetResolution {
+                                resolved_container: missing,
+                                hops,
+                                create_steps,
+                                fault: Some(ProjectTargetFault::OutsideProjectRoot),
+                            };
+                        }
+                        create_steps.push(missing.clone());
+                    }
+                    return ProjectTargetResolution {
+                        resolved_container: missing,
+                        hops,
+                        create_steps,
+                        fault: None,
+                    };
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                    return ProjectTargetResolution {
+                        resolved_container: hop_candidate,
+                        hops,
+                        create_steps,
+                        fault: Some(ProjectTargetFault::SymlinkCycle),
+                    };
+                }
+                Err(e) => {
+                    return ProjectTargetResolution {
+                        resolved_container: hop_candidate,
+                        hops,
+                        create_steps,
+                        fault: Some(ProjectTargetFault::TargetUnavailable {
+                            diagnostic: e.to_string(),
+                        }),
+                    };
+                }
+            };
+
+            if metadata.file_type().is_symlink() {
+                symlink_count += 1;
+                if symlink_count > MAX_PROJECT_HOPS {
+                    return ProjectTargetResolution {
+                        resolved_container: hop_candidate,
+                        hops,
+                        create_steps,
+                        fault: Some(ProjectTargetFault::HopLimitExceeded),
+                    };
+                }
+                let key = (metadata.dev(), metadata.ino());
+                if !visited.insert(key) {
+                    return ProjectTargetResolution {
+                        resolved_container: hop_candidate,
+                        hops,
+                        create_steps,
+                        fault: Some(ProjectTargetFault::SymlinkCycle),
+                    };
+                }
+                let target = match fs::read_link(&hop_candidate) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return ProjectTargetResolution {
+                            resolved_container: hop_candidate,
+                            hops,
+                            create_steps,
+                            fault: Some(ProjectTargetFault::TargetUnavailable {
+                                diagnostic: e.to_string(),
+                            }),
+                        };
+                    }
+                };
+                hops.push(EvidenceChainHop {
+                    path: hop_candidate.clone(),
+                    kind: EvidenceChainHopKind::Symlink {
+                        target: target.clone(),
+                    },
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                });
+
+                let resolved_target = if target.is_relative() {
+                    hop_candidate
+                        .parent()
+                        .unwrap_or(canonical_project_root)
+                        .join(&target)
+                } else {
+                    target.clone()
+                };
+
+                let normalized = normalize_lexically_macos(&resolved_target);
+                hop_candidate = normalized;
+                continue;
+            } else if metadata.is_dir() {
+                hops.push(EvidenceChainHop {
+                    path: hop_candidate.clone(),
+                    kind: EvidenceChainHopKind::Directory,
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                });
+                let canonical_candidate = match fs::canonicalize(&hop_candidate) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return ProjectTargetResolution {
+                            resolved_container: hop_candidate,
+                            hops,
+                            create_steps,
+                            fault: Some(ProjectTargetFault::TargetUnavailable {
+                                diagnostic: e.to_string(),
+                            }),
+                        };
+                    }
+                };
+                current_dir = canonical_candidate;
+                break;
+            } else {
+                return ProjectTargetResolution {
+                    resolved_container: hop_candidate,
+                    hops,
+                    create_steps,
+                    fault: Some(ProjectTargetFault::TargetNotDirectory),
+                };
+            }
+        }
+    }
+
+    let final_canonical = fs::canonicalize(&current_dir).unwrap_or_else(|_| current_dir.clone());
+    if !final_canonical.starts_with(canonical_project_root) {
+        return ProjectTargetResolution {
+            resolved_container: final_canonical,
+            hops,
+            create_steps,
+            fault: Some(ProjectTargetFault::OutsideProjectRoot),
+        };
+    }
+
+    if !current_dir.exists() && create_steps.is_empty() {
+        create_steps.push(current_dir.clone());
+    }
+
+    ProjectTargetResolution {
+        resolved_container: current_dir,
+        hops,
+        create_steps,
+        fault: None,
+    }
+}
+
+fn normalize_lexically_macos(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(p) => normalized.push(p.as_os_str()),
+            std::path::Component::RootDir => normalized.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(c) => normalized.push(c),
+        }
+    }
+    normalized
+}
+
 impl FileSystem for MacOsFileSystem {
+    fn ensure_directory_tree(&self, path: &Path) -> Result<(), FileSystemError> {
+        let path = self.normalize_configured_path(path)?;
+        if fs::symlink_metadata(&path).is_ok() {
+            return Ok(());
+        }
+        fs::create_dir_all(&path).map_err(|source| FileSystemError::Io {
+            operation: "ensure directory tree exists",
+            path,
+            source,
+        })
+    }
+
+    fn resolve_project_target(
+        &self,
+        canonical_project_root: &Path,
+        configured_relative: &Path,
+    ) -> Result<ProjectTargetResolution, FileSystemError> {
+        Ok(resolve_project_skills_dir(
+            canonical_project_root,
+            configured_relative,
+        ))
+    }
+
     fn read_entropy(&self, buffer: &mut [u8]) -> Result<(), FileSystemError> {
         use std::io::Read;
         let mut file =
