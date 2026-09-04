@@ -217,6 +217,12 @@ fn write_lock_atomically(
     let (parent, final_name) = open_lock_parent(lock_path).map_err(|source| {
         LockReleaseError::Io(format!("open {}: {source}", lock_path.display()))
     })?;
+    // Serialize all Skill Man lock rewrites for this parent directory. The
+    // lock file is externally owned, so the descriptor-relative exchange
+    // below still validates bytes/inode after every exchange; this advisory
+    // parent lock closes the check→exchange window for cooperating writers
+    // instead of relying on an unlink/rename sequence.
+    lock_parent_exclusively(&parent, lock_path)?;
     let temporary_name = CString::new(format!(
         ".skill-lock.json.tmp-{}-{}",
         std::process::id(),
@@ -331,76 +337,62 @@ fn write_lock_atomically(
             return Ok(());
         }
 
-        // The exchange observed a different inode or different bytes. Put
-        // that live claim back with another atomic exchange; never delete a
-        // claim that appeared while this compensation was in flight.
-        let current = read_regular_at(&parent, &final_name, lock_path);
-        let can_restore = current
-            .as_ref()
-            .ok()
-            .and_then(|snapshot| snapshot.as_ref())
-            .is_some_and(|snapshot| {
-                snapshot.identity == temporary_identity && snapshot.bytes == bytes
-            });
-        if !can_restore {
-            return Err(LockReleaseError::FingerprintChanged);
-        }
-        let restore_status = unsafe {
-            libc::renameatx_np(
-                parent.as_raw_fd(),
-                temporary_name.as_ptr(),
-                parent.as_raw_fd(),
-                final_name.as_ptr(),
-                libc::RENAME_SWAP,
-            )
-        };
-        if restore_status != 0 {
-            return Err(LockReleaseError::Io(format!(
-                "restore concurrent lock claim {}: {}",
-                lock_path.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        let restored_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
-        let restored_our_temp = restored_temp
-            .as_ref()
-            .ok()
-            .and_then(|snapshot| snapshot.as_ref())
-            .is_some_and(|snapshot| {
-                snapshot.identity == temporary_identity && snapshot.bytes == bytes
-            });
-        if restored_our_temp {
-            unlink_temp(
-                &parent,
-                &temporary_name,
-                &temporary_path,
-                &temporary_identity,
-            )?;
-            sync_lock_parent(&parent, lock_path)?;
-            return Err(LockReleaseError::FingerprintChanged);
-        }
-
-        // The installer changed the live path between the check and the
-        // exchange. After the exchange the old claim is at the final path
-        // and the newer claim is in the temporary name. Restore the newer
-        // claim only while the final path still contains the exact old
-        // claim; otherwise leave both entries for recovery.
-        let current_final = read_regular_at(&parent, &final_name, lock_path);
-        let current_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
-        let can_restore_newer = current_final
-            .as_ref()
-            .ok()
-            .and_then(|snapshot| snapshot.as_ref())
-            .is_some_and(|snapshot| {
-                snapshot.identity == previous_snapshot.identity
-                    && snapshot.bytes == previous_snapshot.bytes
-            })
-            && current_temp
-                .as_ref()
+        // The exchange observed a different inode or different bytes. Chase
+        // the external claim through a bounded sequence of post-checked
+        // exchanges. Every exchange is followed by identity checks; a claim
+        // is never unlinked unless the temporary slot is the exact displaced
+        // file we intended to discard.
+        let mut expected_final: Option<LockFileSnapshot> = None;
+        for _ in 0..8 {
+            let final_snapshot = read_regular_at(&parent, &final_name, lock_path)
                 .ok()
-                .and_then(|snapshot| snapshot.as_ref())
-                .is_some_and(|snapshot| snapshot.identity != temporary_identity);
-        if can_restore_newer {
+                .and_then(|snapshot| snapshot);
+            let temporary_snapshot = read_regular_at(&parent, &temporary_name, &temporary_path)
+                .ok()
+                .and_then(|snapshot| snapshot);
+            if temporary_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.identity == temporary_identity && snapshot.bytes == bytes
+            }) {
+                unlink_temp(
+                    &parent,
+                    &temporary_name,
+                    &temporary_path,
+                    &temporary_identity,
+                )?;
+                sync_lock_parent(&parent, lock_path)?;
+                return Err(LockReleaseError::FingerprintChanged);
+            }
+
+            let final_is_our_temp = final_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.identity == temporary_identity && snapshot.bytes == bytes
+            });
+            let expected = if final_is_our_temp {
+                temporary_snapshot.clone().ok_or_else(|| {
+                    LockReleaseError::Io(format!(
+                        "the lock compensation slot vanished: {}",
+                        lock_path.display()
+                    ))
+                })?
+            } else if let Some(expected) = &expected_final {
+                if final_snapshot.as_ref() != Some(expected)
+                    || temporary_snapshot.is_none()
+                    || temporary_snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.identity == temporary_identity && snapshot.bytes == bytes
+                    })
+                {
+                    return Err(LockReleaseError::Io(format!(
+                        "the lock changed while the CAS rollback was in progress: {}",
+                        lock_path.display()
+                    )));
+                }
+                expected.clone()
+            } else {
+                return Err(LockReleaseError::Io(format!(
+                    "the lock changed while the CAS rollback was in progress: {}",
+                    lock_path.display()
+                )));
+            };
+
             let restore_status = unsafe {
                 libc::renameatx_np(
                     parent.as_raw_fd(),
@@ -410,59 +402,33 @@ fn write_lock_atomically(
                     libc::RENAME_SWAP,
                 )
             };
-            if restore_status == 0 {
-                let restored_old = read_regular_at(&parent, &temporary_name, &temporary_path);
-                if restored_old
-                    .as_ref()
-                    .ok()
-                    .and_then(|snapshot| snapshot.as_ref())
-                    .is_some_and(|snapshot| {
-                        snapshot.identity == previous_snapshot.identity
-                            && snapshot.bytes == previous_snapshot.bytes
-                    })
-                {
-                    unlink_temp(
-                        &parent,
-                        &temporary_name,
-                        &temporary_path,
-                        &previous_snapshot.identity,
-                    )?;
-                    sync_lock_parent(&parent, lock_path)?;
-                    return Err(LockReleaseError::FingerprintChanged);
-                }
-                // A newer installer claim may have landed at the final path
-                // after the guard above but before this exchange. If the
-                // temporary slot now contains a different regular file,
-                // make one best-effort exchange to put that newest claim
-                // back at the public lock path. Do not unlink either side
-                // unless the displaced entry is the exact old claim.
-                let current_final = read_regular_at(&parent, &final_name, lock_path);
-                let current_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
-                if current_final
-                    .as_ref()
-                    .ok()
-                    .and_then(|snapshot| snapshot.as_ref())
-                    .is_some()
-                    && current_temp
-                        .as_ref()
-                        .ok()
-                        .and_then(|snapshot| snapshot.as_ref())
-                        .is_some()
-                {
-                    let _ = unsafe {
-                        libc::renameatx_np(
-                            parent.as_raw_fd(),
-                            temporary_name.as_ptr(),
-                            parent.as_raw_fd(),
-                            final_name.as_ptr(),
-                            libc::RENAME_SWAP,
-                        )
-                    };
-                }
+            if restore_status != 0 {
+                return Err(LockReleaseError::Io(format!(
+                    "restore concurrent lock claim {}: {}",
+                    lock_path.display(),
+                    std::io::Error::last_os_error()
+                )));
             }
+            let after_temp = read_regular_at(&parent, &temporary_name, &temporary_path)
+                .ok()
+                .and_then(|snapshot| snapshot);
+            let after_final = read_regular_at(&parent, &final_name, lock_path)
+                .ok()
+                .and_then(|snapshot| snapshot);
+            if after_temp.as_ref() == Some(&expected) {
+                unlink_temp(
+                    &parent,
+                    &temporary_name,
+                    &temporary_path,
+                    &expected.identity,
+                )?;
+                sync_lock_parent(&parent, lock_path)?;
+                return Err(LockReleaseError::FingerprintChanged);
+            }
+            expected_final = after_final;
         }
         Err(LockReleaseError::Io(format!(
-            "the lock changed while the CAS rollback was in progress: {}",
+            "the lock changed repeatedly while the CAS rollback was in progress: {}",
             lock_path.display()
         )))
     } else {
@@ -492,7 +458,7 @@ fn write_lock_atomically(
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct LockFileSnapshot {
     bytes: Vec<u8>,
     identity: LockFileIdentity,
@@ -515,6 +481,7 @@ fn read_lock_snapshot(path: &Path) -> Result<Option<LockFileSnapshot>, Installer
             });
         }
     };
+    lock_parent_shared(&parent, path)?;
     read_regular_at(&parent, &name, path).map_err(|source| InstallerLockError::Io {
         operation: "read installer lock",
         path: path.to_path_buf(),
@@ -721,6 +688,32 @@ fn sync_lock_parent(parent: &OwnedFd, lock_path: &Path) -> Result<(), LockReleas
             lock_path.display(),
             std::io::Error::last_os_error()
         )))
+    }
+}
+
+fn lock_parent_exclusively(parent: &OwnedFd, lock_path: &Path) -> Result<(), LockReleaseError> {
+    let status = unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(LockReleaseError::Io(format!(
+            "lock parent for {}: {}",
+            lock_path.display(),
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
+fn lock_parent_shared(parent: &OwnedFd, lock_path: &Path) -> Result<(), InstallerLockError> {
+    let status = unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_SH) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(InstallerLockError::Io {
+            operation: "lock installer lock parent for read",
+            path: lock_path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        })
     }
 }
 
