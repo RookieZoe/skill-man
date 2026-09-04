@@ -9,6 +9,7 @@ import type {
   EnableResult,
   RecentProjectFolder,
 } from "../../app/catalog-client";
+import type { EnableSkillItem } from "./GlobalEnableSheet";
 import { useLocale } from "../locale/LocaleProvider";
 import type { MessageKey } from "../locale/messages";
 
@@ -26,18 +27,30 @@ import type { MessageKey } from "../locale/messages";
  */
 export function ProjectEnableSheet({
   client,
+  skills,
   skillId,
   skillName,
   onClose,
   onOpenAgentManagement,
 }: {
   client: CatalogClient;
-  skillId: string;
-  skillName: string;
+  skills?: EnableSkillItem[];
+  skillId?: string;
+  skillName?: string;
   onClose: () => void;
   onOpenAgentManagement?: () => void;
 }) {
-  const { t } = useLocale();
+  const { t, tPlural } = useLocale();
+  const normalizedSkills = useMemo<EnableSkillItem[]>(() => {
+    if (skills && skills.length > 0) return skills;
+    if (skillId) return [{ id: skillId, name: skillName ?? skillId }];
+    return [];
+  }, [skills, skillId, skillName]);
+  const isBatch = normalizedSkills.length > 1;
+  const skillIds = useMemo(
+    () => normalizedSkills.map((s) => s.id),
+    [normalizedSkills],
+  );
 
   const [step, setStep] = useState<"folder" | "agents" | "preview" | "result">(
     "folder",
@@ -92,13 +105,18 @@ export function ProjectEnableSheet({
 
   // Plan project enable whenever preview step is active and inputs change
   useEffect(() => {
-    if (step !== "preview" || selectedAgentIds.length === 0 || !folder.trim()) {
+    if (
+      step !== "preview" ||
+      selectedAgentIds.length === 0 ||
+      !folder.trim() ||
+      skillIds.length === 0
+    ) {
       return;
     }
     let current = true;
     client
       .planProjectEnable(
-        [skillId],
+        skillIds,
         folder.trim(),
         selectedAgentIds,
         [...resolutions.entries()].map(([cellKey, resolution]) => ({
@@ -119,7 +137,7 @@ export function ProjectEnableSheet({
     return () => {
       current = false;
     };
-  }, [client, skillId, folder, selectedAgentIds, resolutions, step]);
+  }, [client, skillIds, folder, selectedAgentIds, resolutions, step]);
 
   // Handle keyboard escape to close
   useEffect(() => {
@@ -221,7 +239,16 @@ export function ProjectEnableSheet({
         className="activation-sheet enable-sheet project-enable-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label={t("enable.project.dialogLabel", { skill: skillName })}
+        aria-label={
+          isBatch
+            ? tPlural(
+                "enable.project.dialogLabelBatch",
+                normalizedSkills.length,
+              )
+            : t("enable.project.dialogLabel", {
+                skill: normalizedSkills[0]?.name ?? "",
+              })
+        }
       >
         <ol
           className="import-progress"
@@ -275,6 +302,22 @@ export function ProjectEnableSheet({
               setResolutions((curr) => {
                 const next = new Map(curr);
                 next.set(cellKey, resolution);
+                if (resolution === "replace") {
+                  const changedCell = plan.cells.find(
+                    (c) => c.cellKey === cellKey,
+                  );
+                  if (changedCell) {
+                    for (const other of plan.cells) {
+                      if (
+                        other.cellKey !== cellKey &&
+                        other.targetRootId === changedCell.targetRootId &&
+                        other.entryPath === changedCell.entryPath
+                      ) {
+                        next.set(other.cellKey, "skip");
+                      }
+                    }
+                  }
+                }
                 return next;
               });
             }}
@@ -623,7 +666,9 @@ function ProjectPreviewCell({
     <div className="project-cell-card">
       <div className="project-cell-header">
         <div className="resolved-group-info">
-          <h4>{t("enable.project.resolvedGroupDisclosure")}</h4>
+          <h4>
+            {cell.skillName} → {t("enable.project.resolvedGroupDisclosure")}
+          </h4>
           <p className="one-physical-write">
             {t("enable.project.onePhysicalWrite", {
               count: cell.affectedAgentIds.length,
@@ -724,6 +769,9 @@ function ProjectPreviewCell({
         </div>
       )}
 
+      {cell.detail !== null && (
+        <p className="enable-matrix-note error-note">{cell.detail}</p>
+      )}
       {blockedReasonText && (
         <p className="enable-matrix-note error-note">{blockedReasonText}</p>
       )}

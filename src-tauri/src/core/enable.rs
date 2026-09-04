@@ -572,6 +572,7 @@ impl EnableService {
                 "at least one Target group is required for Global Enable".into(),
             ));
         }
+        let is_batch = skill_ids.len() > 1;
         let mut cells = Vec::new();
         for target_group_id in target_group_ids {
             for skill_id in skill_ids {
@@ -580,9 +581,11 @@ impl EnableService {
                     target_group_id,
                     EnableAction::Enable,
                     Some(cell_resolutions),
+                    is_batch,
                 )?);
             }
         }
+        resolve_batch_contention(&mut cells, cell_resolutions);
         self.build_plan(cells)
     }
 
@@ -594,7 +597,7 @@ impl EnableService {
         target_group_id: &str,
         action: EnableAction,
     ) -> Result<EnablePlan, EnableError> {
-        let cell = self.plan_cell(skill_id, target_group_id, action, None)?;
+        let cell = self.plan_cell(skill_id, target_group_id, action, None, false)?;
         self.build_plan(vec![cell])
     }
 
@@ -878,6 +881,7 @@ impl EnableService {
             }
         }
 
+        resolve_batch_contention(&mut cells, cell_resolutions);
         self.build_project_plan(canonical_project_root, cells)
     }
 
@@ -980,6 +984,7 @@ impl EnableService {
         target_group_id: &str,
         action: EnableAction,
         resolutions: Option<&[(String, CellResolution)]>,
+        is_batch: bool,
     ) -> Result<PlannedCell, EnableError> {
         let skill = self
             .catalog
@@ -1054,6 +1059,7 @@ impl EnableService {
             current_row.as_ref(),
             &cell_key,
             resolutions.unwrap_or(&[]),
+            is_batch,
         );
 
         let affected_agent_ids = snapshot
@@ -2176,7 +2182,7 @@ fn effective_resolution(planned: &PlannedCell) -> CellResolution {
     let cell = &planned.cell;
     match &cell.occupancy {
         Occupier::Managed { .. } => CellResolution::Switch,
-        Occupier::Empty => unreachable!("effective_resolution is only called on conflict cells"),
+        Occupier::Empty => cell.resolution,
         Occupier::Untracked { .. } => {
             if cell.occ_exact_direct {
                 CellResolution::Replace
@@ -2273,6 +2279,7 @@ fn classify_cell(
     current_row: Option<&ActivationCellRow>,
     cell_key: &str,
     resolutions: &[(String, CellResolution)],
+    is_batch: bool,
 ) -> (
     CellEligibility,
     Option<CellBlockedReason>,
@@ -2374,7 +2381,8 @@ fn classify_cell(
                     None,
                 );
             }
-            let resolution = match occupier {
+            let mut resolution = match occupier {
+                // Managed ownership: the only resolution is a Target-local Switch.
                 Occupier::Managed { .. } => {
                     // Managed ownership: the only resolution is a
                     // Target-local Switch (ADR-0019).
@@ -2389,11 +2397,115 @@ fn classify_cell(
                 }
                 Occupier::Empty => unreachable!("occupied entry has no occupier"),
             };
+            if is_batch
+                && matches!(occupier, Occupier::Untracked { .. })
+                && resolution == CellResolution::Adopt
+            {
+                resolution = CellResolution::Skip;
+            }
             if matches!(resolution, CellResolution::Skip) {
                 (CellEligibility::Conflict, None, resolution, None)
             } else {
                 let _ = current_row;
                 (CellEligibility::Conflict, None, resolution, None)
+            }
+        }
+    }
+}
+
+/// Intra-batch contention resolution (spec §4.9; §7.5; ADR-0019; #88):
+/// When multiple skills in a batch share the same (target, Directory Identity)
+/// entry path, at most one winner may proceed per Target. If no winner is
+/// explicitly chosen (or multiple are chosen), all non-NoOp contenders remain
+/// in Conflict with resolution Skip, without blocking other Ready cells.
+fn resolve_batch_contention(cells: &mut [PlannedCell], resolutions: &[(String, CellResolution)]) {
+    use std::collections::HashMap;
+
+    let mut groups: HashMap<(String, PathBuf), Vec<usize>> = HashMap::new();
+    for (idx, planned) in cells.iter().enumerate() {
+        let key = (
+            planned.cell.target_root_id.clone(),
+            planned.cell.entry_path.clone(),
+        );
+        groups.entry(key).or_default().push(idx);
+    }
+
+    for ((_target_root_id, _entry_path), indices) in groups {
+        if indices.len() <= 1 {
+            continue;
+        }
+
+        // Multiple skills contend for the exact same target entry path.
+        let mut chosen_winners = Vec::new();
+        for &idx in &indices {
+            let cell = &cells[idx].cell;
+            if cell.eligibility == CellEligibility::Blocked {
+                continue;
+            }
+            let user_res = resolutions
+                .iter()
+                .rev()
+                .find(|(k, _)| k == &cell.cell_key)
+                .map(|(_, r)| *r);
+            if let Some(res) = user_res {
+                if res == CellResolution::Replace || res == CellResolution::Switch {
+                    chosen_winners.push((idx, res));
+                }
+            }
+        }
+
+        if chosen_winners.len() == 1 {
+            let (winner_idx, winner_res) = chosen_winners[0];
+            let winner = &mut cells[winner_idx];
+            if winner.cell.occupancy == Occupier::Empty {
+                winner.cell.eligibility = CellEligibility::Ready;
+                winner.cell.resolution = CellResolution::Replace;
+                winner.cell.detail = None;
+            } else {
+                winner.cell.eligibility = CellEligibility::Conflict;
+                winner.cell.resolution = winner_res;
+            }
+
+            let winner_name = winner.cell.skill_name.clone();
+            for &idx in &indices {
+                if idx != winner_idx {
+                    let loser = &mut cells[idx];
+                    if loser.cell.eligibility != CellEligibility::Blocked {
+                        loser.cell.eligibility = CellEligibility::Conflict;
+                        loser.cell.resolution = CellResolution::Skip;
+                        loser.cell.detail = Some(format!(
+                            "contention with '{winner_name}'; not selected as winner"
+                        ));
+                    }
+                }
+            }
+        } else if chosen_winners.is_empty() {
+            // No winner chosen: existing NoOp cells stay NoOp, new candidates become Conflict / Skip.
+            for &idx in &indices {
+                let cell = &mut cells[idx];
+                if cell.cell.eligibility != CellEligibility::Blocked
+                    && cell.cell.eligibility != CellEligibility::NoOp
+                {
+                    cell.cell.eligibility = CellEligibility::Conflict;
+                    cell.cell.resolution = CellResolution::Skip;
+                    cell.cell.detail = Some(
+                        "multiple skills in this batch share this Directory Identity on this Target; choose a winner"
+                            .into(),
+                    );
+                }
+            }
+        } else {
+            // Multiple winners chosen erroneously: all non-blocked contenders become Conflict / Skip.
+            for &idx in &indices {
+                let cell = &mut cells[idx];
+                if cell.cell.eligibility != CellEligibility::Blocked {
+                    cell.cell.eligibility = CellEligibility::Conflict;
+                    cell.cell.resolution = CellResolution::Skip;
+                    cell.cell.detail = Some(
+                        "multiple winners selected for the same Target entry; only one winner may be selected"
+                            .into(),
+                    );
+                }
             }
         }
     }

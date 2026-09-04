@@ -501,15 +501,25 @@ export function createFixtureCatalogClient(
       const cellResolutionsMap = new Map(
         cellResolutions.map((entry) => [entry.cellKey, entry.resolution]),
       );
-      const cells: EnableCell[] = targetGroupIds.flatMap((targetRootId) =>
-        skillIds.map((skillId) => {
-          const config = agentConfigurations.find((agent) =>
-            agent.roots.some(
-              (root) =>
-                root.role === "activation_target" &&
-                root.rootId === targetRootId,
-            ),
-          );
+      const cells: EnableCell[] = targetGroupIds.flatMap((targetRootId) => {
+        const config = agentConfigurations.find((agent) =>
+          agent.roots.some(
+            (root) =>
+              root.role === "activation_target" && root.rootId === targetRootId,
+          ),
+        );
+        const targetPath =
+          config?.roots.find((root) => root.rootId === targetRootId)
+            ?.configuredPath ?? "";
+        return skillIds.map((skillId) => {
+          const skill = skills.find((s) => s.id === skillId);
+          const directoryName =
+            skill?.directoryName ??
+            (skillId.includes("::") ? skillId.split("::")[1] : skillId);
+          const displayName =
+            skill?.displayName ??
+            (skillId.includes("::") ? skillId.split("::")[0] : skillId);
+          const entryPath = targetPath ? `${targetPath}/${directoryName}` : "";
           const desired =
             enabledSkillIds.get(config?.agentId ?? "")?.includes(skillId) ??
             false;
@@ -518,19 +528,13 @@ export function createFixtureCatalogClient(
           return {
             cellKey,
             skillId,
-            skillName:
-              skills.find((skill) => skill.id === skillId)?.displayName ??
-              skillId,
-            directoryName:
-              skills.find((skill) => skill.id === skillId)?.directoryName ??
-              skillId,
+            skillName: displayName,
+            directoryName,
             directoryIdentityKey: skillId,
             targetRootId,
-            targetPath:
-              config?.roots.find((root) => root.rootId === targetRootId)
-                ?.configuredPath ?? "",
-            entryPath: "",
-            finalEntityPath: "",
+            targetPath,
+            entryPath,
+            finalEntityPath: skill?.finalEntityPath ?? "",
             action: "enable" as const,
             affectedAgentIds: config ? [config.agentId] : [],
             affectedAgentNames: config ? [config.name] : [],
@@ -544,8 +548,51 @@ export function createFixtureCatalogClient(
             createSteps: [],
             hopEvidence: [],
           };
-        }),
-      );
+        });
+      });
+
+      // Intra-batch contention simulation:
+      const entryGroups = new Map<string, number[]>();
+      cells.forEach((cell, idx) => {
+        const key = `${cell.targetRootId}|${cell.entryPath}`;
+        const list = entryGroups.get(key) ?? [];
+        list.push(idx);
+        entryGroups.set(key, list);
+      });
+      for (const [, indices] of entryGroups) {
+        if (indices.length > 1) {
+          const winners = indices.filter(
+            (i) =>
+              cells[i].resolution === "replace" ||
+              cells[i].resolution === "switch",
+          );
+          if (winners.length === 1) {
+            const wIdx = winners[0];
+            cells[wIdx].eligibility = "ready";
+            for (const i of indices) {
+              if (i !== wIdx) {
+                cells[i].eligibility = "conflict";
+                cells[i].resolution = "skip";
+                cells[i].detail =
+                  `contention with '${cells[wIdx].skillName}'; not selected as winner`;
+              }
+            }
+          } else {
+            for (const i of indices) {
+              if (
+                cells[i].eligibility !== "blocked" &&
+                cells[i].eligibility !== "no_op"
+              ) {
+                cells[i].eligibility = "conflict";
+                cells[i].resolution = "skip";
+                cells[i].detail =
+                  "multiple skills in this batch share this Directory Identity on this Target; choose a winner";
+              }
+            }
+          }
+        }
+      }
+
       const plan: EnablePlan = {
         planToken: `fixture-enable-${nextPlanId++}`,
         scope: "global",
@@ -744,15 +791,21 @@ export function createFixtureCatalogClient(
           const cellKey = `${skillId}|${targetRootId}`;
           const resolution = cellResolutionsMap.get(cellKey) ?? "skip";
           const skill = skills.find((s) => s.id === skillId);
+          const directoryName =
+            skill?.directoryName ??
+            (skillId.includes("::") ? skillId.split("::")[1] : skillId);
+          const displayName =
+            skill?.displayName ??
+            (skillId.includes("::") ? skillId.split("::")[0] : skillId);
           cells.push({
             cellKey,
             skillId,
-            skillName: skill?.displayName ?? skillId,
-            directoryName: skill?.directoryName ?? skillId,
+            skillName: displayName,
+            directoryName,
             directoryIdentityKey: skillId,
             targetRootId,
             targetPath: container,
-            entryPath: `${container}/${skill?.directoryName ?? skillId}`,
+            entryPath: `${container}/${directoryName}`,
             finalEntityPath: skill?.finalEntityPath ?? "",
             action: "enable",
             affectedAgentIds: configs.map((c) => c.agentId),
@@ -781,6 +834,46 @@ export function createFixtureCatalogClient(
               ],
             })),
           });
+        }
+      }
+
+      // Intra-batch contention simulation:
+      const entryGroups = new Map<string, number[]>();
+      cells.forEach((cell, idx) => {
+        const key = `${cell.targetRootId}|${cell.entryPath}`;
+        const list = entryGroups.get(key) ?? [];
+        list.push(idx);
+        entryGroups.set(key, list);
+      });
+      for (const [, indices] of entryGroups) {
+        if (indices.length > 1) {
+          const winners = indices.filter(
+            (i) => cells[i].resolution === "replace",
+          );
+          if (winners.length === 1) {
+            const wIdx = winners[0];
+            cells[wIdx].eligibility = "ready";
+            for (const i of indices) {
+              if (i !== wIdx) {
+                cells[i].eligibility = "conflict";
+                cells[i].resolution = "skip";
+                cells[i].detail =
+                  `contention with '${cells[wIdx].skillName}'; not selected as winner`;
+              }
+            }
+          } else {
+            for (const i of indices) {
+              if (
+                cells[i].eligibility !== "blocked" &&
+                cells[i].eligibility !== "no_op"
+              ) {
+                cells[i].eligibility = "conflict";
+                cells[i].resolution = "skip";
+                cells[i].detail =
+                  "multiple skills in this batch share this Directory Identity on this Target; choose a winner";
+              }
+            }
+          }
         }
       }
       const plan: EnablePlan = {

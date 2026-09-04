@@ -1139,6 +1139,11 @@
   "enable.global.affectedAgents_other": "影响 {count} 个 Agent",
   "enable.global.physicalTargets_one": "{count} 个物理目标",
   "enable.global.physicalTargets_other": "{count} 个物理目标",
+  "enable.global.dialogLabelBatch_one": "全局启用 {count} 个技能",
+  "enable.global.dialogLabelBatch_other": "全局启用 {count} 个技能",
+  "enable.global.resolutionReplaceBatch": "替换",
+  "enable.global.resolutionSkipBatch": "跳过",
+  "enable.global.winnerConflictNote": "同一目标上多个所选技能存在目录标识冲突，请选择一个生效项或保持全部跳过。",
   "enable.project.stepFolder": "项目文件夹",
   "enable.project.stepAgents": "选择 Agent",
   "enable.project.stepPreview": "预览",
@@ -1177,5 +1182,14 @@
   "enable.project.blockedCycle": "检测到软链循环",
   "enable.project.blockedHopLimit": "超出软链跳转上限（16）",
   "enable.project.blockedTargetNotDir": "目标路径组件不是目录",
-  "enable.project.blockedUnreadable": "目标无法读取"
+  "enable.project.blockedUnreadable": "目标无法读取",
+  "enable.project.dialogLabelBatch_one": "向项目启用 {count} 个技能",
+  "enable.project.dialogLabelBatch_other": "向项目启用 {count} 个技能",
+  "enable.project.winnerConflictNote": "同一项目容器中多个所选技能存在目录标识冲突，请选择一个生效项或保持全部跳过。",
+  "shelf.select": "选择",
+  "shelf.selectedCount_one": "已选择 {count} 个技能",
+  "shelf.selectedCount_other": "已选择 {count} 个技能",
+  "shelf.enableGlobally": "全局启用…",
+  "shelf.enableToProject": "项目启用…",
+  "shelf.exit": "退出选择"
 }

@@ -1139,6 +1139,11 @@
   "enable.global.affectedAgents_other": "{count} affected agents",
   "enable.global.physicalTargets_one": "{count} physical Target",
   "enable.global.physicalTargets_other": "{count} physical Targets",
+  "enable.global.dialogLabelBatch_one": "Enable {count} skill globally",
+  "enable.global.dialogLabelBatch_other": "Enable {count} skills globally",
+  "enable.global.resolutionReplaceBatch": "Replace",
+  "enable.global.resolutionSkipBatch": "Skip",
+  "enable.global.winnerConflictNote": "Multiple skills in this batch share this Directory Identity on this Target; select one winner or keep all skipped.",
   "enable.project.stepFolder": "Project folder",
   "enable.project.stepAgents": "Agents",
   "enable.project.stepPreview": "Preview",
@@ -1177,5 +1182,14 @@
   "enable.project.blockedCycle": "Symlink loop detected",
   "enable.project.blockedHopLimit": "Symlink hop limit exceeded (16)",
   "enable.project.blockedTargetNotDir": "Target component is not a directory",
-  "enable.project.blockedUnreadable": "Target is unreadable"
+  "enable.project.blockedUnreadable": "Target is unreadable",
+  "enable.project.dialogLabelBatch_one": "Enable {count} skill to Project",
+  "enable.project.dialogLabelBatch_other": "Enable {count} skills to Project",
+  "enable.project.winnerConflictNote": "Multiple skills in this batch share this Directory Identity in this container; select one winner or keep all skipped.",
+  "shelf.select": "Select",
+  "shelf.selectedCount_one": "{count} skill selected",
+  "shelf.selectedCount_other": "{count} skills selected",
+  "shelf.enableGlobally": "Enable Globally…",
+  "shelf.enableToProject": "Enable to Project…",
+  "shelf.exit": "Exit"
 }

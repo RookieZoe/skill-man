@@ -627,3 +627,139 @@ fn recent_project_folders_mru_and_clear() {
         .expect("list cleared");
     assert!(cleared.is_empty());
 }
+
+#[test]
+fn batch_project_enable_multiple_skills_and_agents_with_undo() {
+    let harness = harness();
+    set_agent_project_skills_dir(&harness, "claude-code", Some(".claude/skills"));
+    set_agent_project_skills_dir(&harness, "codex", Some(".codex/skills"));
+
+    let temp_proj = tempfile::tempdir().expect("temp project dir");
+    let project_root = temp_proj.path().to_path_buf();
+
+    let plan = harness
+        .enable
+        .plan_project_enable(
+            &[
+                SkillId("skill-authoring".into()),
+                SkillId("legacy-audit".into()),
+            ],
+            &project_root,
+            &["claude-code".into(), "codex".into()],
+            &[],
+        )
+        .expect("plan batch project enable");
+
+    // 2 target containers × 2 skills = 4 cells
+    assert_eq!(plan.cells.len(), 4);
+    assert!(
+        plan.cells
+            .iter()
+            .all(|c| c.eligibility == CellEligibility::Ready)
+    );
+
+    let result = harness
+        .enable
+        .apply(&plan.plan_token)
+        .expect("apply batch project enable");
+    assert_eq!(result.cells.len(), 4);
+    assert!(
+        result
+            .cells
+            .iter()
+            .all(|c| c.outcome == CellOutcome::Succeeded)
+    );
+
+    let claude_authoring = project_root.join(".claude/skills/skill-authoring");
+    let claude_legacy = project_root.join(".claude/skills/legacy-audit");
+    let codex_authoring = project_root.join(".codex/skills/skill-authoring");
+    let codex_legacy = project_root.join(".codex/skills/legacy-audit");
+
+    assert!(claude_authoring.is_symlink());
+    assert!(claude_legacy.is_symlink());
+    assert!(codex_authoring.is_symlink());
+    assert!(codex_legacy.is_symlink());
+
+    // Undo reverts all 4 project symlinks
+    let undo = harness
+        .enable
+        .undo(&result.operation_id)
+        .expect("undo batch project enable");
+    assert_eq!(undo.cells.len(), 4);
+    assert!(undo.cells.iter().all(|c| c.undone));
+
+    assert!(!claude_authoring.exists());
+    assert!(!claude_legacy.exists());
+    assert!(!codex_authoring.exists());
+    assert!(!codex_legacy.exists());
+}
+
+#[test]
+fn batch_project_enable_intra_batch_collision_and_winner_selection() {
+    let harness = harness();
+    set_agent_project_skills_dir(&harness, "claude-code", Some(".claude/skills"));
+
+    let final_a = harness.home.path().join("Projects/twin-a");
+    std::fs::create_dir_all(&final_a).expect("create twin-a");
+    std::fs::write(final_a.join("SKILL.md"), "# Twin A\n").expect("write SKILL.md");
+    let final_b = harness.home.path().join("Projects/twin-b");
+    std::fs::create_dir_all(&final_b).expect("create twin-b");
+    std::fs::write(final_b.join("SKILL.md"), "# Twin B\n").expect("write SKILL.md");
+
+    harness.home.with_sql("seed twin skills for project", |conn| {
+        conn.execute(
+            "INSERT INTO skills (
+                id, directory_name, directory_identity_key, display_name, description,
+                source_kind, library_entry_path, final_entity_path, health,
+                created_at, updated_at
+             ) VALUES ('twin-proj-a', 'twin-tool', 'twin-tool', 'Twin Tool A', 'First twin',
+                       'link', NULL, ?1, 'healthy', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+            params![final_a.to_string_lossy()],
+        ).expect("insert twin-proj-a");
+        conn.execute(
+            "INSERT INTO skills (
+                id, directory_name, directory_identity_key, display_name, description,
+                source_kind, library_entry_path, final_entity_path, health,
+                created_at, updated_at
+             ) VALUES ('twin-proj-b', 'twin-tool', 'twin-tool', 'Twin Tool B', 'Second twin',
+                       'link', NULL, ?1, 'healthy', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+            params![final_b.to_string_lossy()],
+        ).expect("insert twin-proj-b");
+    });
+
+    let temp_proj = tempfile::tempdir().expect("temp project dir");
+    let project_root = temp_proj.path().to_path_buf();
+
+    // Initial plan without winner
+    let initial_plan = harness
+        .enable
+        .plan_project_enable(
+            &[SkillId("twin-proj-a".into()), SkillId("twin-proj-b".into())],
+            &project_root,
+            &["claude-code".into()],
+            &[],
+        )
+        .expect("plan collision");
+
+    assert_eq!(initial_plan.cells.len(), 2);
+    assert_eq!(initial_plan.cells[0].eligibility, CellEligibility::Conflict);
+    assert_eq!(initial_plan.cells[0].resolution, CellResolution::Skip);
+    assert_eq!(initial_plan.cells[1].eligibility, CellEligibility::Conflict);
+    assert_eq!(initial_plan.cells[1].resolution, CellResolution::Skip);
+
+    // Re-plan with twin-proj-a chosen as winner
+    let winner_key = initial_plan.cells[0].cell_key.clone();
+    let winner_plan = harness
+        .enable
+        .plan_project_enable(
+            &[SkillId("twin-proj-a".into()), SkillId("twin-proj-b".into())],
+            &project_root,
+            &["claude-code".into()],
+            &[(winner_key, CellResolution::Replace)],
+        )
+        .expect("plan with winner");
+
+    assert_eq!(winner_plan.cells[0].eligibility, CellEligibility::Ready);
+    assert_eq!(winner_plan.cells[1].eligibility, CellEligibility::Conflict);
+    assert_eq!(winner_plan.cells[1].resolution, CellResolution::Skip);
+}

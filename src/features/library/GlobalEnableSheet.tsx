@@ -11,6 +11,11 @@ import type {
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import type { MessageKey } from "../locale/messages";
 
+export interface EnableSkillItem {
+  id: string;
+  name: string;
+}
+
 /**
  * Global Enable three-step sheet (spec §7.4): ① Target group selection
  * (default empty, explicit Select all, deduped physical Target count and
@@ -21,18 +26,31 @@ import type { MessageKey } from "../locale/messages";
  */
 export function GlobalEnableSheet({
   client,
+  skills,
   skillId,
   skillName,
-  initialGroupIds,
+  initialGroupIds = [],
   onClose,
 }: {
   client: CatalogClient;
-  skillId: string;
-  skillName: string;
-  initialGroupIds: string[];
+  skills?: EnableSkillItem[];
+  skillId?: string;
+  skillName?: string;
+  initialGroupIds?: string[];
   onClose: () => void;
 }) {
-  const { t } = useLocale();
+  const { t, tPlural } = useLocale();
+  const normalizedSkills = useMemo<EnableSkillItem[]>(() => {
+    if (skills && skills.length > 0) return skills;
+    if (skillId) return [{ id: skillId, name: skillName ?? skillId }];
+    return [];
+  }, [skills, skillId, skillName]);
+  const isBatch = normalizedSkills.length > 1;
+  const primarySkillId = normalizedSkills[0]?.id ?? "";
+  const skillIds = useMemo(
+    () => normalizedSkills.map((s) => s.id),
+    [normalizedSkills],
+  );
   const [groupsSnapshot, setGroupsSnapshot] =
     useState<GlobalTargetGroupSnapshot | null>(null);
   const [selected, setSelected] = useState<string[]>(initialGroupIds);
@@ -52,16 +70,18 @@ export function GlobalEnableSheet({
   const busy = preparing || planning;
   async function refreshGroups() {
     try {
-      setGroupsSnapshot(await client.listTargetGroups(skillId));
+      if (!primarySkillId) return;
+      setGroupsSnapshot(await client.listTargetGroups(primarySkillId));
     } catch (cause) {
       setError(String(cause));
     }
   }
 
   useEffect(() => {
+    if (!primarySkillId) return;
     let current = true;
     client
-      .listTargetGroups(skillId)
+      .listTargetGroups(primarySkillId)
       .then((next) => {
         if (!current) return;
         setGroupsSnapshot(next);
@@ -73,7 +93,7 @@ export function GlobalEnableSheet({
     return () => {
       current = false;
     };
-  }, [client, skillId]);
+  }, [client, primarySkillId]);
 
   // Re-plan whenever the resolution set changes so the preview matrix always
   // reflects the user's latest per-cell decisions; only after Continue.
@@ -81,14 +101,15 @@ export function GlobalEnableSheet({
     if (
       shownStep !== "preview" ||
       selected.length === 0 ||
-      groupsSnapshot === null
+      groupsSnapshot === null ||
+      skillIds.length === 0
     ) {
       return;
     }
     let current = true;
     client
       .planGlobalEnable(
-        [skillId],
+        skillIds,
         selected,
         [...resolutions.entries()].map(([cellKey, resolution]) => ({
           cellKey,
@@ -106,7 +127,7 @@ export function GlobalEnableSheet({
     return () => {
       current = false;
     };
-  }, [client, skillId, selected, resolutions, groupsSnapshot, shownStep]);
+  }, [client, skillIds, selected, resolutions, groupsSnapshot, shownStep]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -192,7 +213,13 @@ export function GlobalEnableSheet({
         className="activation-sheet enable-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label={t("enable.global.dialogLabel", { skill: skillName })}
+        aria-label={
+          isBatch
+            ? tPlural("enable.global.dialogLabelBatch", normalizedSkills.length)
+            : t("enable.global.dialogLabel", {
+                skill: normalizedSkills[0]?.name ?? "",
+              })
+        }
       >
         <ol
           className="import-progress"
@@ -232,10 +259,27 @@ export function GlobalEnableSheet({
           <PreviewMatrixStep
             plan={plan}
             resolutions={resolutions}
+            isBatch={isBatch}
             onResolutionChange={(cellKey, resolution) => {
               setResolutions((current) => {
                 const next = new Map(current);
                 next.set(cellKey, resolution);
+                if (resolution === "replace" || resolution === "switch") {
+                  const changedCell = plan.cells.find(
+                    (c) => c.cellKey === cellKey,
+                  );
+                  if (changedCell) {
+                    for (const other of plan.cells) {
+                      if (
+                        other.cellKey !== cellKey &&
+                        other.targetRootId === changedCell.targetRootId &&
+                        other.entryPath === changedCell.entryPath
+                      ) {
+                        next.set(other.cellKey, "skip");
+                      }
+                    }
+                  }
+                }
                 return next;
               });
             }}
@@ -388,10 +432,12 @@ function TargetGroupStep({
 function PreviewMatrixStep({
   plan,
   resolutions,
+  isBatch,
   onResolutionChange,
 }: {
   plan: EnablePlan;
   resolutions: Map<string, CellResolution>;
+  isBatch: boolean;
   onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
 }) {
   const { t } = useLocale();
@@ -405,6 +451,7 @@ function PreviewMatrixStep({
           key={cell.cellKey}
           cell={cell}
           resolution={resolutions.get(cell.cellKey) ?? cell.resolution}
+          isBatch={isBatch}
           onResolutionChange={onResolutionChange}
         />
       ))}
@@ -416,10 +463,12 @@ function PreviewMatrixStep({
 function PreviewCell({
   cell,
   resolution,
+  isBatch,
   onResolutionChange,
 }: {
   cell: EnableCell;
   resolution: CellResolution;
+  isBatch: boolean;
   onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
 }) {
   const { t } = useLocale();
@@ -448,7 +497,6 @@ function PreviewCell({
       {cell.eligibility === "conflict" && (
         <select
           className="enable-resolution-select"
-          role="cell"
           aria-label={cell.cellKey}
           value={resolution}
           onChange={(event) =>
@@ -458,16 +506,44 @@ function PreviewCell({
             )
           }
         >
-          <option value="switch">{t("enable.global.resolutionSwitch")}</option>
-          <option value="replace">
-            {t("enable.global.resolutionReplace")}
-          </option>
-          <option value="adopt">{t("enable.global.resolutionAdopt")}</option>
-          <option value="skip">{t("enable.global.resolutionCancel")}</option>
+          {isBatch ? (
+            <>
+              {typeof cell.occupier === "object" &&
+                "managed" in cell.occupier && (
+                  <option value="switch">
+                    {t("enable.global.resolutionSwitch")}
+                  </option>
+                )}
+              <option value="replace">
+                {t("enable.global.resolutionReplaceBatch")}
+              </option>
+              <option value="skip">
+                {t("enable.global.resolutionSkipBatch")}
+              </option>
+            </>
+          ) : (
+            <>
+              <option value="switch">
+                {t("enable.global.resolutionSwitch")}
+              </option>
+              <option value="replace">
+                {t("enable.global.resolutionReplace")}
+              </option>
+              <option value="adopt">
+                {t("enable.global.resolutionAdopt")}
+              </option>
+              <option value="skip">
+                {t("enable.global.resolutionCancel")}
+              </option>
+            </>
+          )}
         </select>
       )}
       {blockedLabel !== null && (
         <small className="enable-matrix-note">{blockedLabel}</small>
+      )}
+      {cell.detail !== null && (
+        <small className="enable-matrix-note">{cell.detail}</small>
       )}
       {cell.occExactDirect && (
         <small className="enable-matrix-note">

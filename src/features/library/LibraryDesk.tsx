@@ -47,7 +47,9 @@ import {
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
 import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
+import { GlobalEnableSheet } from "./GlobalEnableSheet";
 import { ProjectEnableSheet } from "./ProjectEnableSheet";
+import { SelectionShelf } from "./SelectionShelf";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
@@ -271,6 +273,11 @@ export function LibraryDesk({
   }, [gitSourceCapability]);
   const [surface, setSurface] = useState<"library" | "agents">("library");
   const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
+  const [isBatchGlobalEnableOpen, setIsBatchGlobalEnableOpen] = useState(false);
+  const [isBatchProjectEnableOpen, setIsBatchProjectEnableOpen] =
+    useState(false);
+  const [isSelectMode, setIsSelectMode] = useState(false);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [agentOverlayOpen, setAgentOverlayOpen] = useState(false);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [activePane, setActivePane] = useState<PaneKey>("library");
@@ -280,7 +287,23 @@ export function LibraryDesk({
   const lastOverlay = useRef<"import" | "preferences" | "appUpdate" | null>(
     null,
   );
+
+  const exitSelectMode = () => {
+    setIsSelectMode(false);
+    setSelectedSkillIds([]);
+  };
+
+  const toggleSkillSelection = (skillId: string) => {
+    setSelectedSkillIds((current) =>
+      current.includes(skillId)
+        ? current.filter((id) => id !== skillId)
+        : [...current, skillId],
+    );
+  };
+
   const hasOtherOverlay =
+    isBatchGlobalEnableOpen ||
+    isBatchProjectEnableOpen ||
     agentOverlayOpen ||
     isProjectEnableOpen ||
     isLinkImportOpen ||
@@ -292,6 +315,17 @@ export function LibraryDesk({
     Boolean(appUpdatePanel.update) && !hasOtherOverlay;
   const hasOverlay = hasOtherOverlay || hasAppUpdateOverlay;
   const isAgentDrawerModal = layoutMode === "mid" && agentDrawerOpen;
+
+  useEffect(() => {
+    if (!isSelectMode || hasOverlay) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        exitSelectMode();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isSelectMode, hasOverlay]);
 
   useEffect(() => {
     function onResize() {
@@ -411,9 +445,21 @@ export function LibraryDesk({
       <Toolbar
         surface={surface}
         onSurfaceChange={(next) => {
+          if (next !== "library") {
+            exitSelectMode();
+          }
           setSurface(next);
           setAgentDrawerOpen(false);
           setActivePane("library");
+        }}
+        isSelectMode={isSelectMode}
+        onToggleSelectMode={() => {
+          if (isSelectMode) {
+            exitSelectMode();
+          } else {
+            setIsSelectMode(true);
+            setSelectedSkillIds([]);
+          }
         }}
         layoutMode={layoutMode}
         agentDrawerOpen={agentDrawerOpen}
@@ -486,6 +532,9 @@ export function LibraryDesk({
               filter={filter}
               skills={skills}
               selectedId={selectedId}
+              isSelectMode={isSelectMode}
+              selectedSkillIds={selectedSkillIds}
+              onToggleSkillSelection={toggleSkillSelection}
               onFilter={onFilter}
               onSelect={(skillId) => {
                 if (layoutMode === "narrow") setActivePane("detail");
@@ -544,6 +593,49 @@ export function LibraryDesk({
           onManageGitGroup={onManageGitGroup}
         />
       </div>
+      {surface === "library" && isSelectMode ? (
+        <SelectionShelf
+          selectedCount={selectedSkillIds.length}
+          onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
+          onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
+          onExit={exitSelectMode}
+        />
+      ) : null}
+      {isBatchGlobalEnableOpen ? (
+        <GlobalEnableSheet
+          client={client}
+          skills={skills
+            .filter((s) => selectedSkillIds.includes(s.id))
+            .map((s) => ({
+              id: s.id,
+              name: s.displayName ?? s.directoryName,
+            }))}
+          onClose={() => {
+            setIsBatchGlobalEnableOpen(false);
+            exitSelectMode();
+          }}
+        />
+      ) : null}
+      {isBatchProjectEnableOpen ? (
+        <ProjectEnableSheet
+          client={client}
+          skills={skills
+            .filter((s) => selectedSkillIds.includes(s.id))
+            .map((s) => ({
+              id: s.id,
+              name: s.displayName ?? s.directoryName,
+            }))}
+          onClose={() => {
+            setIsBatchProjectEnableOpen(false);
+            exitSelectMode();
+          }}
+          onOpenAgentManagement={() => {
+            setIsBatchProjectEnableOpen(false);
+            exitSelectMode();
+            setSurface("agents");
+          }}
+        />
+      ) : null}
       {relocatePanel.isOpen ? (
         <RelocateSheet
           panel={relocatePanel}
@@ -645,6 +737,8 @@ export function LibraryDesk({
 function Toolbar({
   surface,
   onSurfaceChange,
+  isSelectMode,
+  onToggleSelectMode,
   layoutMode,
   agentDrawerOpen,
   onToggleAgentDrawer,
@@ -653,6 +747,8 @@ function Toolbar({
 }: {
   surface: "library" | "agents";
   onSurfaceChange: (surface: "library" | "agents") => void;
+  isSelectMode: boolean;
+  onToggleSelectMode: () => void;
   layoutMode: LayoutMode;
   agentDrawerOpen: boolean;
   onToggleAgentDrawer: () => void;
@@ -714,6 +810,15 @@ function Toolbar({
               </button>
             ) : null}
             <button
+              id="library-select-trigger"
+              type="button"
+              className={`toolbar-button${isSelectMode ? " active" : ""}`}
+              aria-pressed={isSelectMode}
+              onClick={onToggleSelectMode}
+            >
+              {t("shelf.select")}
+            </button>
+            <button
               id="link-import-trigger"
               type="button"
               className="primary-button"
@@ -745,6 +850,9 @@ interface LibrarySidebarProps {
   filter: CatalogFilter;
   skills: SkillSummary[];
   selectedId: string | null;
+  isSelectMode: boolean;
+  selectedSkillIds: string[];
+  onToggleSkillSelection: (skillId: string) => void;
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
 }
@@ -753,6 +861,9 @@ function LibrarySidebar({
   filter,
   skills,
   selectedId,
+  isSelectMode,
+  selectedSkillIds,
+  onToggleSkillSelection,
   onFilter,
   onSelect,
 }: LibrarySidebarProps) {
@@ -791,30 +902,51 @@ function LibrarySidebar({
       </div>
       <div className="skill-list">
         {skills.length ? (
-          skills.map((skill) => (
-            <button
-              type="button"
-              className="skill-row"
-              aria-label={skill.directoryName}
-              aria-pressed={selectedId === skill.id}
-              key={skill.id}
-              onClick={() => onSelect(skill.id)}
-            >
-              <StatusDot health={skill.health} />
-              <span className="skill-row-copy">
-                <strong>{skill.directoryName}</strong>
-                <span>{skill.description}</span>
-              </span>
-              <span
-                className="agent-count"
-                aria-label={t("library.sidebar.agent_count", {
-                  count: skill.enabledAgentCount,
-                })}
+          skills.map((skill) => {
+            const isChecked = selectedSkillIds.includes(skill.id);
+            return (
+              <button
+                type="button"
+                className={`skill-row${isChecked ? " skill-row--selected" : ""}`}
+                aria-label={skill.directoryName}
+                aria-pressed={
+                  isSelectMode ? isChecked : selectedId === skill.id
+                }
+                key={skill.id}
+                onClick={() => {
+                  if (isSelectMode) {
+                    onToggleSkillSelection(skill.id);
+                  } else {
+                    onSelect(skill.id);
+                  }
+                }}
               >
-                {skill.enabledAgentCount}
-              </span>
-            </button>
-          ))
+                {isSelectMode && (
+                  <input
+                    type="checkbox"
+                    className="skill-select-checkbox"
+                    checked={isChecked}
+                    onChange={() => onToggleSkillSelection(skill.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={skill.directoryName}
+                  />
+                )}
+                <StatusDot health={skill.health} />
+                <span className="skill-row-copy">
+                  <strong>{skill.directoryName}</strong>
+                  <span>{skill.description}</span>
+                </span>
+                <span
+                  className="agent-count"
+                  aria-label={t("library.sidebar.agent_count", {
+                    count: skill.enabledAgentCount,
+                  })}
+                >
+                  {skill.enabledAgentCount}
+                </span>
+              </button>
+            );
+          })
         ) : (
           <div className="empty-list">
             <span>{t("library.sidebar.empty")}</span>

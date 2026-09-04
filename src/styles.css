@@ -37,6 +37,15 @@
   --space-10: 40px;
 }
 
+.skill-select-checkbox {
+  margin-right: var(--space-2, 8px);
+  cursor: pointer;
+}
+
+.skill-row--selected {
+  background-color: var(--accent-soft, rgba(59, 130, 246, 0.08));
+}
+
 * {
   box-sizing: border-box;
 }
@@ -342,6 +351,41 @@ button:active:not(:disabled) {
     grid-template-columns: 1fr;
     gap: 2px;
   }
+}
+
+/* Selection shelf (spec §7.4, fixed action bar at bottom) */
+.selection-shelf {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4, 16px);
+  padding: var(--space-3, 12px) var(--space-6, 24px);
+  background: var(--surface-raised, #fff);
+  border-top: 1px solid var(--divider, #d9d5cc);
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
+  z-index: 50;
+}
+
+.selection-shelf-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+.selection-shelf-count {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text, #1c1917);
+}
+
+.selection-shelf-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
 }
 
 .library-desk {

@@ -993,3 +993,279 @@ fn blocked_target_cell_is_skipped_without_blocking_ready_cells() {
     assert!(catalog_desired(&harness, "skill-authoring", "claude-code"));
     assert!(!catalog_desired(&harness, "skill-authoring", "workbench"));
 }
+
+#[test]
+fn batch_global_enable_multiple_skills_and_targets_with_undo() {
+    let harness = harness();
+    let claude_root_id = harness.home.activation_root_id("claude-code");
+    let codex_root_id = harness.home.activation_root_id("codex");
+
+    let plan = harness
+        .enable
+        .plan_global_enable(
+            &[
+                SkillId("skill-authoring".into()),
+                SkillId("legacy-audit".into()),
+            ],
+            &[claude_root_id.clone(), codex_root_id.clone()],
+            &[],
+        )
+        .expect("plan batch global enable");
+
+    assert_eq!(plan.cells.len(), 4);
+    assert!(
+        plan.cells
+            .iter()
+            .all(|c| c.eligibility == CellEligibility::Ready)
+    );
+
+    let result = harness
+        .enable
+        .apply(&plan.plan_token)
+        .expect("apply batch global enable");
+    assert_eq!(result.cells.len(), 4);
+    assert!(
+        result
+            .cells
+            .iter()
+            .all(|c| c.outcome == CellOutcome::Succeeded)
+    );
+
+    let claude_authoring = entry_path(&harness, "skill-authoring", "claude-code");
+    let claude_legacy = entry_path(&harness, "legacy-audit", "claude-code");
+    let codex_authoring = entry_path(&harness, "skill-authoring", "codex");
+    let codex_legacy = entry_path(&harness, "legacy-audit", "codex");
+
+    assert!(claude_authoring.is_symlink());
+    assert!(claude_legacy.is_symlink());
+    assert!(codex_authoring.is_symlink());
+    assert!(codex_legacy.is_symlink());
+
+    let undo = harness
+        .enable
+        .undo(&result.operation_id)
+        .expect("undo batch global enable");
+    assert_eq!(undo.cells.len(), 4);
+    assert!(undo.cells.iter().all(|c| c.undone));
+
+    assert!(!claude_authoring.exists());
+    assert!(!claude_legacy.exists());
+    assert!(!codex_authoring.exists());
+    assert!(!codex_legacy.exists());
+}
+
+#[test]
+fn batch_global_enable_intra_batch_collision_and_winner_selection() {
+    let harness = harness();
+    let claude_root_id = harness.home.activation_root_id("claude-code");
+
+    // Seed two different skills that share the exact same directory_name ("twin-tool")
+    let final_a = harness.home.path().join("Projects/twin-a");
+    std::fs::create_dir_all(&final_a).expect("create twin-a");
+    std::fs::write(final_a.join("SKILL.md"), "# Twin A\n").expect("write SKILL.md");
+    let final_b = harness.home.path().join("Projects/twin-b");
+    std::fs::create_dir_all(&final_b).expect("create twin-b");
+    std::fs::write(final_b.join("SKILL.md"), "# Twin B\n").expect("write SKILL.md");
+
+    harness.home.with_sql("seed twin skills", |conn| {
+        conn.execute(
+            "INSERT INTO skills (
+                id, directory_name, directory_identity_key, display_name, description,
+                source_kind, library_entry_path, final_entity_path, health,
+                created_at, updated_at
+             ) VALUES ('twin-a', 'twin-tool', 'twin-tool', 'Twin Tool A', 'First twin',
+                       'link', NULL, ?1, 'healthy', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+            params![final_a.to_string_lossy()],
+        ).expect("insert twin-a");
+        conn.execute(
+            "INSERT INTO skills (
+                id, directory_name, directory_identity_key, display_name, description,
+                source_kind, library_entry_path, final_entity_path, health,
+                created_at, updated_at
+             ) VALUES ('twin-b', 'twin-tool', 'twin-tool', 'Twin Tool B', 'Second twin',
+                       'link', NULL, ?1, 'healthy', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+            params![final_b.to_string_lossy()],
+        ).expect("insert twin-b");
+    });
+
+    // Initial plan with twin-a, twin-b, and non-conflicting skill-authoring
+    let initial_plan = harness
+        .enable
+        .plan_global_enable(
+            &[
+                SkillId("twin-a".into()),
+                SkillId("twin-b".into()),
+                SkillId("skill-authoring".into()),
+            ],
+            std::slice::from_ref(&claude_root_id),
+            &[],
+        )
+        .expect("plan with intra-batch collision");
+
+    // Both colliding cells must be in Conflict with resolution Skip; the non-conflicting cell is Ready
+    let cell_a = initial_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "twin-a")
+        .unwrap();
+    let cell_b = initial_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "twin-b")
+        .unwrap();
+    let cell_authoring = initial_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "skill-authoring")
+        .unwrap();
+
+    assert_eq!(cell_a.eligibility, CellEligibility::Conflict);
+    assert_eq!(cell_a.resolution, CellResolution::Skip);
+    assert_eq!(cell_b.eligibility, CellEligibility::Conflict);
+    assert_eq!(cell_b.resolution, CellResolution::Skip);
+    assert_eq!(cell_authoring.eligibility, CellEligibility::Ready);
+
+    // If applied without choosing a winner, twin-a and twin-b are Skipped, skill-authoring succeeds
+    let apply_no_winner = harness
+        .enable
+        .apply(&initial_plan.plan_token)
+        .expect("apply without winner");
+    assert_eq!(
+        apply_no_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_a.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Skipped
+    );
+    assert_eq!(
+        apply_no_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_b.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Skipped
+    );
+    assert_eq!(
+        apply_no_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_authoring.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Succeeded
+    );
+
+    // Revert before second round
+    harness
+        .enable
+        .undo(&apply_no_winner.operation_id)
+        .expect("undo initial");
+
+    // Now plan with twin-a explicitly selected as winner
+    let winner_resolutions = vec![
+        (cell_a.cell_key.clone(), CellResolution::Replace),
+        (cell_b.cell_key.clone(), CellResolution::Skip),
+    ];
+    let resolved_plan = harness
+        .enable
+        .plan_global_enable(
+            &[
+                SkillId("twin-a".into()),
+                SkillId("twin-b".into()),
+                SkillId("skill-authoring".into()),
+            ],
+            std::slice::from_ref(&claude_root_id),
+            &winner_resolutions,
+        )
+        .expect("plan with winner chosen");
+
+    let res_cell_a = resolved_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "twin-a")
+        .unwrap();
+    let res_cell_b = resolved_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "twin-b")
+        .unwrap();
+    let res_cell_auth = resolved_plan
+        .cells
+        .iter()
+        .find(|c| c.skill_id.0 == "skill-authoring")
+        .unwrap();
+
+    // Winner cell becomes Ready (since target entry was empty); loser remains Conflict / Skipped
+    assert_eq!(res_cell_a.eligibility, CellEligibility::Ready);
+    assert_eq!(res_cell_b.eligibility, CellEligibility::Conflict);
+    assert_eq!(res_cell_b.resolution, CellResolution::Skip);
+    assert_eq!(res_cell_auth.eligibility, CellEligibility::Ready);
+
+    let result_winner = harness
+        .enable
+        .apply(&resolved_plan.plan_token)
+        .expect("apply winner plan");
+    assert_eq!(
+        result_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_a.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Succeeded
+    );
+    assert_eq!(
+        result_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_b.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Skipped
+    );
+    assert_eq!(
+        result_winner
+            .cells
+            .iter()
+            .find(|c| c.cell_key == cell_authoring.cell_key)
+            .unwrap()
+            .outcome,
+        CellOutcome::Succeeded
+    );
+
+    let twin_entry = entry_path(&harness, "twin-tool", "claude-code");
+    assert!(twin_entry.is_symlink());
+    assert_eq!(std::fs::read_link(&twin_entry).expect("readlink"), final_a);
+}
+
+#[test]
+fn batch_global_enable_untracked_occupier_rejects_adopt() {
+    let harness = harness();
+    let claude_root_id = harness.home.activation_root_id("claude-code");
+
+    // Place an untracked occupier in claude_root / skill-authoring
+    let occupier_path = entry_path(&harness, "skill-authoring", "claude-code");
+    std::fs::write(&occupier_path, "occupier file").expect("write occupier");
+
+    // Planning a batch with 2 skills, attempting Adopt on the untracked occupier
+    let cell_key = format!("skill-authoring|{claude_root_id}");
+    let plan = harness
+        .enable
+        .plan_global_enable(
+            &[
+                SkillId("skill-authoring".into()),
+                SkillId("legacy-audit".into()),
+            ],
+            std::slice::from_ref(&claude_root_id),
+            &[(cell_key.clone(), CellResolution::Adopt)],
+        )
+        .expect("plan batch with adopt resolution");
+
+    let cell = plan.cells.iter().find(|c| c.cell_key == cell_key).unwrap();
+    assert_eq!(cell.eligibility, CellEligibility::Conflict);
+    // Batch Untracked occupier does not support Adopt; must remain Skip
+    assert_eq!(cell.resolution, CellResolution::Skip);
+}

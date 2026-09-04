@@ -55,7 +55,7 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
 
   // Step 3: Preview
   expect(
-    (await within(dialog).findAllByText("Resolved target group")).length,
+    (await within(dialog).findAllByText(/Resolved target group/)).length,
   ).toBeGreaterThan(0);
   expect(
     within(dialog).getAllByText(/1 physical write/).length,
@@ -88,6 +88,72 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
       within(dialog).getByPlaceholderText("/path/to/project"),
     ).toBeInTheDocument();
   });
+});
+
+test("batch project enable flow with multiple skills", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  render(
+    <ProjectEnableSheet
+      client={client}
+      skills={[
+        { id: "skill-authoring", name: "Skill authoring" },
+        { id: "media-xray", name: "Media X-ray" },
+      ]}
+      onClose={() => {}}
+    />,
+  );
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Enable 2 skills to Project",
+  });
+  expect(dialog).toBeInTheDocument();
+
+  // Step 1: Folder
+  const folderInput = within(dialog).getByPlaceholderText("/path/to/project");
+  await user.type(folderInput, "/my/batch-project");
+  const continueBtn = within(dialog).getByRole("button", {
+    name: "Review the plan",
+  });
+  await user.click(continueBtn);
+
+  // Step 2: Agents
+  const selectAllBtn = within(dialog).getByRole("button", {
+    name: "Select all",
+  });
+  await user.click(selectAllBtn);
+  const reviewBtn = within(dialog).getByRole("button", {
+    name: "Review the plan",
+  });
+  await user.click(reviewBtn);
+
+  // Step 3: Preview shows both skills
+  const authoringMatches =
+    await within(dialog).findAllByText(/Skill authoring/);
+  expect(authoringMatches.length).toBeGreaterThan(0);
+  const mediaMatches = within(dialog).getAllByText(/Media X-ray/);
+  expect(mediaMatches.length).toBeGreaterThan(0);
+
+  const applyBtn = within(dialog).getByRole("button", {
+    name: "Enable in Project",
+  });
+  expect(applyBtn).not.toBeDisabled();
+  await user.click(applyBtn);
+
+  // Step 4: Result
+  expect(
+    await within(dialog).findByText(
+      "No Project record was created. Project links are not tracked or monitored.",
+    ),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText(/cells succeeded/)).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("button", { name: "Undo this operation" }),
+  ).toBeInTheDocument();
+
+  await user.click(
+    within(dialog).getByRole("button", { name: "Undo this operation" }),
+  );
 });
 
 test("folder step renders browse button and input", async () => {
