@@ -366,13 +366,13 @@ fn write_lock_atomically(
             let final_is_our_temp = final_snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.identity == temporary_identity && snapshot.bytes == bytes
             });
-            let expected = if final_is_our_temp {
-                temporary_snapshot.clone().ok_or_else(|| {
-                    LockReleaseError::Io(format!(
+            if final_is_our_temp {
+                if temporary_snapshot.is_none() {
+                    return Err(LockReleaseError::Io(format!(
                         "the lock compensation slot vanished: {}",
                         lock_path.display()
-                    ))
-                })?
+                    )));
+                }
             } else if let Some(expected) = &expected_final {
                 if final_snapshot.as_ref() != Some(expected)
                     || temporary_snapshot.is_none()
@@ -385,13 +385,12 @@ fn write_lock_atomically(
                         lock_path.display()
                     )));
                 }
-                expected.clone()
             } else {
                 return Err(LockReleaseError::Io(format!(
                     "the lock changed while the CAS rollback was in progress: {}",
                     lock_path.display()
                 )));
-            };
+            }
 
             let restore_status = unsafe {
                 libc::renameatx_np(
@@ -415,12 +414,14 @@ fn write_lock_atomically(
             let after_final = read_regular_at(&parent, &final_name, lock_path)
                 .ok()
                 .and_then(|snapshot| snapshot);
-            if after_temp.as_ref() == Some(&expected) {
+            if after_temp.as_ref().is_some_and(|snapshot| {
+                snapshot.identity == temporary_identity && snapshot.bytes == bytes
+            }) {
                 unlink_temp(
                     &parent,
                     &temporary_name,
                     &temporary_path,
-                    &expected.identity,
+                    &temporary_identity,
                 )?;
                 sync_lock_parent(&parent, lock_path)?;
                 return Err(LockReleaseError::FingerprintChanged);
