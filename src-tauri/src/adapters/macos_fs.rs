@@ -676,6 +676,7 @@ impl FileSystem for MacOsFileSystem {
     fn create_project_activation(
         &self,
         project_root: &DirectoryFingerprint,
+        expected_targets: &[(PathBuf, ProjectTargetResolution)],
         target_path: &Path,
         create_steps: &[PathBuf],
         entry_path: &Path,
@@ -684,6 +685,7 @@ impl FileSystem for MacOsFileSystem {
     ) -> Result<DirectoryFingerprint, FileSystemError> {
         create_project_activation_nofollow(
             project_root,
+            expected_targets,
             target_path,
             create_steps,
             entry_path,
@@ -1047,11 +1049,13 @@ impl FileSystem for MacOsFileSystem {
         let (source_parent, _) = open_absolute_directory_chain_nofollow(
             &source_parent_path,
             "open Source Promotion Local Link source parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, &source_parent_path))?;
         let (destination_parent, _) = open_absolute_directory_chain_nofollow(
             &destination_parent_path,
             "open Source Promotion Local Link target parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, &destination_parent_path))?;
         let actual_source_parent =
             directory_descriptor_fingerprint(&source_parent, &source_parent_path)?;
         let actual_destination_parent =
@@ -1399,7 +1403,8 @@ impl FileSystem for MacOsFileSystem {
         let (destination_parent, metadata) = open_absolute_directory_chain_nofollow(
             destination_parent_path,
             "open Local Source Copy destination parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, destination_parent_path))?;
         let actual_parent = DirectoryFingerprint {
             canonical_path: destination_parent_path.to_path_buf(),
             device: metadata.st_dev as u64,
@@ -1478,6 +1483,49 @@ impl FileSystem for MacOsFileSystem {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    fn remove_directory_verified_nofollow(
+        &self,
+        path: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        let path = canonical_entry_path_nofollow(&self.expand_home(path))?;
+        let parent_path = path
+            .parent()
+            .ok_or_else(|| FileSystemError::InvalidConfiguredPath { path: path.clone() })?;
+        let name = cstring_path_component(
+            path.file_name(),
+            &path,
+            "encode verified directory removal name",
+        )?;
+        let (parent, _) = open_absolute_directory_chain_nofollow(
+            parent_path,
+            "open verified directory removal parent without following links",
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, parent_path))?;
+        let metadata = metadata_at_nofollow(
+            &parent,
+            &name,
+            &path,
+            "inspect verified directory before removal",
+        )?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_dev as u64 != expected.device
+            || metadata.st_ino != expected.inode
+            || expected.canonical_path != path
+        {
+            return Err(FileSystemError::PlanStale { path });
+        }
+        remove_child_directory_at(
+            &parent,
+            metadata.st_dev,
+            metadata.st_ino,
+            &name,
+            &path,
+            "remove verified directory without following links",
+        )?;
+        sync_descriptor(&parent, parent_path, "sync verified directory parent")
     }
 
     fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
@@ -4665,7 +4713,8 @@ impl FileSystem for MacOsFileSystem {
         let (isolated_parent, _) = open_absolute_directory_chain_nofollow(
             isolated_parent_path,
             "open isolated external source parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, isolated_parent_path))?;
         let isolated_metadata = metadata_at_nofollow(
             &isolated_parent,
             &isolated_name,
@@ -4701,7 +4750,8 @@ impl FileSystem for MacOsFileSystem {
         let (source_parent, _) = open_absolute_directory_chain_nofollow(
             source_parent_path,
             "open restored external source parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, source_parent_path))?;
         match metadata_at_nofollow(
             &source_parent,
             &source_name,
@@ -4767,7 +4817,8 @@ impl FileSystem for MacOsFileSystem {
         let (parent, _) = open_absolute_directory_chain_nofollow(
             parent_path,
             "open isolated source discard parent without following links",
-        )?;
+        )
+        .map_err(|error| map_nofollow_race_to_plan_stale(error, parent_path))?;
         let metadata = match metadata_at_nofollow(
             &parent,
             &name,
@@ -6764,7 +6815,8 @@ fn move_occupant_to_backup_nofollow_at(
     let (entry_parent, entry_parent_metadata) = open_absolute_directory_chain_nofollow(
         entry_parent_path,
         "open Activation occupant parent without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, entry_parent_path))?;
     let actual_entry_parent = DirectoryFingerprint {
         canonical_path: entry_parent_path.to_path_buf(),
         device: entry_parent_metadata.st_dev as u64,
@@ -6907,7 +6959,8 @@ fn restore_occupant_from_backup_nofollow_at(
     let (entry_parent, entry_parent_metadata) = open_absolute_directory_chain_nofollow(
         entry_parent_path,
         "open Activation restore parent without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, entry_parent_path))?;
     let actual_entry_parent = DirectoryFingerprint {
         canonical_path: entry_parent_path.to_path_buf(),
         device: entry_parent_metadata.st_dev as u64,
@@ -6933,7 +6986,8 @@ fn restore_occupant_from_backup_nofollow_at(
     let (backup_parent, _) = open_absolute_directory_chain_nofollow(
         backup_parent_path,
         "open Activation occupant backup without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, backup_parent_path))?;
     let entry_name = cstring_path_component(
         entry_path.file_name(),
         entry_path,
@@ -8132,7 +8186,8 @@ fn open_absolute_directory_chain_nofollow(
                         source: std::io::Error::new(std::io::ErrorKind::InvalidInput, source),
                     })?;
                 let (next, _) =
-                    open_directory_at_nofollow(&current, &encoded, &current_path, operation)?;
+                    open_directory_at_nofollow(&current, &encoded, &current_path, operation)
+                        .map_err(|error| map_nofollow_race_to_plan_stale(error, &current_path))?;
                 current = next;
             }
             Component::ParentDir | Component::Prefix(_) => {
@@ -8201,7 +8256,8 @@ fn isolate_external_source_nofollow(
     let (parent, parent_metadata) = open_absolute_directory_chain_nofollow(
         &source_parent,
         "open external source parent without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, &source_parent))?;
     let source_metadata = metadata_at_nofollow(
         &parent,
         &source_name,
@@ -8356,7 +8412,8 @@ fn open_project_relative_directory_nofollow(
         };
         current_path.push(name);
         let encoded = cstring_path_component(Some(name), &current_path, operation)?;
-        let (next, _) = open_directory_at_nofollow(&current, &encoded, &current_path, operation)?;
+        let (next, _) = open_directory_at_nofollow(&current, &encoded, &current_path, operation)
+            .map_err(|error| map_nofollow_race_to_plan_stale(error, &current_path))?;
         current = next;
     }
     let metadata = directory_descriptor_metadata(&current, path)?;
@@ -8365,16 +8422,32 @@ fn open_project_relative_directory_nofollow(
 
 fn create_project_activation_nofollow(
     project_root: &DirectoryFingerprint,
+    expected_targets: &[(PathBuf, ProjectTargetResolution)],
     target_path: &Path,
     create_steps: &[PathBuf],
     entry_path: &Path,
     final_entity_path: &Path,
     expected_target: Option<&DirectoryFingerprint>,
 ) -> Result<DirectoryFingerprint, FileSystemError> {
+    for (configured_relative_path, expected) in expected_targets {
+        let current =
+            resolve_project_skills_dir(&project_root.canonical_path, configured_relative_path);
+        let matches = current == *expected
+            || (!expected.create_steps.is_empty()
+                && current.fault.is_none()
+                && current.resolved_container == target_path
+                && current.create_steps.is_empty());
+        if !matches || current.resolved_container != target_path {
+            return Err(FileSystemError::PlanStale {
+                path: target_path.to_path_buf(),
+            });
+        }
+    }
     let (root, root_metadata) = open_directory_nofollow(
         &project_root.canonical_path,
         "open canonical project root without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, &project_root.canonical_path))?;
     if root_metadata.st_dev as u64 != project_root.device
         || root_metadata.st_ino != project_root.inode
     {
@@ -8442,7 +8515,8 @@ fn create_project_activation_nofollow(
                 &name,
                 step,
                 "open created project Activation target component without following links",
-            )?;
+            )
+            .map_err(|error| map_nofollow_race_to_plan_stale(error, step))?;
             if metadata.st_dev != root_metadata.st_dev {
                 return Err(FileSystemError::RecoveryRequired {
                     operation: "create project Activation target",
@@ -8536,7 +8610,8 @@ fn create_activation_nofollow_at(
     let (parent, metadata) = open_absolute_directory_chain_nofollow(
         parent_path,
         "open Activation parent without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, parent_path))?;
     let actual = DirectoryFingerprint {
         canonical_path: parent_path.to_path_buf(),
         device: metadata.st_dev as u64,
@@ -8585,7 +8660,8 @@ fn remove_activation_nofollow_at(
     let (parent, metadata) = open_absolute_directory_chain_nofollow(
         parent_path,
         "open Activation removal parent without following links",
-    )?;
+    )
+    .map_err(|error| map_nofollow_race_to_plan_stale(error, parent_path))?;
     let actual = DirectoryFingerprint {
         canonical_path: parent_path.to_path_buf(),
         device: metadata.st_dev as u64,
@@ -8753,6 +8829,22 @@ fn file_system_error_is_not_found(error: &FileSystemError) -> bool {
         FileSystemError::Io { source, .. }
             if source.kind() == std::io::ErrorKind::NotFound
     )
+}
+
+fn map_nofollow_race_to_plan_stale(error: FileSystemError, path: &Path) -> FileSystemError {
+    match error {
+        FileSystemError::Io { source, .. }
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::TooManyLinks
+            ) =>
+        {
+            FileSystemError::PlanStale {
+                path: path.to_path_buf(),
+            }
+        }
+        other => other,
+    }
 }
 
 fn ensure_entry_missing_at(
@@ -10479,6 +10571,30 @@ mod tests {
 
         assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
         assert!(source.join("SKILL.md").is_file());
+        assert!(preserved.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn verified_directory_removal_rejects_a_same_tree_replacement() {
+        let root = tempfile::tempdir().expect("temporary Local Copy rollback root");
+        let destination = root.path().join("copy");
+        let preserved = root.path().join("copy-original");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(destination.join("SKILL.md"), "# Same bytes\n").expect("write destination");
+        let filesystem = MacOsFileSystem::new(root.path().to_path_buf());
+        let expected = filesystem
+            .directory_fingerprint(&destination)
+            .expect("destination identity");
+
+        fs::rename(&destination, &preserved).expect("preserve destination");
+        fs::create_dir(&destination).expect("create replacement destination");
+        fs::write(destination.join("SKILL.md"), "# Same bytes\n")
+            .expect("write replacement destination");
+
+        let result = filesystem.remove_directory_verified_nofollow(&destination, &expected);
+
+        assert!(matches!(result, Err(FileSystemError::PlanStale { .. })));
+        assert!(destination.join("SKILL.md").is_file());
         assert!(preserved.join("SKILL.md").is_file());
     }
 

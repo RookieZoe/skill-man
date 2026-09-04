@@ -308,42 +308,42 @@ fn write_lock_atomically(
         }
 
         let previous = read_regular_at(&parent, &temporary_name, &temporary_path);
-        let previous_snapshot = previous
-            .as_ref()
-            .ok()
-            .and_then(|snapshot| snapshot.as_ref());
-        let matches_frozen = previous_snapshot.is_some_and(|snapshot| {
-            snapshot.identity == *expected_identity
-                && expected_fingerprint
-                    .is_some_and(|expected| lock_fingerprint(&snapshot.bytes) == expected)
-        });
+        let previous_snapshot = match previous {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => {
+                return Err(LockReleaseError::Io(format!(
+                    "the pre-CAS lock claim is not a readable regular file: {}",
+                    lock_path.display()
+                )));
+            }
+        };
+        let matches_frozen = previous_snapshot.identity == *expected_identity
+            && expected_fingerprint
+                .is_some_and(|expected| lock_fingerprint(&previous_snapshot.bytes) == expected);
         if matches_frozen {
-            let previous_identity = previous_snapshot
-                .expect("matches_frozen implies a previous snapshot")
-                .identity;
             unlink_temp(
                 &parent,
                 &temporary_name,
                 &temporary_path,
-                &previous_identity,
+                &previous_snapshot.identity,
             )?;
             sync_lock_parent(&parent, lock_path)?;
             return Ok(());
         }
 
         // The exchange observed a different inode or different bytes. Put
-        // that live claim back with another atomic exchange; never publish
-        // our rewrite over a concurrent installer update.
+        // that live claim back with another atomic exchange; never delete a
+        // claim that appeared while this compensation was in flight.
         let current = read_regular_at(&parent, &final_name, lock_path);
-        let current_snapshot = current.as_ref().ok().and_then(|snapshot| snapshot.as_ref());
-        let can_restore = current_snapshot.is_some_and(|snapshot| {
-            snapshot.identity == temporary_identity && snapshot.bytes == bytes
-        });
+        let can_restore = current
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| snapshot.as_ref())
+            .is_some_and(|snapshot| {
+                snapshot.identity == temporary_identity && snapshot.bytes == bytes
+            });
         if !can_restore {
-            return Err(LockReleaseError::Io(format!(
-                "the lock changed while the CAS rollback was in progress: {}",
-                lock_path.display()
-            )));
+            return Err(LockReleaseError::FingerprintChanged);
         }
         let restore_status = unsafe {
             libc::renameatx_np(
@@ -361,15 +361,110 @@ fn write_lock_atomically(
                 std::io::Error::last_os_error()
             )));
         }
-        let restored_temp = metadata_at_nofollow(&parent, &temporary_name, &temporary_path)
-            .map_err(|error| LockReleaseError::Io(error.to_string()))?;
-        let restored_temp = LockFileIdentity {
-            device: restored_temp.st_dev as u64,
-            inode: restored_temp.st_ino,
-        };
-        unlink_temp(&parent, &temporary_name, &temporary_path, &restored_temp)?;
-        sync_lock_parent(&parent, lock_path)?;
-        Err(LockReleaseError::FingerprintChanged)
+        let restored_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
+        let restored_our_temp = restored_temp
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| snapshot.as_ref())
+            .is_some_and(|snapshot| {
+                snapshot.identity == temporary_identity && snapshot.bytes == bytes
+            });
+        if restored_our_temp {
+            unlink_temp(
+                &parent,
+                &temporary_name,
+                &temporary_path,
+                &temporary_identity,
+            )?;
+            sync_lock_parent(&parent, lock_path)?;
+            return Err(LockReleaseError::FingerprintChanged);
+        }
+
+        // The installer changed the live path between the check and the
+        // exchange. After the exchange the old claim is at the final path
+        // and the newer claim is in the temporary name. Restore the newer
+        // claim only while the final path still contains the exact old
+        // claim; otherwise leave both entries for recovery.
+        let current_final = read_regular_at(&parent, &final_name, lock_path);
+        let current_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
+        let can_restore_newer = current_final
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| snapshot.as_ref())
+            .is_some_and(|snapshot| {
+                snapshot.identity == previous_snapshot.identity
+                    && snapshot.bytes == previous_snapshot.bytes
+            })
+            && current_temp
+                .as_ref()
+                .ok()
+                .and_then(|snapshot| snapshot.as_ref())
+                .is_some_and(|snapshot| snapshot.identity != temporary_identity);
+        if can_restore_newer {
+            let restore_status = unsafe {
+                libc::renameatx_np(
+                    parent.as_raw_fd(),
+                    temporary_name.as_ptr(),
+                    parent.as_raw_fd(),
+                    final_name.as_ptr(),
+                    libc::RENAME_SWAP,
+                )
+            };
+            if restore_status == 0 {
+                let restored_old = read_regular_at(&parent, &temporary_name, &temporary_path);
+                if restored_old
+                    .as_ref()
+                    .ok()
+                    .and_then(|snapshot| snapshot.as_ref())
+                    .is_some_and(|snapshot| {
+                        snapshot.identity == previous_snapshot.identity
+                            && snapshot.bytes == previous_snapshot.bytes
+                    })
+                {
+                    unlink_temp(
+                        &parent,
+                        &temporary_name,
+                        &temporary_path,
+                        &previous_snapshot.identity,
+                    )?;
+                    sync_lock_parent(&parent, lock_path)?;
+                    return Err(LockReleaseError::FingerprintChanged);
+                }
+                // A newer installer claim may have landed at the final path
+                // after the guard above but before this exchange. If the
+                // temporary slot now contains a different regular file,
+                // make one best-effort exchange to put that newest claim
+                // back at the public lock path. Do not unlink either side
+                // unless the displaced entry is the exact old claim.
+                let current_final = read_regular_at(&parent, &final_name, lock_path);
+                let current_temp = read_regular_at(&parent, &temporary_name, &temporary_path);
+                if current_final
+                    .as_ref()
+                    .ok()
+                    .and_then(|snapshot| snapshot.as_ref())
+                    .is_some()
+                    && current_temp
+                        .as_ref()
+                        .ok()
+                        .and_then(|snapshot| snapshot.as_ref())
+                        .is_some()
+                {
+                    let _ = unsafe {
+                        libc::renameatx_np(
+                            parent.as_raw_fd(),
+                            temporary_name.as_ptr(),
+                            parent.as_raw_fd(),
+                            final_name.as_ptr(),
+                            libc::RENAME_SWAP,
+                        )
+                    };
+                }
+            }
+        }
+        Err(LockReleaseError::Io(format!(
+            "the lock changed while the CAS rollback was in progress: {}",
+            lock_path.display()
+        )))
     } else {
         let status = unsafe {
             libc::renameatx_np(

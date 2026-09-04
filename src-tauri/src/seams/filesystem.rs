@@ -872,6 +872,11 @@ impl SourceLifecycleJournal {
                     "device": parent.device,
                     "inode": parent.inode,
                 })),
+                "destinationFingerprint": journal.destination_fingerprint.as_ref().map(|destination| json!({
+                    "canonicalPath": destination.canonical_path.to_string_lossy(),
+                    "device": destination.device,
+                    "inode": destination.inode,
+                })),
                 "stagedPath": journal.staged_path.to_string_lossy(),
                 "contentHash": journal.content_hash,
             }),
@@ -991,6 +996,36 @@ impl SourceLifecycleJournal {
                             inode: parent.get("inode").and_then(Value::as_u64).ok_or_else(
                                 || "local copy journal destination parent lacks inode".to_string(),
                             )?,
+                        })
+                    })
+                    .transpose()?,
+                destination_fingerprint: value
+                    .get("destinationFingerprint")
+                    .and_then(Value::as_object)
+                    .map(|destination| {
+                        Ok::<DirectoryFingerprint, String>(DirectoryFingerprint {
+                            canonical_path: destination
+                                .get("canonicalPath")
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from)
+                                .ok_or_else(|| {
+                                    "local copy journal destination fingerprint lacks canonicalPath"
+                                        .to_string()
+                                })?,
+                            device: destination
+                                .get("device")
+                                .and_then(Value::as_u64)
+                                .ok_or_else(|| {
+                                    "local copy journal destination fingerprint lacks device"
+                                        .to_string()
+                                })?,
+                            inode: destination
+                                .get("inode")
+                                .and_then(Value::as_u64)
+                                .ok_or_else(|| {
+                                    "local copy journal destination fingerprint lacks inode"
+                                        .to_string()
+                                })?,
                         })
                     })
                     .transpose()?,
@@ -1156,6 +1191,7 @@ impl LocalCopyPhase {
     }
 }
 
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCopyJournal {
     pub version: u32,
@@ -1176,6 +1212,9 @@ pub struct LocalCopyJournal {
     /// written. This prevents an ancestor replacement from redirecting the
     /// staged copy or its final rename.
     pub destination_parent: Option<DirectoryFingerprint>,
+    /// The copied destination identity after the final rename. Rollback
+    /// refuses to delete the path without this fact.
+    pub destination_fingerprint: Option<DirectoryFingerprint>,
     pub staged_path: PathBuf,
     pub content_hash: String,
 }
@@ -1501,12 +1540,27 @@ pub trait FileSystem: Send + Sync {
     fn create_project_activation(
         &self,
         project_root: &DirectoryFingerprint,
+        expected_targets: &[(PathBuf, ProjectTargetResolution)],
         target_path: &Path,
         create_steps: &[PathBuf],
         entry_path: &Path,
         final_entity_path: &Path,
         expected_target: Option<&DirectoryFingerprint>,
     ) -> Result<DirectoryFingerprint, FileSystemError> {
+        for (configured_relative_path, expected) in expected_targets {
+            let current = self
+                .resolve_project_target(&project_root.canonical_path, configured_relative_path)?;
+            let matches = current == *expected
+                || (!expected.create_steps.is_empty()
+                    && current.fault.is_none()
+                    && current.resolved_container == target_path
+                    && current.create_steps.is_empty());
+            if !matches || current.resolved_container != target_path {
+                return Err(FileSystemError::PlanStale {
+                    path: target_path.to_path_buf(),
+                });
+            }
+        }
         let actual_root = self.directory_fingerprint(&project_root.canonical_path)?;
         if actual_root != *project_root {
             return Err(FileSystemError::PlanStale {
@@ -2655,6 +2709,22 @@ pub trait FileSystem: Send + Sync {
                 "directory removal is not supported by this filesystem",
             ),
         })
+    }
+
+    /// Remove a directory only when its final entry is still the recorded
+    /// real directory. The system adapter performs the recursive cleanup
+    /// relative to an identity-pinned parent descriptor.
+    fn remove_directory_verified_nofollow(
+        &self,
+        path: &Path,
+        expected: &DirectoryFingerprint,
+    ) -> Result<(), FileSystemError> {
+        if self.directory_fingerprint(path)? != *expected {
+            return Err(FileSystemError::PlanStale {
+                path: path.to_path_buf(),
+            });
+        }
+        self.remove_directory_verified(path)
     }
 
     /// Atomically write the parent manifest `source.json` (temp → fsync →

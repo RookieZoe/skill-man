@@ -1071,6 +1071,9 @@ fn map_store_error(error: AgentConfigurationStoreError) -> AgentConfigurationErr
 fn map_filesystem_error(error: AgentConfigurationFileSystemError) -> AgentConfigurationError {
     match error {
         AgentConfigurationFileSystemError::PlanStale => AgentConfigurationError::PlanStale,
+        AgentConfigurationFileSystemError::Rollback(message) => {
+            AgentConfigurationError::RecoveryRequired(message)
+        }
         other => AgentConfigurationError::FileSystem(other.to_string()),
     }
 }

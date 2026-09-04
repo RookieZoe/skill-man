@@ -38,6 +38,19 @@ impl MacOsAgentConfigurationFileSystem {
         }
         Ok(configured_path.to_path_buf())
     }
+
+    fn rollback_or_return(
+        &self,
+        receipt: &CreatedAgentTargetDirectory,
+        error: AgentConfigurationFileSystemError,
+    ) -> AgentConfigurationFileSystemError {
+        match self.rollback_created_target(receipt) {
+            Ok(()) => error,
+            Err(rollback) => AgentConfigurationFileSystemError::Rollback(format!(
+                "{error}; rollback failed: {rollback}"
+            )),
+        }
+    }
 }
 
 impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
@@ -197,41 +210,54 @@ impl AgentConfigurationFileSystem for MacOsAgentConfigurationFileSystem {
             let status = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), libc::S_IRWXU) };
             if status != 0 {
                 let error = std::io::Error::last_os_error();
-                let _ = self.rollback_created_target(&receipt);
-                return if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    Err(AgentConfigurationFileSystemError::PlanStale)
+                let error = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    AgentConfigurationFileSystemError::PlanStale
                 } else {
-                    Err(AgentConfigurationFileSystemError::Create(error.to_string()))
+                    AgentConfigurationFileSystemError::Create(error.to_string())
                 };
+                return Err(self.rollback_or_return(&receipt, error));
+            }
+            let metadata = match metadata_at_nofollow(&parent, &name, &path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    return Err(self.rollback_or_return(
+                        &receipt,
+                        AgentConfigurationFileSystemError::Create(error.to_string()),
+                    ));
+                }
+            };
+            let created_identity = AgentRootFingerprint {
+                canonical_path: path.clone(),
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino,
+            };
+            receipt.created.push(created_identity.clone());
+            if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                return Err(
+                    self.rollback_or_return(&receipt, AgentConfigurationFileSystemError::PlanStale)
+                );
             }
             let child = match open_directory_at_nofollow(&parent, &name, &path) {
                 Ok(child) => child,
                 Err(error) => {
-                    let _ = self.rollback_created_target(&receipt);
-                    return Err(error);
+                    return Err(self.rollback_or_return(&receipt, error));
                 }
             };
             let metadata = match descriptor_metadata(&child, &path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    let _ = self.rollback_created_target(&receipt);
-                    return Err(error);
+                    return Err(self.rollback_or_return(&receipt, error));
                 }
             };
-            receipt.created.push(AgentRootFingerprint {
-                canonical_path: path.clone(),
-                device: metadata.st_dev as u64,
-                inode: metadata.st_ino,
-            });
-            if metadata.st_dev != ancestor_metadata.st_dev {
-                let _ = self.rollback_created_target(&receipt);
-                return Err(AgentConfigurationFileSystemError::Create(
-                    "the Target creation crossed a filesystem boundary".into(),
-                ));
+            if metadata.st_dev != ancestor_metadata.st_dev
+                || metadata.st_ino != created_identity.inode
+            {
+                return Err(
+                    self.rollback_or_return(&receipt, AgentConfigurationFileSystemError::PlanStale)
+                );
             }
             if let Err(error) = sync_descriptor(&parent, &path) {
-                let _ = self.rollback_created_target(&receipt);
-                return Err(error);
+                return Err(self.rollback_or_return(&receipt, error));
             }
             parent = child;
         }
@@ -335,6 +361,28 @@ fn open_directory_at_nofollow(
         return Err(AgentConfigurationFileSystemError::NotDirectory);
     }
     Ok(descriptor)
+}
+
+fn metadata_at_nofollow(
+    parent: &OwnedFd,
+    name: &CString,
+    _path: &Path,
+) -> Result<libc::stat, std::io::Error> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        // SAFETY: a zero `fstatat` return initialized the output.
+        Ok(unsafe { metadata.assume_init() })
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn descriptor_metadata(

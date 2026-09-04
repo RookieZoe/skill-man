@@ -321,7 +321,7 @@ impl SourceLifecycleService {
             .filesystem
             .staged_tree_snapshot(&source_path)?
             .content_hash;
-        let journal = LocalCopyJournal {
+        let mut journal = LocalCopyJournal {
             version: LIFECYCLE_JOURNAL_VERSION,
             operation_id: operation_id.clone(),
             phase: LocalCopyPhase::Planned,
@@ -334,6 +334,7 @@ impl SourceLifecycleService {
             source_path: source_path.clone(),
             destination: destination.clone(),
             destination_parent: Some(destination_parent),
+            destination_fingerprint: None,
             staged_path: staged_path.clone(),
             content_hash,
         };
@@ -342,7 +343,7 @@ impl SourceLifecycleService {
             &SourceLifecycleJournal::LocalCopy(journal.clone()),
         )?;
 
-        let result = self.apply_local_copy(&library_root, &journal);
+        let result = self.apply_local_copy(&library_root, &mut journal);
         match result {
             Ok((snapshot_version, local_skill_id, local_directory_name)) => {
                 if let Err(error) = self
@@ -668,16 +669,26 @@ impl SourceLifecycleService {
                             "the Local Copy journal has no destination parent identity",
                         )
                     })?;
-                    if self
+                    let expected_destination =
+                        local.destination_fingerprint.as_ref().ok_or_else(|| {
+                            Self::invalid_recovery_journal(
+                                "the Local Copy journal has no destination identity",
+                            )
+                        })?;
+                    if !self
                         .filesystem
                         .path_has_no_symlink_component(&local.destination)
                         .map_err(|error| Self::invalid_recovery_journal(&error.to_string()))?
-                        == false
                         || self
                             .filesystem
                             .directory_fingerprint(parent)
                             .map_err(|error| Self::invalid_recovery_journal(&error.to_string()))?
                             != *expected_parent
+                        || self
+                            .filesystem
+                            .directory_fingerprint(&local.destination)
+                            .map_err(|error| Self::invalid_recovery_journal(&error.to_string()))?
+                            != *expected_destination
                     {
                         return Err(Self::invalid_recovery_journal(
                             "the Local Copy destination parent changed",
@@ -1244,7 +1255,7 @@ impl SourceLifecycleService {
     fn apply_local_copy(
         &self,
         library_root: &Path,
-        journal: &LocalCopyJournal,
+        journal: &mut LocalCopyJournal,
     ) -> Result<(u64, String, String), SourceLifecycleError> {
         let destination_parent = journal.destination_parent.as_ref().ok_or_else(|| {
             SourceLifecycleError::RecoveryRequired(
@@ -1275,7 +1286,6 @@ impl SourceLifecycleService {
                 "the staged Local Source Copy no longer matches the member bytes".into(),
             ));
         }
-        let mut journal = journal.clone();
         journal.phase = LocalCopyPhase::Copied;
         self.filesystem.write_source_lifecycle_journal(
             library_root,
@@ -1289,6 +1299,10 @@ impl SourceLifecycleService {
             destination_parent,
             destination_parent,
         )?;
+        journal.destination_fingerprint = Some(
+            self.filesystem
+                .directory_fingerprint(&journal.destination)?,
+        );
         journal.phase = LocalCopyPhase::Registered;
         self.filesystem.write_source_lifecycle_journal(
             library_root,
@@ -1331,7 +1345,29 @@ impl SourceLifecycleService {
             self.filesystem
                 .discard_isolated_source(&journal.staged_path)?;
         }
-        if self.filesystem.path_is_directory(&journal.destination)? {
+        if self.filesystem.path_is_occupied(&journal.destination)? {
+            let expected_destination =
+                journal.destination_fingerprint.as_ref().ok_or_else(|| {
+                    self.block_for_recovery(
+                        "roll back Create Local Source Copy",
+                        "the copied destination has no frozen identity".to_string(),
+                    )
+                })?;
+            let actual_destination = self
+                .filesystem
+                .directory_fingerprint(&journal.destination)
+                .map_err(|error| {
+                    self.block_for_recovery(
+                        "roll back Create Local Source Copy",
+                        format!("the copied destination identity is unavailable: {error}"),
+                    )
+                })?;
+            if &actual_destination != expected_destination {
+                return Err(self.block_for_recovery(
+                    "roll back Create Local Source Copy",
+                    "the copied destination identity changed during rollback".to_string(),
+                ));
+            }
             let destination_snapshot =
                 self.filesystem.staged_tree_snapshot(&journal.destination)?;
             if destination_snapshot.content_hash != journal.content_hash {
@@ -1341,7 +1377,7 @@ impl SourceLifecycleService {
                 ));
             }
             self.filesystem
-                .remove_directory_verified(&journal.destination)?;
+                .remove_directory_verified_nofollow(&journal.destination, expected_destination)?;
         }
         Ok(())
     }

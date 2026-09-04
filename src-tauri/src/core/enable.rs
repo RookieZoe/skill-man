@@ -1412,6 +1412,13 @@ impl EnableService {
                         stopped = true;
                         CellOutcome::Failed
                     }
+                    Err(EnableError::FileSystem(FileSystemError::PlanStale { .. })) => {
+                        // A sink-level identity/ancestor guard is a typed
+                        // stale boundary. The journal remains durable for
+                        // startup recovery; do not downgrade it to a
+                        // per-cell failure result.
+                        return Err(EnableError::PlanStale);
+                    }
                     Err(EnableError::CellConflict(_)) => {
                         // Ordinary per-cell failure: isolated and continue.
                         cell_error = Some(EnableError::CellConflict(
@@ -1740,12 +1747,23 @@ impl EnableService {
     ) -> Result<u64, EnableError> {
         let cell = &planned.cell;
         if scope == "project" {
+            let expected_targets = planned
+                .frozen_project_targets
+                .iter()
+                .map(|target| {
+                    (
+                        target.configured_relative_path.clone(),
+                        target.resolution.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
             match effective_action(planned) {
                 EnableCellAction::Enable | EnableCellAction::Repair => {
                     let project_root_identity =
                         project_root_identity.ok_or(EnableError::PlanStale)?;
                     let target_identity = self.filesystem.create_project_activation(
                         project_root_identity,
+                        &expected_targets,
                         &cell.target_path,
                         &cell.create_steps,
                         &cell.entry_path,
@@ -1789,6 +1807,7 @@ impl EnableService {
                         project_root_identity.ok_or(EnableError::PlanStale)?;
                     let target_identity = self.filesystem.create_project_activation(
                         project_root_identity,
+                        &expected_targets,
                         &cell.target_path,
                         &cell.create_steps,
                         &cell.entry_path,

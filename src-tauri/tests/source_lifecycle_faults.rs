@@ -856,6 +856,12 @@ fn create_local_copy_happy_path_registers_and_recovery_is_idempotent() {
                         .directory_fingerprint(&fixture.export_root)
                         .expect("destination parent identity"),
                 ),
+                destination_fingerprint: Some(
+                    fixture
+                        .filesystem
+                        .directory_fingerprint(&destination)
+                        .expect("destination identity"),
+                ),
                 staged_path: fixture.export_root.join(".staging-never"),
                 content_hash,
             }),
@@ -894,6 +900,7 @@ fn create_local_copy_recovery_blocks_when_the_registered_destination_vanished() 
                 source_path: member_namespace(&fixture, &remote_id, "skills/alpha"),
                 destination: destination.clone(),
                 destination_parent: None,
+                destination_fingerprint: None,
                 staged_path: fixture.export_root.join(".staging-never"),
                 content_hash: content_hash.into(),
             }),
@@ -947,6 +954,7 @@ fn tampered_local_copy_recovery_keeps_an_external_destination_untouched() {
                 source_path,
                 destination: destination.clone(),
                 destination_parent: None,
+                destination_fingerprint: None,
                 staged_path,
                 content_hash,
             }),
@@ -1343,6 +1351,7 @@ fn local_copy_rolls_back_a_pre_commit_crash_journal() {
                 source_path: alpha,
                 destination: destination.clone(),
                 destination_parent: None,
+                destination_fingerprint: None,
                 staged_path: staged.clone(),
                 content_hash: snapshot.content_hash.clone(),
             }),
