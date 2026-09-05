@@ -38,11 +38,19 @@ async function renderApplication() {
     <StrictMode>
       <BootstrapApp
         client={
-          import.meta.env.DEV && params.get("fixture") === "enable"
+          import.meta.env.DEV && params.get("fixture") === "scan"
             ? (
-                await import("./test-fixtures/catalog")
-              ).createFixtureCatalogClient()
-            : createCatalogClient()
+                await import("./test-fixtures/scan-report")
+              ).createScanPreviewClient()
+            : import.meta.env.DEV && params.get("fixture") === "git-preview"
+              ? (
+                  await import("./test-fixtures/git-preview")
+                ).createGitPreviewClient()
+              : import.meta.env.DEV && params.get("fixture") === "enable"
+                ? (
+                    await import("./test-fixtures/catalog")
+                  ).createFixtureCatalogClient()
+                : createCatalogClient()
         }
       />
     </StrictMode>,

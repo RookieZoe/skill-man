@@ -44,6 +44,10 @@ impl FixtureGitSource {
 }
 
 impl GitSource for FixtureGitSource {
+    fn validate_home_cache(&self, home: &Path, mirror: &Path) -> Result<(), SourceError> {
+        self.inner.validate_home_cache(home, mirror)
+    }
+
     fn fetch_mirror(&self, _url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError> {
         self.inner.fetch_mirror(&self.fixture_url, mirror_dir)
     }
@@ -161,6 +165,108 @@ fn committed_repo(root: &Path) -> PathBuf {
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "source release"]);
     repo
+}
+
+#[test]
+fn app_home_cache_survives_preview_refreshes_and_rebuilds_after_cleanup() {
+    use skill_man_lib::core::git_source::git_mirror_path;
+    use skill_man_lib::core::home::BoundHome;
+    use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
+    let workspace = tempfile::tempdir().unwrap();
+    let repo = committed_repo(workspace.path());
+    let home = workspace.path().join("app-selected-home");
+    std::fs::create_dir(&home).unwrap();
+    let gate = Arc::new(WriteGate::new(WriteGateState::Open(BoundHome::test_value(
+        "cache-home",
+        home.clone(),
+    ))));
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    )
+    .with_home_cache(gate.clone());
+    let request = || FetchLatestAndManageRequest {
+        source_type: "git".into(),
+        source_url: "https://example.com/acme/source".into(),
+        tracking_policy: Some(SourceTrackingOverride {
+            mode: "branch".into(),
+            value: Some("main".into()),
+        }),
+    };
+    let mirror = git_mirror_path(&home.join("cache"), "https://example.com/acme/source");
+    service.fetch_latest_and_manage(request()).unwrap();
+    assert!(mirror.join("HEAD").is_file());
+    let config = std::fs::read(mirror.join("config")).unwrap();
+    write_file(
+        &repo,
+        "packages/added/SKILL.md",
+        "---\nname: Added\n---\n# Added\n",
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "new member"]);
+    let SourceGroupPreviewOutcome::Preview(refreshed) =
+        service.fetch_latest_and_manage(request()).unwrap()
+    else {
+        panic!("preview")
+    };
+    assert_eq!(refreshed.members.len(), 3);
+    assert_eq!(std::fs::read(mirror.join("config")).unwrap(), config);
+    assert!(!home.join("skills").exists());
+    assert!(!home.join("operations").exists());
+    std::fs::remove_dir_all(&mirror).unwrap();
+    service.fetch_latest_and_manage(request()).unwrap();
+    assert!(mirror.join("HEAD").is_file());
+    let next_home = workspace.path().join("next-app-home");
+    std::fs::create_dir(&next_home).unwrap();
+    gate.transition_to(WriteGateState::Open(BoundHome::test_value(
+        "next-home",
+        next_home.clone(),
+    )))
+    .unwrap();
+    service.fetch_latest_and_manage(request()).unwrap();
+    let next_mirror = git_mirror_path(&next_home.join("cache"), "https://example.com/acme/source");
+    assert!(next_mirror.join("HEAD").is_file());
+    std::fs::remove_dir_all(&next_home).unwrap();
+    assert!(service.fetch_latest_and_manage(request()).is_err());
+    assert!(
+        !next_home.exists(),
+        "a missing bound Home must not be recreated"
+    );
+    gate.mark_blocked();
+    assert!(service.fetch_latest_and_manage(request()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn app_home_cache_refuses_a_symlinked_cache_directory() {
+    use skill_man_lib::core::home::BoundHome;
+    use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
+    let workspace = tempfile::tempdir().unwrap();
+    let repo = committed_repo(workspace.path());
+    let home = workspace.path().join("selected-home");
+    let outside = workspace.path().join("outside");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("cache")).unwrap();
+    let gate = Arc::new(WriteGate::new(WriteGateState::Open(BoundHome::test_value(
+        "cache-home",
+        home,
+    ))));
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    )
+    .with_home_cache(gate);
+    assert!(
+        service
+            .fetch_latest_and_manage(FetchLatestAndManageRequest {
+                source_type: "git".into(),
+                source_url: "https://example.com/acme/source".into(),
+                tracking_policy: None
+            })
+            .is_err()
+    );
+    assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
 
 #[test]

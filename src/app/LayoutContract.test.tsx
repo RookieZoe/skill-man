@@ -93,6 +93,43 @@ test("exact breakpoints: 1060 wide, 1059 mid, 760 mid, 759 narrow", async () => 
   ).toBeInTheDocument();
 });
 
+test("batch selection stays in the Library heading and adds one column to the same rows", async () => {
+  await renderWideLibrary();
+  const select = screen.getByRole("button", { name: "Select" });
+  expect(select.closest(".library-sidebar .panel-heading")).not.toBeNull();
+  expect(
+    within(toolbar()).queryByRole("button", { name: "Select" }),
+  ).not.toBeInTheDocument();
+  const row = screen.getByRole("button", { name: "skill-authoring" });
+  const padding = getComputedStyle(row).padding;
+  await userEvent.click(select);
+  expect(row).toHaveClass("skill-row--selectable");
+  expect(getComputedStyle(row).gridTemplateColumns).toBe(
+    "14px 9px minmax(0, 1fr) auto",
+  );
+  expect(getComputedStyle(row).padding).toBe(padding);
+  await userEvent.click(within(row).getByRole("checkbox"));
+  expect(row).toHaveAttribute("aria-pressed", "true");
+});
+
+test("enable dialogs have a padded scroll body, visible steps and separated footer", async () => {
+  await renderWideLibrary();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Enable globally…" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  expect(
+    within(dialog).getByText("Target groups", { selector: "li" }),
+  ).toBeVisible();
+  expect(within(dialog).getByText("Preview", { selector: "li" })).toBeVisible();
+  expect(
+    getComputedStyle(dialog.querySelector(".enable-sheet-body")!).overflow,
+  ).toBe("auto");
+  expect(dialog.querySelector(".enable-sheet-actions")).toContainElement(
+    within(dialog).getByRole("button", { name: "Cancel" }),
+  );
+});
+
 test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", async () => {
   await renderWideLibrary();
 
@@ -110,10 +147,29 @@ test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", a
     screen.getByRole("complementary", { name: "Activation Target Groups" }),
   ).toBeInTheDocument();
   expect(inspector()).not.toHaveAttribute("role");
-  // Each pane owns its vertical scroll.
+  // Library chrome never shrinks or scrolls; only its list owns scrolling.
   expect(
     getComputedStyle(document.querySelector(".library-sidebar")!).overflowY,
+  ).toBe("hidden");
+  expect(
+    getComputedStyle(document.querySelector(".skill-list")!).overflowY,
   ).toBe("auto");
+  for (const selector of [
+    ".library-sidebar > .panel-heading",
+    ".library-sidebar > .filter-strip",
+  ]) {
+    expect(getComputedStyle(document.querySelector(selector)!).flexShrink).toBe(
+      "0",
+    );
+  }
+  setViewportWidth(375);
+  expect(
+    getComputedStyle(document.querySelector(".library-sidebar")!).overflowY,
+  ).toBe("hidden");
+  expect(
+    getComputedStyle(document.querySelector(".skill-list")!).overflowY,
+  ).toBe("auto");
+  setViewportWidth(1200);
   expect(
     getComputedStyle(document.querySelector(".skill-detail")!).overflowY,
   ).toBe("auto");
@@ -318,7 +374,7 @@ test("NoticeRegion: zero collapses, one is single, two stack in the region", asy
   ).toBeInTheDocument();
 });
 
-test("NoticeRegion stacks Catalog and source capability failures", async () => {
+test("Catalog failure stays global and source failure belongs to Repositories", async () => {
   const stackedClient = createFixtureCatalogClient();
   stackedClient.getGitSourceCapability = async () => {
     throw {
@@ -331,12 +387,18 @@ test("NoticeRegion stacks Catalog and source capability failures", async () => {
   };
   render(<App client={stackedClient} />);
   await screen.findByRole("heading", { name: "Skill detail unavailable" });
-  expect(noticeRegion().children).toHaveLength(2);
+  expect(noticeRegion().children).toHaveLength(1);
   expect(
     within(noticeRegion()).getByText("Library unavailable"),
   ).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "Repositories" }));
   expect(
-    within(noticeRegion()).getByText("Git source status unavailable"),
+    await within(
+      screen.getByRole("main", { name: "Repository management" }),
+    ).findByText("Git source status unavailable"),
+  ).toBeInTheDocument();
+  expect(
+    within(noticeRegion()).getByText("Library unavailable"),
   ).toBeInTheDocument();
 });
 

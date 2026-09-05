@@ -6,6 +6,7 @@ use crate::tauri_adapter::dto::{
     SourceGroupPreviewOutcomeDto,
 };
 
+#[derive(Clone)]
 pub struct SourceGroupPreviewApi {
     service: Arc<SourceGroupPreviewService>,
 }

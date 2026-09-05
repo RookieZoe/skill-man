@@ -7,6 +7,7 @@ use crate::tauri_adapter::dto::{
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
 };
 
+#[derive(Clone)]
 pub struct SourceTransitionApi {
     service: Arc<SourceTransitionService>,
 }

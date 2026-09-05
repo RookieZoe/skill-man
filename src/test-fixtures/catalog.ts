@@ -26,6 +26,8 @@ import type {
   ScanReportSection,
   SkillDetail,
   SourceKind,
+  SourceGroupPreviewOutcome,
+  GitSourceCapabilityReport,
 } from "../app/catalog-client";
 
 type FixtureSkill = Omit<
@@ -73,6 +75,8 @@ export function createFixtureCatalogClient(
   options: {
     emptyAgentConfigurations?: boolean;
     recentProjectFolders?: RecentProjectFolder[];
+    gitPreview?: SourceGroupPreviewOutcome;
+    gitSourceCapability?: GitSourceCapabilityReport;
   } = {},
 ): CatalogClient & FixtureReportPublish {
   let snapshotVersion = fixture.snapshotVersion;
@@ -434,7 +438,7 @@ export function createFixtureCatalogClient(
       };
     },
     async getGitSourceCapability() {
-      return { sources: [] };
+      return options.gitSourceCapability ?? { sources: [] };
     },
     async restoreCurrentSourceRelease() {
       throw new Error("restore is not available in the fixture client");
@@ -1345,6 +1349,7 @@ export function createFixtureCatalogClient(
       return linkImportPlans.delete(planToken);
     },
     async fetchLatestAndManage() {
+      if (options.gitPreview) return options.gitPreview;
       return fixtureUnsupported(
         "Installing Git Skills is not available in the preview fixture",
       );

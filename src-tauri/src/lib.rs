@@ -505,6 +505,7 @@ pub fn run() {
                 Arc::new(SystemGitSource::new()),
                 Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
             )
+            .with_home_cache(write_gate.clone())
             .with_remote_provider(Arc::new(SystemRemoteProvider::new(Arc::new(
                 SystemGitSource::new(),
             )))));

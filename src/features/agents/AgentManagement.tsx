@@ -34,7 +34,7 @@ type AgentSection = "configured" | "detected" | "presets";
 type AgentSelection =
   { kind: "configuration"; id: string } | { kind: "preset"; id: string } | null;
 type SheetMode = "create" | "edit" | "delete";
-type NarrowPane = "navigation" | "list" | "detail";
+type NarrowPane = "list" | "detail";
 
 interface SheetState {
   mode: SheetMode;
@@ -54,7 +54,7 @@ export function AgentManagement({
   );
   const [section, setSection] = useState<AgentSection>("configured");
   const [selection, setSelection] = useState<AgentSelection>(null);
-  const [narrowPane, setNarrowPane] = useState<NarrowPane>("navigation");
+  const [narrowPane, setNarrowPane] = useState<NarrowPane>("list");
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [sheet, setSheet] = useState<SheetState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -421,7 +421,7 @@ export function AgentManagement({
             role="group"
             aria-label={t("agents.nav.pane_label")}
           >
-            {(["navigation", "list", "detail"] as const).map((pane) => (
+            {(["list", "detail"] as const).map((pane) => (
               <button
                 key={pane}
                 type="button"
@@ -558,10 +558,6 @@ function AgentNavigation({
   ];
   return (
     <nav className="agents-navigation" aria-label={t("agents.nav.label")}>
-      <div className="agents-navigation-heading">
-        <span className="eyebrow">{t("agents.nav.eyebrow")}</span>
-        <h1>{t("agents.nav.title")}</h1>
-      </div>
       <div className="agents-navigation-groups">
         {rows.map((row) => (
           <button
@@ -574,10 +570,6 @@ function AgentNavigation({
             <strong>{row.count}</strong>
           </button>
         ))}
-      </div>
-      <div className="agent-detection-note" role="note">
-        <strong>{t("agents.nav.detection_title")}</strong>
-        <span>{t("agents.nav.zeroWriteHint")}</span>
       </div>
       <button
         type="button"
@@ -623,9 +615,12 @@ function AgentList({
   return (
     <main className="agents-list-pane" aria-label={t("agents.list.label")}>
       <header className="agents-list-heading">
-        <span className="eyebrow">{t(`agents.nav.${section}`)}</span>
         <h2>{t(`agents.list.${section}_title`)}</h2>
-        <p>{t(`agents.list.${section}_body`)}</p>
+        <details className="agents-list-help">
+          <summary>{t("bootstrap.technical_details")}</summary>
+          <p>{t(`agents.list.${section}_body`)}</p>
+          <p>{t("agents.nav.zeroWriteHint")}</p>
+        </details>
         {section === "detected" ? (
           <button
             type="button"
@@ -1239,7 +1234,7 @@ function draftFromConfiguration(
   };
 }
 
-function draftFromPreset(preset: AgentPreset): AgentConfigurationDraft {
+export function draftFromPreset(preset: AgentPreset): AgentConfigurationDraft {
   return {
     presetKey: preset.presetKey,
     name: preset.name,
@@ -1254,7 +1249,7 @@ function draftFromPreset(preset: AgentPreset): AgentConfigurationDraft {
   };
 }
 
-function agentFailureMessage(
+export function agentFailureMessage(
   reason: unknown,
   t: LocaleContextValue["t"],
 ): string {
@@ -1264,6 +1259,8 @@ function agentFailureMessage(
     return t("agents.error.generic");
   }
   switch (error.code) {
+    case "recovery_required":
+      return t("error.write_locked");
     case "agent_configuration_name_invalid":
       return t("agents.error.name_invalid");
     case "agent_configuration_name_conflict":

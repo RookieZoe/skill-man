@@ -54,7 +54,10 @@ const preview: SourceGroupPreviewOutcome = {
   },
 };
 
-function renderFlow(outcome: SourceGroupPreviewOutcome | null) {
+function renderFlow(
+  outcome: SourceGroupPreviewOutcome | null,
+  activity: "idle" | "fetching" | "confirming" = "idle",
+) {
   return render(
     <SourceGroupPreviewFlow
       sourceType="github"
@@ -67,7 +70,7 @@ function renderFlow(outcome: SourceGroupPreviewOutcome | null) {
       updateDraft={null}
       result={null}
       error={null}
-      activity="idle"
+      activity={activity}
       onSourceTypeChange={vi.fn()}
       onSourceUrlChange={vi.fn()}
       onSourceGroupPolicyChange={vi.fn()}
@@ -112,8 +115,26 @@ test("allows a new Git source that has no external ownership claims", () => {
 
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Use latest remote release" }),
+    screen.getByRole("button", { name: "Install all 2 Skills" }),
   ).toBeEnabled();
+});
+
+test("shows indeterminate feedback while fetching and installing", () => {
+  const fetching = renderFlow(null, "fetching");
+  expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+  fetching.unmount();
+  renderFlow(preview, "confirming");
+  expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+});
+
+test("collapses technical details by default", () => {
+  const { container } = renderFlow(preview);
+  expect(container.querySelectorAll("details")).toHaveLength(3);
+  for (const details of container.querySelectorAll("details")) {
+    expect(details.open).toBe(false);
+  }
+  expect(screen.queryByText("auto_release_tag_head")).not.toBeInTheDocument();
 });
 
 test("blocks replacement before confirmation when a source member has no external claim", async () => {

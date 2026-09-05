@@ -1147,22 +1147,13 @@ impl SourceTransitionService {
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
 
-        // A fresh temporary mirror is safe before CAS. Its only durable
-        // output is the staged, validated release recorded in the journal.
-        let temporary_mirror_root = tempfile::Builder::new()
-            .prefix("skill-man-source-transition-")
-            .tempdir()
-            .map_err(|source| {
-                SourceTransitionError::Source(SourceError::Io {
-                    operation: "create temporary Git transition mirror",
-                    path: std::env::temp_dir(),
-                    source,
-                })
-            })?;
+        // Reuse disposable transport objects before CAS. Staged bytes and the
+        // frozen journal remain authoritative; recovery never uses this cache.
         let mut spec = parse_git_source_input(&journal.canonical_url)
             .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
         spec.requested_ref = Some(journal.selected_ref.clone());
-        let mirror = git_mirror_path(temporary_mirror_root.path(), &spec.url);
+        let mirror = git_mirror_path(&library_root.join("cache"), &spec.url);
+        self.git_source.validate_home_cache(library_root, &mirror)?;
         let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
         let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)
             .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
@@ -1337,20 +1328,11 @@ impl SourceTransitionService {
         self.filesystem
             .write_source_transition_journal(library_root, journal)?;
 
-        let temporary_mirror_root = tempfile::Builder::new()
-            .prefix("skill-man-source-update-")
-            .tempdir()
-            .map_err(|source| {
-                SourceTransitionError::Source(SourceError::Io {
-                    operation: "create temporary Git Update mirror",
-                    path: std::env::temp_dir(),
-                    source,
-                })
-            })?;
         let mut spec = parse_git_source_input(&journal.canonical_url)
             .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
         spec.requested_ref = Some(journal.selected_ref.clone());
-        let mirror = git_mirror_path(temporary_mirror_root.path(), &spec.url);
+        let mirror = git_mirror_path(&library_root.join("cache"), &spec.url);
+        self.git_source.validate_home_cache(library_root, &mirror)?;
         let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
         let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)
             .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;

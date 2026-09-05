@@ -70,6 +70,15 @@ pub struct GitTagFact {
 /// fetches into a mirror the Core owns under `<Library>/cache/git/`;
 /// it never writes Library or Agent paths itself.
 pub trait GitSource: Send + Sync {
+    /// Validate a disposable mirror beneath the bound App Home before use.
+    /// The caller holds the Home write guard. Non-filesystem adapters may
+    /// reject persistent caching instead of implementing this operation.
+    fn validate_home_cache(&self, _home: &Path, _mirror: &Path) -> Result<(), SourceError> {
+        Err(SourceError::Validation(
+            "persistent Git caching is unsupported by this adapter".into(),
+        ))
+    }
+
     /// Ensure `mirror_dir` exists as a mirror of `url` (clone on first use,
     /// fetch afterwards) and report the remote's default branch.
     fn fetch_mirror(&self, url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError>;

@@ -281,7 +281,72 @@ fn is_mirror_present(mirror_dir: &Path) -> bool {
     mirror_dir.join("HEAD").is_file()
 }
 
+fn validate_cache_directory(path: &std::path::Path) -> Result<(), SourceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(SourceError::Validation(
+            "Git cache must use real directories inside the configured Home".into(),
+        )),
+    }
+}
+
+fn validate_cache_tree(path: &std::path::Path) -> Result<(), SourceError> {
+    validate_cache_directory(path)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory).map_err(|source| SourceError::Io {
+            operation: "inspect Git cache",
+            path: directory.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| SourceError::Io {
+                operation: "inspect Git cache entry",
+                path: directory.clone(),
+                source,
+            })?;
+            let kind = entry.file_type().map_err(|source| SourceError::Io {
+                operation: "inspect Git cache type",
+                path: entry.path(),
+                source,
+            })?;
+            if kind.is_symlink()
+                || (!kind.is_dir() && !kind.is_file())
+                || entry.file_name() == "alternates"
+            {
+                return Err(SourceError::Validation("Git cache contains an unsafe entry; remove this disposable cache before retrying".into()));
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GitSource for SystemGitSource {
+    fn validate_home_cache(&self, home: &Path, mirror: &Path) -> Result<(), SourceError> {
+        if !fs::symlink_metadata(home)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return Err(SourceError::Validation(
+                "The configured Home is unavailable".into(),
+            ));
+        }
+        let cache = home.join("cache");
+        if mirror.parent() != Some(cache.join("git").as_path()) {
+            return Err(SourceError::Validation(
+                "Git cache is outside the configured Home".into(),
+            ));
+        }
+        validate_cache_directory(&cache)?;
+        validate_cache_directory(&cache.join("git"))?;
+        validate_cache_tree(mirror)
+    }
     fn fetch_mirror(&self, url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError> {
         if !is_mirror_present(mirror_dir) {
             if mirror_dir.exists() {
@@ -315,7 +380,8 @@ impl GitSource for SystemGitSource {
                     mirror_dir.to_str().unwrap_or("."),
                     "fetch",
                     "--prune",
-                    "origin",
+                    url,
+                    "+refs/*:refs/*",
                 ],
                 FETCH_TIMEOUT_SECONDS,
                 None,

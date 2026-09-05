@@ -49,6 +49,10 @@ impl FixtureGitSource {
 }
 
 impl GitSource for FixtureGitSource {
+    fn validate_home_cache(&self, home: &Path, mirror: &Path) -> Result<(), SourceError> {
+        self.inner.validate_home_cache(home, mirror)
+    }
+
     fn fetch_mirror(&self, _url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError> {
         self.inner.fetch_mirror(&self.fixture_url, mirror_dir)
     }

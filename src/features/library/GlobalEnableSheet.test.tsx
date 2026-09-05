@@ -44,7 +44,9 @@ test("three-step flow: select groups, preview matrix, result with undo", async (
   await user.click(
     within(dialog).getByRole("button", { name: "Review the plan" }),
   );
-  const preview = await within(dialog).findByText(/Skill authoring/);
+  const preview = await within(dialog).findByText(/Skill authoring/, {
+    selector: ".enable-matrix-cell",
+  });
   // Wait for the plan to load (matrix shows the Ready cell).
   expect(await within(dialog).findByText("Ready")).toBeInTheDocument();
   expect(preview).toBeInTheDocument();

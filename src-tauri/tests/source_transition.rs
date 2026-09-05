@@ -139,6 +139,10 @@ impl FixtureGitSource {
 }
 
 impl GitSource for FixtureGitSource {
+    fn validate_home_cache(&self, home: &Path, mirror: &Path) -> Result<(), SourceError> {
+        self.inner.validate_home_cache(home, mirror)
+    }
+
     fn fetch_mirror(&self, _url: &str, mirror_dir: &Path) -> Result<GitFetchReport, SourceError> {
         self.inner.fetch_mirror(&self.fixture_url, mirror_dir)
     }
@@ -493,9 +497,41 @@ fn confirms_and_undoes_the_complete_source_in_one_release() {
         .confirm(confirmation(&fixture))
         .expect("v9 transition");
 
+    let mirror = skill_man_lib::core::git_source::git_mirror_path(
+        &fixture.library.join("cache"),
+        "https://example.com/acme/source",
+    );
+    assert!(
+        mirror.join("HEAD").is_file(),
+        "installation retains its reusable Git mirror"
+    );
     assert_eq!(result.member_count, 2);
     assert!(result.undo_available);
     let connection = open_catalog(&fixture);
+    let runtime = skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore::new(
+        fixture.catalog.clone(),
+        fixture.filesystem.clone(),
+    );
+    let api = skill_man_lib::tauri_adapter::catalog_api::CatalogApi::new(
+        skill_man_lib::core::catalog::CatalogService::new(Arc::new(runtime)),
+    );
+    let listed = api
+        .list_skills(skill_man_lib::tauri_adapter::dto::ListSkillsRequestDto {
+            filter: skill_man_lib::tauri_adapter::dto::CatalogFilterDto::All,
+        })
+        .unwrap();
+    for member in listed.items {
+        let detail = api
+            .inspect_skill(member.id)
+            .expect("installed Git member is readable");
+        assert!(
+            Path::new(&detail.final_entity_path)
+                .canonicalize()
+                .unwrap()
+                .starts_with(fixture.library.canonicalize().unwrap())
+        );
+        assert!(!detail.skill_markdown.is_empty());
+    }
     assert_eq!(count(&connection, "remote_source_parents"), 1);
     assert_eq!(count(&connection, "git_repository_sources"), 1);
     assert_eq!(count(&connection, "git_source_releases"), 1);

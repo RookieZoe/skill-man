@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
+import { parseRepositoryInput } from "../features/library/git-repository-input";
 import {
   OperationStatusWindow,
   type OperationStatus,
@@ -41,7 +42,6 @@ import type {
   SourceUpdateDraft,
   SourcePromotionResult,
   SourceTransitionResult,
-  StartupAgent,
 } from "./catalog-client";
 
 export interface AppProps {
@@ -199,7 +199,6 @@ export function App({ client }: AppProps) {
     error: null,
   });
   const appUpdateCheckRunId = useRef(0);
-  const [startupAgents, setStartupAgents] = useState<StartupAgent[]>([]);
   const [onboardingLibraryPath, setOnboardingLibraryPath] = useState<
     string | null
   >(null);
@@ -279,7 +278,6 @@ export function App({ client }: AppProps) {
       .startupInfo()
       .then((info) => {
         if (!current) return;
-        setStartupAgents(info.agents);
         setOnboardingLibraryPath(info.libraryPath ?? null);
         if (info.firstRun) {
           // Spec §8.7: the three-step onboarding runs on the first launch;
@@ -513,8 +511,10 @@ export function App({ client }: AppProps) {
 
   async function fetchLatestAndManage(
     request: FetchLatestAndManageRequest = {
-      sourceType: sourceGroupType,
-      sourceUrl: sourceGroupUrl,
+      sourceType:
+        parseRepositoryInput(sourceGroupUrl)?.sourceType ?? sourceGroupType,
+      sourceUrl:
+        parseRepositoryInput(sourceGroupUrl)?.sourceUrl ?? sourceGroupUrl,
       trackingPolicy: sourceGroupTrackingPolicy(),
     },
     preloadedPreview?: Promise<SourceGroupPreviewOutcome>,
@@ -1295,7 +1295,6 @@ export function App({ client }: AppProps) {
       setOnboardingStep(1);
       try {
         const info = await client.startupInfo();
-        setStartupAgents(info.agents);
         setOnboardingLibraryPath(info.libraryPath ?? null);
       } catch (reason) {
         setOnboardingStep(0);
@@ -1306,14 +1305,18 @@ export function App({ client }: AppProps) {
       return;
     }
     if (onboardingStep === 1) {
-      // Step 3: the first-run full Rescan uses the same Report contract as
-      // the manual Rescan (spec §8.1): zero configuration, zero selection,
-      // Skip or Cancel are always available and nothing is adopted here.
+      // Configuration was explicitly confirmed in step 2. Scanning remains
+      // read-only and does not Adopt or Enable any Skill.
       setOnboardingActivity("scanning");
       setOnboardingError(null);
       setOnboardingStep(2);
       try {
-        await client.startRescan("onboarding");
+        const configuration = await client.getAgentManagementSnapshot();
+        if (!configuration.configurations.length)
+          throw new Error(t("scan.setup.empty"));
+        const started = await client.startRescan("onboarding");
+        const runId = started.scanRun?.runId;
+        if (!runId) throw new Error(t("scan.setup.scan_failed"));
         // Wait for the terminal Report: the shared evidence contract.
         let scanCount: number | null = null;
         const deadline = Date.now() + 120_000;
@@ -1321,17 +1324,25 @@ export function App({ client }: AppProps) {
           const snapshot = await client.getObservationSnapshot();
           const run = snapshot.scanRun;
           const report = snapshot.currentReport?.summary ?? null;
-          const active =
-            run !== null &&
-            ["queued", "running", "cancelling"].includes(run.state);
-          if (!active && report) {
-            scanCount = report.sourceCounts.localCandidates;
+          if (
+            report?.runId === runId &&
+            run?.runId === runId &&
+            run.state === "completed"
+          ) {
+            scanCount = report.counts.entities;
             break;
           }
+          if (
+            !run ||
+            run.runId !== runId ||
+            ["failed", "cancelled", "superseded"].includes(run.state)
+          )
+            throw new Error(t("scan.setup.scan_failed"));
           const { promise, resolve } = Promise.withResolvers<void>();
           setTimeout(resolve, 400);
           await promise;
         }
+        if (scanCount === null) throw new Error(t("scan.setup.scan_timeout"));
         setOnboardingScanCount(scanCount);
       } catch (reason) {
         setOnboardingStep(1);
@@ -1342,20 +1353,6 @@ export function App({ client }: AppProps) {
       return;
     }
     setOnboardingStep((step) => Math.min(step + 1, 2));
-  }
-
-  async function createOnboardingAgentDirectory(agentId: string) {
-    setOnboardingActivity("checking");
-    setOnboardingError(null);
-    try {
-      const info = await client.createAgentDirectory(agentId);
-      setStartupAgents(info.agents);
-      setOnboardingLibraryPath(info.libraryPath ?? null);
-    } catch (reason) {
-      setOnboardingError(readError(reason, t));
-    } finally {
-      setOnboardingActivity("idle");
-    }
   }
 
   const activeOperations = [
@@ -1444,6 +1441,8 @@ export function App({ client }: AppProps) {
         }}
         onSourceGroupUrlChange={(sourceUrl) => {
           setSourceGroupUrl(sourceUrl);
+          const parsed = parseRepositoryInput(sourceUrl);
+          if (parsed) setSourceGroupType(parsed.sourceType);
           setSourceGroupOutcome(null);
           setSourceGroupError(null);
         }}
@@ -1453,7 +1452,7 @@ export function App({ client }: AppProps) {
           setSourceGroupOutcome(null);
           setSourceGroupError(null);
         }}
-        onFetchLatestAndManage={fetchLatestAndManage}
+        onFetchLatestAndManage={() => void fetchLatestAndManage()}
         onConfirmSourceTransition={confirmSourceTransition}
         onUndoSourceTransition={undoSourceTransition}
         onPreviewSourcePromotion={previewSourcePromotion}
@@ -1487,7 +1486,6 @@ export function App({ client }: AppProps) {
         appUpdatePanel={appUpdatePanel}
         isOnboardingOpen={isOnboardingOpen}
         onboardingStep={onboardingStep}
-        onboardingAgents={startupAgents}
         onboardingLibraryPath={onboardingLibraryPath}
         onboardingScanCount={onboardingScanCount}
         onboardingActivity={onboardingActivity}
@@ -1501,7 +1499,12 @@ export function App({ client }: AppProps) {
         onCloseAppUpdate={closeAppUpdate}
         onCompleteOnboarding={completeOnboarding}
         onAdvanceOnboarding={advanceOnboarding}
-        onCreateAgentDirectory={createOnboardingAgentDirectory}
+        onOpenScanSetup={() => {
+          setOnboardingStep(1);
+          setOnboardingScanCount(null);
+          setOnboardingError(null);
+          setIsOnboardingOpen(true);
+        }}
       />
       {activeOperations.length > 0 ? (
         <OperationStatusWindow

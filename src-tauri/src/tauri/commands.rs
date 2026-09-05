@@ -171,28 +171,46 @@ pub fn get_git_source_capability(
 }
 
 #[tauri::command]
-pub fn fetch_latest_and_manage(
+pub async fn fetch_latest_and_manage(
     state: State<'_, SourceGroupPreviewApi>,
     request: FetchLatestAndManageRequestDto,
 ) -> Result<SourceGroupPreviewOutcomeDto, CommandFailureDto> {
-    state.fetch_latest_and_manage(request)
+    let api = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || api.fetch_latest_and_manage(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?
 }
 
 #[tauri::command]
-pub fn preview_source_promotion(
+pub async fn preview_source_promotion(
     state: State<'_, SourcePromotionApi>,
     request: PreviewSourcePromotionRequestDto,
 ) -> Result<crate::tauri_adapter::dto::SourcePromotionDraftOutcomeDto, CommandFailureDto> {
-    state.preview(request)
+    let api = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || api.preview(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?
 }
 
 #[tauri::command]
-pub fn confirm_source_promotion(
+pub async fn confirm_source_promotion(
     state: State<'_, SourcePromotionApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: ConfirmSourcePromotionRequestDto,
 ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-    let result = state.confirm(request);
+    let api = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || api.confirm(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?;
     if result.is_ok() {
         mutation.bump();
     }
@@ -213,20 +231,32 @@ pub fn finalize_source_promotion(
 }
 
 #[tauri::command]
-pub fn preview_source_update(
+pub async fn preview_source_update(
     state: State<'_, SourceUpdateApi>,
     request: PreviewSourcePromotionRequestDto,
 ) -> Result<crate::tauri_adapter::dto::SourceUpdateDraftDto, CommandFailureDto> {
-    state.preview(request)
+    let api = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || api.preview(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?
 }
 
 #[tauri::command]
-pub fn confirm_source_update(
+pub async fn confirm_source_update(
     state: State<'_, SourceUpdateApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: crate::tauri_adapter::dto::SourceUpdateConfirmRequestDto,
 ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-    let result = state.confirm(request);
+    let api = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || api.confirm(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?;
     if result.is_ok() {
         mutation.bump();
     }
@@ -299,12 +329,18 @@ pub fn remove_git_source(
 }
 
 #[tauri::command]
-pub fn confirm_source_transition(
+pub async fn confirm_source_transition(
     state: State<'_, SourceTransitionApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: crate::tauri_adapter::dto::ConfirmSourceTransitionRequestDto,
 ) -> Result<SourceTransitionResultDto, CommandFailureDto> {
-    let result = state.confirm(request);
+    let api = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || api.confirm(request))
+        .await
+        .map_err(|_| CommandFailureDto {
+            error: PublicErrorDto::Internal,
+            diagnostic: None,
+        })?;
     if result.is_ok() {
         mutation.bump();
     }
@@ -483,23 +519,27 @@ pub fn get_agent_management_snapshot(
 }
 
 #[tauri::command]
-pub fn get_observation_snapshot(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+pub fn get_observation_snapshot(
+    state: State<'_, Arc<ObservationApi>>,
+) -> ObservationAndScanSnapshotDto {
     state.snapshot()
 }
 
 #[tauri::command]
-pub fn refresh_detection(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+pub fn refresh_detection(state: State<'_, Arc<ObservationApi>>) -> ObservationAndScanSnapshotDto {
     state.refresh_detection()
 }
 
 #[tauri::command]
-pub fn refresh_startup_probe(state: State<'_, ObservationApi>) -> ObservationAndScanSnapshotDto {
+pub fn refresh_startup_probe(
+    state: State<'_, Arc<ObservationApi>>,
+) -> ObservationAndScanSnapshotDto {
     state.refresh_startup_probe()
 }
 
 #[tauri::command]
 pub fn refresh_activation_health(
-    state: State<'_, ObservationApi>,
+    state: State<'_, Arc<ObservationApi>>,
     request: crate::tauri_adapter::dto::RefreshActivationHealthRequestDto,
 ) -> ObservationAndScanSnapshotDto {
     state.refresh_activation_health(request.target_root_ids.as_deref())
@@ -507,7 +547,7 @@ pub fn refresh_activation_health(
 
 #[tauri::command]
 pub fn get_observation_page(
-    state: State<'_, ObservationApi>,
+    state: State<'_, Arc<ObservationApi>>,
     request: crate::tauri_adapter::dto::ObservationPageRequestDto,
 ) -> Result<crate::tauri_adapter::dto::ObservationPageReadDto, CommandFailureDto> {
     state
@@ -547,7 +587,7 @@ fn observation_command_failure(
 
 #[tauri::command]
 pub fn start_rescan(
-    state: State<'_, ObservationApi>,
+    state: State<'_, Arc<ObservationApi>>,
     request: StartRescanRequestDto,
 ) -> Result<ObservationAndScanSnapshotDto, CommandFailureDto> {
     let trigger = match request.trigger.as_str() {
@@ -567,7 +607,7 @@ pub fn start_rescan(
 
 #[tauri::command]
 pub fn cancel_rescan(
-    state: State<'_, ObservationApi>,
+    state: State<'_, Arc<ObservationApi>>,
     request: CancelRescanRequestDto,
 ) -> Result<ObservationAndScanSnapshotDto, CommandFailureDto> {
     state
@@ -612,7 +652,7 @@ fn scan_command_failure(error: &crate::core::scan::ScanError) -> CommandFailureD
 
 #[tauri::command]
 pub fn get_scan_report_page(
-    state: State<'_, ObservationApi>,
+    state: State<'_, Arc<ObservationApi>>,
     request: crate::tauri_adapter::dto::ScanReportPageRequestDto,
 ) -> Result<crate::tauri_adapter::dto::ScanReportPageDto, CommandFailureDto> {
     use crate::tauri_adapter::dto::scan_report_page_dto;
@@ -657,7 +697,7 @@ pub fn plan_delete_agent_configuration(
 pub fn apply_agent_configuration_plan(
     state: State<'_, AgentConfigurationApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    observation: State<'_, ObservationApi>,
+    observation: State<'_, Arc<ObservationApi>>,
     request: ApplyAgentConfigurationPlanRequestDto,
 ) -> Result<AgentConfigurationApplyResultDto, CommandFailureDto> {
     let result = state.apply(request);
@@ -1056,7 +1096,7 @@ pub fn plan_global_lifecycle(
 pub fn apply_global_enable(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    observation: State<'_, ObservationApi>,
+    observation: State<'_, Arc<ObservationApi>>,
     request: ApplyGlobalEnableRequestDto,
 ) -> Result<EnableResultDto, CommandFailureDto> {
     let result = state.apply_global_enable(request);
@@ -1074,7 +1114,7 @@ pub fn apply_global_enable(
 pub fn undo_global_enable(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    observation: State<'_, ObservationApi>,
+    observation: State<'_, Arc<ObservationApi>>,
     request: EnableOperationRequestDto,
 ) -> Result<EnableUndoResultDto, CommandFailureDto> {
     let result = state.undo_global_enable(request);
@@ -1109,7 +1149,7 @@ pub fn finalize_global_enable(
 /// resulting Target groups must be re-observed so Inspector never keeps
 /// showing the pre-mutation health. Deduplicate the physical Targets because
 /// a batch can contain many cells for the same group.
-fn schedule_activation_health<I>(observation: &ObservationApi, target_root_ids: I)
+fn schedule_activation_health<I>(observation: &Arc<ObservationApi>, target_root_ids: I)
 where
     I: Iterator<Item = String>,
 {

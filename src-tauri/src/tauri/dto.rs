@@ -1860,7 +1860,11 @@ pub struct ScanChainFaultDto {
 /// One row of a Report page; the section determines the variant (spec
 /// §4.7: closed `kind` + typed fields, never free-form App Copy).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ScanReportRowDto {
     RootCoverage {
         index: u32,
@@ -4692,6 +4696,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn scan_report_rows_use_camel_case_wire_fields() {
+        let row = ScanReportRowDto::RootCoverage {
+            index: 0,
+            configured_path: "/Users/me/.agents/skills".into(),
+            canonical_path: "/Users/me/.agents/skills".into(),
+            state: "completed".into(),
+            consumer_agents: vec![ScanRootAgentDto {
+                agent_id: "agent-1".into(),
+                agent_name: "General".into(),
+            }],
+            counts: ScanCountsDto::default(),
+            elapsed_ms: 12,
+            slow: false,
+            diagnostic: None,
+        };
+
+        let json = serde_json::to_value(row).expect("serialize scan report row");
+        assert_eq!(json["kind"], "root_coverage");
+        assert_eq!(json["configuredPath"], "/Users/me/.agents/skills");
+        assert_eq!(json["consumerAgents"][0]["agentName"], "General");
+        assert!(json.get("configured_path").is_none());
+        assert!(json.get("consumer_agents").is_none());
+    }
 
     #[test]
     fn source_group_preview_outcomes_keep_the_typed_wire_contract() {

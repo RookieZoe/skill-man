@@ -21,6 +21,7 @@ use crate::core::git_source::{
 use crate::core::source_tracking_policy::{
     PolicySelection, TrackingPolicyError, evaluate, is_supported_tracking_mode,
 };
+use crate::core::write_gate::WriteGate;
 use crate::seams::installer_lock_store::{InstallerLockError, InstallerLockStore};
 use crate::seams::remote_provider::{ProviderReleaseFact, RemoteProvider};
 use crate::seams::source::{GitSource, GitTreeEntryKind, SourceError};
@@ -140,13 +141,13 @@ pub enum SourceGroupPreviewError {
     TrackingPolicy(#[from] TrackingPolicyError),
 }
 
-/// Core service for the read-only Source Group Draft. Git transport receives
-/// an ephemeral temporary mirror, which is cleaned on return; this service
-/// never receives a Home, Catalog, staging, journal, or lock-writing seam.
+/// Source drafts never mutate Catalog, members, journals or ownership. The
+/// application may opt into disposable mirrors under its currently bound Home.
 pub struct SourceGroupPreviewService {
     git_source: Arc<dyn GitSource>,
     lock_store: Arc<dyn InstallerLockStore>,
     remote_provider: Option<Arc<dyn RemoteProvider>>,
+    cache_gate: Option<Arc<WriteGate>>,
 }
 
 impl SourceGroupPreviewService {
@@ -155,7 +156,13 @@ impl SourceGroupPreviewService {
             git_source,
             lock_store,
             remote_provider: None,
+            cache_gate: None,
         }
+    }
+
+    pub fn with_home_cache(mut self, gate: Arc<WriteGate>) -> Self {
+        self.cache_gate = Some(gate);
+        self
     }
 
     /// Wire the provider Release fact seam (GitHub/GitLab). Without it the
@@ -222,17 +229,52 @@ impl SourceGroupPreviewService {
             ));
         }
 
-        let temporary_mirror_root = tempfile::Builder::new()
-            .prefix("skill-man-source-preview-")
-            .tempdir()
-            .map_err(|source| {
-                SourceGroupPreviewError::Source(SourceError::Io {
-                    operation: "create temporary Git preview mirror",
-                    path: std::env::temp_dir(),
-                    source,
-                })
-            })?;
-        let mirror = git_mirror_path(temporary_mirror_root.path(), &spec.url);
+        // The Home transition barrier also serializes cache readers/writers.
+        // Capture the current App binding for every request, never the startup
+        // path or the system user's HOME. Closed Home states cannot write cache.
+        let context = self
+            .cache_gate
+            .as_ref()
+            .map(|gate| gate.capture_open_context())
+            .transpose()
+            .map_err(|error| SourceGroupPreviewError::Validation(error.to_string()))?;
+        let _cache_guard = match (&self.cache_gate, &context) {
+            (Some(gate), Some(context)) => Some(
+                gate.acquire_product_write(context)
+                    .map_err(|error| SourceGroupPreviewError::Validation(error.to_string()))?,
+            ),
+            _ => None,
+        };
+        let temporary_mirror_root = if context.is_none() {
+            Some(
+                tempfile::Builder::new()
+                    .prefix("skill-man-source-preview-")
+                    .tempdir()
+                    .map_err(|source| {
+                        SourceGroupPreviewError::Source(SourceError::Io {
+                            operation: "create temporary Git preview mirror",
+                            path: std::env::temp_dir(),
+                            source,
+                        })
+                    })?,
+            )
+        } else {
+            None
+        };
+        let mirror = if let Some(context) = &context {
+            let mirror = git_mirror_path(&context.home.path.join("cache"), &spec.url);
+            self.git_source
+                .validate_home_cache(&context.home.path, &mirror)?;
+            mirror
+        } else {
+            git_mirror_path(
+                temporary_mirror_root
+                    .as_ref()
+                    .expect("temporary mirror")
+                    .path(),
+                &spec.url,
+            )
+        };
         let report = self.git_source.fetch_mirror(&spec.url, &mirror)?;
         let releases = self.provider_releases(&spec.url)?;
         let tags = self.git_source.list_tags(&mirror)?;

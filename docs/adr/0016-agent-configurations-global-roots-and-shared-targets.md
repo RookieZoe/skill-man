@@ -56,6 +56,17 @@ Preset 创建出的配置与 Custom Agent 使用同一 CRUD 和 schema。Preset 
 Content。Custom Agent 与 Preset 配置都可保存多个扫描 Root、一个 Target 和可空的安全仓库相对项目
 目录。
 
+### Home 配置后的扫描引导
+
+Home 就绪后的引导先展示 Detection 与已有 Agent Configuration。用户可选择尚未配置的 Preset，
+通过现有 configuration plan 审阅扫描 Root、Activation Target、项目级目录及缺失 Target 的创建影响，
+再显式确认保存。批量保存逐项提交，每项在当前 generation 重新规划并核对已审阅的影响；失败保留
+已保存项，重试只处理尚未配置项，不覆盖已有配置。自定义 Root 继续从 Agent Management 编辑。
+
+用户可跳过整个引导；无配置时不能继续执行空范围扫描。配置完成后的 Continue 发起共享 Scan Run，
+完成状态只接受相同 run identity 的 terminal Report，Finish 打开完整 Evidence Ledger。常态启动
+不自动扫描；用户可从 Agent Management 的“配置扫描范围”重新进入这一流程。
+
 ## Catalog 与 Module Interface
 
 下一 Catalog migration（当前 v7 之后）采用以下逻辑结构；具体 SQL 名称可调整，但约束不能弱化：

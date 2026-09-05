@@ -9,7 +9,7 @@ import type {
   GlobalTargetGroupSnapshot,
 } from "../../app/catalog-client";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
-import { commandErrorMessage, type MessageKey } from "../locale/messages";
+import { commandErrorMessage } from "../locale/messages";
 import { useModalFocus } from "../../ui/useModalFocus";
 
 export interface EnableSkillItem {
@@ -237,87 +237,116 @@ export function GlobalEnableSheet({
               })
         }
       >
+        <header className="enable-sheet-heading">
+          <h2>
+            {isBatch
+              ? tPlural(
+                  "enable.global.dialogLabelBatch",
+                  normalizedSkills.length,
+                )
+              : t("enable.global.dialogLabel", {
+                  skill: normalizedSkills[0]?.name ?? "",
+                })}
+          </h2>
+        </header>
         <ol
           className="import-progress"
           aria-label={t("enable.global.progressLabel")}
         >
           {(["targets", "preview", "result"] as const).map((s) => (
             <li key={s} aria-current={step === s ? "step" : undefined}>
-              {t(`enable.global.step${capitalize(s)}` as MessageKey)}
+              {t(
+                s === "targets"
+                  ? "enable.global.stepTargetGroups"
+                  : s === "preview"
+                    ? "enable.global.stepPreviewMatrix"
+                    : "enable.global.stepResult",
+              )}
             </li>
           ))}
         </ol>
 
-        {step === "targets" && (
-          <TargetGroupStep
-            snapshot={groupsSnapshot}
-            selected={selected}
-            activity={busy}
-            onToggle={(groupId) => {
-              setSelected((current) =>
-                current.includes(groupId)
-                  ? current.filter((id) => id !== groupId)
-                  : [...current, groupId],
-              );
-            }}
-            onSelectAll={() =>
-              setSelected(
-                (groupsSnapshot?.groups ?? []).map(
-                  (group) => group.targetRootId,
-                ),
-              )
-            }
-            affectedAgentCount={affectedAgentIds.size}
-          />
-        )}
+        <div className="enable-sheet-body">
+          {step === "targets" && (
+            <TargetGroupStep
+              snapshot={groupsSnapshot}
+              selected={selected}
+              activity={busy}
+              onToggle={(groupId) => {
+                setSelected((current) =>
+                  current.includes(groupId)
+                    ? current.filter((id) => id !== groupId)
+                    : [...current, groupId],
+                );
+              }}
+              onSelectAll={() =>
+                setSelected(
+                  (groupsSnapshot?.groups ?? []).map(
+                    (group) => group.targetRootId,
+                  ),
+                )
+              }
+              affectedAgentCount={affectedAgentIds.size}
+            />
+          )}
 
-        {step === "preview" && plan !== null && (
-          <PreviewMatrixStep
-            plan={plan}
-            resolutions={resolutions}
-            isBatch={isBatch}
-            onAdoptExisting={onAdoptExisting}
-            onResolutionChange={(cellKey, resolution) => {
-              setResolutions((current) => {
-                const next = new Map(current);
-                next.set(cellKey, resolution);
-                if (resolution === "replace" || resolution === "switch") {
-                  const changedCell = plan.cells.find(
-                    (c) => c.cellKey === cellKey,
-                  );
-                  if (changedCell) {
-                    for (const other of plan.cells) {
-                      if (
-                        other.cellKey !== cellKey &&
-                        other.targetRootId === changedCell.targetRootId &&
-                        other.entryPath === changedCell.entryPath
-                      ) {
-                        next.set(other.cellKey, "skip");
+          {step === "preview" && plan !== null && (
+            <PreviewMatrixStep
+              plan={plan}
+              resolutions={resolutions}
+              isBatch={isBatch}
+              onAdoptExisting={onAdoptExisting}
+              onResolutionChange={(cellKey, resolution) => {
+                setResolutions((current) => {
+                  const next = new Map(current);
+                  next.set(cellKey, resolution);
+                  if (resolution === "replace" || resolution === "switch") {
+                    const changedCell = plan.cells.find(
+                      (c) => c.cellKey === cellKey,
+                    );
+                    if (changedCell) {
+                      for (const other of plan.cells) {
+                        if (
+                          other.cellKey !== cellKey &&
+                          other.targetRootId === changedCell.targetRootId &&
+                          other.entryPath === changedCell.entryPath
+                        ) {
+                          next.set(other.cellKey, "skip");
+                        }
                       }
                     }
                   }
-                }
-                return next;
-              });
-            }}
-          />
-        )}
+                  return next;
+                });
+              }}
+            />
+          )}
 
-        {step === "result" && result !== null && (
-          <ResultStep
-            result={result}
-            busy={busy}
-            onUndo={() => void onUndo()}
-          />
-        )}
+          {step === "result" && result !== null && (
+            <ResultStep
+              result={result}
+              busy={busy}
+              onUndo={() => void onUndo()}
+            />
+          )}
 
-        {error !== null && (
-          <p className="enable-sheet-error" role="alert">
-            {error}
-          </p>
-        )}
-
-        <div className="import-actions">
+          {error !== null && (
+            <p className="enable-sheet-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="import-actions enable-sheet-actions">
+          {step !== "result" && (
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onCloseWithFinalize()}
+            >
+              {t("sourceGroup.cancel")}
+            </button>
+          )}
           {step === "targets" && (
             <button
               type="button"
@@ -368,10 +397,6 @@ export function GlobalEnableSheet({
       </section>
     </div>
   );
-}
-
-function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function TargetGroupStep({

@@ -10,6 +10,8 @@ import type {
 } from "../../app/catalog-client";
 import type { MessageKey } from "../locale/messages";
 import { useLocale } from "../locale/LocaleProvider";
+import { parseRepositoryInput } from "./git-repository-input";
+import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 
 const PARAMETERISED_MODES = [
   "prerelease_channel",
@@ -38,7 +40,6 @@ function selectionKindLabel(
 }
 
 export function SourceGroupPreviewFlow({
-  sourceType,
   sourceUrl,
   policyMode,
   policyValue,
@@ -49,7 +50,6 @@ export function SourceGroupPreviewFlow({
   result,
   error,
   activity,
-  onSourceTypeChange,
   onSourceUrlChange,
   onSourceGroupPolicyChange,
   onFetch,
@@ -272,36 +272,54 @@ export function SourceGroupPreviewFlow({
           <h2>{t("library.source_group.preview_title")}</h2>
           <p>{t("library.source_group.body")}</p>
         </div>
-        <dl className="activation-paths source-group-facts">
-          <div>
-            <dt>{t("library.source_group.provider")}</dt>
-            <dd>{preview.provider}</dd>
-          </div>
-          <div>
-            <dt>{t("library.source_group.source")}</dt>
-            <dd>{preview.sourceUrl}</dd>
-          </div>
-          <div>
-            <dt>{t("library.source_group.policy_mode")}</dt>
-            <dd>{preview.policy.mode}</dd>
-          </div>
-          <div>
-            <dt>{t("library.source_group.selection_kind")}</dt>
-            <dd>{selectionKindLabel(preview.policy.selectionKind, t)}</dd>
-          </div>
-          <div>
-            <dt>{t("library.source_group.selected_ref")}</dt>
-            <dd>
-              <code>{preview.policy.selectedRef}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>{t("library.source_group.resolved_commit")}</dt>
-            <dd>
-              <code>{preview.policy.resolvedCommit}</code>
-            </dd>
-          </div>
-        </dl>
+        <p className="source-preview-url">{preview.sourceUrl}</p>
+        <details className="source-preview-details">
+          <summary>{t("library.source_group.technical_details")}</summary>
+          <dl className="activation-paths source-group-facts">
+            <div>
+              <dt>{t("library.source_group.provider")}</dt>
+              <dd>{preview.provider}</dd>
+            </div>
+            <div>
+              <dt>{t("library.source_group.source")}</dt>
+              <dd>{preview.sourceUrl}</dd>
+            </div>
+            <div>
+              <dt>{t("library.source_group.policy_mode")}</dt>
+              <dd>
+                {t(
+                  (
+                    {
+                      auto_release_tag_head: "library.source_group.policy_auto",
+                      prerelease_channel:
+                        "library.source_group.policy_prerelease",
+                      fixed_tag: "library.source_group.policy_fixed_tag",
+                      fixed_commit: "library.source_group.policy_fixed_commit",
+                      branch: "library.source_group.policy_branch",
+                      head: "library.source_group.policy_head",
+                    } as Record<string, MessageKey>
+                  )[preview.policy.mode] ?? "library.source_group.policy_auto",
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{t("library.source_group.selection_kind")}</dt>
+              <dd>{selectionKindLabel(preview.policy.selectionKind, t)}</dd>
+            </div>
+            <div>
+              <dt>{t("library.source_group.selected_ref")}</dt>
+              <dd>
+                <code>{preview.policy.selectedRef}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("library.source_group.resolved_commit")}</dt>
+              <dd>
+                <code>{preview.policy.resolvedCommit}</code>
+              </dd>
+            </div>
+          </dl>
+        </details>
         <section
           className="source-group-members"
           aria-label={t("library.source_group.members")}
@@ -322,14 +340,10 @@ export function SourceGroupPreviewFlow({
                     <small>{member.description}</small>
                   ) : null}
                 </div>
-                <dl className="source-group-member-tree">
-                  <div>
-                    <dt>{t("library.source_group.tree_summary")}</dt>
-                    <dd>
-                      <code>{member.treeSummary}</code>
-                    </dd>
-                  </div>
-                </dl>
+                <details className="source-member-details">
+                  <summary>{t("library.source_group.tree_summary")}</summary>
+                  <code>{member.treeSummary}</code>
+                </details>
               </li>
             ))}
           </ul>
@@ -352,9 +366,15 @@ export function SourceGroupPreviewFlow({
             <span>{error}</span>
           </div>
         ) : null}
+        {activity === "confirming" && (
+          <IndeterminateProgress
+            className="source-fetch-progress"
+            label={t("library.source_group.installing_hint")}
+          />
+        )}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
-            {t("library.source_group.close")}
+            {t("library.import.cancel")}
           </button>
           <button
             type="button"
@@ -364,7 +384,11 @@ export function SourceGroupPreviewFlow({
           >
             {activity === "confirming"
               ? t("library.source_group.confirming")
-              : t("library.source_group.confirm")}
+              : preview.externalOwnershipClaims.length
+                ? t("library.source_group.confirm")
+                : t("library.source_group.install_all", {
+                    count: preview.members.length,
+                  })}
           </button>
         </div>
       </>
@@ -484,36 +508,28 @@ export function SourceGroupPreviewFlow({
         <h2>{t("library.source_group.title")}</h2>
         <p>{t("library.source_group.body")}</p>
       </div>
-      <label className="import-source-field">
-        <span>{t("library.source_group.source_type")}</span>
-        <select
-          value={sourceType}
-          disabled={isBusy}
-          onChange={(event) =>
-            onSourceTypeChange(
-              event.currentTarget.value as GitRepositorySourceType,
-            )
-          }
-        >
-          <option value="github">
-            {t("library.source_group.type_github")}
-          </option>
-          <option value="gitlab">
-            {t("library.source_group.type_gitlab")}
-          </option>
-          <option value="git">{t("library.source_group.type_generic")}</option>
-        </select>
-      </label>
-      <label className="import-source-field">
-        <span>{t("library.source_group.repo_label")}</span>
+      <div className="import-source-field">
+        <label htmlFor="git-repository-url">
+          {t("library.source_group.repo_label")}
+        </label>
         <input
+          id="git-repository-url"
           type="url"
           value={sourceUrl}
           disabled={isBusy}
           onChange={(event) => onSourceUrlChange(event.currentTarget.value)}
           placeholder="https://"
+          aria-invalid={!!sourceUrl.trim() && !parseRepositoryInput(sourceUrl)}
+          aria-describedby="git-address-feedback"
         />
-      </label>
+        <small id="git-address-feedback" role="status">
+          {t(
+            sourceUrl.trim() && !parseRepositoryInput(sourceUrl)
+              ? "library.source_group.invalid_address"
+              : "library.source_group.address_hint",
+          )}
+        </small>
+      </div>
       <label className="import-source-field">
         <span>{t("library.source_group.policy_mode")}</span>
         <select
@@ -563,6 +579,12 @@ export function SourceGroupPreviewFlow({
           <span>{error}</span>
         </div>
       ) : null}
+      {activity === "fetching" && (
+        <IndeterminateProgress
+          className="source-fetch-progress"
+          label={t("library.source_group.fetching_hint")}
+        />
+      )}
       <div className="activation-sheet-actions">
         <button type="button" disabled={isBusy} onClick={onClose}>
           {t("library.import.cancel")}
@@ -572,6 +594,7 @@ export function SourceGroupPreviewFlow({
           className="activation-confirm-button"
           disabled={
             isBusy ||
+            !parseRepositoryInput(sourceUrl) ||
             (PARAMETERISED_MODES.includes(policyMode) && !policyValue.trim())
           }
           onClick={onFetch}

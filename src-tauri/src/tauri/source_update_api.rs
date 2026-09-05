@@ -15,6 +15,7 @@ use crate::tauri_adapter::dto::{
     SourceUpdateDraftDto,
 };
 
+#[derive(Clone)]
 pub struct SourceUpdateApi {
     update: Arc<SourceUpdateService>,
 }

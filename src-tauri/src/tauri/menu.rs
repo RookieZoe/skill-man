@@ -1,5 +1,5 @@
 //! Native application menu (spec §10.3, ADR-0011): the standard macOS app
-//! menu with the Window/Help submenu titles resolved through the effective
+//! menu with the Edit/Window/Help submenu titles resolved through the effective
 //! locale. Predefined items keep `None` text so macOS renders their
 //! system-localized titles; only Skill Man's own submenu titles are App Copy.
 
@@ -12,9 +12,26 @@ use crate::tauri_adapter::native_message::{NativeMessageKey, native_message};
 pub const APP_MENU_AGENTS_EVENT: &str = "menu-open-agents";
 const MENU_ID_OPEN_AGENTS: &str = "open-agents";
 
-/// Builds the standard menu (same structure as `Menu::default`) with
-/// locale-resolved `Window` / `Help` submenu titles.
+/// Builds the application menu with standard native editing commands and
+/// locale-resolved submenu titles.
 pub fn build_app_menu(app: &AppHandle, locale: EffectiveLocale) -> tauri::Result<Menu<tauri::Wry>> {
+    // WKWebView text shortcuts use these native responder-chain actions.
+    // Custom menu items or webview clipboard handlers are not substitutes.
+    let edit_menu = Submenu::with_id_and_items(
+        app,
+        "edit",
+        native_message(locale, NativeMessageKey::MenuEdit, &[]),
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
     let window_menu = Submenu::with_id_and_items(
         app,
         "window",
@@ -62,6 +79,7 @@ pub fn build_app_menu(app: &AppHandle, locale: EffectiveLocale) -> tauri::Result
                     &PredefinedMenuItem::quit(app, None)?,
                 ],
             )?,
+            &edit_menu,
             &window_menu,
             &help_menu,
         ],
@@ -83,5 +101,33 @@ pub fn handle_app_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     if event.id().as_ref() == MENU_ID_OPEN_AGENTS {
         crate::tauri_adapter::lifecycle::show_main_window(app);
         let _ = app.emit(APP_MENU_AGENTS_EVENT, ());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Static wiring guard, not a substitute for macOS responder-chain QA.
+    /// Removing Edit from our replacement app menu breaks text shortcuts
+    /// throughout WKWebView even when React handles no Command-key events.
+    #[test]
+    fn app_menu_wires_native_text_editing_commands() {
+        let source = include_str!("menu.rs");
+        let builder = source
+            .split("pub fn build_app_menu")
+            .nth(1)
+            .unwrap()
+            .split("pub fn apply_app_menu")
+            .next()
+            .unwrap();
+        assert!(
+            builder.contains("&edit_menu,"),
+            "the Edit submenu must be installed"
+        );
+        for action in ["undo", "redo", "cut", "copy", "paste", "select_all"] {
+            assert!(
+                builder.contains(&format!("PredefinedMenuItem::{action}(app, None)")),
+                "missing native editing action: {action}"
+            );
+        }
     }
 }

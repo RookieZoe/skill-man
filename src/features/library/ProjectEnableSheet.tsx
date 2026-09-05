@@ -254,6 +254,18 @@ export function ProjectEnableSheet({
               })
         }
       >
+        <header className="enable-sheet-heading">
+          <h2>
+            {isBatch
+              ? tPlural(
+                  "enable.project.dialogLabelBatch",
+                  normalizedSkills.length,
+                )
+              : t("enable.project.dialogLabel", {
+                  skill: normalizedSkills[0]?.name ?? "",
+                })}
+          </h2>
+        </header>
         <ol
           className="import-progress"
           aria-label={t("enable.project.progressLabel")}
@@ -265,91 +277,102 @@ export function ProjectEnableSheet({
           ))}
         </ol>
 
-        {step === "folder" && (
-          <FolderStep
-            folder={folder}
-            recentFolders={recentFolders}
-            onSelectFolder={(selected) => setFolder(selected)}
-            onFolderChange={(next) => setFolder(next)}
-            onClearRecent={onClearRecent}
-          />
-        )}
+        <div className="enable-sheet-body">
+          {step === "folder" && (
+            <FolderStep
+              folder={folder}
+              recentFolders={recentFolders}
+              onSelectFolder={(selected) => setFolder(selected)}
+              onFolderChange={(next) => setFolder(next)}
+              onClearRecent={onClearRecent}
+            />
+          )}
 
-        {step === "agents" && (
-          <AgentSelectionStep
-            agents={agents}
-            selectedIds={selectedAgentIds}
-            onToggleAgent={(id) =>
-              setSelectedAgentIds((curr) =>
-                curr.includes(id)
-                  ? curr.filter((item) => item !== id)
-                  : [...curr, id],
-              )
-            }
-            onSelectAll={() =>
-              setSelectedAgentIds(
-                agents
-                  .filter((agent) => Boolean(agent.projectSkillsDir))
-                  .map((agent) => agent.agentId),
-              )
-            }
-            onOpenAgentManagement={onOpenAgentManagement}
-          />
-        )}
+          {step === "agents" && (
+            <AgentSelectionStep
+              agents={agents}
+              selectedIds={selectedAgentIds}
+              onToggleAgent={(id) =>
+                setSelectedAgentIds((curr) =>
+                  curr.includes(id)
+                    ? curr.filter((item) => item !== id)
+                    : [...curr, id],
+                )
+              }
+              onSelectAll={() =>
+                setSelectedAgentIds(
+                  agents
+                    .filter((agent) => Boolean(agent.projectSkillsDir))
+                    .map((agent) => agent.agentId),
+                )
+              }
+              onOpenAgentManagement={onOpenAgentManagement}
+            />
+          )}
 
-        {step === "preview" && plan !== null && (
-          <ProjectPreviewStep
-            plan={plan}
-            resolutions={resolutions}
-            destructiveAcks={destructiveAcks}
-            onResolutionChange={(cellKey, resolution) => {
-              setResolutions((curr) => {
-                const next = new Map(curr);
-                next.set(cellKey, resolution);
-                if (resolution === "replace") {
-                  const changedCell = plan.cells.find(
-                    (c) => c.cellKey === cellKey,
-                  );
-                  if (changedCell) {
-                    for (const other of plan.cells) {
-                      if (
-                        other.cellKey !== cellKey &&
-                        other.targetRootId === changedCell.targetRootId &&
-                        other.entryPath === changedCell.entryPath
-                      ) {
-                        next.set(other.cellKey, "skip");
+          {step === "preview" && plan !== null && (
+            <ProjectPreviewStep
+              plan={plan}
+              resolutions={resolutions}
+              destructiveAcks={destructiveAcks}
+              onResolutionChange={(cellKey, resolution) => {
+                setResolutions((curr) => {
+                  const next = new Map(curr);
+                  next.set(cellKey, resolution);
+                  if (resolution === "replace") {
+                    const changedCell = plan.cells.find(
+                      (c) => c.cellKey === cellKey,
+                    );
+                    if (changedCell) {
+                      for (const other of plan.cells) {
+                        if (
+                          other.cellKey !== cellKey &&
+                          other.targetRootId === changedCell.targetRootId &&
+                          other.entryPath === changedCell.entryPath
+                        ) {
+                          next.set(other.cellKey, "skip");
+                        }
                       }
                     }
                   }
-                }
-                return next;
-              });
-            }}
-            onToggleDestructiveAck={(cellKey) => {
-              setDestructiveAcks((curr) => {
-                const next = new Set(curr);
-                if (next.has(cellKey)) {
-                  next.delete(cellKey);
-                } else {
-                  next.add(cellKey);
-                }
-                return next;
-              });
-            }}
-          />
-        )}
+                  return next;
+                });
+              }}
+              onToggleDestructiveAck={(cellKey) => {
+                setDestructiveAcks((curr) => {
+                  const next = new Set(curr);
+                  if (next.has(cellKey)) {
+                    next.delete(cellKey);
+                  } else {
+                    next.add(cellKey);
+                  }
+                  return next;
+                });
+              }}
+            />
+          )}
 
-        {step === "result" && result !== null && (
-          <ProjectResultStep result={result} onUndo={() => void onUndo()} />
-        )}
+          {step === "result" && result !== null && (
+            <ProjectResultStep result={result} onUndo={() => void onUndo()} />
+          )}
 
-        {error !== null && (
-          <p className="enable-sheet-error" role="alert">
-            {error}
-          </p>
-        )}
-
-        <div className="import-actions">
+          {error !== null && (
+            <p className="enable-sheet-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <div className="import-actions enable-sheet-actions">
+          {step !== "result" && (
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onCloseWithFinalize()}
+            >
+              {t("sourceGroup.cancel")}
+            </button>
+          )}
           {step === "folder" && (
             <button
               type="button"

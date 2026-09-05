@@ -2,83 +2,18 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 
-import type {
-  ObservationAndScanSnapshot,
-  ScanReportRow,
-} from "../../app/catalog-client";
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import { ScanEvidenceLedger } from "./ScanEvidenceLedger";
 
-type ReportSummary = NonNullable<
-  ObservationAndScanSnapshot["currentReport"]["summary"]
->;
-
-const COMPLETE_SUMMARY: ReportSummary = {
-  generation: 5,
-  runId: "fixture-scan-manual-1",
-  contentIdentity: "scan-report-v1:home:fixture-report-5:5:complete",
-  trigger: "manual" as const,
-  state: "complete" as const,
-  coverage: { completed: 1, failed: 0, unresponsive: 0 },
-  counts: {
-    roots: 1,
-    entries: 2,
-    entities: 1,
-    files: 4,
-    bytes: 2048,
-    gitProbes: 0,
-    failedRoots: 0,
-    configuredAgents: 1,
-    declaredRoots: 1,
-    canonicalRoots: 1,
-  },
-  incomplete: false,
-  publishedAtMs: 1757000000000,
-  agentConfigurationGeneration: 1,
-  configuredRootSnapshotFingerprint: "roots<1>",
-  startedAtMs: 1756999990000,
-  slow: false,
-  sourceCounts: {
-    gitGroups: 0,
-    gitGroupsConflicted: 0,
-    localCandidates: 1,
-    conflictSets: 0,
-    conflictMembers: 0,
-    blocked: 0,
-    deferred: 0,
-    identityConflicts: 0,
-    alreadyManaged: 0,
-    excluded: 0,
-    needsAttention: 0,
-  },
-};
-
-const LOCAL_CANDIDATE_ROW: ScanReportRow = {
-  kind: "source_verdict",
-  entityRef: "scan-report-v1:home:fixture-report-5:5:complete@5@1",
-  entitySeq: 1,
-  verdict: "local",
-  canonicalPath: "/dev/projects/prompt-linter",
-  directoryNames: ["prompt-linter"],
-  appearances: 1,
-  fileCount: 3,
-  byteCount: 100,
-  treeHash: "tree-sha256-v1:abc",
-  lockClaims: [],
-  worktreeHints: [],
-  reasonKind: null,
-  detail: null,
-  gitRefs: [],
-  gitLockPaths: [],
-  gitGroupSeq: null,
-  conflictSetSeq: null,
-  notes: [],
-  operations: [{ operation: "local_link", allowed: true, closedReason: null }],
-};
+import {
+  COMPLETE_SUMMARY,
+  LOCAL_CANDIDATE_ROW,
+} from "../../test-fixtures/scan-report";
 
 test("never-scanned surface shows the honest state and offers Rescan", async () => {
   render(<ScanEvidenceLedger client={createFixtureCatalogClient()} />);
   expect(await screen.findByText("Never scanned")).toBeInTheDocument();
+  expect(screen.queryByText(/Stale report/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
 });
 
@@ -116,6 +51,19 @@ test("idle surfaces never expose write actions", async () => {
   expect(
     screen.queryByRole("button", { name: "Rescan" }),
   ).not.toBeInTheDocument();
+});
+
+test("Rescan explains a closed write gate instead of reporting an internal error", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.startRescan = async () => {
+    throw { error: { code: "scan_not_writable" } };
+  };
+  render(<ScanEvidenceLedger client={client} />);
+  await user.click(await screen.findByRole("button", { name: "Rescan" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Writes are locked. Check the Home status before trying again.",
+  );
 });
 
 test("Local Link draft plans and applies; the batch stays undoable and finalizable", async () => {

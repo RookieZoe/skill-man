@@ -144,6 +144,8 @@ export function errorMessageKey(error: PublicError | string): MessageKey {
       return "error.catalog_unavailable";
     case "recovery_required":
       return "error.recovery_required";
+    case "scan_not_writable":
+      return "error.write_locked";
     case "source_unavailable":
       return "error.source_unavailable";
     case "target_mismatch":

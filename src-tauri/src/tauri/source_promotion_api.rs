@@ -7,6 +7,7 @@ use crate::tauri_adapter::dto::{
     SourcePromotionResultDto, SourceTransitionOperationRequestDto,
 };
 
+#[derive(Clone)]
 pub struct SourcePromotionApi {
     service: Arc<SourcePromotionService>,
 }

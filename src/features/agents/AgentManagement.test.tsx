@@ -6,6 +6,21 @@ import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import type { ObservationAndScanSnapshot } from "../../app/catalog-client";
 import { AgentManagement } from "./AgentManagement";
 
+test("editing an agent explains a closed write gate", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  client.planEditAgentConfiguration = async () => {
+    throw { error: { code: "recovery_required" } };
+  };
+  render(<AgentManagement client={client} layoutMode="wide" />);
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  const dialog = screen.getByRole("dialog", { name: "Agent Configuration" });
+  await user.click(within(dialog).getByRole("button", { name: "Review" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    "Writes are locked. Check the Home status before trying again.",
+  );
+});
+
 test("fresh Home renders empty configured state and all zero-write presets", async () => {
   render(
     <AgentManagement

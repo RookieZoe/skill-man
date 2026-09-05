@@ -950,6 +950,10 @@ Source Content 永远是插值参数，不是 key（§6.3）：
 
 ### 8.1 Evidence Ledger 与 Source Group Preview
 
+Git 传输缓存使用 **App 当前绑定的 Home** 下的 `cache/git/<repository-id>.git`，不是系统用户目录。预览、确认前拉取与来源更新复用 bare mirror，但每次仍向规范化远端刷新并校验选定提交，不能把缓存当作“远端最新”或恢复依据。预览允许写入这项可丢弃缓存，不写 Catalog、已安装成员、staging、journal 或 external lock；取消可以保留缓存。Home 切换和缓存使用串行化，关闭或失效 Home 拒绝缓存操作。缓存清理只在无进行中的操作时执行，删除后下次重新拉取；不删除已安装技能。提交后的恢复继续只使用冻结 journal 与已验证内容，不依赖缓存或网络。
+
+来源预览默认突出仓库、完整成员列表与安装动作；版本、策略、提交和 tree 摘要可折叠查看。新来源确认文案为“安装全部 N 个技能”，仅有 External Ownership Claim 的替代操作使用远端替代文案。耗时 Git 请求在后台阻塞任务执行，界面显示无虚构百分比的等待提示。
+
 Local Source 的 Adopt Preview 使用逐 Canonical Skill Entity 证据账本和显式 Include。稳定控制区外的用户开发工作区即使属于 Git repository 也保持 Local：Catalog 只记录 canonical 最终实体路径，不保存内容 baseline，Adopt 不移动、复制或改写目录，Activation 直指该实体。受支持 Git provider 的入口显示 bounded worktree hint、provider、规范化 repository、所有命中的 External Ownership Claim、默认 Source Tracking Policy 和可选显式 override；Fetch Latest and Manage 按 policy 选择 ref/tag 后才获取远端并发现完整 Source Release。
 
 Scan 先按最终文件系统对象聚合 appearances，再按 provider + canonical repository identity 聚合 Git Repository Source Candidate。同一 repository 的多个 legacy ref 提示是一个 Repository Ref Conflict，不拆分来源。Git Repository Source Preview 以来源为父节点；固定显示 provider、canonical repository、Source Tracking Policy、selected ref/tag、resolved commit、完整 Source Member 集、每个成员的 `skillPath`、Directory Identity、目标 tree 摘要、added/current/removed 动作、Source Snapshot Mismatch 与外部 lock 影响。成员不能逐项 Include、保留旧版本或跳过。worktree HEAD/dirty bytes、旧 lock、旧本地 `skillPath`、hash 与 commit 只可显示为 hint、External Ownership Claim 或历史事实，绝不作为远端成员、remote baseline 或 verified provenance。
@@ -961,6 +965,12 @@ Scan Report 分别统计 Root coverage、canonical entities、appearances、Loca
 汇总顺序固定为 Scan incomplete、Needs attention、Git sources、Local sources、Excluded/already Managed。multiple appearances 与稳定开发目录是信息，不是 warning。Local Include、Conflict winner 与 Git source review 默认未选择；Blocked/Deferred 没有选择控件。onboarding 与手动 Rescan 共用此 report contract：首次配置后的 onboarding 允许零配置、零选择、Skip 或 Cancel；常态启动只运行 Startup Probe，不自动完整 Rescan。手动入口打开非模态 Evidence Ledger；运行期间保留旧 Stale Report，只有 Complete/Incomplete Run 原子发布新 Report，Cancelled/Superseded 保留旧 Report。该汇总 sheet 的信息结构（funnel、四类计数卡、Root coverage 表、候选列表）见 §7.6，本节 contract 不因呈现而重复。
 
 Skill Man 不限制 Root、entry、Skill、entity、文件或内容字节规模；完整 evidence 按第 3.6/4.10 节流式落盘和分页读取。symlink 16-hop/cycle、originating Root containment、零网络 Rescan、有界并发/背压和 30 秒无进度 watchdog 是终止护栏，不是 Agent Skill 加载限制。Scan 本身只写派生 Evidence Store；selection draft、Source Group Draft、取消、返回或 remote 重新获取前仍不写 Catalog、Skill entity、staging、journal 或 lock。
+
+Home 就绪后的扫描引导允许零配置退出，但不继续执行空范围扫描。引导展示全部 Preset 的 Detection
+状态和已有配置；用户选择预设、审阅 Root/Target 与建目录影响后显式保存，再 Continue 发起共享
+Scan Run。已有配置不覆盖，部分保存失败保留成功项；批量后续项在新 generation 重验已审阅影响。
+完成只接受本次 run identity 的报告并打开 Evidence Ledger，不能复用旧报告作为本次成功结果。
+Agent Management 提供“配置扫描范围”入口，供跳过引导后再次进入。自定义 Root 仍从配置编辑入口维护。
 
 ### 8.2 分类与入口
 

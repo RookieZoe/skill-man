@@ -413,8 +413,9 @@ impl SqliteCatalogStore {
 
     /// Open the Catalog of a verified `BoundHome` for writing. Re-verifies
     /// the recorded identity against the bound value object (spec §3.4:
-    /// `BoundCatalogStore` construction requires the four identity fields to
-    /// be present and matching). An identity-bearing v5 Catalog migrates in
+    /// `BoundCatalogStore` construction requires a matching Home ID and
+    /// persistent volume UUID; fsid is mount-scoped diagnostic data, not
+    /// cross-startup identity (ADR-0012). An identity-bearing v5 Catalog migrates in
     /// place to the current schema; anything else is refused.
     pub fn open_bound(bound: &BoundHome, path: &Path) -> Result<Self, BoundCatalogOpenError> {
         if !has_content(path) {
@@ -428,10 +429,7 @@ impl SqliteCatalogStore {
         configure_connection(&connection).map_err(BoundCatalogOpenError::Configure)?;
         let stored =
             read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
-        if stored.home_id != bound.home_id
-            || stored.volume_fsid != bound.volume_fsid
-            || stored.volume_uuid != bound.volume_uuid
-        {
+        if stored.home_id != bound.home_id || stored.volume_uuid != bound.volume_uuid {
             return Err(BoundCatalogOpenError::IdentityMismatch);
         }
         if schema < CURRENT_SCHEMA_VERSION {
@@ -474,10 +472,7 @@ impl SqliteCatalogStore {
             .map_err(BoundCatalogOpenError::Configure)?;
         let stored =
             read_catalog_identity(&connection).ok_or(BoundCatalogOpenError::IdentityMissing)?;
-        if stored.home_id != bound.home_id
-            || stored.volume_fsid != bound.volume_fsid
-            || stored.volume_uuid != bound.volume_uuid
-        {
+        if stored.home_id != bound.home_id || stored.volume_uuid != bound.volume_uuid {
             return Err(BoundCatalogOpenError::IdentityMismatch);
         }
         Ok(Self {
@@ -773,8 +768,10 @@ impl SqliteCatalogStore {
         &self,
         skill_id: &SkillId,
     ) -> Result<Option<PersistedSkillDetail>, CatalogStoreError> {
-        self.connection()
-            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?
+        let connection = self
+            .connection()
+            .map_err(|error| CatalogStoreError::Unavailable(error.to_string()))?;
+        let detail = connection
             .query_row(
                 "SELECT
                     skills.id, skills.directory_name, skills.display_name,
@@ -806,7 +803,37 @@ impl SqliteCatalogStore {
                 },
             )
             .optional()
-            .map_err(sqlite_catalog_error)
+            .map_err(sqlite_catalog_error)?;
+        detail
+            .map(|mut detail| {
+                // Current Git members persist Home-relative namespace paths.
+                // Resolve against this open Catalog's Home, never process cwd.
+                // Absolute Local Link / legacy Install paths retain their meaning.
+                if detail.final_entity_path.is_relative() {
+                    let path = &detail.final_entity_path;
+                    if detail.summary.source_kind != SourceKind::RemoteInstall
+                        || !path.starts_with("skills/git")
+                        || path.components().count() != 4
+                        || !path
+                            .components()
+                            .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    {
+                        return Err(CatalogStoreError::Unavailable(
+                            "invalid Home-relative Skill path".into(),
+                        ));
+                    }
+                    let home = connection
+                        .path()
+                        .and_then(|path| Path::new(path).parent())
+                        .filter(|path| path.is_absolute())
+                        .ok_or_else(|| {
+                            CatalogStoreError::Unavailable("Catalog Home is unavailable".into())
+                        })?;
+                    detail.final_entity_path = home.join(path);
+                }
+                Ok(detail)
+            })
+            .transpose()
     }
 
     pub fn adopted_skill_entities(&self) -> Result<Vec<AdoptedSkillEntity>, MaintenanceStoreError> {
@@ -6402,6 +6429,68 @@ mod tests {
         drop(reopened);
 
         assert_eq!(catalog_artifacts(&path), before);
+    }
+
+    #[test]
+    fn bound_catalog_reopen_accepts_mount_fsid_drift_without_rewriting_identity() {
+        for recovery in [false, true] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("skill-man.sqlite3");
+            let original = bound_home();
+            drop(SqliteCatalogStore::create_bound(&original, &path).expect("create Catalog"));
+            let before = catalog_artifacts(&path);
+            let mut rebooted = original.clone();
+            rebooted.volume_fsid = "different-mount-after-reboot".into();
+            let opened = if recovery {
+                SqliteCatalogStore::open_bound_without_catalog_mutation(&rebooted, &path)
+            } else {
+                SqliteCatalogStore::open_bound(&rebooted, &path)
+            }
+            .expect("same persistent Home and volume must remain writable after reboot");
+            assert_eq!(opened.startup_status().access, StartupAccess::ReadWrite);
+            drop(opened);
+            if recovery {
+                assert_eq!(catalog_artifacts(&path), before);
+            }
+            let report = crate::adapters::catalog_probe::SqliteCatalogProbe::new()
+                .probe(&path)
+                .expect("read-only probe");
+            assert_eq!(
+                report.home_identity.expect("identity").volume_fsid,
+                original.volume_fsid
+            );
+        }
+    }
+
+    #[test]
+    fn bound_catalog_reopen_still_rejects_persistent_identity_changes() {
+        for recovery in [false, true] {
+            for changed_volume in [false, true] {
+                let dir = tempfile::tempdir().expect("temp dir");
+                let path = dir.path().join("skill-man.sqlite3");
+                let original = bound_home();
+                drop(SqliteCatalogStore::create_bound(&original, &path).expect("create Catalog"));
+                let mut changed = original.clone();
+                if changed_volume {
+                    changed.volume_uuid = "different-volume".into();
+                } else {
+                    changed.home_id = BoundHome::test_value(
+                        "c1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+                        dir.path().into(),
+                    )
+                    .home_id;
+                }
+                let result = if recovery {
+                    SqliteCatalogStore::open_bound_without_catalog_mutation(&changed, &path)
+                } else {
+                    SqliteCatalogStore::open_bound(&changed, &path)
+                };
+                assert!(matches!(
+                    result,
+                    Err(BoundCatalogOpenError::IdentityMismatch)
+                ));
+            }
+        }
     }
 
     #[test]

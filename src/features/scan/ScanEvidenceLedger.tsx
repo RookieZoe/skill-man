@@ -293,8 +293,12 @@ export function ScanEvidenceLedger({
   adoptHandoff = null,
   onManageGitGroup,
   onAdoptHandoffHandled,
+  expanded = true,
+  onExpandedChange,
 }: {
   client: CatalogClient;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
   idle?: boolean;
   /** A modal Agent Inspector is open; keep the ledger out of the tab order. */
@@ -391,7 +395,7 @@ export function ScanEvidenceLedger({
   const report = observation?.currentReport ?? null;
   const summary = report?.summary ?? null;
   const hasReport = summary !== null;
-  const stale = report?.freshness === "stale";
+  const stale = hasReport && report?.freshness === "stale";
   const cacheUnreadable =
     report?.staleReasons.includes("cache_unreadable") ?? false;
 
@@ -673,7 +677,9 @@ export function ScanEvidenceLedger({
   return (
     <section
       ref={ledgerRef}
+      id="scan-report-workspace"
       className="scan-evidence-ledger"
+      data-expanded={expanded}
       aria-label={t("scan.ledger.label")}
       inert={inert ? true : undefined}
       tabIndex={-1}
@@ -681,594 +687,621 @@ export function ScanEvidenceLedger({
         runActive ? "running" : (run?.state ?? (hasReport ? "report" : "none"))
       }
     >
-      <div className="scan-ledger-status" role="status" aria-live="polite">
-        <span className="scan-ledger-state">
-          {runActive
-            ? t(stateKey(run))
-            : run
+      <div className="scan-ledger-bar">
+        <div className="scan-ledger-status" role="status" aria-live="polite">
+          <span className="scan-ledger-state">
+            {runActive
               ? t(stateKey(run))
-              : t(reportStateKey(summary))}
-        </span>
-        {stale ? (
-          <span className="scan-ledger-stale">{t("scan.ledger.stale")}</span>
-        ) : null}
-        {cacheUnreadable ? (
-          <span className="scan-ledger-stale">
-            {t("scan.ledger.cacheUnreadable")}
+              : run
+                ? t(stateKey(run))
+                : t(reportStateKey(summary))}
           </span>
-        ) : null}
-        {run ? (
-          <span className="scan-ledger-phase">
-            {t(phaseKey(run))} · {t(triggerKey(run))}
-          </span>
-        ) : null}
-      </div>
-
-      {run ? (
-        <dl className="scan-ledger-facts">
-          <dt>
-            {t("scan.ledger.entryCount", { entries: run.counts.entries })}
-          </dt>
-          <dd>
-            {t("scan.ledger.entityCount", { entities: run.counts.entities })}
-          </dd>
-          <dd>{t("scan.ledger.fileCount", { files: run.counts.files })}</dd>
-          <dd>{t("scan.ledger.byteCount", { bytes: run.counts.bytes })}</dd>
-          {run.counts.failedRoots > 0 ? (
-            <dd>
-              {t("scan.ledger.failedRootCount", {
-                failed: run.counts.failedRoots,
-                roots: run.counts.roots,
-              })}
-            </dd>
+          {stale ? (
+            <span className="scan-ledger-stale">{t("scan.ledger.stale")}</span>
           ) : null}
-          <dd>
-            {t("scan.ledger.elapsed", {
-              seconds: Math.floor(run.elapsedMs / 1000),
-            })}
-          </dd>
-        </dl>
-      ) : summary ? (
-        <>
-          {/* Funnel: Configured Agents → declared roots → canonical roots →
-              appearances → canonical entities (spec §7.6). */}
-          <ul className="scan-summary-funnel">
-            <li>
-              {t("scan.summary.funnel.agents", {
-                value: summary.counts.configuredAgents,
-              })}
-            </li>
-            <li>
-              {t("scan.summary.funnel.declaredRoots", {
-                value: summary.counts.declaredRoots,
-              })}
-            </li>
-            <li>
-              {t("scan.summary.funnel.canonicalRoots", {
-                value: summary.counts.canonicalRoots,
-              })}
-            </li>
-            <li>
-              {t("scan.summary.funnel.appearances", {
-                value: summary.counts.entries,
-              })}
-            </li>
-            <li>
-              {t("scan.summary.funnel.entities", {
-                value: summary.counts.entities,
-              })}
-            </li>
-          </ul>
-          {/* Four classification count cards: counting only. */}
-          <ul
-            className="scan-summary-cards"
-            aria-label={t("scan.summary.cards.label")}
-          >
-            {countCards(summary).map((card) => (
-              <li key={card.key} aria-label={t(card.key)}>
-                <span className="scan-summary-card-value">{card.value}</span>
-                <span className="scan-summary-card-label">{t(card.key)}</span>
-              </li>
-            ))}
-          </ul>
-          {summary.incomplete ? (
-            <p className="scan-ledger-slow" role="alert">
-              {t("scan.summary.incompleteDestructiveDisabled")}
-            </p>
+          {cacheUnreadable ? (
+            <span className="scan-ledger-stale">
+              {t("scan.ledger.cacheUnreadable")}
+            </span>
           ) : null}
-          <dl className="scan-ledger-facts">
-            <dd>
-              {t("scan.ledger.entryCount", {
-                entries: summary.counts.entries,
-              })}
-            </dd>
-            <dd>
-              {t("scan.ledger.entityCount", {
-                entities: summary.counts.entities,
-              })}
-            </dd>
-            <dd>
-              {t("scan.ledger.fileCount", {
-                files: summary.counts.files,
-              })}
-            </dd>
-            <dd>
-              {t("scan.ledger.byteCount", { bytes: summary.counts.bytes })}
-            </dd>
-            <dd>
-              {t("scan.ledger.published", {
-                time: new Date(summary.publishedAtMs).toLocaleString(),
-              })}
-            </dd>
-          </dl>
-        </>
-      ) : null}
-
-      {run?.currentRoot !== null && run?.currentRoot !== undefined ? (
-        <p className="scan-ledger-root">
-          {t("scan.ledger.currentRoot", {
-            index: run.currentRoot + 1,
-            path: run.roots[run.currentRoot]?.configuredPath ?? "",
-          })}
-        </p>
-      ) : null}
-      {run?.slow ? (
-        <p className="scan-ledger-slow">{t("scan.ledger.slow")}</p>
-      ) : null}
-      {run?.diagnostic ? (
-        <details className="scan-ledger-diagnostic" role="alert">
-          <summary>{t("bootstrap.technical_details")}</summary>
-          <p>{run.diagnostic}</p>
-        </details>
-      ) : null}
-      {error ? (
-        <p className="scan-ledger-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {adoptHandoff && !summary ? (
-        <p className="scan-ledger-error" role="alert">
-          {t("scan.ledger.adoptHandoffNeedsReport")}
-        </p>
-      ) : null}
-
-      {summary && !runActive ? (
-        <div className="scan-summary-blocks">
-          {/* §8.1 fixed block order. Incomplete first, only when published. */}
-          {summary.incomplete ? (
-            <section className="scan-summary-block scan-summary-block-incomplete">
-              <h4>{t("scan.summary.block.incomplete")}</h4>
-              <ul className="scan-summary-rows scan-summary-rows-incomplete">
-                {sections.roots.rows
-                  .filter(
-                    (row) =>
-                      row.kind === "root_coverage" && row.state !== "completed",
-                  )
-                  .map((row, index) => (
-                    <li key={index} className="scan-summary-issue">
-                      {row.kind === "root_coverage" ? (
-                        <>
-                          <span>{row.canonicalPath}</span>
-                          <span className="scan-summary-issue-diagnostic">
-                            {row.diagnostic ??
-                              t(
-                                `scan.ledger.rootState.${row.state}` as MessageKey,
-                              )}
-                          </span>
-                        </>
-                      ) : null}
-                    </li>
-                  ))}
-                {sections.roots.loaded &&
-                !sections.roots.rows.some(
-                  (row) =>
-                    row.kind === "root_coverage" && row.state !== "completed",
-                ) ? (
-                  <li>{t("scan.summary.noCandidates")}</li>
-                ) : null}
-              </ul>
-            </section>
+          {runActive ? (
+            <span className="scan-ledger-phase">
+              {t(phaseKey(run))} · {t(triggerKey(run))}
+            </span>
           ) : null}
-          {CANDIDATE_SECTIONS.map((section) => (
-            <section
-              key={section}
-              className="scan-summary-block"
-              aria-label={t(sectionKey(section))}
-            >
-              <h4>{t(sectionKey(section))}</h4>
-              <ul className="scan-summary-rows">
-                {sections[section].rows.map((row, index) => {
-                  const key = candidateKey(row);
-                  const destination =
-                    row.kind === "source_verdict" ? row.canonicalPath : "";
-                  const operations = operationEligibility(row);
-                  const blocked = operations.filter((op) => !op.allowed);
-                  const clearable = operations.length > 0;
-                  return (
-                    <li
-                      key={index}
-                      className={`scan-summary-row scan-summary-row-${row.kind}`}
-                    >
-                      <div className="scan-summary-row-destination">
-                        <span className="scan-summary-row-text">
-                          {rowText(row, t)}
-                        </span>
-                        <span className="scan-summary-row-path">
-                          {destination}
-                        </span>
-                        {row.kind === "source_verdict" &&
-                        row.verdict !== "local" ? (
-                          <span className="scan-summary-row-reason">
-                            {reasonKey(row.reasonKind)
-                              ? t(reasonKey(row.reasonKind) as MessageKey)
-                              : t(verdictKey(row.verdict))}
-                          </span>
-                        ) : row.kind === "git_source_group" &&
-                          row.status !== "candidate" ? (
-                          <span className="scan-summary-row-reason">
-                            {t(statusKey(row.status))}
-                          </span>
-                        ) : null}
-                        {row.kind === "source_verdict"
-                          ? row.notes.map((note) => (
-                              <span
-                                key={note}
-                                className="scan-summary-row-note"
-                              >
-                                {t(noteKey(note))}
-                              </span>
-                            ))
-                          : null}
-                      </div>
-                      {/* Typed operation eligibility: default-empty selection
-                          draft; destructive ops blocked with the Core closed
-                          reason; Blocked/Deferred have no control at all. */}
-                      {clearable && !idle ? (
-                        <div className="scan-summary-row-operations">
-                          {row.kind === "git_source_group" &&
-                          row.status === "candidate" &&
-                          onManageGitGroup ? (
-                            <button
-                              type="button"
-                              className="scan-summary-row-manage"
-                              onClick={() =>
-                                onManageGitGroup(
-                                  row.provider as "github" | "gitlab" | "git",
-                                  row.canonicalRepository,
-                                )
-                              }
-                            >
-                              {t("scan.ledger.manageGitGroup")}
-                            </button>
-                          ) : (
-                            operations.map((op) =>
-                              op.allowed ? (
-                                <label
-                                  key={op.operation}
-                                  className="scan-summary-row-op"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={selected[key] ?? false}
-                                    onChange={(event) =>
-                                      setSelected((prev) => ({
-                                        ...prev,
-                                        [key]: event.target.checked,
-                                      }))
-                                    }
-                                  />
-                                  {t(operationKey(op.operation))}
-                                </label>
-                              ) : (
-                                <span
-                                  key={op.operation}
-                                  className="scan-summary-row-op-blocked"
-                                  aria-disabled={true}
-                                  title={t(
-                                    "scan.summary.incompleteDestructiveDisabled",
-                                  )}
-                                >
-                                  {t(operationKey(op.operation))}
-                                  <span className="scan-summary-row-op-blocked-hint">
-                                    {t("scan.summary.op.blocked")}
-                                  </span>
-                                </span>
-                              ),
-                            )
-                          )}
-                        </div>
-                      ) : null}
-                      {blocked.length > 0 ? (
-                        <p className="scan-summary-row-blocked-reason">
-                          {t("scan.summary.incompleteDestructiveDisabled")}
-                        </p>
-                      ) : null}
-                    </li>
-                  );
-                })}
-                {sections[section].loaded &&
-                sections[section].rows.length === 0 ? (
-                  <li className="scan-summary-none">
-                    {t("scan.summary.noCandidates")}
-                  </li>
-                ) : null}
-              </ul>
-              {!sections[section].loaded ||
-              sections[section].nextOffset !== null ? (
-                <button
-                  type="button"
-                  onClick={() => loadMore(section)}
-                  disabled={sections[section].loading}
-                >
-                  {t("scan.ledger.loadMore")}
-                </button>
-              ) : null}
-              {/* §7.6: Conflict Sets (Local↔Local same Directory Identity,
-                  default no winner) render inside the Local sources block. */}
-              {section === "local_candidates" ? (
-                <div className="scan-summary-conflicts">
-                  <h5>{t("scan.summary.block.conflictSets")}</h5>
-                  <ul className="scan-summary-rows">
-                    {sections.conflict_sets.rows.map((row, index) => {
-                      if (row.kind !== "conflict_set") return null;
-                      const setKey = candidateKey(row);
-                      return (
-                        <li
-                          key={index}
-                          className="scan-summary-row scan-summary-row-conflict_set"
-                        >
-                          <div className="scan-summary-row-destination">
-                            <span className="scan-summary-row-text">
-                              {rowText(row, t)}
-                            </span>
-                            <span className="scan-summary-row-path">
-                              {t("scan.summary.conflict.noWinnerYet")}
-                            </span>
-                          </div>
-                          {!idle ? (
-                            <div className="scan-summary-row-operations">
-                              {row.memberEntitySeqs.map((entitySeq) => (
-                                <label
-                                  key={entitySeq}
-                                  className="scan-summary-row-op"
-                                >
-                                  <input
-                                    type="radio"
-                                    name={`winner-${row.setSeq}`}
-                                    checked={
-                                      (winners[setKey] ?? -1) === entitySeq
-                                    }
-                                    onChange={() =>
-                                      setWinners((prev) => ({
-                                        ...prev,
-                                        [setKey]: entitySeq,
-                                      }))
-                                    }
-                                  />
-                                  {t("scan.summary.conflict.winner", {
-                                    member: entitySeq,
-                                  })}
-                                </label>
-                              ))}
-                            </div>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {!sections.conflict_sets.loaded ||
-                  sections.conflict_sets.nextOffset !== null ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        loadSection(
-                          "conflict_sets",
-                          sections.conflict_sets.nextOffset ?? 0,
-                        )
-                      }
-                      disabled={sections.conflict_sets.loading}
-                    >
-                      {t("scan.ledger.loadMore")}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </section>
-          ))}
         </div>
-      ) : null}
-
-      {/* §4.6 plan → apply → undo/finalize shelf: Local Include and an
-          explicit Conflict Set winner; the selections stay presentation
-          state until the Core validates the Report (any staleness is a
-          typed PlanStale, never a silent fallback). */}
-      {summary && !runActive && !idle ? (
-        <div className="scan-ledger-adopt-shelf">
-          <div className="scan-ledger-adopt-actions">
+        <div className="scan-ledger-actions">
+          {onExpandedChange ? (
             <button
               type="button"
-              onClick={planAdopt}
-              disabled={adoptBusy || stale || buildSelections().length === 0}
+              aria-expanded={expanded}
+              aria-controls="scan-report-content"
+              onClick={() => onExpandedChange(!expanded)}
             >
-              {t("scan.ledger.adoptPlan")}
+              {t(
+                expanded ? "scan.ledger.closeReport" : "scan.ledger.openReport",
+              )}
             </button>
-            {adoptPlan ? (
-              <button
-                type="button"
-                onClick={applyPlan}
-                disabled={adoptBusy || stale}
-              >
-                {t("scan.ledger.adoptApply")}
-              </button>
-            ) : null}
-            {adoptResult?.undoAvailable ? (
-              <button
-                type="button"
-                onClick={undoOperation}
-                disabled={adoptBusy || stale}
-              >
-                {t("scan.ledger.adoptUndo")}
-              </button>
-            ) : null}
-            {adoptResult ? (
-              <button
-                type="button"
-                onClick={finalizeOperation}
-                disabled={adoptBusy}
-              >
-                {t("scan.ledger.adoptFinalize")}
-              </button>
-            ) : null}
-          </div>
-          {adoptPlan ? (
-            <p className="scan-ledger-adopt-summary">
-              {t("scan.ledger.adoptPlanned", {
-                count: adoptPlan.items.length,
-              })}
-            </p>
           ) : null}
-          {adoptResult ? (
-            <ul className="scan-ledger-adopt-results">
-              {adoptResult.items.map((item) => (
-                <li key={item.skillId}>
-                  {item.adopted
-                    ? t("scan.ledger.adoptAdopted", {
-                        name: item.directoryName,
-                      })
-                    : t("scan.ledger.adoptFailed", {
-                        name: item.directoryName,
-                        detail: item.error ?? t("library.adopt.failed_unknown"),
-                      })}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {adoptUndo ? (
-            <ul className="scan-ledger-adopt-results">
-              {adoptUndo.items.map((item, index) => (
-                <li key={index}>
-                  {t("scan.ledger.adoptUndone", {
-                    name: item.directoryName,
-                  })}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {adoptMessage ? (
-            <p className="scan-ledger-error" role="alert">
-              {adoptMessage}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {summary && !runActive ? (
-        <div className="scan-ledger-sections">
-          {(["roots", "entities", "appearances", "diagnostics"] as const).map(
-            (section) => {
-              const state = sections[section];
-              const hasMore = !state.loaded || state.nextOffset !== null;
-              return (
-                <details key={section} className={`scan-ledger-section`}>
-                  <summary>{t(sectionKey(section))}</summary>
-                  {section === "roots" ? (
-                    <table className="scan-summary-coverage">
-                      <thead>
-                        <tr>
-                          <th>{t("scan.summary.coverage.root")}</th>
-                          <th>{t("scan.summary.coverage.agents")}</th>
-                          <th>{t("scan.summary.coverage.result")}</th>
-                          <th>{t("scan.summary.coverage.evidence")}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {state.rows.map((row, index) =>
-                          row.kind === "root_coverage" ? (
-                            <tr key={index}>
-                              <td>{row.canonicalPath}</td>
-                              <td>
-                                {row.consumerAgents.length > 0
-                                  ? row.consumerAgents
-                                      .map((agent) => agent.agentName)
-                                      .join(", ")
-                                  : t("scan.summary.coverage.noAgents")}
-                              </td>
-                              <td>
-                                {t(
-                                  `scan.ledger.rootState.${row.state}` as MessageKey,
-                                )}
-                                {row.diagnostic ? (
-                                  <span
-                                    className="scan-summary-coverage-diagnostic"
-                                    role="alert"
-                                  >
-                                    {row.diagnostic}
-                                  </span>
-                                ) : null}
-                              </td>
-                              <td>
-                                {t("scan.summary.coverage.evidenceSummary", {
-                                  entities: row.counts.entities,
-                                  files: row.counts.files,
-                                  entries: row.counts.entries,
-                                  bytes: row.counts.bytes,
-                                })}
-                              </td>
-                            </tr>
-                          ) : null,
-                        )}
-                        {state.loaded && state.rows.length === 0 ? (
-                          <tr>
-                            <td colSpan={4}>{t("scan.ledger.noRows")}</td>
-                          </tr>
-                        ) : null}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <>
-                      {state.loaded && state.rows.length === 0 ? (
-                        <p className="scan-ledger-none">
-                          {t("scan.ledger.noRows")}
-                        </p>
-                      ) : (
-                        <ul className="scan-ledger-rows">
-                          {state.rows.map((row, index) => (
-                            <li key={index}>{rowText(row, t)}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
-                  )}
-                  {hasMore ? (
-                    <button
-                      type="button"
-                      onClick={() => loadMore(section)}
-                      disabled={state.loading}
-                    >
-                      {t("scan.ledger.loadMore")}
-                    </button>
-                  ) : null}
-                </details>
-              );
-            },
-          )}
-        </div>
-      ) : null}
-
-      {!idle ? (
-        <div className="scan-ledger-actions">
-          {runActive && run.state !== "cancelling" ? (
+          {!idle && runActive && run.state !== "cancelling" ? (
             <button type="button" onClick={cancel} disabled={busy}>
               {t("scan.ledger.cancel")}
             </button>
           ) : null}
-          {!runActive || terminalFailed ? (
+          {!idle && (!runActive || terminalFailed) ? (
             <button type="button" onClick={start} disabled={busy}>
               {t("scan.ledger.rescan")}
             </button>
           ) : null}
         </div>
+      </div>
+      {error && !expanded ? (
+        <p className="scan-ledger-error" role="alert">
+          {error}
+        </p>
       ) : null}
+      <div
+        id="scan-report-content"
+        className="scan-report-content"
+        hidden={!expanded}
+      >
+        <h2 className="scan-report-title">{t("scan.ledger.openReport")}</h2>
+        {!summary && !run ? <p>{t("scan.ledger.noReport")}</p> : null}
+        {runActive ? (
+          <dl className="scan-ledger-facts">
+            <dt>
+              {t("scan.ledger.entryCount", { entries: run.counts.entries })}
+            </dt>
+            <dd>
+              {t("scan.ledger.entityCount", { entities: run.counts.entities })}
+            </dd>
+            <dd>{t("scan.ledger.fileCount", { files: run.counts.files })}</dd>
+            <dd>{t("scan.ledger.byteCount", { bytes: run.counts.bytes })}</dd>
+            {run.counts.failedRoots > 0 ? (
+              <dd>
+                {t("scan.ledger.failedRootCount", {
+                  failed: run.counts.failedRoots,
+                  roots: run.counts.roots,
+                })}
+              </dd>
+            ) : null}
+            <dd>
+              {t("scan.ledger.elapsed", {
+                seconds: Math.floor(run.elapsedMs / 1000),
+              })}
+            </dd>
+          </dl>
+        ) : summary ? (
+          <>
+            {/* Funnel: Configured Agents → declared roots → canonical roots →
+              appearances → canonical entities (spec §7.6). */}
+            <ul className="scan-summary-funnel">
+              <li>
+                {t("scan.summary.funnel.agents", {
+                  value: summary.counts.configuredAgents,
+                })}
+              </li>
+              <li>
+                {t("scan.summary.funnel.declaredRoots", {
+                  value: summary.counts.declaredRoots,
+                })}
+              </li>
+              <li>
+                {t("scan.summary.funnel.canonicalRoots", {
+                  value: summary.counts.canonicalRoots,
+                })}
+              </li>
+              <li>
+                {t("scan.summary.funnel.appearances", {
+                  value: summary.counts.entries,
+                })}
+              </li>
+              <li>
+                {t("scan.summary.funnel.entities", {
+                  value: summary.counts.entities,
+                })}
+              </li>
+            </ul>
+            {/* Four classification count cards: counting only. */}
+            <ul
+              className="scan-summary-cards"
+              aria-label={t("scan.summary.cards.label")}
+            >
+              {countCards(summary).map((card) => (
+                <li key={card.key} aria-label={t(card.key)}>
+                  <span className="scan-summary-card-value">{card.value}</span>
+                  <span className="scan-summary-card-label">{t(card.key)}</span>
+                </li>
+              ))}
+            </ul>
+            {summary.incomplete ? (
+              <p className="scan-ledger-slow" role="alert">
+                {t("scan.summary.incompleteDestructiveDisabled")}
+              </p>
+            ) : null}
+            <dl className="scan-ledger-facts">
+              <dd>
+                {t("scan.ledger.entryCount", {
+                  entries: summary.counts.entries,
+                })}
+              </dd>
+              <dd>
+                {t("scan.ledger.entityCount", {
+                  entities: summary.counts.entities,
+                })}
+              </dd>
+              <dd>
+                {t("scan.ledger.fileCount", {
+                  files: summary.counts.files,
+                })}
+              </dd>
+              <dd>
+                {t("scan.ledger.byteCount", { bytes: summary.counts.bytes })}
+              </dd>
+              <dd>
+                {t("scan.ledger.published", {
+                  time: new Date(summary.publishedAtMs).toLocaleString(),
+                })}
+              </dd>
+            </dl>
+          </>
+        ) : null}
+
+        {runActive &&
+        run?.currentRoot !== null &&
+        run?.currentRoot !== undefined ? (
+          <p className="scan-ledger-root">
+            {t("scan.ledger.currentRoot", {
+              index: run.currentRoot + 1,
+              path: run.roots[run.currentRoot]?.configuredPath ?? "",
+            })}
+          </p>
+        ) : null}
+        {run?.slow ? (
+          <p className="scan-ledger-slow">{t("scan.ledger.slow")}</p>
+        ) : null}
+        {run?.diagnostic ? (
+          <details className="scan-ledger-diagnostic" role="alert">
+            <summary>{t("bootstrap.technical_details")}</summary>
+            <p>{run.diagnostic}</p>
+          </details>
+        ) : null}
+        {error ? (
+          <p className="scan-ledger-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {adoptHandoff && !summary ? (
+          <p className="scan-ledger-error" role="alert">
+            {t("scan.ledger.adoptHandoffNeedsReport")}
+          </p>
+        ) : null}
+
+        {summary && !runActive ? (
+          <div className="scan-summary-blocks">
+            {/* §8.1 fixed block order. Incomplete first, only when published. */}
+            {summary.incomplete ? (
+              <section className="scan-summary-block scan-summary-block-incomplete">
+                <h4>{t("scan.summary.block.incomplete")}</h4>
+                <ul className="scan-summary-rows scan-summary-rows-incomplete">
+                  {sections.roots.rows
+                    .filter(
+                      (row) =>
+                        row.kind === "root_coverage" &&
+                        row.state !== "completed",
+                    )
+                    .map((row, index) => (
+                      <li key={index} className="scan-summary-issue">
+                        {row.kind === "root_coverage" ? (
+                          <>
+                            <span>{row.canonicalPath}</span>
+                            <span className="scan-summary-issue-diagnostic">
+                              {row.diagnostic ??
+                                t(
+                                  `scan.ledger.rootState.${row.state}` as MessageKey,
+                                )}
+                            </span>
+                          </>
+                        ) : null}
+                      </li>
+                    ))}
+                  {sections.roots.loaded &&
+                  !sections.roots.rows.some(
+                    (row) =>
+                      row.kind === "root_coverage" && row.state !== "completed",
+                  ) ? (
+                    <li>{t("scan.summary.noCandidates")}</li>
+                  ) : null}
+                </ul>
+              </section>
+            ) : null}
+            {CANDIDATE_SECTIONS.map((section) => (
+              <section
+                key={section}
+                className="scan-summary-block"
+                aria-label={t(sectionKey(section))}
+              >
+                <h4>{t(sectionKey(section))}</h4>
+                <ul className="scan-summary-rows">
+                  {sections[section].rows.map((row, index) => {
+                    const key = candidateKey(row);
+                    const destination =
+                      row.kind === "source_verdict" ? row.canonicalPath : "";
+                    const operations = operationEligibility(row);
+                    const blocked = operations.filter((op) => !op.allowed);
+                    const clearable = operations.length > 0;
+                    return (
+                      <li
+                        key={index}
+                        className={`scan-summary-row scan-summary-row-${row.kind}`}
+                      >
+                        <div className="scan-summary-row-destination">
+                          <span className="scan-summary-row-text">
+                            {rowText(row, t)}
+                          </span>
+                          <span className="scan-summary-row-path">
+                            {destination}
+                          </span>
+                          {row.kind === "source_verdict" &&
+                          row.verdict !== "local" ? (
+                            <span className="scan-summary-row-reason">
+                              {reasonKey(row.reasonKind)
+                                ? t(reasonKey(row.reasonKind) as MessageKey)
+                                : t(verdictKey(row.verdict))}
+                            </span>
+                          ) : row.kind === "git_source_group" &&
+                            row.status !== "candidate" ? (
+                            <span className="scan-summary-row-reason">
+                              {t(statusKey(row.status))}
+                            </span>
+                          ) : null}
+                          {row.kind === "source_verdict"
+                            ? row.notes.map((note) => (
+                                <span
+                                  key={note}
+                                  className="scan-summary-row-note"
+                                >
+                                  {t(noteKey(note))}
+                                </span>
+                              ))
+                            : null}
+                        </div>
+                        {/* Typed operation eligibility: default-empty selection
+                          draft; destructive ops blocked with the Core closed
+                          reason; Blocked/Deferred have no control at all. */}
+                        {clearable && !idle ? (
+                          <div className="scan-summary-row-operations">
+                            {row.kind === "git_source_group" &&
+                            row.status === "candidate" &&
+                            onManageGitGroup ? (
+                              <button
+                                type="button"
+                                className="scan-summary-row-manage"
+                                onClick={() =>
+                                  onManageGitGroup(
+                                    row.provider as "github" | "gitlab" | "git",
+                                    row.canonicalRepository,
+                                  )
+                                }
+                              >
+                                {t("scan.ledger.manageGitGroup")}
+                              </button>
+                            ) : (
+                              operations.map((op) =>
+                                op.allowed ? (
+                                  <label
+                                    key={op.operation}
+                                    className="scan-summary-row-op"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={selected[key] ?? false}
+                                      onChange={(event) =>
+                                        setSelected((prev) => ({
+                                          ...prev,
+                                          [key]: event.target.checked,
+                                        }))
+                                      }
+                                    />
+                                    {t(operationKey(op.operation))}
+                                  </label>
+                                ) : (
+                                  <span
+                                    key={op.operation}
+                                    className="scan-summary-row-op-blocked"
+                                    aria-disabled={true}
+                                    title={t(
+                                      "scan.summary.incompleteDestructiveDisabled",
+                                    )}
+                                  >
+                                    {t(operationKey(op.operation))}
+                                    <span className="scan-summary-row-op-blocked-hint">
+                                      {t("scan.summary.op.blocked")}
+                                    </span>
+                                  </span>
+                                ),
+                              )
+                            )}
+                          </div>
+                        ) : null}
+                        {blocked.length > 0 ? (
+                          <p className="scan-summary-row-blocked-reason">
+                            {t("scan.summary.incompleteDestructiveDisabled")}
+                          </p>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                  {sections[section].loaded &&
+                  sections[section].rows.length === 0 ? (
+                    <li className="scan-summary-none">
+                      {t("scan.summary.noCandidates")}
+                    </li>
+                  ) : null}
+                </ul>
+                {!sections[section].loaded ||
+                sections[section].nextOffset !== null ? (
+                  <button
+                    type="button"
+                    onClick={() => loadMore(section)}
+                    disabled={sections[section].loading}
+                  >
+                    {t("scan.ledger.loadMore")}
+                  </button>
+                ) : null}
+                {/* §7.6: Conflict Sets (Local↔Local same Directory Identity,
+                  default no winner) render inside the Local sources block. */}
+                {section === "local_candidates" ? (
+                  <div className="scan-summary-conflicts">
+                    <h5>{t("scan.summary.block.conflictSets")}</h5>
+                    <ul className="scan-summary-rows">
+                      {sections.conflict_sets.rows.map((row, index) => {
+                        if (row.kind !== "conflict_set") return null;
+                        const setKey = candidateKey(row);
+                        return (
+                          <li
+                            key={index}
+                            className="scan-summary-row scan-summary-row-conflict_set"
+                          >
+                            <div className="scan-summary-row-destination">
+                              <span className="scan-summary-row-text">
+                                {rowText(row, t)}
+                              </span>
+                              <span className="scan-summary-row-path">
+                                {t("scan.summary.conflict.noWinnerYet")}
+                              </span>
+                            </div>
+                            {!idle ? (
+                              <div className="scan-summary-row-operations">
+                                {row.memberEntitySeqs.map((entitySeq) => (
+                                  <label
+                                    key={entitySeq}
+                                    className="scan-summary-row-op"
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`winner-${row.setSeq}`}
+                                      checked={
+                                        (winners[setKey] ?? -1) === entitySeq
+                                      }
+                                      onChange={() =>
+                                        setWinners((prev) => ({
+                                          ...prev,
+                                          [setKey]: entitySeq,
+                                        }))
+                                      }
+                                    />
+                                    {t("scan.summary.conflict.winner", {
+                                      member: entitySeq,
+                                    })}
+                                  </label>
+                                ))}
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {!sections.conflict_sets.loaded ||
+                    sections.conflict_sets.nextOffset !== null ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          loadSection(
+                            "conflict_sets",
+                            sections.conflict_sets.nextOffset ?? 0,
+                          )
+                        }
+                        disabled={sections.conflict_sets.loading}
+                      >
+                        {t("scan.ledger.loadMore")}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </section>
+            ))}
+          </div>
+        ) : null}
+
+        {/* §4.6 plan → apply → undo/finalize shelf: Local Include and an
+          explicit Conflict Set winner; the selections stay presentation
+          state until the Core validates the Report (any staleness is a
+          typed PlanStale, never a silent fallback). */}
+        {summary && !runActive && !idle ? (
+          <div className="scan-ledger-adopt-shelf">
+            <div className="scan-ledger-adopt-actions">
+              <button
+                type="button"
+                onClick={planAdopt}
+                disabled={adoptBusy || stale || buildSelections().length === 0}
+              >
+                {t("scan.ledger.adoptPlan")}
+              </button>
+              {adoptPlan ? (
+                <button
+                  type="button"
+                  onClick={applyPlan}
+                  disabled={adoptBusy || stale}
+                >
+                  {t("scan.ledger.adoptApply")}
+                </button>
+              ) : null}
+              {adoptResult?.undoAvailable ? (
+                <button
+                  type="button"
+                  onClick={undoOperation}
+                  disabled={adoptBusy || stale}
+                >
+                  {t("scan.ledger.adoptUndo")}
+                </button>
+              ) : null}
+              {adoptResult ? (
+                <button
+                  type="button"
+                  onClick={finalizeOperation}
+                  disabled={adoptBusy}
+                >
+                  {t("scan.ledger.adoptFinalize")}
+                </button>
+              ) : null}
+            </div>
+            {adoptPlan ? (
+              <p className="scan-ledger-adopt-summary">
+                {t("scan.ledger.adoptPlanned", {
+                  count: adoptPlan.items.length,
+                })}
+              </p>
+            ) : null}
+            {adoptResult ? (
+              <ul className="scan-ledger-adopt-results">
+                {adoptResult.items.map((item) => (
+                  <li key={item.skillId}>
+                    {item.adopted
+                      ? t("scan.ledger.adoptAdopted", {
+                          name: item.directoryName,
+                        })
+                      : t("scan.ledger.adoptFailed", {
+                          name: item.directoryName,
+                          detail:
+                            item.error ?? t("library.adopt.failed_unknown"),
+                        })}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {adoptUndo ? (
+              <ul className="scan-ledger-adopt-results">
+                {adoptUndo.items.map((item, index) => (
+                  <li key={index}>
+                    {t("scan.ledger.adoptUndone", {
+                      name: item.directoryName,
+                    })}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {adoptMessage ? (
+              <p className="scan-ledger-error" role="alert">
+                {adoptMessage}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {summary && !runActive ? (
+          <div className="scan-ledger-sections">
+            {(["roots", "entities", "appearances", "diagnostics"] as const).map(
+              (section) => {
+                const state = sections[section];
+                const hasMore = !state.loaded || state.nextOffset !== null;
+                return (
+                  <details key={section} className={`scan-ledger-section`}>
+                    <summary>{t(sectionKey(section))}</summary>
+                    {section === "roots" ? (
+                      <table className="scan-summary-coverage">
+                        <thead>
+                          <tr>
+                            <th>{t("scan.summary.coverage.root")}</th>
+                            <th>{t("scan.summary.coverage.agents")}</th>
+                            <th>{t("scan.summary.coverage.result")}</th>
+                            <th>{t("scan.summary.coverage.evidence")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {state.rows.map((row, index) =>
+                            row.kind === "root_coverage" ? (
+                              <tr key={index}>
+                                <td>{row.canonicalPath}</td>
+                                <td>
+                                  {row.consumerAgents.length > 0
+                                    ? row.consumerAgents
+                                        .map((agent) => agent.agentName)
+                                        .join(", ")
+                                    : t("scan.summary.coverage.noAgents")}
+                                </td>
+                                <td>
+                                  {t(
+                                    `scan.ledger.rootState.${row.state}` as MessageKey,
+                                  )}
+                                  {row.diagnostic ? (
+                                    <span
+                                      className="scan-summary-coverage-diagnostic"
+                                      role="alert"
+                                    >
+                                      {row.diagnostic}
+                                    </span>
+                                  ) : null}
+                                </td>
+                                <td>
+                                  {t("scan.summary.coverage.evidenceSummary", {
+                                    entities: row.counts.entities,
+                                    files: row.counts.files,
+                                    entries: row.counts.entries,
+                                    bytes: row.counts.bytes,
+                                  })}
+                                </td>
+                              </tr>
+                            ) : null,
+                          )}
+                          {state.loaded && state.rows.length === 0 ? (
+                            <tr>
+                              <td colSpan={4}>{t("scan.ledger.noRows")}</td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <>
+                        {state.loaded && state.rows.length === 0 ? (
+                          <p className="scan-ledger-none">
+                            {t("scan.ledger.noRows")}
+                          </p>
+                        ) : (
+                          <ul className="scan-ledger-rows">
+                            {state.rows.map((row, index) => (
+                              <li key={index}>{rowText(row, t)}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </>
+                    )}
+                    {hasMore ? (
+                      <button
+                        type="button"
+                        onClick={() => loadMore(section)}
+                        disabled={state.loading}
+                      >
+                        {t("scan.ledger.loadMore")}
+                      </button>
+                    ) : null}
+                  </details>
+                );
+              },
+            )}
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }
