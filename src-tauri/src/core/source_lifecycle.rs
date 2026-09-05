@@ -1060,8 +1060,10 @@ impl SourceLifecycleService {
                             ),
                         ));
                     }
-                    self.filesystem
-                        .remove_directory_verified(&member.namespace_path)?;
+                    self.filesystem.remove_directory_verified_nofollow(
+                        &member.namespace_path,
+                        &installed.root,
+                    )?;
                 }
                 self.filesystem.restore_isolated_source(
                     backup,

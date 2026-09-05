@@ -1733,8 +1733,10 @@ impl SourceTransitionService {
                                 ),
                             ));
                         }
-                        self.filesystem
-                            .remove_directory_verified(&member.namespace_path)?;
+                        self.filesystem.remove_directory_verified_nofollow(
+                            &member.namespace_path,
+                            &snapshot.root,
+                        )?;
                     }
                     let isolated = member.isolated_path.clone().ok_or_else(|| {
                         SourceTransitionError::RecoveryRequired(
@@ -1771,8 +1773,10 @@ impl SourceTransitionService {
                             ),
                         ));
                     }
-                    self.filesystem
-                        .remove_directory_verified(&member.namespace_path)?;
+                    self.filesystem.remove_directory_verified_nofollow(
+                        &member.namespace_path,
+                        &snapshot.root,
+                    )?;
                 }
             }
             for removed in journal.removed_members.iter_mut().rev() {
@@ -1906,8 +1910,10 @@ impl SourceTransitionService {
                             format!("Home member '{}' changed", member.directory_name),
                         ));
                     }
-                    self.filesystem
-                        .remove_directory_verified(&member.namespace_path)?;
+                    self.filesystem.remove_directory_verified_nofollow(
+                        &member.namespace_path,
+                        &snapshot.root,
+                    )?;
                 }
                 let previous_tree = previous_by_skill
                     .get(member.skill_id.as_str())
@@ -1935,7 +1941,7 @@ impl SourceTransitionService {
                     ));
                 }
                 self.filesystem
-                    .remove_directory_verified(&member.namespace_path)?;
+                    .remove_directory_verified_nofollow(&member.namespace_path, &snapshot.root)?;
             }
         }
         for removed in &journal.removed_members {
@@ -2177,7 +2183,7 @@ impl SourceTransitionService {
                     ));
                 }
                 self.filesystem
-                    .remove_directory_verified(&member.namespace_path)?;
+                    .remove_directory_verified_nofollow(&member.namespace_path, &snapshot.root)?;
             }
         }
         for member in journal.members.iter_mut().rev() {
@@ -2268,16 +2274,22 @@ impl SourceTransitionService {
                         format!("Home member '{}' changed", member.directory_name),
                     ));
                 }
-                self.filesystem
-                    .remove_directory_verified(&member.namespace_path)?;
+                self.filesystem.remove_directory_verified_nofollow(
+                    &member.namespace_path,
+                    &final_snapshot.root,
+                )?;
             }
             // The empty remote namespace directory is part of the source's
             // owned state; a clean Undo removes it with the members.
             if let Some(first) = journal.members.first() {
                 if let Some(remote_directory) = first.namespace_path.parent() {
                     if self.filesystem.list_directory(remote_directory)?.is_empty() {
-                        self.filesystem
-                            .remove_directory_verified(remote_directory)?;
+                        let remote_directory_fingerprint =
+                            self.filesystem.directory_fingerprint(remote_directory)?;
+                        self.filesystem.remove_directory_verified_nofollow(
+                            remote_directory,
+                            &remote_directory_fingerprint,
+                        )?;
                     }
                 }
             }

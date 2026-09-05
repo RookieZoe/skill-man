@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::core::source_transition::{SourceTransitionError, SourceTransitionService};
+use crate::seams::installer_lock_store::LockReleaseError;
 use crate::tauri_adapter::dto::{
     CommandFailureDto, ConfirmSourceTransitionRequestDto, DiagnosticDto, PublicErrorDto,
     SourceTransitionOperationRequestDto, SourceTransitionResultDto, SourceUndoResultDto,
 };
-use crate::seams::installer_lock_store::LockReleaseError;
 
 pub struct SourceTransitionApi {
     service: Arc<SourceTransitionService>,
