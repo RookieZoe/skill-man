@@ -18,7 +18,9 @@ use skill_man_lib::core::source_transition::{
 use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::FileSystem;
-use skill_man_lib::seams::installer_lock_store::InstallerLockStore;
+use skill_man_lib::seams::installer_lock_store::{
+    InstallerLockError, InstallerLockStore, LockFileFault, LockFileReport,
+};
 use skill_man_lib::seams::source::{GitFetchReport, GitSource, GitTreeEntry, SourceError};
 use skill_man_lib::seams::source_transition_store::{
     ExistingSourceFacts, ExistingSourceMember, SourceTransitionRecord, SourceTransitionStore,
@@ -28,6 +30,31 @@ use skill_man_lib::seams::source_transition_store::{
 struct FixtureGitSource {
     inner: SystemGitSource,
     fixture_url: String,
+}
+
+#[derive(Default)]
+struct EmptyLocks;
+
+impl InstallerLockStore for EmptyLocks {
+    fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError> {
+        Ok(Vec::new())
+    }
+}
+
+struct FaultedLocks;
+
+impl InstallerLockStore for FaultedLocks {
+    fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError> {
+        Ok(vec![LockFileReport {
+            path: PathBuf::from("/tmp/.skill-lock.json"),
+            fingerprint: "faulted".into(),
+            byte_len: 0,
+            version: 4,
+            fault: Some(LockFileFault::UnsupportedVersion(4)),
+            entries: Vec::new(),
+            entry_faults: Vec::new(),
+        }])
+    }
 }
 
 /// Post-CAS recovery must use only the frozen journal and must never touch
@@ -557,6 +584,117 @@ fn confirms_and_undoes_the_complete_source_in_one_release() {
             .expect("journal cleanup")
             .is_empty()
     );
+}
+
+#[test]
+fn confirms_a_worktree_only_source_without_fabricating_ownership_claims() {
+    let fixture = fixture();
+    let locks: Arc<dyn InstallerLockStore> = Arc::new(EmptyLocks);
+    let preview = Arc::new(SourceGroupPreviewService::new(
+        fixture.source.clone(),
+        locks.clone(),
+    ));
+    let transition = SourceTransitionService::new(
+        preview.clone(),
+        fixture.source.clone(),
+        locks,
+        fixture.catalog.clone(),
+        fixture.filesystem.clone(),
+        Arc::new(FixtureClock),
+        fixture.library.clone(),
+        fixture.home.clone(),
+        fixture.write_gate.clone(),
+    );
+    let outcome = preview
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+        })
+        .expect("preview");
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("expected a worktree-only preview");
+    };
+    assert!(preview.external_ownership_claims.is_empty());
+    let result = transition
+        .confirm(ConfirmSourceTransitionRequest {
+            source_type: "git".into(),
+            source_url: preview.source_url,
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+            expected_selected_ref: preview.policy.selected_ref,
+            expected_resolved_commit: preview.policy.resolved_commit,
+        })
+        .expect("unowned source converts into a managed release");
+    assert_eq!(result.member_count, 2);
+    assert!(
+        fixture
+            .filesystem
+            .read_remote_parent_manifest(&fixture.library.join("remotes"), &result.remote_id)
+            .expect("read source manifest")
+            .is_some()
+    );
+    assert_eq!(count(&open_catalog(&fixture), "git_repository_sources"), 1);
+    transition
+        .undo(&result.operation_id)
+        .expect("unowned source Undo");
+    assert_eq!(count(&open_catalog(&fixture), "git_repository_sources"), 0);
+}
+
+#[test]
+fn refuses_lockless_conversion_when_an_installer_lock_is_faulted() {
+    let fixture = fixture();
+    let locks: Arc<dyn InstallerLockStore> = Arc::new(FaultedLocks);
+    let preview = Arc::new(SourceGroupPreviewService::new(
+        fixture.source.clone(),
+        locks.clone(),
+    ));
+    let transition = SourceTransitionService::new(
+        preview.clone(),
+        fixture.source.clone(),
+        locks,
+        fixture.catalog.clone(),
+        fixture.filesystem.clone(),
+        Arc::new(FixtureClock),
+        fixture.library.clone(),
+        fixture.home.clone(),
+        fixture.write_gate.clone(),
+    );
+    let outcome = preview
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+        })
+        .expect("preview");
+    let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
+        panic!("the faulted lock is hidden from the read-only preview");
+    };
+    let error = transition
+        .confirm(ConfirmSourceTransitionRequest {
+            source_type: "git".into(),
+            source_url: preview.source_url,
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+            expected_selected_ref: preview.policy.selected_ref,
+            expected_resolved_commit: preview.policy.resolved_commit,
+        })
+        .expect_err("a faulted lock cannot be treated as no ownership");
+    assert!(
+        matches!(&error, SourceTransitionError::Validation(message) if message.contains("lock")),
+        "expected a closed lock validation, got {error:?}"
+    );
+    assert_eq!(count(&open_catalog(&fixture), "git_repository_sources"), 0);
 }
 
 #[test]

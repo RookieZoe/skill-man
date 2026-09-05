@@ -1983,13 +1983,16 @@ impl SourceTransitionStore for SqliteCatalogStore {
             let existing: Option<String> = transaction
                 .query_row(
                     "SELECT directory_name FROM skills
-                     WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
+                     WHERE id = ?1
+                        OR (
+                            directory_identity_key = ?2
+                            AND NOT EXISTS (
+                                SELECT 1 FROM git_source_members
+                                 WHERE git_source_members.skill_id = skills.id
+                            )
+                        )
                      LIMIT 1",
-                    params![
-                        member.skill_id.0,
-                        member.directory_name,
-                        member.identity_key
-                    ],
+                    params![member.skill_id.0, member.identity_key],
                     |row| row.get(0),
                 )
                 .optional()
@@ -2702,7 +2705,6 @@ fn validate_source_promotion_record(
     }
     let mut seen_ids = BTreeSet::new();
     let mut seen_paths = BTreeSet::new();
-    let mut seen_identities = BTreeSet::new();
     for member in &record.members {
         if !seen_ids.insert(member.skill_id.0.as_str())
             || !seen_paths.insert(member.skill_path.as_str())
@@ -2715,13 +2717,21 @@ fn validate_source_promotion_record(
             let collision: Option<String> = connection
                 .query_row(
                     "SELECT directory_name FROM skills
-                     WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
+                     WHERE id = ?1
+                        OR (
+                            directory_identity_key = ?2
+                            AND NOT EXISTS (
+                                SELECT 1 FROM git_source_members
+                                 WHERE git_source_members.skill_id = skills.id
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1 FROM remote_bindings
+                                 WHERE remote_bindings.skill_id = skills.id
+                                   AND remote_bindings.remote_id = ?3
+                            )
+                        )
                      LIMIT 1",
-                    params![
-                        member.skill_id.0,
-                        member.directory_name,
-                        member.identity_key
-                    ],
+                    params![member.skill_id.0, member.identity_key, record.remote_id],
                     |row| row.get(0),
                 )
                 .optional()
@@ -2731,14 +2741,6 @@ fn validate_source_promotion_record(
                     "the Library already contains Managed Skill '{directory_name}'"
                 )));
             }
-        }
-        // Repository Identity collisions with an existing *different* source
-        // member are allowed (same-name members from different sources); only
-        // the exact identity within this parent must not repeat.
-        if !seen_identities.insert(member.identity_key.as_str()) {
-            return Err(SourcePromotionStoreError::Conflict(
-                "the target release carries duplicate Directory Identities".into(),
-            ));
         }
     }
     Ok(())
@@ -2779,7 +2781,6 @@ fn validate_new_source_transition(
     }
     let mut seen_ids = BTreeSet::new();
     let mut seen_paths = BTreeSet::new();
-    let mut seen_identities = BTreeSet::new();
     for member in &record.members {
         if !seen_ids.insert(member.skill_id.0.as_str())
             || !seen_paths.insert(member.skill_path.as_str())
@@ -2788,21 +2789,19 @@ fn validate_new_source_transition(
                 "the source release carries duplicate members".into(),
             ));
         }
-        if !seen_identities.insert(member.identity_key.as_str()) {
-            return Err(SourceTransitionStoreError::Conflict(
-                "the source release carries duplicate Directory Identities".into(),
-            ));
-        }
         let existing: Option<String> = connection
             .query_row(
                 "SELECT directory_name FROM skills
-                 WHERE id = ?1 OR directory_name = ?2 OR directory_identity_key = ?3
+                 WHERE id = ?1
+                    OR (
+                        directory_identity_key = ?2
+                        AND NOT EXISTS (
+                            SELECT 1 FROM git_source_members
+                             WHERE git_source_members.skill_id = skills.id
+                        )
+                    )
                  LIMIT 1",
-                params![
-                    member.skill_id.0,
-                    member.directory_name,
-                    member.identity_key
-                ],
+                params![member.skill_id.0, member.identity_key],
                 |row| row.get(0),
             )
             .optional()

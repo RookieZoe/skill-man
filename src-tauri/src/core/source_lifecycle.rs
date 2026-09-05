@@ -1070,6 +1070,28 @@ impl SourceLifecycleService {
                     &member.namespace_path,
                     &member.observed_tree_hash,
                 )?;
+            } else if journal.phase == RestoreSourcePhase::BackedUp
+                && self.filesystem.path_is_occupied(&member.namespace_path)?
+            {
+                // A durable BackedUp cursor proves that this member was
+                // absent before installation. If installation completed but
+                // the next journal cursor was not persisted, remove that
+                // uncommitted release snapshot instead of leaving a
+                // namespace orphan behind.
+                let installed = self
+                    .filesystem
+                    .staged_tree_snapshot(&member.namespace_path)?;
+                if installed.content_hash != member.release_tree_hash {
+                    return Err(self.block_for_recovery(
+                        "roll back Restore Current Source Release",
+                        format!(
+                            "the newly installed member '{}' changed during rollback",
+                            member.directory_name
+                        ),
+                    ));
+                }
+                self.filesystem
+                    .remove_directory_verified_nofollow(&member.namespace_path, &installed.root)?;
             }
         }
         self.filesystem.discard_staging(

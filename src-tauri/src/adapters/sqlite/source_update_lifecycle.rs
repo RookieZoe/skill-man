@@ -297,11 +297,9 @@ fn validate_source_update_records(
     }
     let mut seen_ids = BTreeSet::new();
     let mut seen_paths = BTreeSet::new();
-    let mut seen_identities = BTreeSet::new();
     for member in &record.members {
         if !seen_ids.insert(member.skill_id.0.as_str())
             || !seen_paths.insert(member.skill_path.as_str())
-            || !seen_identities.insert(member.identity_key.as_str())
         {
             return Err(SourceUpdateStoreError::Conflict(
                 "the target release carries duplicate members".into(),
@@ -385,6 +383,20 @@ fn commit_update_members(
     record: &SourceUpdateRecord,
 ) -> Result<(), SourceUpdateStoreError> {
     use crate::seams::source_update_store::SourceUpdateMemberOrigin;
+    // Every member row was observed while discovering this complete target
+    // release. Advance the tombstone's last-seen release too, even when the
+    // path remains absent. Otherwise a later committed probe cannot describe
+    // the complete live member set using the target release.
+    transaction
+        .execute(
+            "UPDATE git_source_members
+                SET last_seen_release_id = ?1,
+                    last_checked_at = unixepoch('now'),
+                    last_updated_at = unixepoch('now')
+              WHERE remote_id = ?2",
+            params![record.release_id, record.remote_id],
+        )
+        .map_err(update_sql_error)?;
     for member in &record.members {
         match member.origin {
             SourceUpdateMemberOrigin::Existing => {
@@ -577,6 +589,40 @@ fn source_update_committed_with(
             "broken".to_string(),
             removed.skill_path.clone(),
             removed.storage_relpath.clone(),
+            "absent".to_string(),
+            record.release_id.clone(),
+        ));
+    }
+    // Tombstones that predate this Update remain part of the source's live
+    // member projection. They carry no target-release member row, but their
+    // stable identity and absent state must still be expected after the
+    // source-level commit.
+    let target_ids = record
+        .members
+        .iter()
+        .map(|member| member.skill_id.0.as_str())
+        .chain(
+            record
+                .removed_members
+                .iter()
+                .map(|member| member.skill_id.0.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    for previous in &record.previous_members {
+        if previous.presence != SourceMemberPresence::Absent
+            || target_ids.contains(previous.skill_id.0.as_str())
+        {
+            continue;
+        }
+        expected_live.push((
+            previous.skill_id.0.clone(),
+            previous.directory_name.clone(),
+            previous.identity_key.clone(),
+            previous.display_name.clone(),
+            previous.description.clone(),
+            health_text(previous.health).to_string(),
+            previous.skill_path.clone(),
+            previous.storage_relpath.clone(),
             "absent".to_string(),
             record.release_id.clone(),
         ));

@@ -801,6 +801,80 @@ fn restore_rolls_back_isolated_observed_bytes_from_a_planned_journal() {
     assert_eq!(pending, 0, "the rolled-back journal is finished");
 }
 
+#[test]
+fn restore_rolls_back_an_install_when_the_original_namespace_was_missing() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let current = read_current(&fixture, &remote_id);
+    let member = current
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/alpha")
+        .expect("alpha member")
+        .clone();
+    let namespace = member_namespace(&fixture, &remote_id, "skills/alpha");
+    let release_tree_hash = member.tree_hash.clone().expect("release tree");
+
+    // The Restore journal reached BackedUp while this member was absent.
+    // Installation then completed, but the per-member cursor was not
+    // persisted before the process crashed.
+    std::fs::remove_dir_all(&namespace).expect("remove original namespace");
+    write_file(&namespace, "SKILL.md", ALPHA_SKILL_MD);
+    let operation_id = "source-transition-restore-missing-crash";
+    fixture
+        .filesystem
+        .write_source_lifecycle_journal(
+            &fixture.library,
+            &SourceLifecycleJournal::Restore(RestoreSourceJournal {
+                version: 1,
+                operation_id: operation_id.into(),
+                phase: RestoreSourcePhase::BackedUp,
+                remote_id: remote_id.clone(),
+                release_id: current.current_release_id,
+                resolved_commit: current.resolved_commit,
+                staging_operation_root: fixture.library.join("staging").join(operation_id),
+                staging_fingerprint: None,
+                members: vec![RestoreSourceMember {
+                    skill_id: member.skill_id.0,
+                    directory_name: member.directory_name,
+                    skill_path: member.skill_path,
+                    namespace_path: namespace.clone(),
+                    staged_root: fixture
+                        .library
+                        .join("staging")
+                        .join(operation_id)
+                        .join("alpha"),
+                    release_tree_hash,
+                    observed_tree_hash: String::new(),
+                    staged_snapshot: None,
+                    backup_path: None,
+                    restored: false,
+                }],
+            }),
+        )
+        .expect("freeze missing-namespace crash journal");
+
+    fixture
+        .lifecycle
+        .recover_lifecycle(&fixture.library)
+        .expect("rollback removes the uncommitted restored snapshot");
+    assert!(
+        !namespace.exists(),
+        "a snapshot installed after the last rollback cursor is removed"
+    );
+    let pending = std::fs::read_dir(fixture.library.join("operations"))
+        .expect("operations root")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("source-transition-restore-")
+        })
+        .count();
+    assert_eq!(pending, 0, "the rolled-back Restore journal is finished");
+}
+
 // ---- Create Local Source Copy -------------------------------------------
 
 #[test]
@@ -1116,6 +1190,8 @@ fn verify_all_members_flags_drift_and_blocks_update_until_restored() {
 fn update_reuses_persisted_policy_and_reappearing_members_recover() {
     let fixture = fixture();
     let remote_id = confirm_transition(&fixture);
+    let initial = read_current(&fixture, &remote_id);
+    let initial_release_id = initial.current_release_id.clone();
     let beta_id = member_id_by_path(&fixture, &remote_id, "skills/beta");
 
     // An Update without an explicit override re-evaluates the source's
@@ -1160,6 +1236,15 @@ fn update_reuses_persisted_policy_and_reappearing_members_recover() {
             draft.policy.resolved_commit.clone(),
         )
         .expect("confirm tombstone");
+    let updated_manifest = fixture
+        .filesystem
+        .read_remote_parent_manifest(&fixture.library.join("remotes"), &remote_id)
+        .expect("read updated source manifest")
+        .expect("updated source manifest");
+    assert_eq!(
+        updated_manifest.current_release_id.as_deref(),
+        Some(tombstone_result.release_id.as_str())
+    );
     let after = read_current(&fixture, &remote_id);
     let beta = after
         .members
@@ -1188,6 +1273,16 @@ fn update_reuses_persisted_policy_and_reappearing_members_recover() {
         .update
         .undo(&tombstone_result.operation_id)
         .expect("source Update Undo");
+    let restored_manifest = fixture
+        .filesystem
+        .read_remote_parent_manifest(&fixture.library.join("remotes"), &remote_id)
+        .expect("read restored source manifest")
+        .expect("restored source manifest");
+    assert_eq!(
+        restored_manifest.current_release_id.as_deref(),
+        Some(initial_release_id.as_str()),
+        "Update Undo restores source.json with the previous Catalog release"
+    );
     let after_undo = read_current(&fixture, &remote_id);
     let beta = after_undo
         .members

@@ -133,6 +133,11 @@ impl SourcePromotionService {
             })?;
         match outcome {
             SourceGroupPreviewOutcome::Preview(preview) => {
+                if preview.external_ownership_claims.is_empty() {
+                    return Err(SourcePromotionError::Validation(
+                        "Legacy Source Promotion requires an external ownership claim".into(),
+                    ));
+                }
                 let legacy_by_path = legacy
                     .members
                     .iter()

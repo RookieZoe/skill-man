@@ -10,6 +10,9 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 use skill_man_lib::core::domain::{Health, SkillId, skill_identity_key};
+use skill_man_lib::seams::source_transition_store::{
+    SourceTransitionMemberRecord, SourceTransitionRecord, SourceTransitionStore,
+};
 use skill_man_lib::seams::source_update_store::{
     LocalSourceCopyRecord, SourceMemberPresence, SourceUpdateMemberOrigin,
     SourceUpdateMemberRecord, SourceUpdatePreviousMemberRecord, SourceUpdateRecord,
@@ -405,6 +408,97 @@ fn source_update_undo_restores_exact_previous_state() {
 }
 
 #[test]
+fn source_update_keeps_preexisting_tombstones_in_commit_and_undo() {
+    let home = common::BoundTestHome::new();
+    seed_managed_source(&home);
+    home.with_sql("seed preexisting tombstone", |connection| {
+        connection
+            .execute_batch(
+                r#"
+                UPDATE git_source_members
+                   SET presence = 'absent',
+                       last_seen_release_id = 'release-r1'
+                 WHERE skill_id = 'skill-b';
+                UPDATE skills
+                   SET health = 'broken'
+                 WHERE id = 'skill-b';
+                "#,
+            )
+            .expect("seed tombstone");
+    });
+    let current = home
+        .runtime
+        .read_current(REMOTE_ID)
+        .expect("read")
+        .expect("source");
+    let record = SourceUpdateRecord {
+        remote_id: REMOTE_ID.into(),
+        provider: current.provider.clone(),
+        canonical_url: current.canonical_url.clone(),
+        tracking_mode: "auto_release_tag_head".into(),
+        tracking_value: None,
+        selection_kind: "tag".into(),
+        selected_ref: "v1.1.0".into(),
+        release_id: "release-r2".into(),
+        resolved_commit: "2222222222222222222222222222222222222222".into(),
+        operation_id: "update-existing-tombstone".into(),
+        previous_release_id: RELEASE_R1.into(),
+        previous_tracking_mode: current.tracking_mode.clone(),
+        previous_tracking_value: current.tracking_value.clone(),
+        previous_selected_ref: current.selected_ref.clone(),
+        previous_resolved_commit: current.resolved_commit.clone(),
+        previous_members: previous_from_current(&current),
+        members: vec![target_member(
+            SourceUpdateMemberOrigin::Existing,
+            "skill-a",
+            "skills/alpha",
+            "alpha",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )],
+        removed_members: Vec::new(),
+    };
+
+    home.runtime
+        .commit_source_update(&record)
+        .expect("commit update with existing tombstone");
+    let after = home
+        .runtime
+        .read_current(REMOTE_ID)
+        .expect("read after")
+        .expect("source after");
+    let tombstone = after
+        .members
+        .iter()
+        .find(|member| member.skill_id.0 == "skill-b")
+        .expect("preexisting tombstone");
+    assert_eq!(tombstone.presence, SourceMemberPresence::Absent);
+    assert_eq!(tombstone.health, Health::Broken);
+    assert_eq!(tombstone.last_seen_release_id, "release-r2");
+    assert!(
+        home.runtime
+            .source_update_is_committed(&record)
+            .expect("committed probe includes old tombstone")
+    );
+
+    home.runtime
+        .undo_source_update(&record)
+        .expect("undo update with existing tombstone");
+    let restored = home
+        .runtime
+        .read_current(REMOTE_ID)
+        .expect("read restored")
+        .expect("restored source");
+    let tombstone = restored
+        .members
+        .iter()
+        .find(|member| member.skill_id.0 == "skill-b")
+        .expect("tombstone after undo");
+    assert_eq!(tombstone.presence, SourceMemberPresence::Absent);
+    assert_eq!(tombstone.health, Health::Broken);
+    assert_eq!(tombstone.last_seen_release_id, RELEASE_R1);
+}
+
+#[test]
 fn source_update_validate_rejects_changed_current_state() {
     let home = common::BoundTestHome::new();
     seed_managed_source(&home);
@@ -670,4 +764,75 @@ fn read_current_is_none_for_unknown_source() {
             .expect("read")
             .is_none()
     );
+}
+
+fn transition_member(
+    remote_id: &str,
+    skill_id: &str,
+    skill_path: &str,
+    directory_name: &str,
+) -> SourceTransitionMemberRecord {
+    SourceTransitionMemberRecord {
+        skill_id: SkillId(skill_id.into()),
+        directory_name: directory_name.into(),
+        identity_key: skill_identity_key(directory_name),
+        display_name: directory_name.into(),
+        description: String::new(),
+        storage_relpath: format!("skills/git/{remote_id}/{skill_id}"),
+        skill_path: skill_path.into(),
+        tree_hash: "a".repeat(40),
+        provider_hash: None,
+    }
+}
+
+#[test]
+fn git_sources_allow_same_directory_identity_within_and_across_sources() {
+    let home = common::BoundTestHome::new();
+    let same_source = SourceTransitionRecord {
+        remote_id: "remote-same".into(),
+        provider: "github".into(),
+        canonical_url: "https://github.com/acme/same".into(),
+        aliases: Vec::new(),
+        tracking_mode: "branch".into(),
+        tracking_value: Some("main".into()),
+        selection_kind: "branch".into(),
+        selected_ref: "main".into(),
+        release_id: "release-same".into(),
+        resolved_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        members: vec![
+            transition_member("remote-same", "skill-same-a", "packages/one", "shared"),
+            transition_member("remote-same", "skill-same-b", "packages/two", "shared"),
+        ],
+    };
+    home.sqlite
+        .validate_new_source_transition(&same_source)
+        .expect("same-source duplicate identity is valid");
+    home.sqlite
+        .commit_source_transition(same_source)
+        .expect("commit same-source duplicate identity");
+
+    let other_source = SourceTransitionRecord {
+        remote_id: "remote-other".into(),
+        provider: "github".into(),
+        canonical_url: "https://github.com/acme/other".into(),
+        aliases: Vec::new(),
+        tracking_mode: "branch".into(),
+        tracking_value: Some("main".into()),
+        selection_kind: "branch".into(),
+        selected_ref: "main".into(),
+        release_id: "release-other".into(),
+        resolved_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        members: vec![transition_member(
+            "remote-other",
+            "skill-other",
+            "skills/shared",
+            "shared",
+        )],
+    };
+    home.sqlite
+        .validate_new_source_transition(&other_source)
+        .expect("cross-source duplicate identity is valid");
+    home.sqlite
+        .commit_source_transition(other_source)
+        .expect("commit cross-source duplicate identity");
 }
