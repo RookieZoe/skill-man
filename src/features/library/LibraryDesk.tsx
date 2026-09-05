@@ -494,7 +494,7 @@ export function LibraryDesk({
           setActivePane("library");
         }}
         isSelectMode={isSelectMode}
-        inert={hasOverlay}
+        inert={hasOverlay || isAgentDrawerModal}
         onToggleSelectMode={() => {
           if (isSelectMode) {
             exitSelectMode();
@@ -512,7 +512,10 @@ export function LibraryDesk({
         }}
         onOpenPreferences={onOpenPreferences}
       />
-      <div className="notice-region" inert={hasOverlay ? true : undefined}>
+      <div
+        className="notice-region"
+        inert={hasOverlay || isAgentDrawerModal ? true : undefined}
+      >
         {error ? (
           <div className="global-notice" role="alert">
             <strong>{t("library.notice.unavailable")}</strong>
@@ -577,6 +580,7 @@ export function LibraryDesk({
                 className="pane-nav"
                 role="group"
                 aria-label={t("library.pane.label")}
+                inert={isAgentDrawerModal ? true : undefined}
               >
                 {(["library", "detail", "agents"] as const).map((pane) => (
                   <button
@@ -598,6 +602,7 @@ export function LibraryDesk({
               filter={filter}
               skills={skills}
               selectedId={selectedId}
+              inert={isAgentDrawerModal}
               isSelectMode={isSelectMode}
               selectedSkillIds={selectedSkillIds}
               onToggleSkillSelection={toggleSkillSelection}
@@ -609,6 +614,7 @@ export function LibraryDesk({
             />
             <SkillDetailPanel
               detail={detail}
+              inert={isAgentDrawerModal}
               error={error}
               libraryEmpty={libraryEmpty}
               relocatePanel={relocatePanel}
@@ -690,6 +696,7 @@ export function LibraryDesk({
         )}
         <ScanEvidenceLedger
           client={client}
+          inert={isAgentDrawerModal}
           adoptHandoff={adoptHandoff}
           onAdoptHandoffHandled={() => setAdoptHandoff(null)}
           onManageGitGroup={onManageGitGroup}
@@ -698,7 +705,7 @@ export function LibraryDesk({
       {surface === "library" && isSelectMode ? (
         <SelectionShelf
           selectedCount={selectedSkillIds.length}
-          inert={hasOverlay}
+          inert={hasOverlay || isAgentDrawerModal}
           onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
           onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
           onExit={exitSelectMode}
@@ -969,6 +976,7 @@ interface LibrarySidebarProps {
   filter: CatalogFilter;
   skills: SkillSummary[];
   selectedId: string | null;
+  inert?: boolean;
   isSelectMode: boolean;
   selectedSkillIds: string[];
   onToggleSkillSelection: (skillId: string) => void;
@@ -980,6 +988,7 @@ function LibrarySidebar({
   filter,
   skills,
   selectedId,
+  inert = false,
   isSelectMode,
   selectedSkillIds,
   onToggleSkillSelection,
@@ -988,7 +997,11 @@ function LibrarySidebar({
 }: LibrarySidebarProps) {
   const { t } = useLocale();
   return (
-    <nav className="library-sidebar" aria-label={t("library.sidebar.label")}>
+    <nav
+      className="library-sidebar"
+      aria-label={t("library.sidebar.label")}
+      inert={inert ? true : undefined}
+    >
       <div className="panel-heading">
         <div>
           <span className="eyebrow">{t("library.sidebar.managed")}</span>
@@ -1079,6 +1092,7 @@ function LibrarySidebar({
 
 function SkillDetailPanel({
   detail,
+  inert = false,
   error,
   libraryEmpty,
   relocatePanel,
@@ -1090,6 +1104,7 @@ function SkillDetailPanel({
   gitSourceCapability,
 }: {
   detail: SkillDetail | null;
+  inert?: boolean;
   error: string | null;
   libraryEmpty: boolean;
   relocatePanel: RelocatePanelState;
@@ -1141,6 +1156,7 @@ function SkillDetailPanel({
       id="skill-detail"
       className="skill-detail"
       aria-label={t("library.detail.label")}
+      inert={inert ? true : undefined}
     >
       {detail ? (
         <>

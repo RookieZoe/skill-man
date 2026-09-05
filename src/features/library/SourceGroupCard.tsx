@@ -168,7 +168,7 @@ export function SourceGroupCard({
 
   const overrideText =
     source.trackingMode && source.trackingMode !== "auto_release_tag_head"
-      ? source.trackingValue || source.trackingMode
+      ? source.trackingValue || trackingModeLabel(source.trackingMode, t)
       : t("sourceGroup.overrideNone");
 
   return (
@@ -416,4 +416,16 @@ function memberHealthLabel(
 ): string {
   const value = health ?? "broken";
   return t(`library.health.badge.${value}` as MessageKey);
+}
+
+function trackingModeLabel(mode: string, t: LocaleContextValue["t"]): string {
+  const keys: Record<string, MessageKey> = {
+    prerelease_channel: "library.source_group.policy_prerelease",
+    fixed_tag: "library.source_group.policy_fixed_tag",
+    fixed_commit: "library.source_group.policy_fixed_commit",
+    branch: "library.source_group.policy_branch",
+    head: "library.source_group.policy_head",
+  };
+  const key = keys[mode];
+  return key ? t(key) : t("sourceGroup.override");
 }

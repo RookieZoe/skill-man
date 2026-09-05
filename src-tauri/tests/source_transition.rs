@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rusqlite::Connection;
 use skill_man_lib::adapters::git_source::SystemGitSource;
@@ -13,19 +13,21 @@ use skill_man_lib::core::source_group_preview::{
     SourceTrackingOverride,
 };
 use skill_man_lib::core::source_transition::{
-    ConfirmSourceTransitionRequest, SourceTransitionError, SourceTransitionService,
+    ConfirmSourceTransitionRequest, ConfirmSourceUpdateRequest, SourceTransitionError,
+    SourceTransitionService,
 };
 use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::clock::Clock;
 use skill_man_lib::seams::filesystem::FileSystem;
 use skill_man_lib::seams::installer_lock_store::{
-    InstallerLockError, InstallerLockStore, LockFileFault, LockFileReport,
+    InstallerLockError, InstallerLockStore, LockEntry, LockFileFault, LockFileReport,
 };
 use skill_man_lib::seams::source::{GitFetchReport, GitSource, GitTreeEntry, SourceError};
 use skill_man_lib::seams::source_transition_store::{
     ExistingSourceFacts, ExistingSourceMember, SourceTransitionRecord, SourceTransitionStore,
     SourceTransitionStoreError,
 };
+use skill_man_lib::seams::source_update_store::SourceUpdateStore;
 
 struct FixtureGitSource {
     inner: SystemGitSource,
@@ -54,6 +56,21 @@ impl InstallerLockStore for FaultedLocks {
             entries: Vec::new(),
             entry_faults: Vec::new(),
         }])
+    }
+}
+
+struct ReappearingLocks {
+    calls: AtomicUsize,
+    report: LockFileReport,
+}
+
+impl InstallerLockStore for ReappearingLocks {
+    fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= 3 {
+            Ok(vec![self.report.clone()])
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -309,6 +326,18 @@ fn fixture_repository(root: &Path) -> PathBuf {
         ],
     );
     repository
+}
+
+struct OffsetClock;
+
+impl Clock for OffsetClock {
+    fn monotonic_millis(&self) -> u128 {
+        2
+    }
+
+    fn unix_epoch_nanos(&self) -> u128 {
+        1_725_000_000_000_000_001
+    }
 }
 
 struct Fixture {
@@ -723,6 +752,118 @@ fn second_confirmation_is_closed_to_update_until_ticket_93() {
         fixture.locks.discover().expect("lock")[0].entries.len(),
         0,
         "the managed source's claims stay released"
+    );
+}
+
+#[test]
+fn update_rechecks_external_ownership_before_catalog_commit() {
+    let fixture = fixture();
+    let transition = service(&fixture, fixture.catalog.clone());
+    let remote_id = transition
+        .confirm(confirmation(&fixture))
+        .expect("initial transition")
+        .remote_id;
+    let old_commit = fixture
+        .catalog
+        .read_current(&remote_id)
+        .expect("read current source")
+        .expect("source")
+        .resolved_commit;
+    let repository = fixture._workspace.path().join("source-repository");
+
+    write_file(
+        &repository,
+        "skills/source/SKILL.md",
+        "---\nname: Source Root\ndescription: Updated member\n---\n# Updated\n",
+    );
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "update"],
+    );
+
+    let report = LockFileReport {
+        path: fixture.home.join(".agents/.skill-lock.json"),
+        fingerprint: "reappeared".into(),
+        byte_len: 0,
+        version: 3,
+        fault: None,
+        entries: vec![LockEntry {
+            name: "source".into(),
+            source_type: "git".into(),
+            source: "acme/source".into(),
+            source_url: "https://example.com/acme/source".into(),
+            requested_ref: Some("main".into()),
+            skill_path: "skills/source".into(),
+            skill_folder_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            installed_at: None,
+            updated_at: None,
+            plugin_name: None,
+        }],
+        entry_faults: Vec::new(),
+    };
+    let locks = Arc::new(ReappearingLocks {
+        calls: AtomicUsize::new(0),
+        report,
+    });
+    let preview = Arc::new(SourceGroupPreviewService::new(
+        fixture.source.clone(),
+        locks.clone(),
+    ));
+    let transition = SourceTransitionService::new(
+        preview.clone(),
+        fixture.source.clone(),
+        locks,
+        fixture.catalog.clone(),
+        fixture.filesystem.clone(),
+        Arc::new(OffsetClock),
+        fixture.library.clone(),
+        fixture.home.clone(),
+        fixture.write_gate.clone(),
+    )
+    .with_update_store(fixture.catalog.clone());
+    let SourceGroupPreviewOutcome::Preview(preview) = preview
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+        })
+        .expect("updated preview")
+    else {
+        panic!("expected updated source preview");
+    };
+
+    let error = transition
+        .confirm_update(ConfirmSourceUpdateRequest {
+            remote_id: remote_id.clone(),
+            tracking_policy: Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+            expected_selected_ref: preview.policy.selected_ref,
+            expected_resolved_commit: preview.policy.resolved_commit,
+        })
+        .expect_err("ownership reappearance must block Update");
+    assert!(
+        matches!(&error, SourceTransitionError::ExternalOwnershipReappeared)
+            || matches!(
+                &error,
+                SourceTransitionError::Validation(message) if message.contains("installer lock")
+            ),
+        "unexpected Update failure: {error:?}"
+    );
+    assert_eq!(
+        fixture
+            .catalog
+            .read_current(&remote_id)
+            .expect("read current source")
+            .expect("source")
+            .resolved_commit,
+        old_commit,
+        "a reappearing owner must prevent the Catalog release switch"
     );
 }
 

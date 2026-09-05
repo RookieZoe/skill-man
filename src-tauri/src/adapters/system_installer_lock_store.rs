@@ -112,6 +112,17 @@ impl InstallerLockStore for SystemInstallerLockStore {
         Ok(reports)
     }
 
+    fn protected_skills_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.home_directory.join(".agents/skills")];
+        if let Some(xdg_state_home) = &self.xdg_state_home {
+            let xdg_root = xdg_state_home.join("skills");
+            if !roots.contains(&xdg_root) {
+                roots.push(xdg_root);
+            }
+        }
+        roots
+    }
+
     fn observed_identity(
         &self,
         lock_path: &Path,

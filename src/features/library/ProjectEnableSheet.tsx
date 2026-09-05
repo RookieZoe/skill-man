@@ -11,7 +11,7 @@ import type {
 } from "../../app/catalog-client";
 import type { EnableSkillItem } from "./GlobalEnableSheet";
 import { useLocale } from "../locale/LocaleProvider";
-import type { MessageKey } from "../locale/messages";
+import { commandErrorMessage, type MessageKey } from "../locale/messages";
 import { useModalFocus } from "../../ui/useModalFocus";
 
 /**
@@ -105,12 +105,12 @@ export function ProjectEnableSheet({
         if (current) setAgents(snapshot.configurations);
       })
       .catch((cause) => {
-        if (current) setError(String(cause));
+        if (current) setError(commandErrorMessage(cause, t));
       });
     return () => {
       current = false;
     };
-  }, [client, step]);
+  }, [client, step, t]);
 
   // Plan project enable whenever preview step is active and inputs change
   useEffect(() => {
@@ -140,13 +140,13 @@ export function ProjectEnableSheet({
       })
       .catch((cause) => {
         if (current) {
-          setError(String(cause));
+          setError(commandErrorMessage(cause, t));
         }
       });
     return () => {
       current = false;
     };
-  }, [client, skillIds, folder, selectedAgentIds, resolutions, step]);
+  }, [client, skillIds, folder, selectedAgentIds, resolutions, step, t]);
 
   const applyableCells = useMemo(
     () =>
@@ -182,7 +182,7 @@ export function ProjectEnableSheet({
       setResult(enableResult);
       setStep("result");
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     } finally {
       setSubmitting(false);
     }
@@ -198,7 +198,7 @@ export function ProjectEnableSheet({
       setPlan(null);
       setStep("folder");
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     } finally {
       setSubmitting(false);
     }
@@ -224,7 +224,7 @@ export function ProjectEnableSheet({
       await client.clearRecentProjectFolders();
       setRecentFolders([]);
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     }
   }
 

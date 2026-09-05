@@ -1374,6 +1374,11 @@ export function createFixtureCatalogClient(
         "Source Update is not available in the preview fixture",
       );
     },
+    async undoSourceUpdate() {
+      return fixtureUnsupported(
+        "Source Update Undo is not available in the preview fixture",
+      );
+    },
     async finalizeSourceUpdate() {
       return fixtureUnsupported(
         "Source Update is not available in the preview fixture",

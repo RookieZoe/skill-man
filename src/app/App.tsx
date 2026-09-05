@@ -819,7 +819,11 @@ export function App({ client }: AppProps) {
     setSourceGroupActivity("undoing");
     setSourceGroupError(null);
     try {
-      await client.undoSourceTransition(sourcePromotionResult.operationId);
+      if (sourceUpdateActive) {
+        await client.undoSourceUpdate(sourcePromotionResult.operationId);
+      } else {
+        await client.undoSourceTransition(sourcePromotionResult.operationId);
+      }
       setSourcePromotionResult(null);
       setSourcePromotionDraft(null);
       setSourceUpdateDraft(null);

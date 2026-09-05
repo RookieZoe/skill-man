@@ -218,3 +218,32 @@ export function errorMessageParams(error: {
   }
   return undefined;
 }
+
+/** Localized summary for a Tauri command failure; technical detail stays out
+ * of ordinary App Copy and belongs in an explicitly labelled diagnostic. */
+export function commandErrorMessage(
+  reason: unknown,
+  t: (key: MessageKey, params?: MessageParams) => string,
+): string {
+  if (typeof reason === "object" && reason !== null) {
+    const error =
+      "error" in reason &&
+      typeof reason.error === "object" &&
+      reason.error !== null
+        ? reason.error
+        : reason;
+    if ("code" in error && typeof error.code === "string") {
+      return t(
+        errorMessageKey(error.code),
+        errorMessageParams({
+          code: error.code,
+          directoryName:
+            "directoryName" in error && typeof error.directoryName === "string"
+              ? error.directoryName
+              : undefined,
+        }),
+      );
+    }
+  }
+  return t("app.error.read_failed");
+}

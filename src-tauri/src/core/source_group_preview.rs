@@ -237,13 +237,7 @@ impl SourceGroupPreviewService {
         let releases = self.provider_releases(&spec.url)?;
         let tags = self.git_source.list_tags(&mirror)?;
         let reachable = self.reachable_tags(&mirror, &report.default_branch, &tags)?;
-        let selection = self.select_ref(
-            override_mode,
-            request.tracking_policy.as_ref(),
-            &releases,
-            &tags,
-            &reachable,
-        )?;
+        let selection = self.select_ref(override_mode, &releases, &tags, &reachable)?;
         spec.requested_ref = Some(selection.selection.selected_ref.clone());
         let resolved = resolve_git_ref(self.git_source.as_ref(), &mirror, &spec, &report)?;
         let tree_entries = self.git_source.list_tree(&mirror, &resolved.commit)?;
@@ -343,7 +337,6 @@ impl SourceGroupPreviewService {
     fn select_ref(
         &self,
         override_mode: Option<SourceTrackingOverride>,
-        request_override: Option<&SourceTrackingOverride>,
         releases: &[ProviderReleaseFact],
         tags: &[crate::seams::source::GitTagFact],
         reachable_tags: &[crate::seams::source::GitTagFact],
@@ -353,7 +346,6 @@ impl SourceGroupPreviewService {
             None => ("auto_release_tag_head".into(), None),
         };
         let selection = evaluate(&mode, value.as_deref(), releases, tags, reachable_tags)?;
-        let _ = request_override;
         Ok(EffectiveSelection {
             mode,
             value,

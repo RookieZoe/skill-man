@@ -134,6 +134,13 @@ pub trait InstallerLockStore: Send + Sync {
     /// report, valid or faulted.
     fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError>;
 
+    /// Return the installer-managed Skills roots governed by this adapter.
+    /// These roots are protected Local Source Copy destinations even when
+    /// their lock file is currently absent.
+    fn protected_skills_roots(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     /// Return the lstat identity captured with a previously discovered full
     /// fingerprint. Pure/test stores may return `None`; the system store
     /// keeps this fact out of the public report while retaining it for CAS.

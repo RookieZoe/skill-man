@@ -1251,7 +1251,9 @@ impl SourceLifecycleService {
                 "the Local Source Copy destination must be outside the App state directory".into(),
             ));
         }
-        for forbidden in &current.forbidden_local_link_roots {
+        let mut forbidden_roots = current.forbidden_local_link_roots.clone();
+        forbidden_roots.extend(self.transition.protected_installer_skills_roots());
+        for forbidden in &forbidden_roots {
             let forbidden = self.filesystem.normalize_configured_path(forbidden)?;
             if canonical_destination.starts_with(&forbidden) {
                 return Err(SourceLifecycleError::Validation(format!(

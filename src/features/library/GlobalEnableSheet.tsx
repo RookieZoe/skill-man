@@ -9,7 +9,7 @@ import type {
   GlobalTargetGroupSnapshot,
 } from "../../app/catalog-client";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
-import type { MessageKey } from "../locale/messages";
+import { commandErrorMessage, type MessageKey } from "../locale/messages";
 import { useModalFocus } from "../../ui/useModalFocus";
 
 export interface EnableSkillItem {
@@ -87,7 +87,7 @@ export function GlobalEnableSheet({
       if (!primarySkillId) return;
       setGroupsSnapshot(await client.listTargetGroups(primarySkillId));
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     }
   }
 
@@ -102,12 +102,12 @@ export function GlobalEnableSheet({
         setError(null);
       })
       .catch((cause) => {
-        if (current) setError(String(cause));
+        if (current) setError(commandErrorMessage(cause, t));
       });
     return () => {
       current = false;
     };
-  }, [client, primarySkillId]);
+  }, [client, primarySkillId, t]);
 
   // Re-plan whenever the resolution set changes so the preview matrix always
   // reflects the user's latest per-cell decisions; only after Continue.
@@ -136,12 +136,12 @@ export function GlobalEnableSheet({
         setError(null);
       })
       .catch((cause) => {
-        if (current) setError(String(cause));
+        if (current) setError(commandErrorMessage(cause, t));
       });
     return () => {
       current = false;
     };
-  }, [client, skillIds, selected, resolutions, groupsSnapshot, shownStep]);
+  }, [client, skillIds, selected, resolutions, groupsSnapshot, shownStep, t]);
 
   const applyableCells = useMemo(
     () =>
@@ -173,7 +173,7 @@ export function GlobalEnableSheet({
       setResult(applied);
       setShownStep("result");
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     } finally {
       setActivity("idle");
     }
@@ -192,7 +192,7 @@ export function GlobalEnableSheet({
       setShownStep("targets");
       await refreshGroups();
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     } finally {
       setActivity("idle");
     }

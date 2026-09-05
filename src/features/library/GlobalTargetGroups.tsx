@@ -490,12 +490,10 @@ function tPluralConsumerCount(
 }
 
 function observedDisplayed(group: GlobalTargetGroup): boolean {
-  return (
-    group.observedState === "missing" ||
-    group.observedState === "dangling" ||
-    group.observedState === "occupied" ||
-    group.observedState === "target_mismatch"
-  );
+  // Repair is only safe for a missing managed entry. Dangling, occupied and
+  // target-mismatch observations need their typed conflict flow instead of
+  // silently replacing an external entry.
+  return group.observedState === "missing";
 }
 
 function observedStateLabel(

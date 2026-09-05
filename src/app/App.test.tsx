@@ -1231,7 +1231,7 @@ test("Source Update exposes an executable Undo window", async () => {
       undoAvailable: true,
     };
   };
-  client.undoSourceTransition = async (operationId) => {
+  client.undoSourceUpdate = async (operationId) => {
     undone = operationId;
     return { operationId, memberCount: 1, snapshotVersion: 13 };
   };

@@ -1059,7 +1059,28 @@ fn create_local_copy_rejects_destinations_inside_the_home() {
     );
     assert!(
         matches!(result, Err(SourceLifecycleError::Validation(_))),
-        "a destination inside Home must be rejected, got {result:?}"
+        "Home-owned destination must be rejected: {result:?}"
+    );
+}
+
+#[test]
+fn create_local_copy_rejects_destinations_inside_installer_skills_root() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let destination = fixture.home.join(".agents/skills").join("alpha-copy");
+
+    let result = fixture.lifecycle.create_local_copy(
+        &remote_id,
+        &member_id_by_path(&fixture, &remote_id, "skills/alpha"),
+        &destination,
+    );
+    assert!(
+        matches!(result, Err(SourceLifecycleError::Validation(_))),
+        "installer-owned destination must be rejected: {result:?}"
+    );
+    assert!(
+        !destination.exists(),
+        "a rejected installer destination must remain untouched"
     );
 }
 

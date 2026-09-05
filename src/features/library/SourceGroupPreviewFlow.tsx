@@ -8,6 +8,7 @@ import type {
   SourceTransitionResult,
   SourceUpdateDraft,
 } from "../../app/catalog-client";
+import type { MessageKey } from "../locale/messages";
 import { useLocale } from "../locale/LocaleProvider";
 
 const PARAMETERISED_MODES = [
@@ -16,6 +17,25 @@ const PARAMETERISED_MODES = [
   "fixed_commit",
   "branch",
 ];
+
+const SELECTION_KIND_KEYS: Record<string, MessageKey> = {
+  provider_release: "sourceGroup.policyRelease",
+  semver_tag: "sourceGroup.policySemverTag",
+  normal_tag: "sourceGroup.policyTag",
+  head: "sourceGroup.policyHead",
+  prerelease_channel: "library.source_group.policy_prerelease",
+  fixed_tag: "library.source_group.policy_fixed_tag",
+  fixed_commit: "library.source_group.policy_fixed_commit",
+  branch: "library.source_group.policy_branch",
+};
+
+function selectionKindLabel(
+  selectionKind: string,
+  t: (key: MessageKey) => string,
+): string {
+  const key = SELECTION_KIND_KEYS[selectionKind];
+  return key ? t(key) : t("library.source_group.selection_kind");
+}
 
 export function SourceGroupPreviewFlow({
   sourceType,
@@ -131,7 +151,9 @@ export function SourceGroupPreviewFlow({
           </div>
           <div>
             <dt>{t("library.source_group.selection_kind")}</dt>
-            <dd>{promotionDraft.policy.selectionKind}</dd>
+            <dd>
+              {selectionKindLabel(promotionDraft.policy.selectionKind, t)}
+            </dd>
           </div>
           <div>
             <dt>{t("library.source_group.selected_ref")}</dt>
@@ -265,7 +287,7 @@ export function SourceGroupPreviewFlow({
           </div>
           <div>
             <dt>{t("library.source_group.selection_kind")}</dt>
-            <dd>{preview.policy.selectionKind}</dd>
+            <dd>{selectionKindLabel(preview.policy.selectionKind, t)}</dd>
           </div>
           <div>
             <dt>{t("library.source_group.selected_ref")}</dt>

@@ -15,7 +15,11 @@ import type {
   ScanRunSnapshot,
 } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
-import type { MessageKey, MessageParams } from "../locale/messages";
+import {
+  commandErrorMessage,
+  type MessageKey,
+  type MessageParams,
+} from "../locale/messages";
 
 /**
  * Non-modal Evidence Ledger for the full Rescan (spec §4.10, ADR-0020) and
@@ -279,12 +283,13 @@ function adoptErrorText(
         failure.error.code,
     });
   }
-  return reason instanceof Error ? reason.message : String(reason);
+  return commandErrorMessage(reason, t);
 }
 
 export function ScanEvidenceLedger({
   client,
   idle = false,
+  inert = false,
   adoptHandoff = null,
   onManageGitGroup,
   onAdoptHandoffHandled,
@@ -292,6 +297,8 @@ export function ScanEvidenceLedger({
   client: CatalogClient;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
   idle?: boolean;
+  /** A modal Agent Inspector is open; keep the ledger out of the tab order. */
+  inert?: boolean;
   /** Explicit handoff from Global Enable's single-Skill Adopt action. */
   adoptHandoff?: {
     directoryName: string;
@@ -489,7 +496,7 @@ export function ScanEvidenceLedger({
     try {
       setObservation(await client.startRescan("manual"));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(commandErrorMessage(reason, t));
     } finally {
       setBusy(false);
     }
@@ -502,7 +509,7 @@ export function ScanEvidenceLedger({
     try {
       setObservation(await client.cancelRescan(run.runId));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(commandErrorMessage(reason, t));
     } finally {
       setBusy(false);
     }
@@ -547,7 +554,7 @@ export function ScanEvidenceLedger({
         };
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(commandErrorMessage(reason, t));
       setSections((prev) => ({
         ...prev,
         [section]: { ...prev[section], loading: false },
@@ -668,6 +675,7 @@ export function ScanEvidenceLedger({
       ref={ledgerRef}
       className="scan-evidence-ledger"
       aria-label={t("scan.ledger.label")}
+      inert={inert ? true : undefined}
       tabIndex={-1}
       data-state={
         runActive ? "running" : (run?.state ?? (hasReport ? "report" : "none"))
@@ -808,9 +816,10 @@ export function ScanEvidenceLedger({
         <p className="scan-ledger-slow">{t("scan.ledger.slow")}</p>
       ) : null}
       {run?.diagnostic ? (
-        <p className="scan-ledger-diagnostic" role="alert">
-          {run.diagnostic}
-        </p>
+        <details className="scan-ledger-diagnostic" role="alert">
+          <summary>{t("bootstrap.technical_details")}</summary>
+          <p>{run.diagnostic}</p>
+        </details>
       ) : null}
       {error ? (
         <p className="scan-ledger-error" role="alert">

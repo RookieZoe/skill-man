@@ -9,13 +9,14 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::adapters::zip_extract::extract_zip_archive;
+use crate::adapters::zip_extract::{MAX_STAGED_SOURCE_BYTES, extract_zip_archive};
 use crate::seams::source::{
     GitFetchReport, GitSource, GitTreeEntry, GitTreeEntryKind, SourceError,
 };
@@ -23,6 +24,7 @@ use crate::seams::source::{
 const CONNECT_TIMEOUT_SECONDS: u64 = 60;
 const FETCH_TIMEOUT_SECONDS: u64 = 300;
 const LOCAL_OP_TIMEOUT_SECONDS: u64 = 60;
+const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
 
 pub struct SystemGitSource;
 
@@ -74,9 +76,10 @@ fn run_git(
 fn run_git_to_file(
     args: &[&str],
     total_seconds: u64,
+    stdout_cap: usize,
     stdout_path: &Path,
 ) -> Result<GitOutput, SourceError> {
-    let result = run_git_impl(args, total_seconds, None, Some(stdout_path))?;
+    let result = run_git_impl(args, total_seconds, Some(stdout_cap), Some(stdout_path))?;
     if result.success {
         return Ok(GitOutput {
             stdout: result.stdout,
@@ -107,6 +110,20 @@ struct GitRunResult {
     exit_code: Option<i32>,
 }
 
+fn create_git_output_file(path: &Path) -> Result<fs::File, SourceError> {
+    let mut options = fs::OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    options.open(path).map_err(|source| SourceError::Io {
+        operation: "create Git output file",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 fn run_git_impl(
     args: &[&str],
     total_seconds: u64,
@@ -124,6 +141,11 @@ fn run_git_impl(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    let output_file_path = stdout_path.map(Path::to_path_buf);
+    let output_file = output_file_path
+        .as_deref()
+        .map(create_git_output_file)
+        .transpose()?;
     let mut child = command.spawn().map_err(|source| SourceError::Io {
         operation: "spawn git",
         path: Path::new("git").to_path_buf(),
@@ -131,48 +153,64 @@ fn run_git_impl(
     })?;
     let mut stdout = child.stdout.take().expect("git stdout was piped");
     let mut stderr = child.stderr.take().expect("git stderr was piped");
-    let output_file = stdout_path.map(Path::to_path_buf);
     let cap = stdout_cap;
-    let stdout_reader = thread::spawn(move || {
+    let stdout_reader = thread::spawn(move || -> Result<_, std::io::Error> {
         let mut output = Vec::new();
-        let mut file = output_file.as_ref().and_then(|path| {
-            fs::File::create(path)
-                .map_err(|source| {
-                    eprintln!(
-                        "skill-man: could not create git output file {}: {source}",
-                        path.display()
-                    )
-                })
-                .ok()
-        });
+        let keep_output = output_file.is_none();
+        let mut file = output_file;
+        let mut stream_error = None;
         let mut buffer = [0_u8; 64 * 1024];
+        let mut bytes_read = 0_usize;
         let mut over_cap = false;
         loop {
             match stdout.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if cap.is_some_and(|cap| output.len().saturating_add(count) > cap) {
+                    let next_bytes_read = bytes_read.saturating_add(count);
+                    let exceeds_cap = cap.is_some_and(|cap| next_bytes_read > cap);
+                    bytes_read = next_bytes_read;
+                    if exceeds_cap {
                         over_cap = true;
                         output.clear();
                     } else if !over_cap {
-                        output.extend_from_slice(&buffer[..count]);
-                    }
-                    if let Some(file) = &mut file {
-                        let _ = file.write_all(&buffer[..count]);
+                        if keep_output {
+                            output.extend_from_slice(&buffer[..count]);
+                        }
+                        if let Some(file) = &mut file {
+                            if let Err(source) = file.write_all(&buffer[..count])
+                                && stream_error.is_none()
+                            {
+                                stream_error = Some(source);
+                            }
+                        }
                     }
                 }
-                Err(_) => break,
+                Err(source) => {
+                    if stream_error.is_none() {
+                        stream_error = Some(source);
+                    }
+                    break;
+                }
             }
         }
-        (output, over_cap)
+        if let Some(source) = stream_error {
+            Err(source)
+        } else {
+            Ok((output, over_cap))
+        }
     });
     let stderr_reader = thread::spawn(move || {
-        let mut output = Vec::new();
+        let mut output = Vec::with_capacity(MAX_GIT_STDERR_BYTES);
         let mut buffer = [0_u8; 16 * 1024];
         loop {
             match stderr.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Ok(count) => {
+                    let remaining = MAX_GIT_STDERR_BYTES.saturating_sub(output.len());
+                    if remaining > 0 {
+                        output.extend_from_slice(&buffer[..count.min(remaining)]);
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -193,7 +231,14 @@ fn run_git_impl(
             Ok(Some(status)) => {
                 let (stdout, over_cap) = stdout_reader
                     .join()
-                    .map_err(|_| SourceError::Git("git stdout reader panicked".into()))?;
+                    .map_err(|_| SourceError::Git("git stdout reader panicked".into()))?
+                    .map_err(|source| SourceError::Io {
+                        operation: "write Git output file",
+                        path: output_file_path
+                            .clone()
+                            .unwrap_or_else(|| Path::new("git").to_path_buf()),
+                        source,
+                    })?;
                 let stderr = stderr_reader
                     .join()
                     .map_err(|_| SourceError::Git("git stderr reader panicked".into()))?;
@@ -460,7 +505,9 @@ impl GitSource for SystemGitSource {
         if !skill_path.is_empty() {
             args.push(skill_path);
         }
-        let result = run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, &archive_path)
+        let archive_cap = usize::try_from(MAX_STAGED_SOURCE_BYTES)
+            .expect("the staged source transport limit must fit in usize");
+        let result = run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, archive_cap, &archive_path)
             .map(|_| ())
             .and_then(|()| {
                 extract_zip_archive(
@@ -558,10 +605,10 @@ impl GitSource for SystemGitSource {
 mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
-
-    use super::{SystemGitSource, is_mirror_present};
-    use crate::seams::source::GitSource;
     use std::process::Command;
+
+    use super::{LOCAL_OP_TIMEOUT_SECONDS, SystemGitSource, is_mirror_present, run_git_to_file};
+    use crate::seams::source::{GitSource, SourceError};
 
     /// Create a local fixture repository with a couple of commits.
     fn fixture_repo(root: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -775,6 +822,101 @@ mod tests {
         assert!(
             !temp.path().join("staging").join(".one.skill.zip").exists(),
             "the transient archive must be removed"
+        );
+    }
+
+    #[test]
+    fn git_archive_output_is_capped_before_zip_extraction() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[("SKILL.md", "---\nname: fixture\n---\n")],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let commit = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let archive_path = temp.path().join("staging/archive.zip");
+        std::fs::create_dir_all(archive_path.parent().expect("archive parent"))
+            .expect("create archive parent");
+        let args = [
+            "-C",
+            mirror.to_str().expect("mirror path"),
+            "archive",
+            "--format=zip",
+            commit.as_str(),
+        ];
+
+        let error = match run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, 1, &archive_path) {
+            Err(error) => error,
+            Ok(_) => panic!("archive output must exceed the one-byte cap"),
+        };
+        assert!(
+            matches!(error, SourceError::Validation(message) if message.contains("size limit"))
+        );
+        assert!(
+            std::fs::metadata(&archive_path)
+                .expect("partial archive")
+                .len()
+                <= 1,
+            "the capped transport must not write beyond its byte limit"
+        );
+        std::fs::remove_file(&archive_path).expect("remove capped archive");
+
+        let output = run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, 64 * 1024, &archive_path)
+            .expect("archive within the cap");
+        assert!(
+            output.stdout.is_empty(),
+            "file-backed Git output must not be retained in memory"
+        );
+    }
+
+    #[test]
+    fn file_backed_git_output_rejects_a_symlink_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = fixture_repo(
+            temp.path(),
+            "fixture",
+            &[("SKILL.md", "---\nname: fixture\n---\n")],
+        );
+        let mirror = temp.path().join("cache/git/fixture");
+        let source = SystemGitSource::new();
+        source
+            .fetch_mirror(&file_url(&repo), &mirror)
+            .expect("fetch mirror");
+        let commit = source
+            .resolve_commit(&mirror, "main")
+            .expect("resolve")
+            .expect("present");
+        let archive_path = temp.path().join("staging/archive.zip");
+        let outside = temp.path().join("outside.bin");
+        std::fs::create_dir_all(archive_path.parent().expect("archive parent"))
+            .expect("create archive parent");
+        std::fs::write(&outside, b"preserve me").expect("write outside file");
+        std::os::unix::fs::symlink(&outside, &archive_path).expect("create archive symlink");
+        let args = [
+            "-C",
+            mirror.to_str().expect("mirror path"),
+            "archive",
+            "--format=zip",
+            commit.as_str(),
+        ];
+
+        let error = match run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, 64 * 1024, &archive_path)
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a symlink archive destination must be rejected"),
+        };
+        assert!(matches!(error, SourceError::Io { .. }));
+        assert_eq!(
+            std::fs::read(&outside).expect("read outside file"),
+            b"preserve me"
         );
     }
 

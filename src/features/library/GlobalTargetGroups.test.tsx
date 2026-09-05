@@ -138,6 +138,30 @@ test("mismatch health exposes only its typed Disable action", async () => {
   ).toHaveLength(3);
 });
 
+test("non-missing observations do not expose ordinary Repair", async () => {
+  const client = createFixtureCatalogClient();
+  const original = client.listTargetGroups.bind(client);
+  client.listTargetGroups = async (skillId) => {
+    const snapshot = await original(skillId);
+    return {
+      ...snapshot,
+      groups: snapshot.groups.map((group, index) => ({
+        ...group,
+        desired: true,
+        observedState: index === 0 ? "occupied" : "target_mismatch",
+      })),
+    } satisfies GlobalTargetGroupSnapshot;
+  };
+  renderPanel({ client });
+
+  const panel = await screen.findByRole("complementary", {
+    name: "Activation Target Groups",
+  });
+  expect(
+    within(panel).queryByRole("button", { name: "Repair" }),
+  ).not.toBeInTheDocument();
+});
+
 test("Broken health hides switches and opens dedicated Disable", async () => {
   const client = createFixtureCatalogClient();
   const original = client.listTargetGroups.bind(client);

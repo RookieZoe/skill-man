@@ -481,13 +481,10 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
     fn agent_configuration_snapshot(
         &self,
     ) -> Result<AgentConfigurationStoreSnapshot, AgentConfigurationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                AgentConfigurationStoreError::Unavailable(
-                    "no Bound Home: the catalog is closed".into(),
-                )
-            })?
-            .agent_configuration_snapshot()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| AgentConfigurationStoreError::Unavailable(error.to_string()))?;
+        sqlite.agent_configuration_snapshot()
     }
 
     fn apply_agent_configuration_change(
@@ -504,13 +501,10 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
     fn list_recent_project_folders(
         &self,
     ) -> Result<Vec<RecentProjectFolder>, AgentConfigurationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                AgentConfigurationStoreError::Unavailable(
-                    "no Bound Home: the catalog is closed".into(),
-                )
-            })?
-            .list_recent_project_folders()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| AgentConfigurationStoreError::Unavailable(error.to_string()))?;
+        sqlite.list_recent_project_folders()
     }
 
     fn record_recent_project_folder(
@@ -958,21 +952,19 @@ impl AdoptStore for RuntimeCatalogStore {
 
 impl ActivationStore for RuntimeCatalogStore {
     fn desired_activations(&self) -> Result<Vec<DesiredActivation>, ActivationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-            })?
-            .desired_activations()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))?;
+        sqlite.desired_activations()
     }
 
     fn activation_observations(
         &self,
     ) -> Result<Vec<StoredActivationObservation>, ActivationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-            })?
-            .activation_observations()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))?;
+        sqlite.activation_observations()
     }
 
     fn record_observations(
@@ -996,22 +988,20 @@ impl ActivationStore for RuntimeCatalogStore {
     }
 
     fn activation_cells(&self) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-            })?
-            .activation_cells()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))?;
+        sqlite.activation_cells()
     }
 
     fn activation_cells_for_skill(
         &self,
         skill_id: &SkillId,
     ) -> Result<Vec<ActivationCellRow>, ActivationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-            })?
-            .activation_cells_for_skill(skill_id)
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))?;
+        sqlite.activation_cells_for_skill(skill_id)
     }
 
     fn write_activation_cells(
@@ -1025,11 +1015,10 @@ impl ActivationStore for RuntimeCatalogStore {
     }
 
     fn catalog_generation(&self) -> Result<u64, ActivationStoreError> {
-        self.store()
-            .ok_or_else(|| {
-                ActivationStoreError::Unavailable("no Bound Home: the catalog is closed".into())
-            })?
-            .catalog_generation()
+        let sqlite = self
+            .require_catalog()
+            .map_err(|error| ActivationStoreError::Unavailable(error.to_string()))?;
+        sqlite.catalog_generation()
     }
 }
 
@@ -1215,10 +1204,8 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
         crate::seams::preferences_store::AppPreferences,
         crate::seams::preferences_store::PreferencesStoreError,
     > {
-        let sqlite = self.store().ok_or_else(|| {
-            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                "no Bound Home: the catalog is closed".into(),
-            )
+        let sqlite = self.require_catalog().map_err(|error| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(error.to_string())
         })?;
         sqlite.load_preferences()
     }
@@ -1241,10 +1228,8 @@ impl crate::seams::preferences_store::PreferencesStore for RuntimeCatalogStore {
     fn last_app_update_check_at(
         &self,
     ) -> Result<Option<i64>, crate::seams::preferences_store::PreferencesStoreError> {
-        let sqlite = self.store().ok_or_else(|| {
-            crate::seams::preferences_store::PreferencesStoreError::Unavailable(
-                "no Bound Home: the catalog is closed".into(),
-            )
+        let sqlite = self.require_catalog().map_err(|error| {
+            crate::seams::preferences_store::PreferencesStoreError::Unavailable(error.to_string())
         })?;
         sqlite.last_app_update_check_at()
     }
@@ -1313,6 +1298,24 @@ mod tests {
         assert!(matches!(
             store.list(CatalogFilter::All),
             Err(CatalogStoreError::Unavailable(_))
+        ));
+        assert!(matches!(
+            <RuntimeCatalogStore as crate::seams::agent_configuration_store::AgentConfigurationStore>::agent_configuration_snapshot(
+                &store
+            ),
+            Err(AgentConfigurationStoreError::Unavailable(_))
+        ));
+        assert!(matches!(
+            <RuntimeCatalogStore as crate::seams::activation_store::ActivationStore>::catalog_generation(
+                &store
+            ),
+            Err(ActivationStoreError::Unavailable(_))
+        ));
+        assert!(matches!(
+            <RuntimeCatalogStore as crate::seams::preferences_store::PreferencesStore>::load_preferences(
+                &store
+            ),
+            Err(crate::seams::preferences_store::PreferencesStoreError::Unavailable(_))
         ));
         assert!(!store.is_writable());
         assert!(store.store().is_none());

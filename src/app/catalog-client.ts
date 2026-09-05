@@ -1770,6 +1770,7 @@ export interface CatalogClient {
   confirmSourceUpdate(
     request: ConfirmSourceUpdateRequest,
   ): Promise<SourceUpdateResult>;
+  undoSourceUpdate(operationId: string): Promise<SourceUndoResult>;
   finalizeSourceUpdate(operationId: string): Promise<void>;
   restoreCurrentSourceRelease(remoteId: string): Promise<SourceRestoreResult>;
   createLocalSourceCopy(
@@ -2127,6 +2128,11 @@ const tauriCatalogClient: CatalogClient = {
   },
   confirmSourceUpdate(request) {
     return invoke<SourceUpdateResult>("confirm_source_update", { request });
+  },
+  undoSourceUpdate(operationId) {
+    return invoke<SourceUndoResult>("undo_source_update", {
+      request: { operationId },
+    });
   },
   finalizeSourceUpdate(operationId) {
     return invoke<void>("finalize_source_update", {

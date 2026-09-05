@@ -797,7 +797,20 @@ impl ScanEvidenceStore for SystemScanEvidenceStore {
             })?;
         }
         let path = root_dir.join("root.json");
-        self.write_json_atomic(&path, root, "write Scan Root record")
+        let result = self.write_json_atomic(&path, root, "write Scan Root record");
+        if let Err(error) = &result
+            && root.state == ScanRootState::Completed
+        {
+            // The atomic rename may already have succeeded before a parent
+            // fsync reports an error. Publish a matching failed terminal
+            // record so the later Incomplete manifest cannot disagree with
+            // a durable Completed root.
+            let mut failed = root.clone();
+            failed.state = ScanRootState::Failed;
+            failed.diagnostic = Some(error.to_string());
+            let _ = self.write_json_atomic(&path, &failed, "write failed Scan Root record");
+        }
+        result
     }
 
     fn read_run(&self, run_id: &str) -> Result<Option<ScanRunRecord>, ScanEvidenceStoreError> {

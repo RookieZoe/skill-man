@@ -234,6 +234,32 @@ pub fn confirm_source_update(
 }
 
 #[tauri::command]
+pub fn undo_source_update(
+    state: State<'_, SourceUpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<SourceUndoResultDto, CommandFailureDto> {
+    let result = state.undo(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
+pub fn finalize_source_update(
+    state: State<'_, SourceUpdateApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    request: SourceTransitionOperationRequestDto,
+) -> Result<(), CommandFailureDto> {
+    let result = state.finalize(request);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
 pub fn restore_current_source_release(
     state: State<'_, SourceLifecycleApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,

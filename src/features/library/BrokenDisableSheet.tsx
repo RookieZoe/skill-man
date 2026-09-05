@@ -6,6 +6,7 @@ import type {
 } from "../../app/catalog-client";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useLocale } from "../locale/LocaleProvider";
+import { commandErrorMessage } from "../locale/messages";
 
 export interface BrokenDisableSheetProps {
   client: CatalogClient;
@@ -67,12 +68,12 @@ export function BrokenDisableSheet({
       })
       .catch((cause) => {
         if (!current) return;
-        setError(String(cause));
+        setError(commandErrorMessage(cause, t));
       });
     return () => {
       current = false;
     };
-  }, [client, skillId]);
+  }, [client, skillId, t]);
 
   // Auto-focus primary action button on step transition
   useLayoutEffect(() => {
@@ -96,7 +97,7 @@ export function BrokenDisableSheet({
       }
       setStep("result");
     } catch (cause) {
-      setError(String(cause));
+      setError(commandErrorMessage(cause, t));
     } finally {
       setIsBusy(false);
     }

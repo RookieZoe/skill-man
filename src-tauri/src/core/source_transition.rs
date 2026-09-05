@@ -204,6 +204,10 @@ impl SourceTransitionService {
         self.write_gate.clone()
     }
 
+    pub(crate) fn protected_installer_skills_roots(&self) -> Vec<PathBuf> {
+        self.lock_store.protected_skills_roots()
+    }
+
     pub fn with_home_context(mut self, home_context: Arc<WriteGate>) -> Self {
         self.home_context = Some(home_context.clone());
         self.write_gate = home_context;
@@ -851,6 +855,14 @@ impl SourceTransitionService {
     /// Conflict: Update never re-adopts, merges or releases it (spec §8.4).
     fn ensure_no_external_claims(&self, canonical_url: &str) -> Result<(), SourceTransitionError> {
         let reports = self.lock_store.discover()?;
+        if reports
+            .iter()
+            .any(|report| report.fault.is_some() || !report.entry_faults.is_empty())
+        {
+            return Err(SourceTransitionError::Validation(
+                "an installer lock is not structurally readable".into(),
+            ));
+        }
         let reappeared = reports.iter().any(|report| {
             report.entries.iter().any(|entry| {
                 parse_git_source_input(&entry.source_url)
@@ -1410,6 +1422,12 @@ impl SourceTransitionService {
         self.reserve_update_destinations(library_root, journal)?;
         self.ensure_reserved_update_destinations(journal)?;
 
+        // External ownership is allowed to reappear while the remote
+        // release is being staged. Recheck immediately before the Catalog
+        // commit so an Update cannot publish a new Source Release while a
+        // legacy installer has reclaimed this repository.
+        self.ensure_no_external_claims(&journal.canonical_url)?;
+
         // The single transaction is the Update commit point.
         let snapshot_version = self.update_store.commit_source_update(record)?;
         journal.phase = SourceTransitionPhase::ManagedCommitted;
@@ -1454,7 +1472,6 @@ impl SourceTransitionService {
                 health: parse_health_inner(&member.health),
             })
             .collect();
-        let _ = library_root;
         Ok(SourceUpdateRecord {
             remote_id: journal.remote_id.clone(),
             provider: journal.provider.clone(),
@@ -2972,6 +2989,11 @@ impl SourceTransitionService {
         let has_faulted_lock = reports
             .iter()
             .any(|report| report.fault.is_some() || !report.entry_faults.is_empty());
+        if has_faulted_lock {
+            return Err(SourceTransitionError::Validation(
+                "an installer lock is not clean enough for a Source Transition".into(),
+            ));
+        }
         let relevant = reports
             .into_iter()
             .filter(|report| {
@@ -2983,11 +3005,6 @@ impl SourceTransitionService {
             })
             .collect::<Vec<_>>();
         if relevant.is_empty() && require_exact_member_set {
-            if has_faulted_lock {
-                return Err(SourceTransitionError::Validation(
-                    "an installer lock is not clean enough for an unowned Source Transition".into(),
-                ));
-            }
             // A worktree-only candidate has no external owner to release.
             // It is converted from the remote release directly: the journal
             // carries no lock facts and the Home snapshot becomes the sole

@@ -140,9 +140,16 @@ test("mid mode opens the Agent Inspector as a modal drawer with inert background
   expect(inspector()).toHaveAttribute("role", "dialog");
   expect(inspector()).toHaveAttribute("aria-modal", "true");
   // The drawer stays inside the app background (same DOM node across
-  // breakpoints), so modality comes from the focus trap, backdrop and
-  // aria-modal rather than the inert attribute; sheets own the inert gate.
+  // breakpoints), so its sibling surfaces are inert while the drawer remains
+  // interactive.
   expect(background()).not.toHaveAttribute("inert");
+  expect(document.querySelector(".toolbar")).toHaveAttribute("inert");
+  expect(document.querySelector(".notice-region")).toHaveAttribute("inert");
+  expect(document.querySelector(".library-sidebar")).toHaveAttribute("inert");
+  expect(document.querySelector(".skill-detail")).toHaveAttribute("inert");
+  expect(document.querySelector(".scan-evidence-ledger")).toHaveAttribute(
+    "inert",
+  );
   expect(
     screen.getByRole("dialog", { name: "Activation Target Groups" }),
   ).toBeInTheDocument();
