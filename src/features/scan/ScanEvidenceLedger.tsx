@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
   AdoptAction,
@@ -241,9 +241,11 @@ function countCards(
     },
     {
       key: "scan.summary.cards.local",
-      value:
+      value: Math.max(
+        0,
         summary.sourceCounts.localCandidates -
-        summary.sourceCounts.conflictMembers,
+          summary.sourceCounts.conflictMembers,
+      ),
     },
     {
       key: "scan.summary.cards.conflictSet",
@@ -283,11 +285,19 @@ function adoptErrorText(
 export function ScanEvidenceLedger({
   client,
   idle = false,
+  adoptHandoff = null,
   onManageGitGroup,
+  onAdoptHandoffHandled,
 }: {
   client: CatalogClient;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
   idle?: boolean;
+  /** Explicit handoff from Global Enable's single-Skill Adopt action. */
+  adoptHandoff?: {
+    directoryName: string;
+    entryPath: string;
+  } | null;
+  onAdoptHandoffHandled?: () => void;
   /** Git Repository Source handoff (spec §8.1): candidate groups open the
    * source management surface (#92); never per-member plans here. */
   onManageGitGroup?: (
@@ -296,6 +306,7 @@ export function ScanEvidenceLedger({
   ) => void;
 }) {
   const { t } = useLocale();
+  const ledgerRef = useRef<HTMLElement | null>(null);
   const [observation, setObservation] =
     useState<ObservationAndScanSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
@@ -314,6 +325,13 @@ export function ScanEvidenceLedger({
   const [adoptUndo, setAdoptUndo] = useState<AdoptUndoResult | null>(null);
   const [adoptBusy, setAdoptBusy] = useState(false);
   const [adoptMessage, setAdoptMessage] = useState<string | null>(null);
+  const handledAdoptHandoff = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (!adoptHandoff) return;
+    ledgerRef.current?.scrollIntoView?.({ block: "nearest" });
+    ledgerRef.current?.focus({ preventScroll: true });
+  }, [adoptHandoff]);
 
   // Page sections are bound to one Report identity: a published new Report
   // resets every page (the old cursor is stale by contract, never reused).
@@ -390,6 +408,80 @@ export function ScanEvidenceLedger({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportIdentity, summary]);
+
+  useEffect(() => {
+    if (!adoptHandoff) {
+      handledAdoptHandoff.current = null;
+      return;
+    }
+    if (!summary) return;
+    const handoffKey = `${summary.contentIdentity}:${adoptHandoff.entryPath}`;
+    if (handledAdoptHandoff.current === handoffKey) return;
+    if (!sections.appearances.loaded) {
+      if (!sections.appearances.loading) void loadSection("appearances", 0);
+      return;
+    }
+    const matchingAppearance = sections.appearances.rows.find(
+      (row) =>
+        row.kind === "appearance" &&
+        row.entryPath === adoptHandoff.entryPath &&
+        row.entitySeq !== null,
+    );
+    if (!matchingAppearance || matchingAppearance.kind !== "appearance") {
+      if (sections.appearances.nextOffset !== null) {
+        void loadSection("appearances", sections.appearances.nextOffset);
+      }
+      return;
+    }
+    const candidate = sections.local_candidates.rows.find(
+      (row) =>
+        row.kind === "source_verdict" &&
+        row.entitySeq === matchingAppearance.entitySeq &&
+        row.directoryNames.includes(adoptHandoff.directoryName),
+    );
+    const conflict = sections.conflict_sets.rows.find(
+      (row) =>
+        row.kind === "conflict_set" &&
+        row.memberEntitySeqs.includes(matchingAppearance.entitySeq!),
+    );
+    if (
+      (!candidate || candidate.kind !== "source_verdict") &&
+      (!conflict || conflict.kind !== "conflict_set")
+    ) {
+      return;
+    }
+    handledAdoptHandoff.current = handoffKey;
+    queueMicrotask(() => {
+      if (candidate?.kind === "source_verdict") {
+        const key = candidateKey(candidate);
+        setSelected((previous) =>
+          previous[key] ? previous : { ...previous, [key]: true },
+        );
+      } else if (conflict?.kind === "conflict_set") {
+        setWinners((previous) => ({
+          ...previous,
+          [candidateKey(conflict)]: matchingAppearance.entitySeq!,
+        }));
+      }
+      setAdoptMessage(
+        t("scan.ledger.adoptHandoffSelected", {
+          name: adoptHandoff.directoryName,
+        }),
+      );
+      onAdoptHandoffHandled?.();
+    });
+    // `loadSection` is the ledger's single paging path; adding its
+    // per-render function identity would restart this handoff effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    adoptHandoff,
+    onAdoptHandoffHandled,
+    sections.appearances,
+    sections.conflict_sets.rows,
+    sections.local_candidates.rows,
+    summary,
+    t,
+  ]);
 
   async function start() {
     setBusy(true);
@@ -573,8 +665,10 @@ export function ScanEvidenceLedger({
 
   return (
     <section
+      ref={ledgerRef}
       className="scan-evidence-ledger"
       aria-label={t("scan.ledger.label")}
+      tabIndex={-1}
       data-state={
         runActive ? "running" : (run?.state ?? (hasReport ? "report" : "none"))
       }
@@ -721,6 +815,11 @@ export function ScanEvidenceLedger({
       {error ? (
         <p className="scan-ledger-error" role="alert">
           {error}
+        </p>
+      ) : null}
+      {adoptHandoff && !summary ? (
+        <p className="scan-ledger-error" role="alert">
+          {t("scan.ledger.adoptHandoffNeedsReport")}
         </p>
       ) : null}
 

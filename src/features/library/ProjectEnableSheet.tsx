@@ -12,6 +12,7 @@ import type {
 import type { EnableSkillItem } from "./GlobalEnableSheet";
 import { useLocale } from "../locale/LocaleProvider";
 import type { MessageKey } from "../locale/messages";
+import { useModalFocus } from "../../ui/useModalFocus";
 
 /**
  * Project Enable four-step sheet (spec §7.4; ADR-0015; ADR-0019; ADR-0021; #89):
@@ -30,6 +31,7 @@ export function ProjectEnableSheet({
   skills,
   skillId,
   skillName,
+  opener,
   onClose,
   onOpenAgentManagement,
 }: {
@@ -37,6 +39,7 @@ export function ProjectEnableSheet({
   skills?: EnableSkillItem[];
   skillId?: string;
   skillName?: string;
+  opener?: HTMLElement | null;
   onClose: () => void;
   onOpenAgentManagement?: () => void;
 }) {
@@ -71,6 +74,12 @@ export function ProjectEnableSheet({
   const [submitting, setSubmitting] = useState(false);
   const planning = step === "preview" && plan === null;
   const busy = planning || submitting;
+  const modalRef = useModalFocus<HTMLElement>({
+    opener,
+    busy,
+    focusKey: `${step}:${agents.length}:${plan !== null}:${result !== null}`,
+    onClose: onCloseWithFinalize,
+  });
 
   // Load recent folders on mount
   useEffect(() => {
@@ -139,17 +148,6 @@ export function ProjectEnableSheet({
     };
   }, [client, skillIds, folder, selectedAgentIds, resolutions, step]);
 
-  // Handle keyboard escape to close
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        void onCloseWithFinalize();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  });
-
   const applyableCells = useMemo(
     () =>
       (plan?.cells ?? []).filter(
@@ -207,11 +205,15 @@ export function ProjectEnableSheet({
   }
 
   async function onCloseWithFinalize() {
+    if (busy) return;
     if (result) {
+      setSubmitting(true);
       try {
         await client.finalizeProjectEnable(result.operationId);
       } catch {
         // Finalization is best effort
+      } finally {
+        setSubmitting(false);
       }
     }
     onClose();
@@ -236,9 +238,11 @@ export function ProjectEnableSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet enable-sheet project-enable-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={
           isBatch
             ? tPlural(

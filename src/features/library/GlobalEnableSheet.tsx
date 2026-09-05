@@ -10,6 +10,7 @@ import type {
 } from "../../app/catalog-client";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import type { MessageKey } from "../locale/messages";
+import { useModalFocus } from "../../ui/useModalFocus";
 
 export interface EnableSkillItem {
   id: string;
@@ -30,6 +31,8 @@ export function GlobalEnableSheet({
   skillId,
   skillName,
   initialGroupIds = [],
+  opener,
+  onAdoptExisting,
   onClose,
 }: {
   client: CatalogClient;
@@ -37,6 +40,8 @@ export function GlobalEnableSheet({
   skillId?: string;
   skillName?: string;
   initialGroupIds?: string[];
+  opener?: HTMLElement | null;
+  onAdoptExisting?: (cell: EnableCell) => void;
   onClose: () => void;
 }) {
   const { t, tPlural } = useLocale();
@@ -63,11 +68,20 @@ export function GlobalEnableSheet({
     "targets",
   );
   const [error, setError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<
+    "idle" | "applying" | "undoing" | "finalizing"
+  >("idle");
 
   const step = shownStep;
   const preparing = step === "targets" && groupsSnapshot === null;
   const planning = step === "preview" && plan === null;
-  const busy = preparing || planning;
+  const busy = preparing || planning || activity !== "idle";
+  const modalRef = useModalFocus<HTMLElement>({
+    opener,
+    busy,
+    focusKey: `${shownStep}:${groupsSnapshot !== null}:${plan !== null}:${result !== null}`,
+    onClose: onCloseWithFinalize,
+  });
   async function refreshGroups() {
     try {
       if (!primarySkillId) return;
@@ -88,7 +102,7 @@ export function GlobalEnableSheet({
         setError(null);
       })
       .catch((cause) => {
-        if (!current) setError(String(cause));
+        if (current) setError(String(cause));
       });
     return () => {
       current = false;
@@ -129,16 +143,6 @@ export function GlobalEnableSheet({
     };
   }, [client, skillIds, selected, resolutions, groupsSnapshot, shownStep]);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
-
   const applyableCells = useMemo(
     () =>
       (plan?.cells ?? []).filter(
@@ -159,9 +163,10 @@ export function GlobalEnableSheet({
   );
 
   async function onApply() {
-    if (!plan) {
+    if (!plan || activity !== "idle") {
       return;
     }
+    setActivity("applying");
     setError(null);
     try {
       const applied = await client.applyGlobalEnable(plan.planToken);
@@ -169,13 +174,16 @@ export function GlobalEnableSheet({
       setShownStep("result");
     } catch (cause) {
       setError(String(cause));
+    } finally {
+      setActivity("idle");
     }
   }
 
   async function onUndo() {
-    if (!result) {
+    if (!result || activity !== "idle") {
       return;
     }
+    setActivity("undoing");
     setError(null);
     try {
       await client.undoGlobalEnable(result.operationId);
@@ -185,16 +193,22 @@ export function GlobalEnableSheet({
       await refreshGroups();
     } catch (cause) {
       setError(String(cause));
+    } finally {
+      setActivity("idle");
     }
   }
 
   async function onCloseWithFinalize() {
-    if (result && !busy) {
+    if (busy) return;
+    if (result) {
+      setActivity("finalizing");
       try {
         await client.finalizeGlobalEnable(result.operationId);
       } catch {
         // Finalization is best-effort here: the result window closes on
         // restart as well (spec §4.9).
+      } finally {
+        setActivity("idle");
       }
     }
     onClose();
@@ -210,9 +224,11 @@ export function GlobalEnableSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet enable-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={
           isBatch
             ? tPlural("enable.global.dialogLabelBatch", normalizedSkills.length)
@@ -260,6 +276,7 @@ export function GlobalEnableSheet({
             plan={plan}
             resolutions={resolutions}
             isBatch={isBatch}
+            onAdoptExisting={onAdoptExisting}
             onResolutionChange={(cellKey, resolution) => {
               setResolutions((current) => {
                 const next = new Map(current);
@@ -287,7 +304,11 @@ export function GlobalEnableSheet({
         )}
 
         {step === "result" && result !== null && (
-          <ResultStep result={result} onUndo={() => void onUndo()} />
+          <ResultStep
+            result={result}
+            busy={busy}
+            onUndo={() => void onUndo()}
+          />
         )}
 
         {error !== null && (
@@ -318,7 +339,7 @@ export function GlobalEnableSheet({
               <button
                 type="button"
                 className="toolbar-button"
-                disabled={planning}
+                disabled={busy}
                 onClick={() => setShownStep("targets")}
               >
                 {t("enable.global.back")}
@@ -326,7 +347,7 @@ export function GlobalEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={applyableCells.length === 0 || planning}
+                disabled={applyableCells.length === 0 || busy}
                 onClick={() => void onApply()}
               >
                 {t("enable.global.applyPlan")}
@@ -433,11 +454,13 @@ function PreviewMatrixStep({
   plan,
   resolutions,
   isBatch,
+  onAdoptExisting,
   onResolutionChange,
 }: {
   plan: EnablePlan;
   resolutions: Map<string, CellResolution>;
   isBatch: boolean;
+  onAdoptExisting?: (cell: EnableCell) => void;
   onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
 }) {
   const { t } = useLocale();
@@ -452,6 +475,7 @@ function PreviewMatrixStep({
           cell={cell}
           resolution={resolutions.get(cell.cellKey) ?? cell.resolution}
           isBatch={isBatch}
+          onAdoptExisting={onAdoptExisting}
           onResolutionChange={onResolutionChange}
         />
       ))}
@@ -464,11 +488,13 @@ function PreviewCell({
   cell,
   resolution,
   isBatch,
+  onAdoptExisting,
   onResolutionChange,
 }: {
   cell: EnableCell;
   resolution: CellResolution;
   isBatch: boolean;
+  onAdoptExisting?: (cell: EnableCell) => void;
   onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
 }) {
   const { t } = useLocale();
@@ -495,49 +521,60 @@ function PreviewCell({
         {eligibilityLabel}
       </span>
       {cell.eligibility === "conflict" && (
-        <select
-          className="enable-resolution-select"
-          aria-label={cell.cellKey}
-          value={resolution}
-          onChange={(event) =>
-            onResolutionChange(
-              cell.cellKey,
-              event.currentTarget.value as CellResolution,
-            )
-          }
-        >
-          {isBatch ? (
-            <>
-              {typeof cell.occupier === "object" &&
-                "managed" in cell.occupier && (
-                  <option value="switch">
-                    {t("enable.global.resolutionSwitch")}
-                  </option>
-                )}
-              <option value="replace">
-                {t("enable.global.resolutionReplaceBatch")}
-              </option>
-              <option value="skip">
-                {t("enable.global.resolutionSkipBatch")}
-              </option>
-            </>
-          ) : (
-            <>
-              <option value="switch">
-                {t("enable.global.resolutionSwitch")}
-              </option>
-              <option value="replace">
-                {t("enable.global.resolutionReplace")}
-              </option>
-              <option value="adopt">
-                {t("enable.global.resolutionAdopt")}
-              </option>
-              <option value="skip">
-                {t("enable.global.resolutionCancel")}
-              </option>
-            </>
-          )}
-        </select>
+        <>
+          <select
+            className="enable-resolution-select"
+            aria-label={cell.cellKey}
+            value={resolution}
+            onChange={(event) =>
+              onResolutionChange(
+                cell.cellKey,
+                event.currentTarget.value as CellResolution,
+              )
+            }
+          >
+            {isBatch ? (
+              <>
+                {typeof cell.occupier === "object" &&
+                  "managed" in cell.occupier && (
+                    <option value="switch">
+                      {t("enable.global.resolutionSwitch")}
+                    </option>
+                  )}
+                <option value="replace">
+                  {t("enable.global.resolutionReplaceBatch")}
+                </option>
+                <option value="skip">
+                  {t("enable.global.resolutionSkipBatch")}
+                </option>
+              </>
+            ) : (
+              <>
+                <option value="switch">
+                  {t("enable.global.resolutionSwitch")}
+                </option>
+                <option value="replace">
+                  {t("enable.global.resolutionReplace")}
+                </option>
+                <option value="adopt">
+                  {t("enable.global.resolutionAdopt")}
+                </option>
+                <option value="skip">
+                  {t("enable.global.resolutionCancel")}
+                </option>
+              </>
+            )}
+          </select>
+          {!isBatch && resolution === "adopt" && onAdoptExisting ? (
+            <button
+              type="button"
+              className="toolbar-button"
+              onClick={() => onAdoptExisting(cell)}
+            >
+              {t("enable.global.openAdopt")}
+            </button>
+          ) : null}
+        </>
       )}
       {blockedLabel !== null && (
         <small className="enable-matrix-note">{blockedLabel}</small>
@@ -589,9 +626,11 @@ function blockedReasonLabel(
 
 function ResultStep({
   result,
+  busy,
   onUndo,
 }: {
   result: EnableResult;
+  busy: boolean;
   onUndo: () => void;
 }) {
   const { t } = useLocale();
@@ -620,7 +659,12 @@ function ResultStep({
           </li>
         ))}
       </ul>
-      <button type="button" className="toolbar-button" onClick={onUndo}>
+      <button
+        type="button"
+        className="toolbar-button"
+        disabled={busy}
+        onClick={onUndo}
+      >
         {t("enable.global.undoOperation")}
       </button>
     </div>

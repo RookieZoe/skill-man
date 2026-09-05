@@ -3,7 +3,8 @@ import type {
   GitSourceCapabilitySource,
   SkillSummary,
 } from "../../app/catalog-client";
-import { useLocale } from "../locale/LocaleProvider";
+import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
+import type { MessageKey } from "../locale/messages";
 import type { SourceActionNotice } from "./GitSourceCapabilityNotice";
 import { defaultCopyDestinationPicker } from "./GitSourceCapabilityNotice";
 
@@ -132,6 +133,39 @@ export function SourceGroupCard({
     }
   }
 
+  const localCopyControls =
+    onCopyMember && copyableMembers.length > 0 ? (
+      <div className="local-copy-controls">
+        {copyableMembers.length > 1 ? (
+          <label className="copy-member-select">
+            <span>{t("sourceGroup.copyMemberLabel")}</span>
+            <select
+              value={copySkillId}
+              disabled={actionActivity}
+              onChange={(e) => setCopySkillId(e.target.value)}
+            >
+              {copyableMembers.map((member) => (
+                <option key={member.skillId} value={member.skillId}>
+                  {member.skillPath}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <button
+          type="button"
+          className="repair-button"
+          disabled={actionActivity}
+          onClick={() => void handleCopy()}
+        >
+          {t("sourceGroup.createLocalCopy")}
+        </button>
+        <small className="local-copy-note">
+          {t("sourceGroup.localCopyNoSwitchNote")}
+        </small>
+      </div>
+    ) : null;
+
   const overrideText =
     source.trackingMode && source.trackingMode !== "auto_release_tag_head"
       ? source.trackingValue || source.trackingMode
@@ -225,38 +259,16 @@ export function SourceGroupCard({
               </button>
             )}
 
-            {onCopyMember && copyableMembers.length > 0 ? (
-              <div className="local-copy-controls">
-                {copyableMembers.length > 1 ? (
-                  <label className="copy-member-select">
-                    <span>{t("sourceGroup.copyMemberLabel")}</span>
-                    <select
-                      value={copySkillId}
-                      disabled={actionActivity}
-                      onChange={(e) => setCopySkillId(e.target.value)}
-                    >
-                      {copyableMembers.map((member) => (
-                        <option key={member.skillId} value={member.skillId}>
-                          {member.skillPath}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                <button
-                  type="button"
-                  className="repair-button"
-                  disabled={actionActivity}
-                  onClick={() => void handleCopy()}
-                >
-                  {t("sourceGroup.createLocalCopy")}
-                </button>
-                <small className="local-copy-note">
-                  {t("sourceGroup.localCopyNoSwitchNote")}
-                </small>
-              </div>
-            ) : null}
+            {localCopyControls}
           </div>
+        </section>
+      ) : null}
+      {!hasMismatch && localCopyControls ? (
+        <section
+          className="source-group-local-copy-panel"
+          aria-label={t("sourceGroup.copyMemberLabel")}
+        >
+          {localCopyControls}
         </section>
       ) : null}
 
@@ -360,7 +372,7 @@ export function SourceGroupCard({
                     <span
                       className={`member-health-badge member-health-badge--${skill?.health ?? "broken"}`}
                     >
-                      {skill?.health ?? "broken"}
+                      {memberHealthLabel(skill?.health, t)}
                     </span>
                   </div>
 
@@ -396,4 +408,12 @@ export function SourceGroupCard({
       </section>
     </article>
   );
+}
+
+function memberHealthLabel(
+  health: SkillSummary["health"] | undefined,
+  t: LocaleContextValue["t"],
+): string {
+  const value = health ?? "broken";
+  return t(`library.health.badge.${value}` as MessageKey);
 }

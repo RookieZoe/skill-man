@@ -2,7 +2,10 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
-import type { SourceGroupPreviewOutcome } from "../../app/catalog-client";
+import type {
+  SourceGroupPreviewOutcome,
+  SourceUpdateDraft,
+} from "../../app/catalog-client";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 
 const preview: SourceGroupPreviewOutcome = {
@@ -207,6 +210,94 @@ test("offers only whole-source Undo in the completed result window", async () =>
   await user.click(screen.getByRole("button", { name: "Source Undo" }));
   expect(onUndo).toHaveBeenCalledOnce();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+});
+
+test("Source Update preview exposes confirm and keeps the result undoable", async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const updateDraft: SourceUpdateDraft = {
+    remoteId: "remote-1",
+    provider: "gitlab",
+    sourceUrl: "https://gitlab.com/acme/repository",
+    aliases: [],
+    policy: preview.preview.policy,
+    members: [
+      {
+        skillId: "skill-1",
+        skillPath: "skills/root",
+        directoryName: "root",
+        directoryIdentityKey: "root",
+        displayName: "Root Skill",
+        description: "Updated member",
+        treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
+        state: "current",
+      },
+    ],
+  };
+  const { rerender } = render(
+    <SourceGroupPreviewFlow
+      sourceType="github"
+      sourceUrl={updateDraft.sourceUrl}
+      policyMode="branch"
+      policyValue="main"
+      outcome={null}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={updateDraft}
+      result={null}
+      error={null}
+      activity="idle"
+      onSourceTypeChange={vi.fn()}
+      onSourceUrlChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
+      onFetch={vi.fn()}
+      onConfirm={vi.fn()}
+      onConfirmPromotion={onConfirm}
+      onUndo={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+
+  expect(
+    screen.getByRole("button", { name: "Update complete source" }),
+  ).toBeInTheDocument();
+  await user.click(
+    screen.getByRole("button", { name: "Update complete source" }),
+  );
+  expect(onConfirm).toHaveBeenCalledOnce();
+
+  rerender(
+    <SourceGroupPreviewFlow
+      sourceType="gitlab"
+      sourceUrl={updateDraft.sourceUrl}
+      policyMode="branch"
+      policyValue="main"
+      outcome={null}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
+      result={{
+        operationId: "update-operation-1",
+        remoteId: "remote-1",
+        releaseId: "source-release-2",
+        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+        memberCount: 1,
+        snapshotVersion: 10,
+        undoAvailable: true,
+      }}
+      error={null}
+      activity="idle"
+      onSourceTypeChange={vi.fn()}
+      onSourceUrlChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
+      onFetch={vi.fn()}
+      onConfirm={vi.fn()}
+      onConfirmPromotion={vi.fn()}
+      onUndo={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Source Undo" })).toBeEnabled();
 });
 
 test("requires a ref choice before re-fetching a typed ref conflict", async () => {

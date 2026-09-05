@@ -493,6 +493,8 @@ export function createFixtureCatalogClient(
         skillId,
         skillName:
           skills.find((skill) => skill.id === skillId)?.displayName ?? skillId,
+        skillHealth:
+          skills.find((skill) => skill.id === skillId)?.health ?? "healthy",
         agentGeneration: 1,
         groups,
       };
@@ -719,12 +721,14 @@ export function createFixtureCatalogClient(
           diagnostic: null,
         };
       });
+      publishObservation();
       return { operationId, cells, snapshotVersion };
     },
     async undoGlobalEnable(operationId) {
       const cellKey = fixtureOperations.get(operationId);
       fixtureOperations.delete(operationId);
       if (!cellKey) {
+        publishObservation();
         return { operationId, cells: [], snapshotVersion };
       }
       const [skillId, targetRootId] = cellKey.split("|");
@@ -741,7 +745,7 @@ export function createFixtureCatalogClient(
         enabledSkillIds.set(config.agentId, base);
         observedSkillStates.get(config.agentId)?.set(skillId, null);
       }
-      return {
+      const result = {
         operationId,
         cells: [
           {
@@ -752,6 +756,8 @@ export function createFixtureCatalogClient(
         ],
         snapshotVersion,
       };
+      publishObservation();
+      return result;
     },
     async finalizeGlobalEnable() {
       return undefined;
@@ -777,11 +783,27 @@ export function createFixtureCatalogClient(
 
       const groupsMap = new Map<string, typeof selectedConfigs>();
       for (const config of selectedConfigs) {
-        const dir = config.projectSkillsDir ?? ".skills";
+        if (!config.projectSkillsDir) continue;
+        const dir = config.projectSkillsDir;
         const container = `${projectFolder}/${dir}`;
         const list = groupsMap.get(container) ?? [];
         list.push(config);
         groupsMap.set(container, list);
+      }
+      // Preview discloses every configured consumer of a resolved project
+      // container, even when the user selected only one of those Agents.
+      for (const config of agentConfigurations) {
+        if (agentIds.includes(config.agentId) || !config.projectSkillsDir) {
+          continue;
+        }
+        const container = `${projectFolder}/${config.projectSkillsDir}`;
+        const consumers = groupsMap.get(container);
+        if (
+          consumers &&
+          !consumers.some((item) => item.agentId === config.agentId)
+        ) {
+          consumers.push(config);
+        }
       }
 
       const cells: EnableCell[] = [];
@@ -910,10 +932,14 @@ export function createFixtureCatalogClient(
       return payload;
     },
     async refreshStartupProbe() {
-      return observationSnapshot();
+      const payload = observationSnapshot();
+      observationListeners.forEach((listener) => listener(payload));
+      return payload;
     },
     async refreshActivationHealth() {
-      return observationSnapshot();
+      const payload = observationSnapshot();
+      observationListeners.forEach((listener) => listener(payload));
+      return payload;
     },
     async getObservationPage(kind, generation) {
       return {

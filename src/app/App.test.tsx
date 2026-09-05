@@ -4,6 +4,8 @@ import { expect, test } from "vitest";
 
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
 import type {
+  EnableCell,
+  EnablePlan,
   ScanReportRow,
   SourceGroupPreviewOutcome,
 } from "./catalog-client";
@@ -1090,4 +1092,307 @@ test("keeps a failed Git source scan visible without closing the Library", async
   expect(
     screen.getByRole("navigation", { name: "Library" }),
   ).toBeInTheDocument();
+});
+
+test("Source Promotion confirms with the draft provider and executes Undo", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const legacySource = {
+    remoteId: "legacy-source",
+    canonicalUrl: "https://gitlab.com/acme/legacy",
+    kind: "legacy_per_skill_git_state" as const,
+    members: [],
+  };
+  let confirmed:
+    | {
+        sourceType: string;
+        sourceUrl: string;
+      }
+    | undefined;
+  let undone: string | undefined;
+  client.getGitSourceCapability = async () => ({
+    sources: [legacySource],
+  });
+  client.previewSourcePromotion = async () => ({
+    kind: "draft" as const,
+    draft: {
+      remoteId: "legacy-source",
+      provider: "gitlab",
+      sourceUrl: legacySource.canonicalUrl,
+      aliases: [],
+      policy: {
+        mode: "branch",
+        value: "main",
+        selectionKind: "branch",
+        selectedRef: "main",
+        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+      },
+      members: [],
+      removedMembers: [],
+      legacyMemberCount: 0,
+      externalOwnershipClaims: [],
+    },
+  });
+  client.confirmSourcePromotion = async (request) => {
+    confirmed = request;
+    return {
+      operationId: "promotion-operation-1",
+      remoteId: request.remoteId,
+      releaseId: "source-release-1",
+      resolvedCommit: request.expectedResolvedCommit,
+      memberCount: 0,
+      snapshotVersion: 10,
+      undoAvailable: true,
+    };
+  };
+  client.undoSourceTransition = async (operationId) => {
+    undone = operationId;
+    return {
+      operationId,
+      memberCount: 0,
+      snapshotVersion: 11,
+    };
+  };
+
+  render(<App client={client} />);
+  await user.click(
+    await screen.findByRole("button", { name: "Promote Legacy Source" }),
+  );
+  await screen.findByRole("heading", { name: "Promote Legacy Source" });
+  await user.click(
+    screen.getByRole("button", { name: "Promote complete source" }),
+  );
+  await screen.findByText("Whole Source Release is managed");
+  expect(confirmed).toMatchObject({
+    sourceType: "gitlab",
+    sourceUrl: legacySource.canonicalUrl,
+  });
+  await user.click(screen.getByRole("button", { name: "Source Undo" }));
+  await waitFor(() => expect(undone).toBe("promotion-operation-1"));
+});
+
+test("Source Update exposes an executable Undo window", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const source = {
+    remoteId: "managed-source",
+    canonicalUrl: "https://github.com/acme/managed",
+    kind: "git_repository_source" as const,
+    provider: "github",
+    trackingMode: "auto_release_tag_head",
+    trackingValue: null,
+    selectedRef: "main",
+    resolvedCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    members: [
+      {
+        skillId: "skill-authoring",
+        skillPath: "skills/authoring",
+        presence: true,
+      },
+    ],
+  };
+  let confirmed = false;
+  let undone: string | undefined;
+  client.getGitSourceCapability = async () => ({ sources: [source] });
+  client.previewSourceUpdate = async () => ({
+    remoteId: source.remoteId,
+    provider: source.provider,
+    sourceUrl: source.canonicalUrl,
+    aliases: [],
+    policy: {
+      mode: "branch",
+      value: "main",
+      selectionKind: "branch",
+      selectedRef: "main",
+      resolvedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    },
+    members: [
+      {
+        skillId: "skill-authoring",
+        skillPath: "skills/authoring",
+        directoryName: "skill-authoring",
+        directoryIdentityKey: "skill-authoring",
+        displayName: "Skill authoring",
+        description: "Updated",
+        treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
+        state: "current",
+      },
+    ],
+  });
+  client.confirmSourceUpdate = async (request) => {
+    confirmed = true;
+    return {
+      operationId: "update-operation-1",
+      remoteId: request.remoteId,
+      releaseId: "source-release-2",
+      resolvedCommit: request.expectedResolvedCommit,
+      memberCount: 1,
+      snapshotVersion: 12,
+      undoAvailable: true,
+    };
+  };
+  client.undoSourceTransition = async (operationId) => {
+    undone = operationId;
+    return { operationId, memberCount: 1, snapshotVersion: 13 };
+  };
+
+  render(<App client={client} />);
+  await user.click(await screen.findByRole("button", { name: "Update" }));
+  await screen.findByRole("heading", {
+    name: "Complete Source Release Update",
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Update complete source" }),
+  );
+  await screen.findByText("Whole Source Release is managed");
+  expect(confirmed).toBe(true);
+  expect(screen.getByRole("button", { name: "Source Undo" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Source Undo" }));
+  await waitFor(() => expect(undone).toBe("update-operation-1"));
+});
+
+test("Global single-skill Adopt hands off to the ledger lifecycle", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const entityRef = "scan-report-v1:home:fixture-report-5:5:complete@5@1";
+  const adoptCell = (targetRootId: string): EnableCell => ({
+    cellKey: `skill-authoring|${targetRootId}`,
+    skillId: "skill-authoring",
+    skillName: "Skill authoring",
+    directoryName: "prompt-linter",
+    directoryIdentityKey: "prompt-linter",
+    targetRootId,
+    targetPath: "/Users/me/.claude/skills",
+    entryPath: "/Users/me/.claude/skills/prompt-linter",
+    finalEntityPath: "/Users/me/Library/skills/skill-authoring",
+    action: "enable",
+    affectedAgentIds: ["claude-code"],
+    affectedAgentNames: ["Claude Code"],
+    occupier: { untracked: { kind: "real_directory", target: null } },
+    occExactDirect: false,
+    destructive: { directories: 1, files: 0 },
+    eligibility: "conflict",
+    blockedReason: null,
+    resolution: "skip",
+    detail: null,
+    createSteps: [],
+    hopEvidence: [],
+  });
+  client.planGlobalEnable = async (_skillIds, targetRootIds) =>
+    ({
+      planToken: "global-adopt-handoff",
+      scope: "global",
+      writeGateGeneration: 0,
+      catalogGeneration: 1,
+      agentGeneration: 1,
+      projectRoot: null,
+      cells: [adoptCell(targetRootIds[0])],
+    }) satisfies EnablePlan;
+  let finalized = false;
+  client.planAdopt = async (_generation, selections) => {
+    expect(selections).toEqual([{ entityRef, action: "local_link" }]);
+    return {
+      planToken: "adopt-plan-1",
+      reportGeneration: 5,
+      items: [
+        {
+          entityRef,
+          action: "local_link",
+          directoryName: "prompt-linter",
+          canonicalEntity: "/dev/projects/prompt-linter",
+          finalEntityPath: "/dev/projects/prompt-linter",
+          appearances: [],
+          activations: [],
+          applyable: true,
+          error: null,
+        },
+      ],
+      canApply: true,
+    };
+  };
+  client.applyAdopt = async () => ({
+    operationId: "adopt-operation-1",
+    items: [
+      {
+        skillId: "adopted-prompt-linter",
+        directoryName: "prompt-linter",
+        adopted: true,
+        error: null,
+      },
+    ],
+    snapshotVersion: 2,
+    undoAvailable: true,
+  });
+  client.finalizeAdopt = async () => {
+    finalized = true;
+  };
+  client.publishScanReport(
+    {
+      ...COMPLETE_SUMMARY,
+      sourceCounts: {
+        ...COMPLETE_SUMMARY.sourceCounts,
+        localCandidates: 1,
+      },
+    },
+    {
+      local_candidates: [
+        {
+          ...LOCAL_CANDIDATE_ROW,
+          entityRef,
+          directoryNames: ["prompt-linter"],
+        },
+      ],
+      appearances: [
+        {
+          kind: "appearance",
+          rootIndex: 0,
+          seq: 1,
+          name: "prompt-linter",
+          entryPath: "/Users/me/.claude/skills/prompt-linter",
+          entryKind: "directory",
+          chain: [],
+          chainFault: null,
+          finalEntity: "/dev/projects/prompt-linter",
+          identity: { device: 1, inode: 1 },
+          entitySeq: 1,
+          lockHint: null,
+          worktreeHint: null,
+        },
+      ],
+    },
+  );
+
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(
+    await screen.findByRole("button", { name: "Enable globally…" }),
+  );
+  const dialog = await screen.findByRole("dialog", {
+    name: "Enable Skill authoring globally",
+  });
+  await user.click(within(dialog).getByText("Claude Code"));
+  await user.click(
+    within(dialog).getByRole("button", { name: "Review the plan" }),
+  );
+  await within(dialog).findByRole("combobox");
+  await user.selectOptions(within(dialog).getByRole("combobox"), "adopt");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Open Adopt surface" }),
+  );
+
+  expect(
+    screen.queryByRole("dialog", {
+      name: "Enable Skill authoring globally",
+    }),
+  ).not.toBeInTheDocument();
+  expect(
+    await screen.findByText("Selected prompt-linter in the Adopt surface."),
+  ).toBeInTheDocument();
+  const planAdopt = screen.getByRole("button", { name: "Plan Adopt" });
+  expect(planAdopt).toBeEnabled();
+  await user.click(planAdopt);
+  await user.click(await screen.findByRole("button", { name: "Apply" }));
+  await screen.findByText("Adopted prompt-linter");
+  await user.click(screen.getByRole("button", { name: "Finalize" }));
+  await waitFor(() => expect(finalized).toBe(true));
 });

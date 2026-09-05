@@ -409,6 +409,49 @@ fn plan_project_enable_merges_multiple_agents_resolving_to_same_container() {
 }
 
 #[test]
+fn project_preview_discloses_unselected_configured_consumers() {
+    let harness = harness();
+    set_agent_project_skills_dir(&harness, "claude-code", Some(".shared/skills"));
+    set_agent_project_skills_dir(&harness, "codex", Some(".shared/skills"));
+
+    let temp_proj = tempfile::tempdir().expect("temp project dir");
+    let project_root = temp_proj.path().to_path_buf();
+    let shared_skills = project_root.join(".shared/skills");
+    std::fs::create_dir_all(&shared_skills).expect("create shared project skills");
+
+    let plan = harness
+        .enable
+        .plan_project_enable(
+            &[SkillId("skill-authoring".into())],
+            &project_root,
+            &["claude-code".into()],
+            &[],
+        )
+        .expect("plan project enable");
+
+    let cell = &plan.cells[0];
+    assert_eq!(
+        cell.affected_agent_ids,
+        vec!["claude-code".to_string(), "codex".to_string()]
+    );
+    assert_eq!(
+        cell.affected_agent_names,
+        vec!["Claude Code".to_string(), "Codex".to_string()]
+    );
+    assert_eq!(
+        cell.hop_evidence
+            .iter()
+            .map(|hop| hop.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude-code", "codex"]
+    );
+    assert_eq!(
+        cell.target_path,
+        std::fs::canonicalize(shared_skills).unwrap()
+    );
+}
+
+#[test]
 fn exact_direct_link_is_noop_and_does_not_update_recent_folders() {
     let harness = harness();
     set_agent_project_skills_dir(&harness, "claude-code", Some(".claude/skills"));

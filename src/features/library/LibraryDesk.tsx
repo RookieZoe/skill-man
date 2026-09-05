@@ -6,6 +6,7 @@ import {
   useState,
   type Ref,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import type {
   AppUpdatePanelState,
@@ -17,6 +18,7 @@ import type {
   AppPreferences,
   CatalogClient,
   CatalogFilter,
+  EnableCell,
   GitRepositorySourceType,
   GitSourceCapabilityReport,
   Health,
@@ -42,6 +44,7 @@ import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
+import { useModalFocus } from "../../ui/useModalFocus";
 import { BrokenDisableSheet } from "./BrokenDisableSheet";
 import { EvidenceRail } from "./EvidenceRail";
 import { SourceGroupCard } from "./SourceGroupCard";
@@ -80,6 +83,7 @@ interface LibraryDeskProps {
   client: CatalogClient;
   filter: CatalogFilter;
   skills: SkillSummary[];
+  catalogRefreshToken: number;
   libraryEmpty: boolean;
   selectedId: string | null;
   detail: SkillDetail | null;
@@ -131,6 +135,7 @@ interface LibraryDeskProps {
   onPreviewSourcePromotion: (remoteId: string) => void;
   onPreviewSourceUpdate: (remoteId: string) => void;
   onConfirmSourcePromotion: () => void;
+  onUndoSourcePromotion: () => void;
   onFetchLatestAndManage: () => void;
   sourceActionActivity: boolean;
   sourceActionNotice: {
@@ -179,6 +184,7 @@ export function LibraryDesk({
   client,
   filter,
   skills,
+  catalogRefreshToken,
   libraryEmpty,
   selectedId,
   detail,
@@ -230,6 +236,7 @@ export function LibraryDesk({
   onPreviewSourcePromotion,
   onPreviewSourceUpdate,
   onConfirmSourcePromotion,
+  onUndoSourcePromotion,
   sourceActionActivity,
   sourceActionNotice,
   onRestoreSource,
@@ -286,6 +293,10 @@ export function LibraryDesk({
     useState(false);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [adoptHandoff, setAdoptHandoff] = useState<{
+    directoryName: string;
+    entryPath: string;
+  } | null>(null);
   const [agentOverlayOpen, setAgentOverlayOpen] = useState(false);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [activePane, setActivePane] = useState<PaneKey>("library");
@@ -335,6 +346,27 @@ export function LibraryDesk({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isSelectMode, hasOverlay]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let current = true;
+    let unlisten: (() => void) | null = null;
+    listen("menu-open-agents", () => {
+      exitSelectMode();
+      setSurface("agents");
+      setAgentDrawerOpen(false);
+      setActivePane("library");
+    })
+      .then((stop) => {
+        if (!current) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     function onResize() {
@@ -462,6 +494,7 @@ export function LibraryDesk({
           setActivePane("library");
         }}
         isSelectMode={isSelectMode}
+        inert={hasOverlay}
         onToggleSelectMode={() => {
           if (isSelectMode) {
             exitSelectMode();
@@ -479,7 +512,7 @@ export function LibraryDesk({
         }}
         onOpenPreferences={onOpenPreferences}
       />
-      <div className="notice-region">
+      <div className="notice-region" inert={hasOverlay ? true : undefined}>
         {error ? (
           <div className="global-notice" role="alert">
             <strong>{t("library.notice.unavailable")}</strong>
@@ -608,6 +641,39 @@ export function LibraryDesk({
                     setAgentDrawerOpen(false);
                     setSurface("agents");
                   }}
+                  onOverlayChange={setAgentOverlayOpen}
+                  refreshToken={catalogRefreshToken}
+                  onOpenAdopt={(cell: EnableCell) => {
+                    setAgentDrawerOpen(false);
+                    setActivePane("library");
+                    setAdoptHandoff({
+                      directoryName: cell.directoryName,
+                      entryPath: cell.entryPath,
+                    });
+                  }}
+                  onOpenBrokenDisable={
+                    detail &&
+                    gitSourceCapability?.sources.some((source) =>
+                      source.members.some(
+                        (member) => member.skillId === detail.id,
+                      ),
+                    )
+                      ? (trigger) => {
+                          const member = gitSourceCapability.sources
+                            .flatMap((source) => source.members)
+                            .find(
+                              (candidate) => candidate.skillId === detail.id,
+                            );
+                          if (member) {
+                            setBrokenSkill({
+                              skillId: detail.id,
+                              skillPath: member.skillPath,
+                              opener: trigger,
+                            });
+                          }
+                        }
+                      : undefined
+                  }
                 />
               ) : (
                 <ActivationTargetPlaceholder
@@ -624,12 +690,15 @@ export function LibraryDesk({
         )}
         <ScanEvidenceLedger
           client={client}
+          adoptHandoff={adoptHandoff}
+          onAdoptHandoffHandled={() => setAdoptHandoff(null)}
           onManageGitGroup={onManageGitGroup}
         />
       </div>
       {surface === "library" && isSelectMode ? (
         <SelectionShelf
           selectedCount={selectedSkillIds.length}
+          inert={hasOverlay}
           onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
           onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
           onExit={exitSelectMode}
@@ -742,6 +811,7 @@ export function LibraryDesk({
           onConfirmSourceTransition={onConfirmSourceTransition}
           onUndoSourceTransition={onUndoSourceTransition}
           onConfirmSourcePromotion={onConfirmSourcePromotion}
+          onUndoSourcePromotion={onUndoSourcePromotion}
         />
       ) : null}
       {isOnboardingOpen ? (
@@ -763,6 +833,7 @@ export function LibraryDesk({
           warning={preferencesWarning}
           error={preferencesError}
           appUpdatePanel={appUpdatePanel}
+          opener={document.getElementById("preferences-trigger")}
           onToggle={onTogglePreference}
           onCheckAppUpdate={onCheckAppUpdate}
           onClose={onClosePreferences}
@@ -784,6 +855,7 @@ function Toolbar({
   surface,
   onSurfaceChange,
   isSelectMode,
+  inert,
   onToggleSelectMode,
   layoutMode,
   agentDrawerOpen,
@@ -794,6 +866,7 @@ function Toolbar({
   surface: "library" | "agents";
   onSurfaceChange: (surface: "library" | "agents") => void;
   isSelectMode: boolean;
+  inert: boolean;
   onToggleSelectMode: () => void;
   layoutMode: LayoutMode;
   agentDrawerOpen: boolean;
@@ -803,7 +876,7 @@ function Toolbar({
 }) {
   const { t } = useLocale();
   return (
-    <header className="toolbar">
+    <header className="toolbar" inert={inert ? true : undefined}>
       <div className="product-mark" aria-hidden="true">
         <span />
         <span />
@@ -1239,6 +1312,7 @@ function LinkImportSheet({
   sourcePromotionResult,
   sourceGroupError,
   sourceGroupActivity,
+  opener,
   onKindChange,
   onPreview,
   onApply,
@@ -1251,6 +1325,7 @@ function LinkImportSheet({
   onConfirmSourceTransition,
   onUndoSourceTransition,
   onConfirmSourcePromotion,
+  onUndoSourcePromotion,
 }: {
   kind: ImportKind;
   preview: LinkImportPreview | null;
@@ -1270,6 +1345,7 @@ function LinkImportSheet({
   sourcePromotionResult: SourcePromotionResult | null;
   sourceGroupError: string | null;
   sourceGroupActivity: "idle" | "fetching" | "confirming" | "undoing";
+  opener?: HTMLElement | null;
   onKindChange: (kind: ImportKind) => void;
   onPreview: (sourcePath: string) => void;
   onApply: () => void;
@@ -1282,6 +1358,7 @@ function LinkImportSheet({
   onConfirmSourceTransition: () => void;
   onUndoSourceTransition: () => void;
   onConfirmSourcePromotion: () => void;
+  onUndoSourcePromotion: () => void;
 }) {
   const { t } = useLocale();
   const [sourcePath, setSourcePath] = useState("");
@@ -1307,6 +1384,12 @@ function LinkImportSheet({
         : isDiscovering
           ? "discover"
           : "source";
+  const modalRef = useModalFocus<HTMLElement>({
+    opener,
+    busy: isRunning,
+    focusKey: `${currentStep}:${preview !== null}:${result !== null}:${sourcePromotionDraft !== null}:${sourceUpdateDraft !== null}`,
+    onClose,
+  });
   const showSourceKindSwitch =
     !result &&
     !preview &&
@@ -1337,15 +1420,6 @@ function LinkImportSheet({
     sourceGroupOutcome,
   ]);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isApplying && !sourceGroupIsFetching)
-        onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isApplying, sourceGroupIsFetching, onClose]);
-
   return (
     <div
       className="activation-sheet-backdrop"
@@ -1359,9 +1433,11 @@ function LinkImportSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={
           result
             ? t("library.import.dialog_link")
@@ -1411,7 +1487,11 @@ function LinkImportSheet({
             onFetch={onFetchLatestAndManage}
             onConfirm={onConfirmSourceTransition}
             onConfirmPromotion={onConfirmSourcePromotion}
-            onUndo={onUndoSourceTransition}
+            onUndo={
+              sourcePromotionActive
+                ? onUndoSourcePromotion
+                : onUndoSourceTransition
+            }
             onClose={onClose}
           />
         ) : result ? (
@@ -1646,6 +1726,11 @@ function OnboardingSheet({
   const advanceButton = useRef<HTMLButtonElement>(null);
   const isBusy = activity !== "idle";
   const isScanning = activity === "scanning";
+  const modalRef = useModalFocus<HTMLElement>({
+    busy: isBusy,
+    focusKey: `${step}:${isBusy}`,
+    onClose: onSkip,
+  });
   const progressLabel =
     activity === "checking"
       ? t("library.onboarding.checking")
@@ -1656,14 +1741,6 @@ function OnboardingSheet({
     else closeButton.current?.focus();
   }, [step, isBusy]);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isBusy) onSkip();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, onSkip]);
-
   const current = onboardingSteps[step];
   return (
     <div
@@ -1673,9 +1750,11 @@ function OnboardingSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet onboarding-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={t("library.onboarding.welcome")}
       >
         <div
@@ -1835,6 +1914,7 @@ function PreferencesSheet({
   warning,
   error,
   appUpdatePanel,
+  opener,
   onToggle,
   onCheckAppUpdate,
   onClose,
@@ -1843,36 +1923,41 @@ function PreferencesSheet({
   warning: PreferencesWarning | null;
   error: string | null;
   appUpdatePanel: AppUpdatePanelState;
+  opener?: HTMLElement | null;
   onToggle: (updates: PreferenceUpdates) => void;
   onCheckAppUpdate: () => void;
   onClose: () => void;
 }) {
   const { t } = useLocale();
   const closeButton = useRef<HTMLButtonElement>(null);
+  function handleClose() {
+    onClose();
+    queueMicrotask(() => opener?.focus());
+  }
+  const modalRef = useModalFocus<HTMLElement>({
+    opener,
+    focusKey: "preferences",
+    restoreFocus: false,
+    onClose: handleClose,
+  });
 
   useLayoutEffect(() => {
     closeButton.current?.focus();
   }, []);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
   return (
     <div
       className="activation-sheet-backdrop"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
+        if (event.currentTarget === event.target) handleClose();
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet preferences-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={t("library.preferences.dialog")}
       >
         <div className="activation-sheet-heading">
@@ -1946,7 +2031,7 @@ function PreferencesSheet({
           </div>
         ) : null}
         <div className="activation-sheet-actions">
-          <button ref={closeButton} type="button" onClick={onClose}>
+          <button ref={closeButton} type="button" onClick={handleClose}>
             {t("library.preferences.done")}
           </button>
         </div>
@@ -1978,11 +2063,17 @@ function AppUpdateSheet({
   const isReady = panel.activity === "ready";
 
   useLayoutEffect(() => {
-    if (panel.activity === "downloading") {
-      cancelButton.current?.focus();
-    } else {
-      primaryButton.current?.focus();
-    }
+    const focusCurrentControl = () => {
+      if (panel.activity === "downloading") {
+        cancelButton.current?.focus();
+      } else {
+        primaryButton.current?.focus();
+      }
+    };
+    focusCurrentControl();
+    // Preferences can unmount in the same commit when its Check now action
+    // opens this sheet; its focus cleanup must not win over this modal.
+    queueMicrotask(focusCurrentControl);
   }, [panel.activity]);
 
   useEffect(() => {
@@ -2110,20 +2201,17 @@ function RemoveSheet({
   const { t } = useLocale();
   const isBusy = panel.activity !== "idle";
   const confirmButton = useRef<HTMLButtonElement>(null);
+  const modalRef = useModalFocus<HTMLElement>({
+    busy: isBusy,
+    focusKey: `${panel.activity}:${panel.preview !== null}:${panel.result !== null}`,
+    onClose,
+  });
 
   useLayoutEffect(() => {
     if (panel.preview || panel.result) {
       confirmButton.current?.focus();
     }
   }, [panel.preview, panel.result]);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isBusy) onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, onClose]);
 
   const preview = panel.preview;
   const isInstall =
@@ -2138,9 +2226,11 @@ function RemoveSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={t("library.remove.dialog")}
       >
         {panel.result ? (
@@ -2255,18 +2345,23 @@ function HealthNotice({
 }) {
   const { t } = useLocale();
   const broken = detail.health === "broken";
+  const mismatch = detail.health === "source_snapshot_mismatch";
   const isBrokenLink = broken && detail.sourceKind === "link";
   return (
     <div className={`health-notice health-notice--${detail.health}`}>
       <strong>
         {broken
           ? t("library.health.source_unavailable")
-          : t("library.health.local_changes")}
+          : mismatch
+            ? t("library.health.source_snapshot_mismatch")
+            : t("library.health.local_changes")}
       </strong>
       <span>
         {broken
           ? t("library.health.broken_body")
-          : t("library.health.modified_body")}
+          : mismatch
+            ? t("library.health.source_snapshot_mismatch_body")
+            : t("library.health.modified_body")}
       </span>
       {isBrokenLink ? (
         <button
@@ -2300,6 +2395,11 @@ function RelocateSheet({
   const step = panel.result ? "result" : panel.preview ? "preview" : "source";
   const sourceInput = useRef<HTMLInputElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
+  const modalRef = useModalFocus<HTMLElement>({
+    busy: isBusy,
+    focusKey: `${step}:${panel.activity}`,
+    onClose,
+  });
 
   useLayoutEffect(() => {
     if (panel.result || panel.preview) {
@@ -2309,14 +2409,6 @@ function RelocateSheet({
     }
   }, [panel.preview, panel.result]);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isBusy) onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, onClose]);
-
   return (
     <div
       className="activation-sheet-backdrop"
@@ -2325,9 +2417,11 @@ function RelocateSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={t("library.relocate.dialog")}
       >
         <ol
@@ -2483,8 +2577,12 @@ function LoadingPanel({ label }: { label: string }) {
 }
 
 function StatusDot({ health }: { health: Health }) {
+  const { t } = useLocale();
   return (
-    <span className={`status-dot status-dot--${health}`} aria-label={health} />
+    <span
+      className={`status-dot status-dot--${health}`}
+      aria-label={t(`library.health.badge.${health}` as MessageKey)}
+    />
   );
 }
 

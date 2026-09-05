@@ -55,6 +55,7 @@ test("mid drawer traps Escape and focuses its close control", async () => {
   expect(
     screen.getByRole("button", { name: "Open details" }),
   ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open details" })).toHaveFocus();
 });
 
 test("single configuration sheet edits multiple roots with one radio target", async () => {
@@ -153,6 +154,31 @@ test("detected section shows read-only evidence without scan or enable actions",
   expect(
     screen.queryByRole("button", { name: /Enable/i }),
   ).not.toBeInTheDocument();
+});
+
+test("detected section offers Configure from template", async () => {
+  const user = userEvent.setup();
+  render(
+    <AgentManagement client={createFixtureCatalogClient()} layoutMode="wide" />,
+  );
+  const navigation = await screen.findByRole("navigation", {
+    name: "Agent groups",
+  });
+  await user.click(within(navigation).getByText("Detected but unconfigured"));
+
+  const windsuf = await screen.findByText("Windsurf");
+  const configure = within(windsuf.closest("article")!).getByRole("button", {
+    name: "Configure from template",
+  });
+  await user.click(configure);
+  expect(
+    screen.getByRole("dialog", { name: "Agent Configuration" }),
+  ).toBeInTheDocument();
+  expect(
+    within(
+      screen.getByRole("dialog", { name: "Agent Configuration" }),
+    ).getByDisplayValue("Windsurf"),
+  ).toBeInTheDocument();
 });
 
 test("unavailable detection evidence is never presented as absent", async () => {

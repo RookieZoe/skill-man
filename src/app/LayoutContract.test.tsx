@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 
@@ -239,6 +245,55 @@ test("Agent Configuration sheet survives resize, inerts the workspace, and resto
   expect(dialog).not.toBeInTheDocument();
   expect(background()).not.toHaveAttribute("inert");
   expect(opener).toHaveFocus();
+});
+
+test("Global Enable sheet traps focus outside the inert app rows", async () => {
+  const user = userEvent.setup();
+  await renderWideLibrary();
+  const opener = within(inspector()).getByRole("button", {
+    name: "Enable globally…",
+  });
+  await user.click(opener);
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Enable Skill authoring globally",
+  });
+  expect(background()).toHaveAttribute("inert");
+  expect(toolbar()).toHaveAttribute("inert");
+  expect(noticeRegion()).toHaveAttribute("inert");
+  expect(within(dialog).getAllByRole("checkbox")[0]).toHaveFocus();
+
+  await user.tab();
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  await user.keyboard("{Escape}");
+  expect(
+    screen.queryByRole("dialog", {
+      name: "Enable Skill authoring globally",
+    }),
+  ).not.toBeInTheDocument();
+  expect(opener).toHaveFocus();
+});
+
+test("mid Agent details drawer is portaled outside the inert workspace", async () => {
+  const user = userEvent.setup();
+  await renderWideLibrary();
+  setViewportWidth(1059);
+  await user.click(screen.getByRole("tab", { name: "Agents" }));
+  const agentRow = await screen.findByRole("button", { name: /Claude Code/ });
+  await user.click(agentRow);
+
+  const drawer = await screen.findByRole("dialog", {
+    name: "Agent configuration details",
+  });
+  expect(background()).toHaveAttribute("inert");
+  expect(drawer.closest("body")).toBe(document.body);
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Agent configuration details" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("button", { name: "Open details" })).toHaveFocus();
 });
 
 // -- Notice counts --

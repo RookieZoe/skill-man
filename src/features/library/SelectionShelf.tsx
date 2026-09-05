@@ -12,11 +12,13 @@ export function SelectionShelf({
   onEnableGlobally,
   onEnableToProject,
   onExit,
+  inert = false,
 }: {
   selectedCount: number;
   onEnableGlobally: () => void;
   onEnableToProject: () => void;
   onExit: () => void;
+  inert?: boolean;
 }) {
   const { t, tPlural } = useLocale();
 
@@ -29,6 +31,7 @@ export function SelectionShelf({
       className="selection-shelf"
       role="region"
       aria-label={tPlural("shelf.selectedCount", selectedCount)}
+      inert={inert ? true : undefined}
     >
       <div className="selection-shelf-info">
         <span className="selection-shelf-count">

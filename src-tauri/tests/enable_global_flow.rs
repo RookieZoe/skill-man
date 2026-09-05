@@ -1347,3 +1347,36 @@ fn batch_global_enable_untracked_occupier_rejects_adopt() {
     // Batch Untracked occupier does not support Adopt; must remain Skip
     assert_eq!(cell.resolution, CellResolution::Skip);
 }
+
+#[test]
+fn single_skill_adopt_resolution_is_skipped_for_the_existing_adopt_surface() {
+    let harness = harness();
+    let claude_root_id = harness.home.activation_root_id("claude-code");
+    let occupier_path = entry_path(&harness, "skill-authoring", "claude-code");
+    std::fs::write(&occupier_path, "existing untracked skill").expect("write occupier");
+
+    let cell_key = format!("skill-authoring|{claude_root_id}");
+    let plan = harness
+        .enable
+        .plan_global_enable(
+            &[SkillId("skill-authoring".into())],
+            std::slice::from_ref(&claude_root_id),
+            &[(cell_key.clone(), CellResolution::Adopt)],
+        )
+        .expect("plan single-skill adopt handoff");
+    let cell = &plan.cells[0];
+    assert_eq!(cell.eligibility, CellEligibility::Conflict);
+    assert_eq!(cell.resolution, CellResolution::Adopt);
+
+    let result = harness
+        .enable
+        .apply(&plan.plan_token)
+        .expect("skip adopt cell");
+    assert_eq!(result.cells[0].outcome, CellOutcome::Skipped);
+    assert!(
+        std::fs::read_to_string(&occupier_path)
+            .expect("read occupier")
+            .contains("existing untracked skill")
+    );
+    assert!(!catalog_desired(&harness, "skill-authoring", "claude-code"));
+}

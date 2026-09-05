@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type {
   CatalogClient,
+  EnableCell,
   EnableResult,
   GlobalTargetGroup,
   GlobalTargetGroupSnapshot,
 } from "../../app/catalog-client";
 import { LockIcon } from "../../ui/icons";
+import { errorMessageKey, errorMessageParams } from "../locale/messages";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { GlobalEnableSheet } from "./GlobalEnableSheet";
 
@@ -23,12 +26,20 @@ export function GlobalTargetGroupsPanel({
   skillId,
   client,
   onOpenAgentManagement,
+  onOpenAdopt,
+  onOpenBrokenDisable,
+  onOverlayChange,
+  refreshToken,
 }: {
   ref: React.Ref<HTMLElement | null>;
   dialog: boolean;
   skillId: string;
   client: CatalogClient;
   onOpenAgentManagement: () => void;
+  onOpenAdopt?: (cell: EnableCell) => void;
+  onOpenBrokenDisable?: (trigger: HTMLButtonElement) => void;
+  onOverlayChange?: (open: boolean) => void;
+  refreshToken?: number;
 }) {
   const { t } = useLocale();
   const [snapshot, setSnapshot] = useState<GlobalTargetGroupSnapshot | null>(
@@ -39,6 +50,12 @@ export function GlobalTargetGroupsPanel({
   const [lastResult, setLastResult] = useState<EnableResult | null>(null);
   const [lastGroupId, setLastGroupId] = useState<string | null>(null);
   const [sheetInitial, setSheetInitial] = useState<string[] | null>(null);
+  const [sheetOpener, setSheetOpener] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    onOverlayChange?.(sheetInitial !== null);
+    return () => onOverlayChange?.(false);
+  }, [onOverlayChange, sheetInitial]);
 
   async function load() {
     try {
@@ -46,7 +63,7 @@ export function GlobalTargetGroupsPanel({
       setSnapshot(next);
       setError(null);
     } catch (cause) {
-      setError(String(cause));
+      setError(targetGroupErrorMessage(cause, t));
     }
   }
 
@@ -60,12 +77,64 @@ export function GlobalTargetGroupsPanel({
         setError(null);
       })
       .catch((cause) => {
-        if (current) setError(String(cause));
+        if (current) setError(targetGroupErrorMessage(cause, t));
       });
     return () => {
       current = false;
     };
-  }, [client, skillId]);
+  }, [client, skillId, t]);
+
+  useEffect(() => {
+    if (refreshToken === undefined || refreshToken === 0) return;
+    let current = true;
+    client
+      .listTargetGroups(skillId)
+      .then((next) => {
+        if (!current) return;
+        setSnapshot(next);
+        setError(null);
+      })
+      .catch((cause) => {
+        if (current) setError(targetGroupErrorMessage(cause, t));
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, refreshToken, skillId, t]);
+
+  useEffect(() => {
+    let current = true;
+    let unlisten: (() => void) | null = null;
+    client
+      .listenObservationChanged((payload) => {
+        if (!current) return;
+        if (
+          payload.activationHealth === null &&
+          payload.startupProbe === null
+        ) {
+          return;
+        }
+        void client
+          .listTargetGroups(skillId)
+          .then((next) => {
+            if (!current) return;
+            setSnapshot(next);
+            setError(null);
+          })
+          .catch((cause) => {
+            if (current) setError(targetGroupErrorMessage(cause, t));
+          });
+      })
+      .then((stop) => {
+        if (!current) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+      unlisten?.();
+    };
+  }, [client, skillId, t]);
 
   async function onToggle(group: GlobalTargetGroup) {
     if (group.action !== "none") {
@@ -82,7 +151,7 @@ export function GlobalTargetGroupsPanel({
       );
       const cell = plan.cells[0];
       if (cell.eligibility === "conflict") {
-        setSheetInitial([group.targetRootId]);
+        openEnableSheet([group.targetRootId]);
         return;
       }
       const applied = await client.applyGlobalEnable(plan.planToken);
@@ -90,7 +159,7 @@ export function GlobalTargetGroupsPanel({
       setLastGroupId(group.targetRootId);
       await load();
     } catch (cause) {
-      setError(String(cause));
+      setError(targetGroupErrorMessage(cause, t));
     } finally {
       setBusyGroupId(null);
     }
@@ -110,7 +179,7 @@ export function GlobalTargetGroupsPanel({
       setLastGroupId(group.targetRootId);
       await load();
     } catch (cause) {
-      setError(String(cause));
+      setError(targetGroupErrorMessage(cause, t));
     } finally {
       setBusyGroupId(null);
     }
@@ -127,10 +196,19 @@ export function GlobalTargetGroupsPanel({
       setLastGroupId(null);
       await load();
     } catch (cause) {
-      setError(String(cause));
+      setError(targetGroupErrorMessage(cause, t));
     } finally {
       setBusyGroupId(null);
     }
+  }
+
+  function openEnableSheet(initial: string[]) {
+    setSheetOpener(
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null,
+    );
+    setSheetInitial(initial);
   }
 
   return (
@@ -151,8 +229,8 @@ export function GlobalTargetGroupsPanel({
         <button
           type="button"
           className="toolbar-button"
-          disabled={snapshot === null}
-          onClick={() => setSheetInitial([])}
+          disabled={snapshot === null || snapshot.skillHealth !== "healthy"}
+          onClick={() => openEnableSheet([])}
         >
           {t("inspector.enableGlobally")}
         </button>
@@ -186,10 +264,12 @@ export function GlobalTargetGroupsPanel({
             <TargetGroupCard
               key={group.targetRootId}
               group={group}
+              skillHealth={snapshot.skillHealth}
               busy={busyGroupId === group.targetRootId}
               onToggle={() => void onToggle(group)}
               onRepair={() => void onRepair(group)}
               onOpenAgentManagement={onOpenAgentManagement}
+              onOpenBrokenDisable={onOpenBrokenDisable}
             />
           ))}
         </ul>
@@ -221,34 +301,72 @@ export function GlobalTargetGroupsPanel({
         <span>{t("inspector.projectFootnote")}</span>
       </div>
 
-      {sheetInitial !== null && (
-        <GlobalEnableSheet
-          client={client}
-          skillId={skillId}
-          skillName={snapshot?.skillName ?? skillId}
-          initialGroupIds={sheetInitial}
-          onClose={() => {
-            setSheetInitial(null);
-            void load();
-          }}
-        />
-      )}
+      {sheetInitial !== null
+        ? createPortal(
+            <GlobalEnableSheet
+              client={client}
+              skillId={skillId}
+              skillName={snapshot?.skillName ?? skillId}
+              initialGroupIds={sheetInitial}
+              opener={sheetOpener}
+              onAdoptExisting={(cell) => {
+                setSheetOpener(null);
+                setSheetInitial(null);
+                onOpenAdopt?.(cell);
+              }}
+              onClose={() => {
+                setSheetInitial(null);
+                setSheetOpener(null);
+                void load();
+              }}
+            />,
+            document.body,
+          )
+        : null}
     </aside>
   );
 }
 
+function targetGroupErrorMessage(
+  reason: unknown,
+  t: LocaleContextValue["t"],
+): string {
+  const failure = reason as {
+    error?: { code?: string; directoryName?: string };
+    code?: string;
+  };
+  const error = failure?.error;
+  if (error?.code) {
+    return t(
+      errorMessageKey(error.code),
+      errorMessageParams({
+        code: error.code,
+        directoryName: error.directoryName,
+      }),
+    );
+  }
+  if (failure?.code) {
+    return t(errorMessageKey(failure.code));
+  }
+  return t("error.internal");
+}
+
 function TargetGroupCard({
   group,
+  skillHealth,
   busy,
   onToggle,
   onRepair,
   onOpenAgentManagement,
+  onOpenBrokenDisable,
 }: {
   group: GlobalTargetGroup;
+  skillHealth: GlobalTargetGroupSnapshot["skillHealth"];
   busy: boolean;
   onToggle: () => void;
   onRepair: () => void;
   onOpenAgentManagement: () => void;
+  onOpenBrokenDisable?: (trigger: HTMLButtonElement) => void;
 }) {
   const { t } = useLocale();
   const consumersLabel = group.consumers
@@ -295,6 +413,36 @@ function TargetGroupCard({
           >
             {t("inspector.openAgentManagement")}
           </button>
+        </div>
+      ) : skillHealth === "broken" ? (
+        <div className="target-group-health-blocked">
+          <strong>{t("inspector.brokenCardTitle")}</strong>
+          <p>{t("inspector.brokenCardBody")}</p>
+          {group.desired && onOpenBrokenDisable ? (
+            <button
+              type="button"
+              className="toolbar-button danger-button"
+              disabled={busy}
+              onClick={(event) => onOpenBrokenDisable(event.currentTarget)}
+            >
+              {t("inspector.disableBroken")}
+            </button>
+          ) : null}
+        </div>
+      ) : skillHealth === "source_snapshot_mismatch" ? (
+        <div className="target-group-health-blocked">
+          <strong>{t("inspector.mismatchCardTitle")}</strong>
+          <p>{t("inspector.mismatchCardBody")}</p>
+          {group.desired ? (
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={onToggle}
+            >
+              {t("inspector.disableMismatch")}
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="target-group-controls">

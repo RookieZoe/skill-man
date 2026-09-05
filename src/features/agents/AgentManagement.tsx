@@ -21,6 +21,7 @@ import type {
   PublicError,
 } from "../../app/catalog-client";
 import type { LayoutMode } from "../library/LibraryDesk";
+import { useModalFocus } from "../../ui/useModalFocus";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 
 interface AgentManagementProps {
@@ -63,15 +64,23 @@ export function AgentManagement({
   const [detectionRefreshing, setDetectionRefreshing] = useState(false);
   const sheetOpener = useRef<HTMLElement | null>(null);
   const detailDrawerRef = useRef<HTMLElement | null>(null);
+  const drawerFocusPending = useRef(false);
+  const detailDrawerModal =
+    layoutMode === "mid" && detailDrawerOpen && sheet === null;
 
   useEffect(() => {
-    if (layoutMode !== "mid" || !detailDrawerOpen) return;
+    if (layoutMode !== "mid" || !detailDrawerOpen || sheet !== null) {
+      return;
+    }
     const drawer = detailDrawerRef.current;
-    drawer?.querySelector<HTMLButtonElement>(".agent-detail-close")?.focus();
+    if (drawerFocusPending.current) {
+      drawer?.querySelector<HTMLButtonElement>(".agent-detail-close")?.focus();
+      drawerFocusPending.current = false;
+    }
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        setDetailDrawerOpen(false);
+        closeDetailDrawer();
         return;
       }
       if (event.key !== "Tab") return;
@@ -102,12 +111,12 @@ export function AgentManagement({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [detailDrawerOpen, layoutMode]);
+  }, [detailDrawerOpen, layoutMode, sheet]);
 
   useEffect(() => {
-    onOverlayChange?.(sheet !== null);
+    onOverlayChange?.(sheet !== null || detailDrawerModal);
     return () => onOverlayChange?.(false);
-  }, [onOverlayChange, sheet]);
+  }, [detailDrawerModal, onOverlayChange, sheet]);
 
   useEffect(() => {
     let current = true;
@@ -236,13 +245,19 @@ export function AgentManagement({
 
   function selectConfiguration(configuration: AgentConfiguration) {
     setSelection({ kind: "configuration", id: configuration.agentId });
-    if (layoutMode === "mid") setDetailDrawerOpen(true);
+    if (layoutMode === "mid") {
+      drawerFocusPending.current = true;
+      setDetailDrawerOpen(true);
+    }
     if (layoutMode === "narrow") setNarrowPane("detail");
   }
 
   function selectPreset(preset: AgentPreset) {
     setSelection({ kind: "preset", id: preset.presetKey });
-    if (layoutMode === "mid") setDetailDrawerOpen(true);
+    if (layoutMode === "mid") {
+      drawerFocusPending.current = true;
+      setDetailDrawerOpen(true);
+    }
     if (layoutMode === "narrow") setNarrowPane("detail");
   }
 
@@ -354,7 +369,7 @@ export function AgentManagement({
         setSelection({ kind: "configuration", id: result.agentId });
         setSection("configured");
       }
-      setDetailDrawerOpen(false);
+      closeDetailDrawer();
     } catch (reason) {
       setError(agentFailureMessage(reason, t));
     } finally {
@@ -369,6 +384,15 @@ export function AgentManagement({
     setSheet(null);
     setError(null);
     queueMicrotask(() => opener?.focus());
+  }
+
+  function closeDetailDrawer() {
+    setDetailDrawerOpen(false);
+    queueMicrotask(() => {
+      document
+        .querySelector<HTMLElement>(".agent-detail-floating-trigger")
+        ?.focus();
+    });
   }
 
   const detail = (
@@ -431,6 +455,7 @@ export function AgentManagement({
           error={error}
           onSelectConfiguration={selectConfiguration}
           onSelectPreset={selectPreset}
+          onConfigureDetected={openPresetSheet}
           onNewCustom={openCustomSheet}
         />
 
@@ -446,39 +471,45 @@ export function AgentManagement({
               <button
                 type="button"
                 className="agent-detail-floating-trigger"
-                onClick={() => setDetailDrawerOpen(true)}
+                onClick={() => {
+                  drawerFocusPending.current = true;
+                  setDetailDrawerOpen(true);
+                }}
               >
                 {t("agents.detail.open")}
               </button>
             ) : null}
-            <div
-              className="agent-detail-drawer"
-              data-open={detailDrawerOpen}
-              aria-hidden={!detailDrawerOpen}
-            >
-              <button
-                type="button"
-                className="agent-detail-drawer-backdrop"
-                aria-label={t("agents.detail.close")}
-                onClick={() => setDetailDrawerOpen(false)}
-              />
-              <aside
-                ref={detailDrawerRef}
-                className="agent-management-detail"
-                role="dialog"
-                aria-modal="true"
-                aria-label={t("agents.detail.label")}
+            {createPortal(
+              <div
+                className="agent-detail-drawer"
+                data-open={detailDrawerOpen}
+                aria-hidden={!detailDrawerOpen}
               >
                 <button
                   type="button"
-                  className="agent-detail-close"
-                  onClick={() => setDetailDrawerOpen(false)}
+                  className="agent-detail-drawer-backdrop"
+                  aria-label={t("agents.detail.close")}
+                  onClick={closeDetailDrawer}
+                />
+                <aside
+                  ref={detailDrawerRef}
+                  className="agent-management-detail"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={t("agents.detail.label")}
                 >
-                  {t("agents.detail.close")}
-                </button>
-                {detail}
-              </aside>
-            </div>
+                  <button
+                    type="button"
+                    className="agent-detail-close"
+                    onClick={closeDetailDrawer}
+                  >
+                    {t("agents.detail.close")}
+                  </button>
+                  {detail}
+                </aside>
+              </div>,
+              document.body,
+            )}
           </>
         ) : null}
       </section>
@@ -488,6 +519,7 @@ export function AgentManagement({
               state={sheet}
               busy={busy}
               error={error}
+              opener={sheetOpener.current}
               onChange={(next) => {
                 setSheet({ ...next, plan: null });
                 setError(null);
@@ -570,6 +602,7 @@ function AgentList({
   error,
   onSelectConfiguration,
   onSelectPreset,
+  onConfigureDetected,
   onNewCustom,
 }: {
   section: AgentSection;
@@ -583,6 +616,7 @@ function AgentList({
   error: string | null;
   onSelectConfiguration: (configuration: AgentConfiguration) => void;
   onSelectPreset: (preset: AgentPreset) => void;
+  onConfigureDetected: (preset: AgentPreset) => void;
   onNewCustom: () => void;
 }) {
   const { t } = useLocale();
@@ -705,6 +739,22 @@ function AgentList({
                     </li>
                   ))}
                 </ul>
+                {availablePresets.some(
+                  (available) => available.presetKey === preset.presetKey,
+                ) ? (
+                  <button
+                    type="button"
+                    className="primary-button agent-detection-configure"
+                    onClick={() => {
+                      const template = availablePresets.find(
+                        (available) => available.presetKey === preset.presetKey,
+                      );
+                      if (template) onConfigureDetected(template);
+                    }}
+                  >
+                    {t("agents.detail.configure_template")}
+                  </button>
+                ) : null}
               </article>
             ))}
           </div>
@@ -917,6 +967,7 @@ function AgentConfigurationSheet({
   state,
   busy,
   error,
+  opener,
   onChange,
   onReview,
   onApply,
@@ -925,6 +976,7 @@ function AgentConfigurationSheet({
   state: SheetState;
   busy: boolean;
   error: string | null;
+  opener?: HTMLElement | null;
   onChange: (state: SheetState) => void;
   onReview: () => void;
   onApply: () => void;
@@ -934,15 +986,12 @@ function AgentConfigurationSheet({
   const firstControl = useRef<HTMLInputElement | HTMLButtonElement>(null);
   const deleteMode = state.mode === "delete";
   const blockers = state.plan?.blockingActivationSkillIds ?? [];
-
-  useEffect(() => {
-    firstControl.current?.focus();
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
+  const modalRef = useModalFocus<HTMLFormElement>({
+    opener,
+    busy,
+    focusKey: `${state.mode}:${state.plan?.planToken ?? "draft"}`,
+    onClose,
+  });
 
   function updateDraft(next: Partial<AgentConfigurationDraft>) {
     onChange({ ...state, draft: { ...state.draft, ...next }, plan: null });
@@ -962,10 +1011,12 @@ function AgentConfigurationSheet({
       }}
     >
       <form
+        ref={modalRef}
         className="activation-sheet agent-configuration-sheet"
         role="dialog"
         aria-modal="true"
         aria-label={t("agents.sheet.dialog")}
+        tabIndex={-1}
         onSubmit={submit}
       >
         <div className="activation-sheet-heading">

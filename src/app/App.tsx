@@ -177,6 +177,7 @@ export function App({ client }: AppProps) {
   tRef.current = t;
   const [filter, setFilter] = useState<CatalogFilter>("all");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [catalogRefreshToken, setCatalogRefreshToken] = useState(0);
   const [gitSourceCapability, setGitSourceCapability] =
     useState<GitSourceCapabilityReport | null>(null);
   const [gitSourceCapabilityFailure, setGitSourceCapabilityFailure] = useState<{
@@ -490,6 +491,7 @@ export function App({ client }: AppProps) {
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -525,6 +527,7 @@ export function App({ client }: AppProps) {
     setSourcePromotionRemoteId(null);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     try {
       const outcome = preloadedPreview
@@ -569,6 +572,7 @@ export function App({ client }: AppProps) {
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -621,6 +625,7 @@ export function App({ client }: AppProps) {
     setSourcePromotionRemoteId(null);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("idle");
@@ -652,6 +657,14 @@ export function App({ client }: AppProps) {
       const snapshot = await client.listSkills(filter);
       if (runId !== sourceGroupRunId.current) return;
       setSkills(snapshot.items);
+      if (selectedId) {
+        const nextDetail = await client
+          .inspectSkill(selectedId)
+          .catch(() => null);
+        if (runId !== sourceGroupRunId.current) return;
+        if (nextDetail) setDetail(nextDetail);
+      }
+      setCatalogRefreshToken((token) => token + 1);
       setSourceTransitionResult(result);
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
@@ -675,6 +688,7 @@ export function App({ client }: AppProps) {
     setSourceUpdateActive(false);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("fetching");
@@ -712,6 +726,7 @@ export function App({ client }: AppProps) {
     setSourceUpdateActive(true);
     setSourcePromotionDraft(null);
     setSourcePromotionOutcome(null);
+    setSourceUpdateDraft(null);
     setSourcePromotionResult(null);
     setSourceGroupError(null);
     setSourceGroupActivity("fetching");
@@ -730,32 +745,51 @@ export function App({ client }: AppProps) {
   }
 
   async function confirmSourcePromotion() {
-    if (!sourcePromotionDraft) return;
+    const draft = sourceUpdateActive ? sourceUpdateDraft : sourcePromotionDraft;
+    if (!draft) return;
     const runId = ++sourceGroupRunId.current;
     setSourceGroupActivity("confirming");
     setSourceGroupError(null);
     try {
-      const result = sourceUpdateActive
-        ? await client.confirmSourceUpdate({
-            remoteId: sourcePromotionDraft.remoteId,
-            expectedSelectedRef: sourcePromotionDraft.policy.selectedRef,
-            expectedResolvedCommit: sourcePromotionDraft.policy.resolvedCommit,
-          })
-        : await client.confirmSourcePromotion({
-            remoteId: sourcePromotionDraft.remoteId,
-            sourceType: sourceGroupType,
-            sourceUrl: sourcePromotionDraft.sourceUrl,
-            trackingPolicy: sourceGroupTrackingPolicy(),
-            expectedSelectedRef: sourcePromotionDraft.policy.selectedRef,
-            expectedResolvedCommit: sourcePromotionDraft.policy.resolvedCommit,
-          });
+      let result: SourcePromotionResult;
+      if (sourceUpdateActive) {
+        result = await client.confirmSourceUpdate({
+          remoteId: draft.remoteId,
+          expectedSelectedRef: draft.policy.selectedRef,
+          expectedResolvedCommit: draft.policy.resolvedCommit,
+        });
+      } else {
+        const sourceType = sourceTypeFromProvider(draft.provider);
+        if (!sourceType) {
+          setSourceGroupError(t("error.source_unavailable"));
+          return;
+        }
+        result = await client.confirmSourcePromotion({
+          remoteId: draft.remoteId,
+          sourceType,
+          sourceUrl: draft.sourceUrl,
+          trackingPolicy: {
+            mode: draft.policy.mode,
+            value: draft.policy.value,
+          },
+          expectedSelectedRef: draft.policy.selectedRef,
+          expectedResolvedCommit: draft.policy.resolvedCommit,
+        });
+      }
       const snapshot = await client.listSkills(filter);
       if (runId !== sourceGroupRunId.current) return;
       setSkills(snapshot.items);
-      setSourcePromotionResult({
-        ...result,
-        undoAvailable: !sourceUpdateActive,
-      });
+      if (selectedId) {
+        const nextDetail = await client
+          .inspectSkill(selectedId)
+          .catch(() => null);
+        if (runId !== sourceGroupRunId.current) return;
+        if (nextDetail) setDetail(nextDetail);
+      }
+      setCatalogRefreshToken((token) => token + 1);
+      setSourceUpdateDraft(null);
+      setSourcePromotionDraft(null);
+      setSourcePromotionResult(result);
       void client
         .getGitSourceCapability()
         .then((report) => {
@@ -779,10 +813,38 @@ export function App({ client }: AppProps) {
     }
   }
 
+  async function undoSourcePromotion() {
+    if (!sourcePromotionResult) return;
+    const runId = ++sourceGroupRunId.current;
+    setSourceGroupActivity("undoing");
+    setSourceGroupError(null);
+    try {
+      await client.undoSourceTransition(sourcePromotionResult.operationId);
+      setSourcePromotionResult(null);
+      setSourcePromotionDraft(null);
+      setSourceUpdateDraft(null);
+      setSourcePromotionOutcome(null);
+      setSourcePromotionRemoteId(null);
+      setSourceUpdateActive(false);
+      await refreshLibraryAfterSourceAction(runId);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) {
+        setSourceGroupError(readError(reason, t));
+      }
+    } finally {
+      if (runId === sourceGroupRunId.current) setSourceGroupActivity("idle");
+    }
+  }
+
   async function refreshLibraryAfterSourceAction(runId: number) {
-    const snapshot = await client.listSkills(filter);
+    const [snapshot, nextDetail] = await Promise.all([
+      client.listSkills(filter),
+      selectedId ? client.inspectSkill(selectedId).catch(() => null) : null,
+    ]);
     if (runId !== sourceGroupRunId.current) return;
     setSkills(snapshot.items);
+    if (nextDetail) setDetail(nextDetail);
+    setCatalogRefreshToken((token) => token + 1);
     void client
       .getGitSourceCapability()
       .then((report) => {
@@ -1337,6 +1399,7 @@ export function App({ client }: AppProps) {
         client={client}
         filter={filter}
         skills={skills}
+        catalogRefreshToken={catalogRefreshToken}
         libraryEmpty={libraryLoaded && skills.length === 0}
         selectedId={selectedId}
         detail={detail}
@@ -1392,6 +1455,7 @@ export function App({ client }: AppProps) {
         onPreviewSourcePromotion={previewSourcePromotion}
         onPreviewSourceUpdate={previewSourceUpdate}
         onConfirmSourcePromotion={confirmSourcePromotion}
+        onUndoSourcePromotion={undoSourcePromotion}
         sourceActionActivity={sourceActionActivity}
         sourceActionNotice={sourceActionNotice}
         onRestoreSource={(remoteId) => void restoreSourceRelease(remoteId)}
@@ -1450,6 +1514,21 @@ export function App({ client }: AppProps) {
       ) : null}
     </>
   );
+}
+
+function sourceTypeFromProvider(
+  provider: string,
+): GitRepositorySourceType | null {
+  switch (provider) {
+    case "gitlab":
+      return "gitlab";
+    case "git":
+      return "git";
+    case "github":
+      return "github";
+    default:
+      return null;
+  }
 }
 
 function readError(reason: unknown, t: LocaleContextValue["t"]) {

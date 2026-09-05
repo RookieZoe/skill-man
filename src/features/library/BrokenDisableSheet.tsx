@@ -4,6 +4,7 @@ import type {
   CatalogClient,
   GlobalTargetGroupSnapshot,
 } from "../../app/catalog-client";
+import { useModalFocus } from "../../ui/useModalFocus";
 import { useLocale } from "../locale/LocaleProvider";
 
 export interface BrokenDisableSheetProps {
@@ -40,6 +41,12 @@ export function BrokenDisableSheet({
   const [error, setError] = useState<string | null>(null);
 
   const primaryButtonRef = useRef<HTMLButtonElement>(null);
+  const modalRef = useModalFocus<HTMLElement>({
+    opener,
+    busy: isBusy,
+    focusKey: `${step}:${groupsSnapshot !== null}`,
+    onClose: handleClose,
+  });
 
   // Return focus to opener on unmount / close
   function handleClose() {
@@ -66,18 +73,6 @@ export function BrokenDisableSheet({
       current = false;
     };
   }, [client, skillId]);
-
-  // Escape key handler
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !isBusy) {
-        opener?.focus();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isBusy, opener, onClose]);
 
   // Auto-focus primary action button on step transition
   useLayoutEffect(() => {
@@ -117,9 +112,11 @@ export function BrokenDisableSheet({
       }}
     >
       <section
+        ref={modalRef}
         className="activation-sheet broken-disable-sheet"
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={t("enable.broken.dialogLabel")}
       >
         <ol

@@ -86,6 +86,29 @@ describe("SourceGroupCard", () => {
     // No member-level version actions (no Update button per member)
     const updateButtons = screen.getAllByRole("button", { name: "Update" });
     expect(updateButtons).toHaveLength(1); // Only the source-level update button
+    expect(screen.getAllByText("Healthy")).toHaveLength(2);
+  });
+
+  it("offers a Local Copy exit for healthy Git members", async () => {
+    const user = userEvent.setup();
+    const onCopyMember = vi.fn();
+    render(
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onCopyMember={onCopyMember}
+        pickDirectory={async () => "/Users/test/Desktop/copied"}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Create Local Source Copy" }),
+    );
+    expect(onCopyMember).toHaveBeenCalledWith(
+      "source-1",
+      "skill-1",
+      "/Users/test/Desktop/copied",
+    );
   });
 
   it("renders embedded Source Snapshot Mismatch panel and disables Update when a member has snapshot mismatch", async () => {

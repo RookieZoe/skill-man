@@ -386,4 +386,8 @@ test("Conflict Set winner picker renders inside the Local sources block", async 
   expect(
     within(localRegion).getByText("No winner selected"),
   ).toBeInTheDocument();
+  const cards = screen.getByLabelText("Classification counts");
+  expect(within(cards).getByLabelText("Local candidates")).toHaveTextContent(
+    "0",
+  );
 });

@@ -27,6 +27,7 @@ pub enum NativeMessageKey {
     SourceSnapshotMismatch,
     MenuWindow,
     MenuHelp,
+    MenuAgents,
 }
 
 impl NativeMessageKey {
@@ -44,6 +45,7 @@ impl NativeMessageKey {
             Self::SourceSnapshotMismatch => "tray.health.source_snapshot_mismatch",
             Self::MenuWindow => "menu.window",
             Self::MenuHelp => "menu.help",
+            Self::MenuAgents => "menu.agents",
         }
     }
 }
@@ -117,6 +119,7 @@ mod tests {
                 NativeMessageKey::TrayHealthModified,
                 NativeMessageKey::MenuWindow,
                 NativeMessageKey::MenuHelp,
+                NativeMessageKey::MenuAgents,
             ] {
                 let message = native_message(locale, key, &[]);
                 assert!(!message.is_empty(), "{locale:?} {key:?} must resolve");

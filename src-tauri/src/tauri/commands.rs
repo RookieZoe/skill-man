@@ -1030,22 +1030,40 @@ pub fn plan_global_lifecycle(
 pub fn apply_global_enable(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    observation: State<'_, ObservationApi>,
     request: ApplyGlobalEnableRequestDto,
 ) -> Result<EnableResultDto, CommandFailureDto> {
-    let result = state.apply_global_enable(request)?;
-    mutation.bump();
-    Ok(result)
+    let result = state.apply_global_enable(request);
+    if let Ok(result) = &result {
+        mutation.bump();
+        schedule_activation_health(
+            &observation,
+            result.cells.iter().map(|cell| cell.target_root_id.clone()),
+        );
+    }
+    result
 }
 
 #[tauri::command]
 pub fn undo_global_enable(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    observation: State<'_, ObservationApi>,
     request: EnableOperationRequestDto,
 ) -> Result<EnableUndoResultDto, CommandFailureDto> {
-    let result = state.undo_global_enable(request)?;
-    mutation.bump();
-    Ok(result)
+    let result = state.undo_global_enable(request);
+    if let Ok(result) = &result {
+        mutation.bump();
+        schedule_activation_health(
+            &observation,
+            result.cells.iter().filter_map(|cell| {
+                cell.cell_key
+                    .split_once('|')
+                    .map(|(_, target_root_id)| target_root_id.to_owned())
+            }),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -1059,6 +1077,26 @@ pub fn finalize_global_enable(
         mutation.bump();
     }
     result
+}
+
+/// Enable mutations commit desired Activation state in the Catalog. The
+/// resulting Target groups must be re-observed so Inspector never keeps
+/// showing the pre-mutation health. Deduplicate the physical Targets because
+/// a batch can contain many cells for the same group.
+fn schedule_activation_health<I>(observation: &ObservationApi, target_root_ids: I)
+where
+    I: Iterator<Item = String>,
+{
+    let mut target_root_ids = target_root_ids.collect::<Vec<_>>();
+    target_root_ids.sort();
+    target_root_ids.dedup();
+    if target_root_ids.is_empty() {
+        return;
+    }
+    let observation = observation.service_handle();
+    std::thread::spawn(move || {
+        observation.refresh_activation_health(Some(&target_root_ids));
+    });
 }
 
 // -- Project Enable (spec §4.9; ADR-0015; ADR-0019; #89) --

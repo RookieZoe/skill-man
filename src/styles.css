@@ -476,6 +476,14 @@ button:active:not(:disabled) {
   border-radius: var(--radius-sm, 6px);
 }
 
+.source-group-local-copy-panel {
+  margin: var(--space-3, 12px) 0;
+  padding: var(--space-3, 12px);
+  border: 1px solid var(--border, #d9d5cc);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-muted, #f7f6f3);
+}
+
 .source-member-list {
   list-style: none;
   margin: var(--space-2, 8px) 0 0;
@@ -3616,6 +3624,10 @@ button:active:not(:disabled) {
   background: var(--surface-raised);
 }
 
+.agent-detection-configure {
+  justify-self: start;
+}
+
 .agent-detection-card-heading {
   display: flex;
   align-items: center;
@@ -4041,7 +4053,7 @@ button:active:not(:disabled) {
 }
 
 .agent-detail-drawer {
-  position: absolute;
+  position: fixed;
   z-index: 14;
   inset: 0;
   pointer-events: none;
@@ -4551,6 +4563,20 @@ button:active:not(:disabled) {
 .target-group-conflict p {
   margin: 0;
   font-size: 13px;
+}
+
+.target-group-health-blocked {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-left: 3px solid var(--warning, #b8860b);
+  background: var(--surface-muted, #f7f6f3);
+}
+
+.target-group-health-blocked p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .inspector-result {

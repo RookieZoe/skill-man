@@ -202,9 +202,25 @@ export function SourceGroupPreviewFlow({
             ))}
           </ul>
         </section>
+        {error ? (
+          <div className="activation-error" role="alert">
+            <strong>{t("library.import.source_unavailable")}</strong>
+            <span>{error}</span>
+          </div>
+        ) : null}
         <div className="activation-sheet-actions">
-          <button type="button" onClick={onClose}>
+          <button type="button" disabled={isBusy} onClick={onClose}>
             {t("library.source_group.close")}
+          </button>
+          <button
+            type="button"
+            className="activation-confirm-button"
+            disabled={isBusy}
+            onClick={onConfirmPromotion}
+          >
+            {isBusy
+              ? t("library.source_group.updating")
+              : t("library.source_group.update_confirm")}
           </button>
         </div>
       </>

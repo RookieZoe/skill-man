@@ -947,7 +947,7 @@ impl From<SourceKind> for SourceKindDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthDto {
     Healthy,
@@ -4862,6 +4862,7 @@ pub struct GlobalTargetGroupSnapshotDto {
     pub skill_id: String,
     #[serde(rename = "skillName")]
     pub skill_name: String,
+    pub skill_health: HealthDto,
     #[serde(rename = "agentGeneration")]
     pub agent_generation: u64,
     pub groups: Vec<GlobalTargetGroupDto>,
@@ -5197,6 +5198,7 @@ impl From<GlobalTargetGroupSnapshot> for GlobalTargetGroupSnapshotDto {
         Self {
             skill_id: value.skill_id.0,
             skill_name: value.skill_name,
+            skill_health: value.skill_health.into(),
             agent_generation: value.agent_generation,
             groups: value.groups.into_iter().map(Into::into).collect(),
         }

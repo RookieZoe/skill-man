@@ -13,6 +13,7 @@ import { BrokenDisableSheet } from "./BrokenDisableSheet";
 const mockSnapshot: GlobalTargetGroupSnapshot = {
   skillId: "broken-skill",
   skillName: "Broken Skill",
+  skillHealth: "broken",
   agentGeneration: 1,
   groups: [
     {

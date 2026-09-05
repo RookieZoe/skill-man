@@ -123,6 +123,7 @@ pub struct GlobalTargetGroup {
 pub struct GlobalTargetGroupSnapshot {
     pub skill_id: SkillId,
     pub skill_name: String,
+    pub skill_health: Health,
     pub agent_generation: u64,
     pub groups: Vec<GlobalTargetGroup>,
 }
@@ -565,6 +566,7 @@ impl EnableService {
         Ok(GlobalTargetGroupSnapshot {
             skill_id: skill_id.clone(),
             skill_name: skill.summary.display_name,
+            skill_health: skill.summary.health,
             agent_generation,
             groups,
         })
@@ -802,6 +804,63 @@ impl EnableService {
                     fault: resolved.fault,
                     detail: resolved.detail,
                 });
+            }
+        }
+
+        // A resolved project container is physically visible to every
+        // configured Agent that points at it, not only to the Agents the
+        // user selected for this operation. Keep the selected Agents as the
+        // write intent, then add the remaining configured consumers to the
+        // group so Preview accurately discloses the read surface and the
+        // apply-time walk remains frozen for every consumer.
+        for configuration in &snapshot.configurations {
+            if agent_ids
+                .iter()
+                .any(|agent_id| agent_id == &configuration.agent_id)
+            {
+                continue;
+            }
+            let Some(configured_dir) = configuration.project_skills_dir.clone() else {
+                continue;
+            };
+            let Ok(resolution) = self
+                .filesystem
+                .resolve_project_target(&canonical_project_root, &configured_dir)
+            else {
+                continue;
+            };
+            if resolution.fault.is_some() {
+                continue;
+            }
+            let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.resolved_container == resolution.resolved_container)
+            else {
+                continue;
+            };
+            if group.fault.is_some() {
+                continue;
+            }
+            let hop_evidence = ProjectHopEvidence {
+                agent_id: configuration.agent_id.clone(),
+                agent_name: configuration.name.clone(),
+                configured_relative_path: configured_dir.clone(),
+                resolved_container: resolution.resolved_container.clone(),
+                hops: resolution.hops.clone(),
+            };
+            group
+                .affected_agent_ids
+                .push(configuration.agent_id.clone());
+            group.affected_agent_names.push(configuration.name.clone());
+            group.hop_evidences.push(hop_evidence);
+            group.target_resolutions.push(FrozenProjectTarget {
+                configured_relative_path: configured_dir,
+                resolution: resolution.clone(),
+            });
+            for step in resolution.create_steps {
+                if !group.create_steps.contains(&step) {
+                    group.create_steps.push(step);
+                }
             }
         }
 
@@ -1532,7 +1591,10 @@ impl EnableService {
             .map(|(index, planned)| {
                 let runnable = planned.cell.eligibility == CellEligibility::Ready
                     || (planned.cell.eligibility == CellEligibility::Conflict
-                        && effective_resolution(planned) != CellResolution::Skip);
+                        && !matches!(
+                            effective_resolution(planned),
+                            CellResolution::Adopt | CellResolution::Skip
+                        ));
                 let phase = if runnable {
                     ActivationReplacePhase::Applying
                 } else {
@@ -1540,7 +1602,10 @@ impl EnableService {
                 };
                 EnableJournalCell {
                     cell_index: index as u32,
-                    action: effective_action(planned),
+                    // Adopt/Skip cells are already Committed and never enter
+                    // the journal executor. Keep the on-disk enum total for
+                    // mixed batches without turning Adopt into Enable work.
+                    action: effective_action(planned).unwrap_or(EnableCellAction::Enable),
                     skill_id: planned.cell.skill_id.0.clone(),
                     target_root_id: planned.cell.target_root_id.clone(),
                     directory_identity_key: planned.cell.directory_identity_key.clone(),
@@ -1757,7 +1822,7 @@ impl EnableService {
                     )
                 })
                 .collect::<Vec<_>>();
-            match effective_action(planned) {
+            match effective_action(planned).ok_or(EnableError::PlanStale)? {
                 EnableCellAction::Enable | EnableCellAction::Repair => {
                     let project_root_identity =
                         project_root_identity.ok_or(EnableError::PlanStale)?;
@@ -1841,7 +1906,7 @@ impl EnableService {
             ..write_owner.clone()
         };
 
-        match effective_action(planned) {
+        match effective_action(planned).ok_or(EnableError::PlanStale)? {
             EnableCellAction::Enable | EnableCellAction::Repair => {
                 // Plain create (no occupant): the entry must be missing.
                 if !matches!(
@@ -2105,7 +2170,10 @@ impl EnableService {
             .filter(|(_, planned)| {
                 planned.cell.eligibility == CellEligibility::Ready
                     || (planned.cell.eligibility == CellEligibility::Conflict
-                        && effective_resolution(planned) != CellResolution::Skip)
+                        && !matches!(
+                            effective_resolution(planned),
+                            CellResolution::Adopt | CellResolution::Skip
+                        ))
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
@@ -2399,7 +2467,7 @@ impl EnableService {
             .frozen_target
             .as_ref()
             .ok_or(EnableError::PlanStale)?;
-        let effective = effective_action(planned);
+        let effective = effective_action(planned).ok_or(EnableError::PlanStale)?;
         let restores_occupant = matches!(
             effective,
             EnableCellAction::Switch | EnableCellAction::Replace
@@ -2521,22 +2589,23 @@ impl EnableService {
 }
 
 /// The journal action this cell actually executes (resolutions rewrite
-/// Enable into Switch/Replace).
-fn effective_action(planned: &PlannedCell) -> EnableCellAction {
+/// Enable into Switch/Replace). Adopt has no journal action because it is
+/// owned by the Scan/Adopt surface.
+fn effective_action(planned: &PlannedCell) -> Option<EnableCellAction> {
     let cell = &planned.cell;
     if cell.eligibility == CellEligibility::Conflict {
         return match effective_resolution(planned) {
-            CellResolution::Switch => EnableCellAction::Switch,
-            CellResolution::Replace => EnableCellAction::Replace,
-            CellResolution::Adopt | CellResolution::Skip => EnableCellAction::Enable,
+            CellResolution::Switch => Some(EnableCellAction::Switch),
+            CellResolution::Replace => Some(EnableCellAction::Replace),
+            CellResolution::Adopt | CellResolution::Skip => None,
         };
     }
-    match cell.action {
+    Some(match cell.action {
         EnableAction::Enable => EnableCellAction::Enable,
         EnableAction::Disable => EnableCellAction::Disable,
         EnableAction::Repair => EnableCellAction::Repair,
         EnableAction::Switch => EnableCellAction::Switch,
-    }
+    })
 }
 
 /// The user resolution that actually drives apply (exact-direct links are
@@ -2568,7 +2637,7 @@ fn grid_after_desired(planned: &PlannedCell) -> bool {
     if planned.cell.eligibility == CellEligibility::Conflict {
         return matches!(
             effective_action(planned),
-            EnableCellAction::Enable | EnableCellAction::Switch | EnableCellAction::Replace
+            Some(EnableCellAction::Enable | EnableCellAction::Switch | EnableCellAction::Replace)
         );
     }
     match planned.cell.action {
@@ -2581,7 +2650,7 @@ fn grid_after_desired(planned: &PlannedCell) -> bool {
 
 fn journal_occupant(planned: &PlannedCell) -> Option<OccupantSnapshot> {
     match effective_action(planned) {
-        EnableCellAction::Switch | EnableCellAction::Replace => planned.frozen_entry.clone(),
+        Some(EnableCellAction::Switch | EnableCellAction::Replace) => planned.frozen_entry.clone(),
         _ => None,
     }
 }
@@ -2589,7 +2658,7 @@ fn journal_occupant(planned: &PlannedCell) -> Option<OccupantSnapshot> {
 fn backup_path_for(batch: &PlannedBatch, index: usize, library_root: &Path) -> Option<PathBuf> {
     if !matches!(
         effective_action(&batch.cells[index]),
-        EnableCellAction::Switch | EnableCellAction::Replace
+        Some(EnableCellAction::Switch | EnableCellAction::Replace)
     ) || batch.cells[index].frozen_entry.is_none()
     {
         return None;

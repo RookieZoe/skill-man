@@ -450,6 +450,8 @@ export interface GlobalTargetGroup {
 export interface GlobalTargetGroupSnapshot {
   skillId: string;
   skillName: string;
+  /** Current Skill health from the Catalog authority. */
+  skillHealth: Health;
   agentGeneration: number;
   groups: GlobalTargetGroup[];
 }
