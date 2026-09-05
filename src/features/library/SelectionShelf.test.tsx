@@ -60,7 +60,7 @@ test("LibraryDesk multi-select: Select button enters mode, toggles skills, shelf
   await screen.findByRole("heading", { name: "skill-authoring" });
 
   // 1. Enter multi-select mode via Toolbar Select button
-  const selectBtn = screen.getByRole("button", { name: "Select" });
+  const selectBtn = screen.getByRole("button", { name: "Batch actions" });
   expect(selectBtn).toHaveAttribute("aria-pressed", "false");
   await user.click(selectBtn);
   expect(selectBtn).toHaveAttribute("aria-pressed", "true");
@@ -112,7 +112,7 @@ test("LibraryDesk multi-select: opens Global Enable sheet in batch mode and clea
   await screen.findByRole("heading", { name: "skill-authoring" });
 
   // Enter select mode and select 2 skills
-  await user.click(screen.getByRole("button", { name: "Select" }));
+  await user.click(screen.getByRole("button", { name: "Batch actions" }));
   const checkboxes = screen.getAllByRole("checkbox");
   await user.click(checkboxes[0]);
   await user.click(checkboxes[1]);
@@ -138,7 +138,7 @@ test("LibraryDesk multi-select: opens Global Enable sheet in batch mode and clea
   expect(
     screen.queryByRole("region", { name: /skills? selected/ }),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Batch actions" })).toHaveAttribute(
     "aria-pressed",
     "false",
   );
@@ -152,7 +152,7 @@ test("LibraryDesk multi-select: opens Project Enable sheet in batch mode and cle
   await screen.findByRole("heading", { name: "skill-authoring" });
 
   // Enter select mode and select 2 skills
-  await user.click(screen.getByRole("button", { name: "Select" }));
+  await user.click(screen.getByRole("button", { name: "Batch actions" }));
   const checkboxes = screen.getAllByRole("checkbox");
   await user.click(checkboxes[0]);
   await user.click(checkboxes[1]);
@@ -178,7 +178,7 @@ test("LibraryDesk multi-select: opens Project Enable sheet in batch mode and cle
   expect(
     screen.queryByRole("region", { name: /skills? selected/ }),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Batch actions" })).toHaveAttribute(
     "aria-pressed",
     "false",
   );

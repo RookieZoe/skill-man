@@ -6,6 +6,86 @@ import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import type { ObservationAndScanSnapshot } from "../../app/catalog-client";
 import { AgentManagement } from "./AgentManagement";
 
+test.each([false, true])(
+  "delete review names Skills and safely handles combined removal (failure=%s)",
+  async (fail) => {
+    const user = userEvent.setup();
+    const client = createFixtureCatalogClient();
+    const snapshot = await client.getAgentManagementSnapshot();
+    const agent = snapshot.configurations[0];
+    const target = agent.roots.find(
+      (root) => root.role === "activation_target",
+    )!;
+    const originalPlan = client.planDeleteAgentConfiguration.bind(client);
+    client.planDeleteAgentConfiguration = async (id) => {
+      const plan = await originalPlan(id);
+      const groups = await client.listTargetGroups("skill-authoring");
+      return {
+        ...plan,
+        blockingActivationSkillIds: groups.groups.some(
+          (group) => group.targetRootId === target.rootId && group.desired,
+        )
+          ? ["skill-authoring"]
+          : [],
+      };
+    };
+    const applyDelete = vi.spyOn(client, "applyAgentConfigurationPlan");
+    const lifecycle = vi.spyOn(client, "planGlobalLifecycle");
+    if (fail)
+      client.applyGlobalEnable = async () => ({
+        operationId: "failed",
+        cells: [
+          {
+            cellKey: "cell",
+            skillId: "skill-authoring",
+            targetRootId: target.rootId,
+            outcome: "failed",
+            diagnostic: null,
+          },
+        ],
+        snapshotVersion: 1,
+      });
+    render(<AgentManagement client={client} layoutMode="wide" />);
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog", { name: "Agent Configuration" });
+    await user.click(within(dialog).getByRole("button", { name: "Review" }));
+    expect(
+      await within(dialog).findByText("Skill authoring"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("skill-authoring"),
+    ).not.toBeInTheDocument();
+    expect(applyDelete).not.toHaveBeenCalled();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Remove together" }),
+    );
+    if (fail) {
+      await within(dialog).findByText(/Removal stopped/);
+      expect(applyDelete).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      expect(applyDelete).toHaveBeenCalledTimes(1);
+      expect(
+        (await client.getAgentManagementSnapshot()).configurations.some(
+          (item) => item.agentId === agent.agentId,
+        ),
+      ).toBe(false);
+      expect(
+        (await client.listSkills("all")).items.some(
+          (item) => item.id === "skill-authoring",
+        ),
+      ).toBe(true);
+    }
+    expect(lifecycle).toHaveBeenCalledExactlyOnceWith(
+      "skill-authoring",
+      target.rootId,
+      "disable",
+    );
+  },
+);
+
 test("editing an agent explains a closed write gate", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();

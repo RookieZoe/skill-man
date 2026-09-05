@@ -30,6 +30,7 @@ export function GlobalTargetGroupsPanel({
   onOpenBrokenDisable,
   onOverlayChange,
   refreshToken,
+  onCatalogChanged,
 }: {
   ref: React.Ref<HTMLElement | null>;
   dialog: boolean;
@@ -40,6 +41,7 @@ export function GlobalTargetGroupsPanel({
   onOpenBrokenDisable?: (trigger: HTMLButtonElement) => void;
   onOverlayChange?: (open: boolean) => void;
   refreshToken?: number;
+  onCatalogChanged?: () => Promise<void>;
 }) {
   const { t } = useLocale();
   const [snapshot, setSnapshot] = useState<GlobalTargetGroupSnapshot | null>(
@@ -158,6 +160,7 @@ export function GlobalTargetGroupsPanel({
       setLastResult(applied);
       setLastGroupId(group.targetRootId);
       await load();
+      await onCatalogChanged?.();
     } catch (cause) {
       setError(targetGroupErrorMessage(cause, t));
     } finally {
@@ -178,6 +181,7 @@ export function GlobalTargetGroupsPanel({
       setLastResult(applied);
       setLastGroupId(group.targetRootId);
       await load();
+      await onCatalogChanged?.();
     } catch (cause) {
       setError(targetGroupErrorMessage(cause, t));
     } finally {
@@ -195,6 +199,7 @@ export function GlobalTargetGroupsPanel({
       setLastResult(null);
       setLastGroupId(null);
       await load();
+      await onCatalogChanged?.();
     } catch (cause) {
       setError(targetGroupErrorMessage(cause, t));
     } finally {
@@ -314,6 +319,7 @@ export function GlobalTargetGroupsPanel({
                 setSheetInitial(null);
                 onOpenAdopt?.(cell);
               }}
+              onCatalogChanged={onCatalogChanged}
               onClose={() => {
                 setSheetInitial(null);
                 setSheetOpener(null);

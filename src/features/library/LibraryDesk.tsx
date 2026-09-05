@@ -84,6 +84,7 @@ interface LibraryDeskProps {
   filter: CatalogFilter;
   skills: SkillSummary[];
   catalogRefreshToken: number;
+  onCatalogChanged: () => Promise<void>;
   libraryEmpty: boolean;
   selectedId: string | null;
   detail: SkillDetail | null;
@@ -148,7 +149,7 @@ interface LibraryDeskProps {
     remoteId: string,
     skillId: string,
     destination: string,
-  ) => void;
+  ) => Promise<boolean>;
   onRemoveSource: (remoteId: string) => void;
   /** Git Repository Source handoff: the scan group opens the source
    * management surface (#92 Source Tracking Policy + immutable Transition). */
@@ -184,6 +185,7 @@ export function LibraryDesk({
   filter,
   skills,
   catalogRefreshToken,
+  onCatalogChanged,
   libraryEmpty,
   selectedId,
   detail,
@@ -578,6 +580,7 @@ export function LibraryDesk({
                     .filter((s) => s.kind === "git_repository_source")
                     .map((source) => (
                       <SourceGroupCard
+                        defaultCollapsed
                         key={source.remoteId}
                         source={source}
                         skills={repositorySkills ?? []}
@@ -628,6 +631,7 @@ export function LibraryDesk({
           </main>
         ) : surface === "agents" ? (
           <AgentManagement
+            onCatalogChanged={onCatalogChanged}
             key={isOnboardingOpen ? "setup" : "configured"}
             client={client}
             layoutMode={layoutMode}
@@ -711,6 +715,7 @@ export function LibraryDesk({
               />
               {detail ? (
                 <GlobalTargetGroupsPanel
+                  onCatalogChanged={onCatalogChanged}
                   ref={agentInspectorRef}
                   dialog={isAgentDrawerModal}
                   skillId={detail.id}
@@ -778,6 +783,7 @@ export function LibraryDesk({
           adoptHandoff={adoptHandoff}
           onAdoptHandoffHandled={() => setAdoptHandoff(null)}
           onManageGitGroup={onManageGitGroup}
+          onCatalogChanged={onCatalogChanged}
         />
       </div>
       {surface === "library" && isSelectMode ? (
@@ -803,6 +809,7 @@ export function LibraryDesk({
       ) : null}
       {isBatchGlobalEnableOpen ? (
         <GlobalEnableSheet
+          onCatalogChanged={onCatalogChanged}
           client={client}
           skills={skills
             .filter((s) => selectedSkillIds.includes(s.id))
@@ -2019,7 +2026,7 @@ function OnboardingSheet({
             disabled={isBusy}
             onClick={onSkip}
           >
-            {t("library.onboarding.skip")}
+            {t("enable.global.close")}
           </button>
           {step < 2 ? (
             <button

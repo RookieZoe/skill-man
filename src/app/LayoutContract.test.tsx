@@ -95,10 +95,10 @@ test("exact breakpoints: 1060 wide, 1059 mid, 760 mid, 759 narrow", async () => 
 
 test("batch selection stays in the Library heading and adds one column to the same rows", async () => {
   await renderWideLibrary();
-  const select = screen.getByRole("button", { name: "Select" });
+  const select = screen.getByRole("button", { name: "Batch actions" });
   expect(select.closest(".library-sidebar .panel-heading")).not.toBeNull();
   expect(
-    within(toolbar()).queryByRole("button", { name: "Select" }),
+    within(toolbar()).queryByRole("button", { name: "Batch actions" }),
   ).not.toBeInTheDocument();
   const row = screen.getByRole("button", { name: "skill-authoring" });
   const padding = getComputedStyle(row).padding;

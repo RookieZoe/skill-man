@@ -34,6 +34,7 @@ export function GlobalEnableSheet({
   opener,
   onAdoptExisting,
   onClose,
+  onCatalogChanged,
 }: {
   client: CatalogClient;
   skills?: EnableSkillItem[];
@@ -43,6 +44,7 @@ export function GlobalEnableSheet({
   opener?: HTMLElement | null;
   onAdoptExisting?: (cell: EnableCell) => void;
   onClose: () => void;
+  onCatalogChanged?: () => Promise<void>;
 }) {
   const { t, tPlural } = useLocale();
   const normalizedSkills = useMemo<EnableSkillItem[]>(() => {
@@ -172,6 +174,7 @@ export function GlobalEnableSheet({
       const applied = await client.applyGlobalEnable(plan.planToken);
       setResult(applied);
       setShownStep("result");
+      await onCatalogChanged?.();
     } catch (cause) {
       setError(commandErrorMessage(cause, t));
     } finally {
@@ -191,6 +194,7 @@ export function GlobalEnableSheet({
       setPlan(null);
       setShownStep("targets");
       await refreshGroups();
+      await onCatalogChanged?.();
     } catch (cause) {
       setError(commandErrorMessage(cause, t));
     } finally {

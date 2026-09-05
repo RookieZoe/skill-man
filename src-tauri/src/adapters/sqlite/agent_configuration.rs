@@ -105,7 +105,7 @@ impl AgentConfigurationStore for SqliteCatalogStore {
             root.activation_skill_ids = connection
                 .prepare(
                     "SELECT skill_id FROM activations
-                     WHERE target_root_id = ?1 ORDER BY skill_id",
+                     WHERE target_root_id = ?1 AND desired_enabled = 1 ORDER BY skill_id",
                 )
                 .map_err(sqlite_error)?
                 .query_map([&root.root_id], |row| row.get(0))
@@ -475,7 +475,7 @@ fn guard_removed_target(
     let skill_ids = transaction
         .prepare(
             "SELECT skill_id FROM activations
-             WHERE target_root_id = ?1 ORDER BY skill_id",
+             WHERE target_root_id = ?1 AND desired_enabled = 1 ORDER BY skill_id",
         )
         .map_err(sqlite_error)?
         .query_map([&old_target], |row| row.get(0))

@@ -1084,6 +1084,11 @@ export function createFixtureCatalogClient(
       };
     },
     async planDeleteAgentConfiguration(agentId) {
+      const target = agentSnapshot()
+        .configurations.find((item) => item.agentId === agentId)
+        ?.roots.find((root) => root.role === "activation_target");
+      const activeIds = enabledSkillIds.get(agentId) ?? [];
+      const lastReference = target?.consumerAgentIds.length === 1;
       const planToken = `fixture-agent-plan-${planCounter++}`;
       agentConfigurationPlans.set(planToken, {
         kind: "delete",
@@ -1095,11 +1100,8 @@ export function createFixtureCatalogClient(
         kind: "delete",
         configuration: null,
         targetWillBeCreated: false,
-        blockingActivationSkillIds: [],
-        retainedActivationCount:
-          agentConfigurations.find(
-            (configuration) => configuration.agentId === agentId,
-          )?.roots[0]?.activationSkillIds.length ?? 0,
+        blockingActivationSkillIds: lastReference ? [...activeIds] : [],
+        retainedActivationCount: lastReference ? 0 : activeIds.length,
       };
     },
     async applyAgentConfigurationPlan(planToken) {

@@ -28,6 +28,7 @@ interface AgentManagementProps {
   client: CatalogClient;
   layoutMode: LayoutMode;
   onOverlayChange?: (open: boolean) => void;
+  onCatalogChanged?: () => Promise<void>;
 }
 
 type AgentSection = "configured" | "detected" | "presets";
@@ -41,12 +42,15 @@ interface SheetState {
   agentId: string | null;
   draft: AgentConfigurationDraft;
   plan: AgentConfigurationPlan | null;
+  blockerNames?: Record<string, string>;
+  targetRootId?: string;
 }
 
 export function AgentManagement({
   client,
   layoutMode,
   onOverlayChange,
+  onCatalogChanged,
 }: AgentManagementProps) {
   const { t } = useLocale();
   const [snapshot, setSnapshot] = useState<AgentManagementSnapshot | null>(
@@ -316,6 +320,9 @@ export function AgentManagement({
     setSheet({
       mode: "delete",
       agentId: configuration.agentId,
+      targetRootId: configuration.roots.find(
+        (root) => root.role === "activation_target",
+      )?.rootId,
       draft: draftFromConfiguration(configuration),
       plan: null,
     });
@@ -339,7 +346,10 @@ export function AgentManagement({
               ? await client.planDeleteAgentConfiguration(sheet.agentId)
               : null;
       if (!plan) return;
-      setSheet((current) => (current ? { ...current, plan } : current));
+      const blockerNames = await readBlockerNames(plan);
+      setSheet((current) =>
+        current ? { ...current, plan, blockerNames } : current,
+      );
     } catch (reason) {
       setError(agentFailureMessage(reason, t));
     } finally {
@@ -347,15 +357,95 @@ export function AgentManagement({
     }
   }
 
-  async function applySheet() {
-    if (!sheet?.plan || sheet.plan.blockingActivationSkillIds.length > 0)
+  async function readBlockerNames(plan: AgentConfigurationPlan) {
+    if (!plan.blockingActivationSkillIds.length) return {};
+    const catalog = await client.listSkills("all");
+    return Object.fromEntries(
+      catalog.items.map((skill) => [
+        skill.id,
+        skill.displayName || skill.directoryName,
+      ]),
+    );
+  }
+
+  async function removeTogether() {
+    if (!sheet?.agentId || sheet.mode !== "delete" || !sheet.plan || busy)
       return;
+    const agentId = sheet.agentId;
+    const reviewed = new Set(sheet.plan.blockingActivationSkillIds);
     setBusy(true);
     setError(null);
     try {
-      const result = await client.applyAgentConfigurationPlan(
-        sheet.plan.planToken,
-      );
+      const fresh = await client.planDeleteAgentConfiguration(agentId);
+      const current = await client.getAgentManagementSnapshot();
+      const target = current.configurations
+        .find((agent) => agent.agentId === agentId)
+        ?.roots.find((root) => root.role === "activation_target");
+      if (
+        !target ||
+        target.rootId !== sheet.targetRootId ||
+        target.consumerAgentIds.length !== 1 ||
+        target.consumerAgentIds[0] !== agentId ||
+        fresh.blockingActivationSkillIds.some((id) => !reviewed.has(id))
+      ) {
+        throw { code: "plan_stale" };
+      }
+      for (const skillId of fresh.blockingActivationSkillIds) {
+        const plan = await client.planGlobalLifecycle(
+          skillId,
+          target.rootId,
+          "disable",
+        );
+        if (
+          plan.cells.length !== 1 ||
+          plan.cells[0].skillId !== skillId ||
+          plan.cells[0].targetRootId !== target.rootId ||
+          plan.cells[0].action !== "disable" ||
+          plan.cells[0].affectedAgentIds.length !== 1 ||
+          plan.cells[0].affectedAgentIds[0] !== agentId
+        )
+          throw { code: "plan_stale" };
+        const result = await client.applyGlobalEnable(plan.planToken);
+        const cell = result.cells[0];
+        if (
+          result.cells.length !== 1 ||
+          cell.skillId !== skillId ||
+          cell.targetRootId !== target.rootId ||
+          !["succeeded", "no_op"].includes(cell.outcome)
+        ) {
+          throw { code: "disable_incomplete" };
+        }
+        await client.finalizeGlobalEnable(result.operationId);
+      }
+      const next = await client.planDeleteAgentConfiguration(agentId);
+      setSheet((current) => (current ? { ...current, plan: next } : current));
+      if (next.blockingActivationSkillIds.length) throw { code: "plan_stale" };
+      await applySheet(next);
+    } catch {
+      setError(t("agents.sheet.remove_together_failed"));
+      // Earlier successful Disable operations stay applied. Never delete the
+      // configuration after a partial failure; show the remaining blockers.
+      try {
+        const plan = await client.planDeleteAgentConfiguration(agentId);
+        const blockerNames = await readBlockerNames(plan);
+        setSheet((current) =>
+          current ? { ...current, plan, blockerNames } : current,
+        );
+      } catch {
+        setSheet((current) => (current ? { ...current, plan: null } : current));
+      }
+    } finally {
+      setBusy(false);
+      await onCatalogChanged?.();
+    }
+  }
+
+  async function applySheet(plan = sheet?.plan) {
+    if (!plan || plan.blockingActivationSkillIds.length > 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await client.applyAgentConfigurationPlan(plan.planToken);
       const next = await client.getAgentManagementSnapshot();
       setSnapshot(next);
       setSheet(null);
@@ -526,6 +616,7 @@ export function AgentManagement({
               }}
               onReview={reviewSheet}
               onApply={applySheet}
+              onRemoveTogether={removeTogether}
               onClose={closeSheet}
             />,
             document.body,
@@ -966,6 +1057,7 @@ function AgentConfigurationSheet({
   onChange,
   onReview,
   onApply,
+  onRemoveTogether,
   onClose,
 }: {
   state: SheetState;
@@ -975,6 +1067,7 @@ function AgentConfigurationSheet({
   onChange: (state: SheetState) => void;
   onReview: () => void;
   onApply: () => void;
+  onRemoveTogether: () => void;
   onClose: () => void;
 }) {
   const { t } = useLocale();
@@ -1155,9 +1248,28 @@ function AgentConfigurationSheet({
                   <p>{t("agents.sheet.blocked_body")}</p>
                   <ul>
                     {blockers.map((skillId) => (
-                      <li key={skillId}>{skillId}</li>
+                      <li key={skillId}>
+                        {state.blockerNames?.[skillId] ??
+                          t("agents.sheet.skill_name_unavailable")}
+                      </li>
                     ))}
                   </ul>
+                  {deleteMode && (
+                    <>
+                      <p>{t("agents.sheet.remove_together_hint")}</p>
+                      <button
+                        type="button"
+                        className="repair-button danger-button"
+                        disabled={
+                          busy ||
+                          blockers.some((id) => !state.blockerNames?.[id])
+                        }
+                        onClick={onRemoveTogether}
+                      >
+                        {t("agents.sheet.remove_together")}
+                      </button>
+                    </>
+                  )}
                 </div>
               ) : (
                 <p>{t("agents.sheet.review_ready")}</p>

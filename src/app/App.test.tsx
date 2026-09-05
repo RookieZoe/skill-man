@@ -16,6 +16,134 @@ import type {
 import { App } from "./App";
 import { createGitPreviewClient } from "../test-fixtures/git-preview";
 
+test("global activation changes refresh the Skill list count immediately", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  const row = screen.getByRole("button", { name: "skill-authoring" });
+  expect(within(row).getByLabelText("2 Agents")).toBeInTheDocument();
+  await user.click(await screen.findByRole("switch", { name: "Claude Code" }));
+  await waitFor(() =>
+    expect(within(row).getByLabelText("1 Agents")).toBeInTheDocument(),
+  );
+});
+
+test("Git import refreshes members and repository grouping before returning to Library", async () => {
+  const user = userEvent.setup();
+  const client = createGitPreviewClient();
+  const list = client.listSkills.bind(client);
+  const capability = client.getGitSourceCapability.bind(client);
+  let installed = false;
+  client.listSkills = async (filter) => {
+    const snapshot = await list(filter);
+    return {
+      ...snapshot,
+      items: installed
+        ? snapshot.items
+        : snapshot.items.filter((s) => s.id !== "media-xray"),
+    };
+  };
+  client.getGitSourceCapability = vi.fn(async () =>
+    installed ? capability() : { sources: [] },
+  );
+  client.confirmSourceTransition = async () => {
+    installed = true;
+    return {
+      operationId: "install",
+      remoteId: "example-media",
+      releaseId: "release",
+      resolvedCommit: "a".repeat(40),
+      memberCount: 1,
+      snapshotVersion: 2,
+      undoAvailable: false,
+    };
+  };
+  client.finalizeSourceTransition = async () => undefined;
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Repository URL" }),
+    "https://github.com/example/media-skills",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Fetch latest preview" }),
+  );
+  await user.click(
+    await screen.findByRole("button", { name: "Install all 12 Skills" }),
+  );
+  await user.click(await screen.findByRole("button", { name: "Close" }));
+  const group = await screen.findByRole("button", {
+    name: "example/media-skills 1",
+  });
+  await user.click(group);
+  expect(
+    screen.getByRole("button", { name: "media-xray" }),
+  ).toBeInTheDocument();
+  expect(client.getGitSourceCapability).toHaveBeenCalledTimes(2);
+  await user.click(screen.getByRole("tab", { name: "Agents" }));
+  await user.click(screen.getByRole("tab", { name: "Library" }));
+  expect(
+    screen.getByRole("button", { name: "example/media-skills 1" }),
+  ).toBeInTheDocument();
+});
+
+test("scan Adopt and Undo refresh the Library without navigation", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const list = client.listSkills.bind(client);
+  let adopted = false;
+  client.listSkills = async (filter) => {
+    const snapshot = await list(filter);
+    return {
+      ...snapshot,
+      items: adopted
+        ? snapshot.items
+        : snapshot.items.filter((s) => s.id !== "media-xray"),
+    };
+  };
+  client.publishScanReport(COMPLETE_SUMMARY, {
+    local_candidates: [LOCAL_CANDIDATE_ROW],
+  });
+  client.planAdopt = async (reportGeneration) => ({
+    planToken: "plan",
+    reportGeneration,
+    items: [],
+    canApply: true,
+  });
+  client.applyAdopt = async () => {
+    adopted = true;
+    return {
+      operationId: "adopt",
+      items: [],
+      snapshotVersion: 2,
+      undoAvailable: true,
+    };
+  };
+  client.undoAdopt = async (operationId) => {
+    adopted = false;
+    return { operationId, items: [], snapshotVersion: 3 };
+  };
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(await screen.findByRole("button", { name: "Scan report" }));
+  await user.click(await screen.findByRole("checkbox", { name: "Local Link" }));
+  await user.click(screen.getByRole("button", { name: "Plan Adopt" }));
+  await user.click(await screen.findByRole("button", { name: "Apply" }));
+  await waitFor(() =>
+    expect(
+      document.querySelector('.skill-row[aria-label="media-xray"]'),
+    ).not.toBeNull(),
+  );
+  await user.click(screen.getByRole("button", { name: "Undo" }));
+  await waitFor(() =>
+    expect(
+      document.querySelector('.skill-row[aria-label="media-xray"]'),
+    ).toBeNull(),
+  );
+});
+
 test("repository management has its own third page and preserves the selected Skill", async () => {
   const user = userEvent.setup();
   render(<App client={createGitPreviewClient()} />);
@@ -31,6 +159,12 @@ test("repository management has its own third page and preserves the selected Sk
     "Repositories",
   ]);
   await user.click(screen.getByRole("tab", { name: "Repositories" }));
+  const repository = await screen.findByRole("heading", {
+    name: "https://github.com/example/media-skills",
+  });
+  expect(repository.closest("details")).not.toHaveAttribute("open");
+  expect(screen.getByRole("button", { name: "Update" })).not.toBeVisible();
+  await user.click(repository);
   expect(await screen.findByRole("button", { name: "Update" })).toBeVisible();
   expect(
     screen.getByRole("main", { name: "Repository management" }),
@@ -64,6 +198,11 @@ test("repository member health is independent of the Library filter", async () =
   await screen.findByRole("heading", { name: "skill-authoring" });
   await user.click(screen.getByRole("button", { name: "Link" }));
   await user.click(screen.getByRole("tab", { name: "Repositories" }));
+  await user.click(
+    await screen.findByRole("heading", {
+      name: "https://github.com/example/media-skills",
+    }),
+  );
   expect(
     await screen.findByText("Modified", { selector: ".member-health-badge" }),
   ).toBeVisible();
@@ -98,7 +237,7 @@ test("scan workspace opens separately and returns without losing the selected Sk
   await user.click(open);
   expect(content).not.toHaveAttribute("hidden");
   expect(
-    screen.queryByRole("button", { name: "Select" }),
+    screen.queryByRole("button", { name: "Batch actions" }),
   ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Back to workspace" }));
   expect(content).toHaveAttribute("hidden");
@@ -430,7 +569,7 @@ test("shows the three-step onboarding on first run and Skip records completion",
   expect(
     await screen.findByText("Already included in scan"),
   ).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Skip setup" }));
+  await user.click(screen.getByRole("button", { name: "Close" }));
 
   expect(completed).toBe(1);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -703,7 +842,7 @@ test("onboarding scan allows zero selection zero registration and Skip", async (
   );
   await screen.findByText(/Scan complete: 1 Skill entity/);
   // Skip stays available at every step: nothing was registered.
-  await user.click(screen.getByRole("button", { name: "Skip setup" }));
+  await user.click(screen.getByRole("button", { name: "Close" }));
   expect(
     screen.queryByRole("dialog", { name: "Welcome to Skill Man" }),
   ).not.toBeInTheDocument();
@@ -1469,6 +1608,11 @@ test("Source Update exposes an executable Undo window", async () => {
 
   render(<App client={client} />);
   await user.click(screen.getByRole("tab", { name: "Repositories" }));
+  await user.click(
+    await screen.findByRole("heading", {
+      name: "https://github.com/acme/managed",
+    }),
+  );
   await user.click(await screen.findByRole("button", { name: "Update" }));
   await screen.findByRole("heading", {
     name: "Complete Source Release Update",

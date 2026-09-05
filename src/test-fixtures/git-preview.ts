@@ -9,6 +9,8 @@ export function createGitPreviewClient() {
           remoteId: "example-media",
           canonicalUrl: "https://github.com/example/media-skills",
           kind: "git_repository_source",
+          selectedRef: "HEAD",
+          resolvedCommit: "a".repeat(40),
           members: [
             { skillId: "media-xray", skillPath: "media-xray", presence: true },
           ],

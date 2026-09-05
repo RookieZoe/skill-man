@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   GitSourceCapabilitySource,
   SkillSummary,
@@ -9,6 +10,7 @@ import type { SourceActionNotice } from "./GitSourceCapabilityNotice";
 import { defaultCopyDestinationPicker } from "./GitSourceCapabilityNotice";
 
 export interface SourceGroupCardProps {
+  defaultCollapsed?: boolean;
   source: GitSourceCapabilitySource;
   skills: SkillSummary[];
   actionActivity?: boolean;
@@ -20,7 +22,7 @@ export interface SourceGroupCardProps {
     remoteId: string,
     skillId: string,
     destination: string,
-  ) => void;
+  ) => void | Promise<boolean>;
   onRemove?: (remoteId: string) => void;
   onOpenBrokenDisable?: (
     skillId: string,
@@ -39,6 +41,7 @@ export interface SourceGroupCardProps {
  * - Fail-closed for Legacy and Remote Source Identity Conflict with typed reasons
  */
 export function SourceGroupCard({
+  defaultCollapsed = false,
   source,
   skills,
   actionActivity = false,
@@ -52,13 +55,24 @@ export function SourceGroupCard({
   pickDirectory = defaultCopyDestinationPicker,
 }: SourceGroupCardProps) {
   const { t, tPlural } = useLocale();
+  const [expanded, setExpanded] = useState(!defaultCollapsed);
+  const [removeTrigger, setRemoveTrigger] = useState<HTMLButtonElement | null>(
+    null,
+  );
   const [confirming, setConfirming] = useState<"restore" | "remove" | null>(
     null,
   );
   const copyableMembers = source.members.filter((m) => m.presence);
-  const [copySkillId, setCopySkillId] = useState<string>(
-    copyableMembers[0]?.skillId ?? "",
-  );
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [copying, setCopying] = useState(false);
+  const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // Fail closed for Legacy and Remote Source Identity Conflict
   if (source.kind === "legacy_per_skill_git_state") {
@@ -125,46 +139,50 @@ export function SourceGroupCard({
     return skill?.health === "source_snapshot_mismatch";
   });
 
+  const selectedMembers = copyableMembers.filter((member) =>
+    selectedIds.includes(member.skillId),
+  );
+
   async function handleCopy() {
-    if (!onCopyMember || !copySkillId) return;
-    const destination = await pickDirectory();
-    if (destination) {
-      onCopyMember(source.remoteId, copySkillId, destination);
+    if (!onCopyMember || copying || actionActivity || !selectedMembers.length)
+      return;
+    setCopying(true);
+    setCopyMessage(null);
+    let completed = 0;
+    try {
+      const parent = await pickDirectory();
+      if (!parent || !mounted.current) return;
+      for (const member of selectedMembers) {
+        if (!mounted.current) break;
+        const name = member.skillPath.split("/").at(-1);
+        if (!name || name === "." || name === ".." || name.includes("\\"))
+          throw new Error();
+        const ok = await onCopyMember(
+          source.remoteId,
+          member.skillId,
+          parent.replace(/\/$/, "") + "/" + name,
+        );
+        if (ok === false) break;
+        completed++;
+        setSelectedIds((ids) => ids.filter((id) => id !== member.skillId));
+      }
+      setCopyMessage(
+        t("sourceGroup.copyBatchResult", {
+          completed,
+          total: selectedMembers.length,
+        }),
+      );
+    } catch {
+      setCopyMessage(
+        t("sourceGroup.copyBatchFailed", {
+          completed,
+          total: selectedMembers.length,
+        }),
+      );
+    } finally {
+      setCopying(false);
     }
   }
-
-  const localCopyControls =
-    onCopyMember && copyableMembers.length > 0 ? (
-      <div className="local-copy-controls">
-        {copyableMembers.length > 1 ? (
-          <label className="copy-member-select">
-            <span>{t("sourceGroup.copyMemberLabel")}</span>
-            <select
-              value={copySkillId}
-              disabled={actionActivity}
-              onChange={(e) => setCopySkillId(e.target.value)}
-            >
-              {copyableMembers.map((member) => (
-                <option key={member.skillId} value={member.skillId}>
-                  {member.skillPath}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        <button
-          type="button"
-          className="repair-button"
-          disabled={actionActivity}
-          onClick={() => void handleCopy()}
-        >
-          {t("sourceGroup.createLocalCopy")}
-        </button>
-        <small className="local-copy-note">
-          {t("sourceGroup.localCopyNoSwitchNote")}
-        </small>
-      </div>
-    ) : null;
 
   const overrideText =
     source.trackingMode && source.trackingMode !== "auto_release_tag_head"
@@ -172,11 +190,13 @@ export function SourceGroupCard({
       : t("sourceGroup.overrideNone");
 
   return (
-    <article
+    <details
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
       className={`source-group-card${hasMismatch ? " source-group-card--mismatch" : ""}`}
       aria-label={t("sourceGroup.label")}
     >
-      <header className="source-group-header">
+      <summary className="source-group-header source-group-summary">
         <div className="source-group-title-row">
           <h3>{source.canonicalUrl}</h3>
           {source.selectedRef ? (
@@ -192,7 +212,7 @@ export function SourceGroupCard({
             })}
           </p>
         ) : null}
-      </header>
+      </summary>
 
       {/* Policy cascade and explicit override side-by-side */}
       <section
@@ -258,22 +278,27 @@ export function SourceGroupCard({
                 {t("sourceGroup.restoreRelease")}
               </button>
             )}
-
-            {localCopyControls}
           </div>
-        </section>
-      ) : null}
-      {!hasMismatch && localCopyControls ? (
-        <section
-          className="source-group-local-copy-panel"
-          aria-label={t("sourceGroup.copyMemberLabel")}
-        >
-          {localCopyControls}
         </section>
       ) : null}
 
       {/* Source-level Update and whole-source Remove */}
       <div className="source-group-actions">
+        {onCopyMember && (
+          <button
+            type="button"
+            className="repair-button source-copy-batch-button"
+            disabled={actionActivity || copying || !selectedMembers.length}
+            title={t("sourceGroup.copyBatchHint")}
+            onClick={() => void handleCopy()}
+          >
+            {t(
+              copying
+                ? "sourceGroup.copyBatchBusy"
+                : "sourceGroup.createLocalCopy",
+            )}
+          </button>
+        )}
         {onUpdate ? (
           <button
             type="button"
@@ -289,38 +314,32 @@ export function SourceGroupCard({
         ) : null}
 
         {onRemove ? (
-          confirming === "remove" ? (
-            <div className="inline-confirmation">
-              <span>{t("sourceGroup.removeConfirmBody")}</span>
-              <button
-                type="button"
-                className="repair-button danger-button"
-                disabled={actionActivity}
-                onClick={() => {
-                  setConfirming(null);
-                  onRemove(source.remoteId);
-                }}
-              >
-                {t("sourceGroup.removeConfirmButton")}
-              </button>
-              <button
-                type="button"
-                disabled={actionActivity}
-                onClick={() => setConfirming(null)}
-              >
-                {t("sourceGroup.cancel")}
-              </button>
-            </div>
-          ) : (
+          <>
             <button
               type="button"
               className="repair-button"
               disabled={actionActivity}
-              onClick={() => setConfirming("remove")}
+              aria-haspopup="dialog"
+              aria-expanded={confirming === "remove"}
+              onClick={(event) => {
+                setRemoveTrigger(event.currentTarget);
+                setConfirming(confirming === "remove" ? null : "remove");
+              }}
             >
               {t("sourceGroup.remove")}
             </button>
-          )
+            {confirming === "remove" && expanded && !actionActivity && (
+              <RemoveSourceConfirmation
+                trigger={removeTrigger}
+                sourceUrl={source.canonicalUrl}
+                onClose={() => setConfirming(null)}
+                onConfirm={() => {
+                  setConfirming(null);
+                  onRemove(source.remoteId);
+                }}
+              />
+            )}
+          </>
         ) : null}
       </div>
 
@@ -338,6 +357,7 @@ export function SourceGroupCard({
         className="source-group-members"
         aria-label={t("sourceGroup.membersLabel")}
       >
+        {copyMessage && <p role="status">{copyMessage}</p>}
         <h4>{t("sourceGroup.membersLabel")}</h4>
         {source.members.length === 0 ? (
           <p className="source-group-empty-members">
@@ -351,7 +371,28 @@ export function SourceGroupCard({
               const targetCount = skill?.enabledAgentCount ?? 0;
 
               return (
-                <li key={member.skillId} className="source-member-row">
+                <li
+                  key={member.skillId}
+                  className={`source-member-row${onCopyMember ? " source-member-row--selectable" : ""}`}
+                >
+                  {onCopyMember && (
+                    <input
+                      type="checkbox"
+                      className="source-member-checkbox"
+                      aria-label={member.skillPath}
+                      checked={
+                        member.presence && selectedIds.includes(member.skillId)
+                      }
+                      disabled={!member.presence || copying || actionActivity}
+                      onChange={() =>
+                        setSelectedIds((ids) =>
+                          ids.includes(member.skillId)
+                            ? ids.filter((id) => id !== member.skillId)
+                            : [...ids, member.skillId],
+                        )
+                      }
+                    />
+                  )}
                   <div className="member-path-column">
                     <span className="member-skill-path">
                       {member.skillPath}
@@ -406,7 +447,110 @@ export function SourceGroupCard({
           </ul>
         )}
       </section>
-    </article>
+    </details>
+  );
+}
+
+function RemoveSourceConfirmation({
+  trigger,
+  sourceUrl,
+  onClose,
+  onConfirm,
+}: {
+  trigger: HTMLButtonElement | null;
+  sourceUrl: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLocale();
+  const id = useId();
+  const panel = useRef<HTMLDivElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const element = panel.current;
+    if (!element || !trigger) return;
+    const anchor = trigger.getBoundingClientRect();
+    const bounds = element.getBoundingClientRect();
+    const gap = 8;
+    const left = Math.max(
+      gap,
+      Math.min(anchor.left, window.innerWidth - bounds.width - gap),
+    );
+    const top =
+      anchor.bottom + gap + bounds.height <= window.innerHeight - gap
+        ? anchor.bottom + gap
+        : Math.max(gap, anchor.top - bounds.height - gap);
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    cancel.current?.focus({ preventScroll: true });
+  }, [trigger]);
+  useEffect(() => {
+    function outside(event: Event) {
+      if (
+        event.target instanceof Node &&
+        !panel.current?.contains(event.target) &&
+        !trigger?.contains(event.target)
+      )
+        onClose();
+    }
+    function escape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      trigger?.focus({ preventScroll: true });
+    }
+    function scroll(event: Event) {
+      if (event.target instanceof Node && panel.current?.contains(event.target))
+        return;
+      onClose();
+    }
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("focusin", outside);
+    document.addEventListener("keydown", escape, true);
+    document.addEventListener("scroll", scroll, true);
+    window.addEventListener("resize", onClose);
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("focusin", outside);
+      document.removeEventListener("keydown", escape, true);
+      document.removeEventListener("scroll", scroll, true);
+      window.removeEventListener("resize", onClose);
+    };
+  }, [onClose, trigger]);
+  return createPortal(
+    <div
+      ref={panel}
+      className="source-remove-popover"
+      role="dialog"
+      aria-labelledby={`${id}-title`}
+      aria-describedby={`${id}-body`}
+    >
+      <h4 id={`${id}-title`}>{t("sourceGroup.removeConfirmTitle")}</h4>
+      <p className="source-remove-popover-url">{sourceUrl}</p>
+      <p id={`${id}-body`}>{t("sourceGroup.removeConfirmBody")}</p>
+      <div className="source-remove-popover-actions">
+        <button
+          ref={cancel}
+          type="button"
+          className="toolbar-button"
+          onClick={() => {
+            onClose();
+            trigger?.focus({ preventScroll: true });
+          }}
+        >
+          {t("sourceGroup.cancel")}
+        </button>
+        <button
+          type="button"
+          className="toolbar-button source-remove-confirm"
+          onClick={onConfirm}
+        >
+          {t("sourceGroup.removeConfirmButton")}
+        </button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

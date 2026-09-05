@@ -53,6 +53,90 @@ const skills: SkillSummary[] = [
 ];
 
 describe("SourceGroupCard", () => {
+  it("uses a dismissible confirmation popover and only removes after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    const remove = vi.fn();
+    render(
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onRemove={remove}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Remove" });
+    await user.click(trigger);
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      healthySource.canonicalUrl,
+    );
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(trigger);
+    await user.click(document.body);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(remove).not.toHaveBeenCalled();
+    await user.click(trigger);
+    await user.click(
+      screen.getByRole("button", { name: "Remove complete source" }),
+    );
+    expect(remove).toHaveBeenCalledExactlyOnceWith("source-1");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("copies selected members sequentially and preserves failed selections", async () => {
+    const user = userEvent.setup();
+    const onCopyMember = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const picker = vi.fn().mockResolvedValue("/Users/test/copies");
+    render(
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onCopyMember={onCopyMember}
+        pickDirectory={picker}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
+    await user.click(screen.getByRole("checkbox", { name: "skills/beta" }));
+    await user.click(screen.getByRole("button", { name: "Create local copy" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Created 1 of 2 copies",
+    );
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(onCopyMember.mock.calls).toEqual([
+      ["source-1", "skill-1", "/Users/test/copies/alpha"],
+      ["source-1", "skill-2", "/Users/test/copies/beta"],
+    ]);
+    expect(
+      screen.getByRole("checkbox", { name: "skills/alpha" }),
+    ).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "skills/beta" })).toBeChecked();
+  });
+
+  it("cancelling the directory picker does not create copies or clear selection", async () => {
+    const user = userEvent.setup();
+    const copy = vi.fn();
+    render(
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onCopyMember={copy}
+        pickDirectory={async () => null}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
+    await user.click(screen.getByRole("button", { name: "Create local copy" }));
+    expect(copy).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("checkbox", { name: "skills/alpha" }),
+    ).toBeChecked();
+  });
   it("renders policy cascade side-by-side with explicit override", () => {
     render(<SourceGroupCard source={healthySource} skills={skills} />);
 
@@ -101,13 +185,15 @@ describe("SourceGroupCard", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Create Local Source Copy" }),
-    );
+    const copy = screen.getByRole("button", { name: "Create local copy" });
+    expect(copy).toBeDisabled();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
+    await user.click(copy);
     expect(onCopyMember).toHaveBeenCalledWith(
       "source-1",
       "skill-1",
-      "/Users/test/Desktop/copied",
+      "/Users/test/Desktop/copied/alpha",
     );
   });
 
@@ -158,20 +244,16 @@ describe("SourceGroupCard", () => {
     await user.click(confirmRestoreBtn);
     expect(onRestore).toHaveBeenCalledWith("source-1");
 
-    // Local copy note is visible
-    expect(
-      screen.getByText("Creating a local copy does not switch any Activation."),
-    ).toBeInTheDocument();
-
     // Create Local Source Copy
     const copyBtn = screen.getByRole("button", {
-      name: "Create Local Source Copy",
+      name: "Create local copy",
     });
+    await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
     await user.click(copyBtn);
     expect(onCopyMember).toHaveBeenCalledWith(
       "source-1",
       expect.any(String),
-      "/Users/test/Desktop/copied",
+      "/Users/test/Desktop/copied/alpha",
     );
   });
 

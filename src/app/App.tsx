@@ -452,8 +452,7 @@ export function App({ client }: AppProps) {
     setLinkImportError(null);
     try {
       const result = await client.applyLinkImport(linkImportPreview.planToken);
-      const snapshot = await client.listSkills(filter);
-      setSkills(snapshot.items);
+      await refreshLibraryAfterSourceAction(++sourceGroupRunId.current);
       setLinkImportPreview(null);
       setLinkImportResult(result);
     } catch (reason) {
@@ -654,17 +653,8 @@ export function App({ client }: AppProps) {
         expectedResolvedCommit: preview.policy.resolvedCommit,
       });
       if (runId !== sourceGroupRunId.current) return;
-      const snapshot = await client.listSkills(filter);
+      await refreshLibraryAfterSourceAction(runId);
       if (runId !== sourceGroupRunId.current) return;
-      setSkills(snapshot.items);
-      if (selectedId) {
-        const nextDetail = await client
-          .inspectSkill(selectedId)
-          .catch(() => null);
-        if (runId !== sourceGroupRunId.current) return;
-        if (nextDetail) setDetail(nextDetail);
-      }
-      setCatalogRefreshToken((token) => token + 1);
       setSourceTransitionResult(result);
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
@@ -776,34 +766,11 @@ export function App({ client }: AppProps) {
           expectedResolvedCommit: draft.policy.resolvedCommit,
         });
       }
-      const snapshot = await client.listSkills(filter);
+      await refreshLibraryAfterSourceAction(runId);
       if (runId !== sourceGroupRunId.current) return;
-      setSkills(snapshot.items);
-      if (selectedId) {
-        const nextDetail = await client
-          .inspectSkill(selectedId)
-          .catch(() => null);
-        if (runId !== sourceGroupRunId.current) return;
-        if (nextDetail) setDetail(nextDetail);
-      }
-      setCatalogRefreshToken((token) => token + 1);
       setSourceUpdateDraft(null);
       setSourcePromotionDraft(null);
       setSourcePromotionResult(result);
-      void client
-        .getGitSourceCapability()
-        .then((report) => {
-          if (runId !== sourceGroupRunId.current) return;
-          setGitSourceCapability(report);
-          setGitSourceCapabilityFailure(null);
-        })
-        .catch((reason: unknown) => {
-          if (runId !== sourceGroupRunId.current) return;
-          setGitSourceCapability(null);
-          setGitSourceCapabilityFailure({
-            diagnostic: readDiagnostic(reason, t),
-          });
-        });
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
         setSourceGroupError(readError(reason, t));
@@ -841,28 +808,38 @@ export function App({ client }: AppProps) {
   }
 
   async function refreshLibraryAfterSourceAction(runId: number) {
-    const [snapshot, nextDetail] = await Promise.all([
+    const [snapshot, nextDetail, capability] = await Promise.all([
       client.listSkills(filter),
       selectedId ? client.inspectSkill(selectedId).catch(() => null) : null,
+      client.getGitSourceCapability().then(
+        (report) => ({ report, failure: null }),
+        (reason: unknown) => ({
+          report: null,
+          failure: { diagnostic: readDiagnostic(reason, t) },
+        }),
+      ),
     ]);
     if (runId !== sourceGroupRunId.current) return;
     setSkills(snapshot.items);
-    if (nextDetail) setDetail(nextDetail);
+    setSelectedId((selected) =>
+      snapshot.items.some(({ id }) => id === selected)
+        ? selected
+        : (snapshot.items[0]?.id ?? null),
+    );
+    setDetail(nextDetail);
+    setGitSourceCapability(capability.report);
+    setGitSourceCapabilityFailure(capability.failure);
     setCatalogRefreshToken((token) => token + 1);
-    void client
-      .getGitSourceCapability()
-      .then((report) => {
-        if (runId !== sourceGroupRunId.current) return;
-        setGitSourceCapability(report);
-        setGitSourceCapabilityFailure(null);
-      })
-      .catch((reason: unknown) => {
-        if (runId !== sourceGroupRunId.current) return;
-        setGitSourceCapability(null);
-        setGitSourceCapabilityFailure({
-          diagnostic: readDiagnostic(reason, t),
-        });
-      });
+  }
+
+  async function refreshAfterAdopt() {
+    const runId = ++sourceGroupRunId.current;
+    try {
+      await refreshLibraryAfterSourceAction(runId);
+      if (runId === sourceGroupRunId.current) setError(null);
+    } catch (reason) {
+      if (runId === sourceGroupRunId.current) setError(readError(reason, t));
+    }
   }
 
   async function restoreSourceRelease(remoteId: string) {
@@ -907,7 +884,7 @@ export function App({ client }: AppProps) {
         destination,
       );
       await refreshLibraryAfterSourceAction(runId);
-      if (runId !== sourceGroupRunId.current) return;
+      if (runId !== sourceGroupRunId.current) return false;
       setSourceActionNotice({
         kind: "copy",
         ok: true,
@@ -915,6 +892,7 @@ export function App({ client }: AppProps) {
           name: result.directoryName,
         }),
       });
+      return true;
     } catch (reason) {
       if (runId === sourceGroupRunId.current)
         setSourceActionNotice({
@@ -922,6 +900,7 @@ export function App({ client }: AppProps) {
           ok: false,
           message: readError(reason, t),
         });
+      return false;
     } finally {
       if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
     }
@@ -959,9 +938,8 @@ export function App({ client }: AppProps) {
     setSourceGroupError(null);
     try {
       await client.undoSourceTransition(sourceTransitionResult.operationId);
-      const snapshot = await client.listSkills(filter);
+      await refreshLibraryAfterSourceAction(runId);
       if (runId !== sourceGroupRunId.current) return;
-      setSkills(snapshot.items);
       setSourceTransitionResult(null);
       setSourceGroupOutcome(null);
     } catch (reason) {
@@ -1401,6 +1379,7 @@ export function App({ client }: AppProps) {
         filter={filter}
         skills={skills}
         catalogRefreshToken={catalogRefreshToken}
+        onCatalogChanged={refreshAfterAdopt}
         libraryEmpty={libraryLoaded && skills.length === 0}
         selectedId={selectedId}
         detail={detail}
@@ -1463,7 +1442,7 @@ export function App({ client }: AppProps) {
         sourceActionNotice={sourceActionNotice}
         onRestoreSource={(remoteId) => void restoreSourceRelease(remoteId)}
         onCopySourceMember={(remoteId, skillId, destination) =>
-          void copySourceMember(remoteId, skillId, destination)
+          copySourceMember(remoteId, skillId, destination)
         }
         onRemoveSource={(remoteId) => void removeSource(remoteId)}
         relocatePanel={relocatePanel}

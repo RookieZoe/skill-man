@@ -338,6 +338,33 @@ fn shared_target_detach_preserves_activations_and_last_reference_is_blocked() {
         .plan_delete(&third.agent_id)
         .expect("plan last shared consumer delete");
     assert_eq!(last_delete.blocking_activation_skill_ids, vec!["skill-1"]);
+    // Disable keeps its historical row, but a disabled entry must no longer
+    // block removing the last Agent Configuration that consumed this Target.
+    let connection = Connection::open(&catalog_path).expect("open disabled history");
+    connection
+        .execute(
+            "UPDATE activations SET desired_enabled = 0 WHERE skill_id = 'skill-1'",
+            [],
+        )
+        .expect("disable activation");
+    let disabled_delete = service
+        .plan_delete(&third.agent_id)
+        .expect("review after Disable");
+    assert!(
+        disabled_delete.blocking_activation_skill_ids.is_empty(),
+        "disabled history must not be a deletion blocker"
+    );
+    service
+        .apply(&disabled_delete.plan_token)
+        .expect("delete configuration after Disable");
+    let retained: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM activations WHERE skill_id = 'skill-1' AND desired_enabled = 0",
+            [],
+            |row| row.get(0),
+        )
+        .expect("retained history");
+    assert_eq!(retained, 1, "keep disabled history and its target root");
 }
 
 #[test]

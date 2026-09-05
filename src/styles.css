@@ -37,6 +37,51 @@
   --space-10: 40px;
 }
 
+.source-remove-popover {
+  position: fixed;
+  z-index: 100;
+  width: min(340px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: var(--space-4);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: 0 8px 28px oklch(24% 0.015 250 / 0.18);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.source-remove-popover h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.source-remove-popover p {
+  margin: var(--space-2) 0 0;
+}
+.source-remove-popover-url {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.source-remove-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.source-remove-popover-actions .toolbar-button {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.source-remove-popover-actions .source-remove-confirm {
+  background: var(--broken);
+  color: white;
+  border-color: var(--broken);
+}
+
 .skill-select-checkbox {
   margin: 2px 0 0;
   width: 14px;
@@ -541,6 +586,19 @@ button:active:not(:disabled) {
   padding: 8px 0;
   border-bottom: 1px solid var(--border, #d9d5cc);
   font-size: 12px;
+}
+.source-member-row--selectable {
+  grid-template-columns: 16px minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+.source-member-checkbox {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  align-self: center;
+  accent-color: var(--accent);
+}
+.source-copy-batch-button {
+  order: 1;
 }
 
 .member-skill-path {
@@ -3175,6 +3233,57 @@ button:active:not(:disabled) {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface-raised) 84%, transparent);
   box-shadow: 0 1px 2px oklch(20% 0.02 250 / 0.04);
+}
+
+.preferences-sheet > .language-control {
+  margin: 0 var(--space-6) var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.library-heading-actions .toolbar-button {
+  min-height: 26px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.source-group-summary {
+  cursor: pointer;
+  list-style: none;
+  position: relative;
+  padding-left: 20px;
+}
+.source-group-summary::-webkit-details-marker {
+  display: none;
+}
+.source-group-summary::before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  color: var(--text-secondary);
+}
+details[open] > .source-group-summary::before {
+  content: "▾";
+}
+.source-group-summary h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.source-group-summary .source-group-commit {
+  margin: var(--space-3) 0 0;
+  overflow-wrap: anywhere;
+}
+.source-group-summary .source-group-title-row {
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.source-group-actions,
+.source-group-local-copy-panel > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
 }
 
 .language-control-label {

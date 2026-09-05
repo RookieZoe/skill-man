@@ -292,11 +292,13 @@ export function ScanEvidenceLedger({
   inert = false,
   adoptHandoff = null,
   onManageGitGroup,
+  onCatalogChanged,
   onAdoptHandoffHandled,
   expanded = true,
   onExpandedChange,
 }: {
   client: CatalogClient;
+  onCatalogChanged?: () => Promise<void>;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
@@ -631,6 +633,7 @@ export function ScanEvidenceLedger({
     setAdoptMessage(null);
     try {
       setAdoptResult(await client.applyAdopt(adoptPlan.planToken));
+      await onCatalogChanged?.();
     } catch (reason) {
       setAdoptMessage(adoptErrorText(reason, t));
     } finally {
@@ -647,6 +650,7 @@ export function ScanEvidenceLedger({
       setAdoptUndo(undo);
       setAdoptResult(null);
       setAdoptPlan(null);
+      await onCatalogChanged?.();
     } catch (reason) {
       setAdoptMessage(adoptErrorText(reason, t));
     } finally {
