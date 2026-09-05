@@ -11,6 +11,7 @@
 //! published by the manifest switch, and a store-wide failure keeps the old
 //! current Report (Run → `Failed`).
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Condvar, Mutex};
@@ -21,10 +22,10 @@ use crate::seams::filesystem::{
     ScannedSkillEntry, TreeScanEntry,
 };
 use crate::seams::scan_evidence_store::{
-    SCAN_STORE_SCHEMA_VERSION, ScanChainFaultRecord, ScanChainHopRecord, ScanEntityIndexStats,
-    ScanEntityRecord, ScanEntryRecord, ScanEvidenceStoreError, ScanLockHintRecord,
-    ScanObjectIdentity, ScanRootCoverageRecord, ScanRootRecord, ScanRootState,
-    ScanSnapshotQualification, ScanWorktreeHintRecord, fault_points,
+    SCAN_STORE_SCHEMA_VERSION, ScanChainFaultRecord, ScanChainHopRecord, ScanClassificationWriter,
+    ScanEntityIndexStats, ScanEntityRecord, ScanEntryRecord, ScanEvidenceStore,
+    ScanEvidenceStoreError, ScanLockHintRecord, ScanObjectIdentity, ScanRootCoverageRecord,
+    ScanRootRecord, ScanRootState, ScanSnapshotQualification, ScanWorktreeHintRecord, fault_points,
 };
 
 use super::{
@@ -61,6 +62,9 @@ struct EngineShared {
     /// Cooperative stop flag per Root: a root-local write failure or the
     /// typed Unresponsive isolation stops this Root only.
     root_stop: Vec<AtomicBool>,
+    /// A Root terminal record is being committed; the watchdog must not
+    /// classify that final durable write as zero-progress walking.
+    root_commit: Vec<AtomicBool>,
     /// Store-wide failure (disk full / store unavailable / manifest
     /// switch): the whole Run fails and keeps the old Report.
     store_wide: AtomicBool,
@@ -72,16 +76,10 @@ struct EngineShared {
     /// Memoized worktree hints per (entry path, Root): the probe result
     /// depends on the exact entry the upward walk starts from, so siblings
     /// under one Root never share a cached hint.
-    worktree_memo:
-        Mutex<std::collections::HashMap<(std::path::PathBuf, u32), Option<WorktreeHintMemo>>>,
+    worktree_memo: Mutex<WorktreeMemoCache>,
     /// Deterministic per-Root entry/entity sequence counters.
     seq: Vec<AtomicUsize>,
     entity_seq: Vec<AtomicUsize>,
-    /// Generation-bound canonical entity de-duplication: final object
-    /// identities already aggregated in this Run (ADR-0017). Live progress
-    /// counts distinct entities; the Report's exact index is built from the
-    /// healthy Roots' evidence at finalize.
-    entity_ids: Mutex<std::collections::HashSet<(u64, u64)>>,
     /// Planned Root index → walkable position (engine array index).
     positions: std::collections::HashMap<u32, usize>,
 }
@@ -92,6 +90,38 @@ struct WorktreeHintMemo {
     gitdir_kind: String,
     remote_urls: Vec<String>,
     head_ref: Option<String>,
+}
+
+struct WorktreeMemoCache {
+    entries: HashMap<(std::path::PathBuf, u32), Option<WorktreeHintMemo>>,
+    order: VecDeque<(std::path::PathBuf, u32)>,
+    capacity: usize,
+}
+
+impl WorktreeMemoCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get(&self, key: &(std::path::PathBuf, u32)) -> Option<Option<WorktreeHintMemo>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: (std::path::PathBuf, u32), value: Option<WorktreeHintMemo>) {
+        if !self.entries.contains_key(&key) {
+            if self.entries.len() >= self.capacity {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.entries.remove(&oldest);
+                }
+            }
+            self.order.push_back(key.clone());
+        }
+        self.entries.insert(key, value);
+    }
 }
 
 const PROBE_CAPACITY: usize = GIT_PROBE_WORKERS;
@@ -202,14 +232,16 @@ fn run(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>) {
         root_stop: (0..walkable.len())
             .map(|_| AtomicBool::new(false))
             .collect(),
+        root_commit: (0..walkable.len())
+            .map(|_| AtomicBool::new(false))
+            .collect(),
         store_wide: AtomicBool::new(false),
         store_wide_detail: Mutex::new(None),
         git_probe: ProbeSemaphore::new(PROBE_CAPACITY),
         lock_report: Mutex::new(None),
-        worktree_memo: Mutex::new(std::collections::HashMap::new()),
+        worktree_memo: Mutex::new(WorktreeMemoCache::new(QUEUE_CAPACITY)),
         seq: (0..walkable.len()).map(|_| AtomicUsize::new(0)).collect(),
         entity_seq: (0..walkable.len()).map(|_| AtomicUsize::new(0)).collect(),
-        entity_ids: Mutex::new(std::collections::HashSet::new()),
         positions: walkable
             .iter()
             .enumerate()
@@ -374,6 +406,7 @@ fn process_root(
             root_index,
             heap_index,
             "Root identity changed before walking".to_owned(),
+            false,
         );
         return;
     }
@@ -409,7 +442,7 @@ fn process_root(
         std::thread::sleep(Duration::from_millis(5));
     }
     if let Err(error) = outcome {
-        fail_root_local(slot, engine, root_index, heap_index, error);
+        fail_root_local(slot, engine, root_index, heap_index, error, false);
         return;
     }
     if cancelled_or_superseded(slot) || engine.store_wide.load(Ordering::Acquire) {
@@ -437,11 +470,9 @@ fn process_root(
             ScanRootState::Failed,
             Some(root.diagnostic.clone().unwrap_or_else(|| "failed".into())),
         ),
-        _ => {
-            root.state = ScanRootViewState::Completed;
-            (ScanRootState::Completed, None)
-        }
+        _ => (ScanRootState::Completed, None),
     };
+    engine.root_commit[heap_index].store(true, Ordering::Release);
     drop(progress);
     let record = build_root_record(slot, root_index, state, diagnostic);
     let _ = writer_tx.send(StoreItem::Root { root_index, record });
@@ -504,18 +535,54 @@ fn process_entry(
 ) -> Result<(), String> {
     // Bounded chain evidence (16-hop/cycle/non-UTF-8 fail closed; the fault
     // is recorded, never a partial fingerprint).
-    let chain = coordinator
+    let entry_name_is_non_utf8 = entry
+        .entry_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_none();
+    let mut chain = coordinator
         .filesystem
         .inspect_evidence_chain(&entry.entry_path)
+        .or_else(|error| {
+            if entry_name_is_non_utf8 {
+                Ok(EvidenceChain {
+                    entry_path: entry.entry_path.clone(),
+                    entry_device: 0,
+                    entry_inode: 0,
+                    hops: Vec::new(),
+                    final_entity: None,
+                    fault: Some(ChainFault::NonUtf8 {
+                        at: entry.entry_path.clone(),
+                    }),
+                })
+            } else {
+                Err(error)
+            }
+        })
         .map_err(|error| error.to_string())?;
-    let lock_hint = lock_hint_for(coordinator, engine, &entry.name);
-    let worktree_hint = worktree_hint_for(
-        coordinator,
-        engine,
-        root_index,
-        &canonical,
-        &entry.entry_path,
-    )?;
+    if entry_name_is_non_utf8 && chain.fault.is_none() {
+        chain.final_entity = None;
+        chain.fault = Some(ChainFault::NonUtf8 {
+            at: entry.entry_path.clone(),
+        });
+    }
+    let non_utf8 = matches!(chain.fault, Some(ChainFault::NonUtf8 { .. }));
+    let lock_hint = if non_utf8 {
+        None
+    } else {
+        lock_hint_for(coordinator, engine, &entry.name)
+    };
+    let worktree_hint = if non_utf8 {
+        None
+    } else {
+        worktree_hint_for(
+            coordinator,
+            engine,
+            root_index,
+            &canonical,
+            &entry.entry_path,
+        )?
+    };
     let (chain_hops, chain_fault) = chain_to_record(&chain);
     // Generation-bound object identity of the resolved final entity
     // (ADR-0017): valid only inside this Report, so the appearance carries
@@ -571,6 +638,21 @@ fn process_entry(
                 identity,
             })
             .map_err(|_| "the entity hash queue stopped".to_owned())?;
+    }
+    if non_utf8 {
+        let at = chain
+            .fault
+            .as_ref()
+            .map(|fault| fault_position(fault).display().to_string())
+            .unwrap_or_else(|| entry.entry_path.display().to_string());
+        fail_root_local(
+            slot,
+            engine,
+            root_index,
+            heap_index,
+            format!("non_utf8_entry: directory entry at {at} is not UTF-8"),
+            false,
+        );
     }
     coordinator.publish_progress(slot, false);
     Ok(())
@@ -634,14 +716,10 @@ fn hash_worker_loop(
         // resolve to the same file-system object form one generation-bound
         // entity. Only a successfully hashed object with a readable identity
         // joins an entity; a fault stays an appearance without a guess.
-        let newly_assigned = match verified_identity {
-            Some(identity) => {
-                let key = (identity.device, identity.inode);
-                let mut ids = engine.entity_ids.lock().unwrap_or_else(|p| p.into_inner());
-                ids.insert(key)
-            }
-            _ => false,
-        };
+        // The exact generation-bound de-duplication happens in the
+        // disk-backed entity index. Live progress only reports successfully
+        // hashed entity evidence and never retains an identity set.
+        let newly_assigned = verified_identity.is_some();
         {
             let mut progress = slot.progress_lock();
             if let Some(root) = progress
@@ -689,7 +767,6 @@ fn hash_worker_loop(
             engine.pending[heap_index].fetch_sub(1, Ordering::AcqRel);
             continue;
         }
-        engine.pending[heap_index].fetch_sub(1, Ordering::AcqRel);
         coordinator.publish_progress(&slot, false);
     }
 }
@@ -700,11 +777,15 @@ fn writer_loop(
     receiver: std::sync::mpsc::Receiver<StoreItem>,
 ) {
     let run_id = &slot.record.run_id;
-    while let Ok(item) = receiver.recv() {
+    while let Ok(mut item) = receiver.recv() {
         if engine.store_wide.load(Ordering::Acquire) {
             // Store-wide: keep draining so producers unblock; every record
             // is discarded (the temporary Run is removed afterwards).
+            complete_entity_write(slot, engine, &item);
             continue;
+        }
+        if let StoreItem::Root { root_index, record } = &mut item {
+            refresh_root_record_before_write(slot, *root_index, record);
         }
         let result = match &item {
             StoreItem::Entry { root_index, record } => {
@@ -717,9 +798,19 @@ fn writer_loop(
             }
             StoreItem::Root { record, .. } => slot.store.write_root(run_id, record),
         };
-        if let Err(error) = result {
-            classify_store_error(engine, slot, &item, &error);
+        match result {
+            Ok(()) => {
+                if let StoreItem::Root { root_index, record } = &item {
+                    if record.state == ScanRootState::Completed {
+                        mark_root_committed(slot, *root_index);
+                    }
+                }
+            }
+            Err(error) => {
+                classify_store_error(engine, slot, &item, &error);
+            }
         }
+        complete_entity_write(slot, engine, &item);
     }
 }
 
@@ -734,7 +825,8 @@ fn classify_store_error(
 ) {
     let store_wide = match error {
         ScanEvidenceStoreError::Write { operation, .. } => *operation == fault_points::DISK_FULL,
-        ScanEvidenceStoreError::Unavailable { .. }
+        ScanEvidenceStoreError::Corrupt { .. }
+        | ScanEvidenceStoreError::Unavailable { .. }
         | ScanEvidenceStoreError::ProvenanceMismatch { .. } => true,
     };
     if store_wide {
@@ -758,7 +850,84 @@ fn classify_store_error(
             )
         }
     };
-    fail_root_local(slot, engine, root_index, heap_index, format!("{error}"));
+    let force_failure = matches!(item, StoreItem::Root { .. });
+    fail_root_local(
+        slot,
+        engine,
+        root_index,
+        heap_index,
+        format!("{error}"),
+        force_failure,
+    );
+}
+
+fn mark_root_committed(slot: &RunSlot, root_index: u32) {
+    let mut progress = slot.progress_lock();
+    let root = progress
+        .roots
+        .iter_mut()
+        .find(|root| root.index == root_index)
+        .expect("written Root is in progress");
+    if root.state != ScanRootViewState::Failed && root.state != ScanRootViewState::Unresponsive {
+        root.state = ScanRootViewState::Completed;
+    }
+    progress.counts.failed_roots = progress
+        .roots
+        .iter()
+        .filter(|root| {
+            matches!(
+                root.state,
+                ScanRootViewState::Failed | ScanRootViewState::Unresponsive
+            )
+        })
+        .count() as u64;
+}
+
+fn refresh_root_record_before_write(slot: &RunSlot, root_index: u32, record: &mut ScanRootRecord) {
+    let mut progress = slot.progress_lock();
+    let root = progress
+        .roots
+        .iter_mut()
+        .find(|root| root.index == root_index)
+        .expect("written Root is in progress");
+    // Entering the terminal write is itself observable progress; otherwise
+    // a durable fsync can race the zero-progress watchdog.
+    if root.state == ScanRootViewState::Walking {
+        root.last_progress = Instant::now();
+    }
+    match root.state {
+        ScanRootViewState::Unresponsive => {
+            record.state = ScanRootState::Unresponsive;
+            record.diagnostic = root
+                .diagnostic
+                .clone()
+                .or_else(|| Some("unresponsive".into()));
+        }
+        ScanRootViewState::Failed => {
+            record.state = ScanRootState::Failed;
+            record.diagnostic = root.diagnostic.clone().or_else(|| Some("failed".into()));
+        }
+        ScanRootViewState::Pending | ScanRootViewState::Walking | ScanRootViewState::Completed => {}
+    }
+}
+
+fn complete_entity_write(slot: &RunSlot, engine: &EngineShared, item: &StoreItem) {
+    let StoreItem::Entity { root_index, .. } = item else {
+        return;
+    };
+    if let Some(heap_index) = engine.heap_of(root_index) {
+        engine.pending[heap_index].fetch_sub(1, Ordering::AcqRel);
+    }
+    let mut progress = slot.progress_lock();
+    if let Some(root) = progress
+        .roots
+        .iter_mut()
+        .find(|root| root.index == *root_index)
+    {
+        // The Root worker may be waiting for the final durable entity write;
+        // that wait is progress, not an unresponsive filesystem walk.
+        root.last_progress = Instant::now();
+    }
 }
 
 fn watchdog_loop(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: Arc<EngineShared>) {
@@ -802,6 +971,10 @@ fn watchdog_loop(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: 
                 root.slow = true;
             }
             if root.state == ScanRootViewState::Walking
+                && !engine
+                    .heap_of(&root.index)
+                    .map(|index| engine.root_commit[index].load(Ordering::Acquire))
+                    .unwrap_or(false)
                 && now.duration_since(root.last_progress).as_millis() as u64
                     >= coordinator.unresponsive_ms
             {
@@ -918,7 +1091,7 @@ fn finalize(coordinator: Arc<ScanCoordinator>, slot: Arc<RunSlot>, engine: Arc<E
             return;
         }
     };
-    let manifest = build_manifest(&coordinator, &slot, index_stats, classification.counts);
+    let manifest = build_manifest(&coordinator, &slot, index_stats, classification);
     match slot.store.publish_report(&slot.record.run_id, &manifest) {
         Ok(()) => {
             set_state_best_effort(&slot, ScanRunState::Completed, None);
@@ -1114,10 +1287,68 @@ fn build_root_record(
 /// the Core seams (fail closed on any read error), runs the pure
 /// classifier and persists the immutable classification index. The caller
 /// treats every error here as store-wide: no classification, no Report.
+struct EvidenceClassificationRowSource<'a> {
+    store: &'a dyn ScanEvidenceStore,
+    run_id: &'a str,
+}
+
+impl crate::core::scan::classification::ClassificationRowSource
+    for EvidenceClassificationRowSource<'_>
+{
+    fn for_each_row(
+        &mut self,
+        visitor: &mut dyn FnMut(
+            crate::seams::scan_evidence_store::ScanClassificationRow,
+        ) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.store
+            .stream_classification_rows(self.run_id, &mut |row| {
+                visitor(row).map_err(|error| ScanEvidenceStoreError::Corrupt {
+                    operation: "classify Scan evidence",
+                    detail: error,
+                })
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct EvidenceClassificationSink<'a> {
+    writer: &'a mut dyn ScanClassificationWriter,
+}
+
+impl crate::core::scan::classification::ClassificationSink for EvidenceClassificationSink<'_> {
+    fn append_verdict(
+        &mut self,
+        record: &crate::seams::scan_evidence_store::ScanSourceVerdictRecord,
+    ) -> Result<(), String> {
+        self.writer
+            .append_verdict(record)
+            .map_err(|error| error.to_string())
+    }
+
+    fn append_git_group(
+        &mut self,
+        record: &crate::seams::scan_evidence_store::ScanGitSourceGroupRecord,
+    ) -> Result<(), String> {
+        self.writer
+            .append_git_group(record)
+            .map_err(|error| error.to_string())
+    }
+
+    fn append_conflict_set(
+        &mut self,
+        record: &crate::seams::scan_evidence_store::ScanConflictSetRecord,
+    ) -> Result<(), String> {
+        self.writer
+            .append_conflict_set(record)
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn classify_run(
     coordinator: &ScanCoordinator,
     slot: &RunSlot,
-) -> Result<crate::core::scan::classification::ScanClassificationOutput, String> {
+) -> Result<crate::seams::scan_evidence_store::ScanSourceCounts, String> {
     use crate::core::scan::classification::ScanClassificationContext;
 
     let gate = coordinator.write_gate.snapshot();
@@ -1130,10 +1361,6 @@ fn classify_run(
             ));
         }
     };
-    let rows = slot
-        .store
-        .classification_rows(&slot.record.run_id)
-        .map_err(|error| error.to_string())?;
     let managed = coordinator
         .managed_facts
         .read()
@@ -1186,16 +1413,33 @@ fn classify_run(
         faulted_lock_roots,
         report_complete,
     };
-    let output = crate::core::scan::classification::classify(rows, &context);
-    slot.store
-        .write_classification(
-            &slot.record.run_id,
-            &output.verdicts,
-            &output.git_groups,
-            &output.conflict_sets,
-        )
+    let mut source = EvidenceClassificationRowSource {
+        store: slot.store.as_ref(),
+        run_id: &slot.record.run_id,
+    };
+    let mut spool = slot
+        .store
+        .open_classification_spool(&slot.record.run_id)
         .map_err(|error| error.to_string())?;
-    Ok(output)
+    let mut counts = None;
+    slot.store
+        .write_classification_stream(&slot.record.run_id, &mut |writer| {
+            let mut sink = EvidenceClassificationSink { writer };
+            let result = crate::core::scan::classification::classify_stream(
+                &mut source,
+                &context,
+                spool.as_mut(),
+                &mut sink,
+            )
+            .map_err(|detail| ScanEvidenceStoreError::Corrupt {
+                operation: "classify Scan evidence",
+                detail,
+            })?;
+            counts = Some(result);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    counts.ok_or_else(|| "classification writer did not run".to_owned())
 }
 
 fn fail_root_local(
@@ -1204,6 +1448,7 @@ fn fail_root_local(
     root_index: u32,
     heap_index: usize,
     diagnostic: String,
+    force: bool,
 ) {
     engine.root_stop[heap_index].store(true, Ordering::Release);
     let mut progress = slot.progress_lock();
@@ -1212,7 +1457,9 @@ fn fail_root_local(
         .iter_mut()
         .find(|root| root.index == root_index)
         .expect("walked Root is in progress");
-    if root.state != ScanRootViewState::Completed && root.state != ScanRootViewState::Unresponsive {
+    if root.state != ScanRootViewState::Unresponsive
+        && (force || root.state != ScanRootViewState::Completed)
+    {
         root.state = ScanRootViewState::Failed;
         root.diagnostic = Some(diagnostic);
     }
@@ -1349,7 +1596,6 @@ fn worktree_hint_for(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(&key)
-        .cloned()
     {
         return Ok(cached.as_ref().map(worktree_hint_record));
     }

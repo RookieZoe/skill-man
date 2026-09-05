@@ -28,8 +28,12 @@
 //!   ownership) require complete coverage — the Core closed reason is
 //!   `scan_incomplete`; a keep-in-place Local Link is never blocked.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::core::domain::skill_identity_key;
 use crate::core::fixture_recovery::{
@@ -38,8 +42,9 @@ use crate::core::fixture_recovery::{
 };
 use crate::core::git_source::parse_git_source_input;
 use crate::seams::scan_evidence_store::{
-    ScanClassificationRow, ScanConflictSetRecord, ScanGitSourceGroupRecord, ScanLockClaimRecord,
-    ScanOperationEligibility, ScanSourceCounts, ScanSourceVerdictRecord, ScanWorktreeHintRecord,
+    ScanClassificationRow, ScanClassificationSpool, ScanClassificationSpoolEntity,
+    ScanConflictSetRecord, ScanGitSourceGroupRecord, ScanLockClaimRecord, ScanOperationEligibility,
+    ScanSourceCounts, ScanSourceVerdictRecord, ScanWorktreeHintRecord,
 };
 
 /// Closed verdict values (the verdict vocabulary of §8.2).
@@ -97,12 +102,30 @@ pub struct ScanClassificationContext {
     pub report_complete: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScanClassificationOutput {
     pub verdicts: Vec<ScanSourceVerdictRecord>,
     pub git_groups: Vec<ScanGitSourceGroupRecord>,
     pub conflict_sets: Vec<ScanConflictSetRecord>,
     pub counts: ScanSourceCounts,
+}
+
+/// Source of one generation's classification rows. Implementations stream
+/// from the Evidence Store; the classifier never receives a full `Vec`.
+pub trait ClassificationRowSource {
+    fn for_each_row(
+        &mut self,
+        visitor: &mut dyn FnMut(ScanClassificationRow) -> Result<(), String>,
+    ) -> Result<(), String>;
+}
+
+/// Destination for immutable classification evidence. The Evidence Store
+/// owns the durable JSONL files and fsync protocol.
+pub trait ClassificationSink {
+    fn append_verdict(&mut self, record: &ScanSourceVerdictRecord) -> Result<(), String>;
+    fn append_git_group(&mut self, record: &ScanGitSourceGroupRecord) -> Result<(), String>;
+    fn append_conflict_set(&mut self, record: &ScanConflictSetRecord) -> Result<(), String>;
 }
 
 /// One attributed bounded worktree hint: provider kind, canonical
@@ -136,6 +159,7 @@ enum GitHintOutcome {
 
 /// Internal classification state of one entity; the final record is built
 /// after conflict/group membership resolves.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct PerEntity {
     seq: u64,
     canonical_path: PathBuf,
@@ -159,6 +183,7 @@ struct PerEntity {
     shape: VerdictShape,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 enum VerdictShape {
     Local,
     Git {
@@ -228,7 +253,11 @@ impl PerEntity {
     }
 }
 
-/// Classify every canonical entity row of a Report generation.
+/// Small in-memory helper retained for pure classifier unit tests.
+///
+/// The production Run uses `classify_stream`, which keeps cross-entity joins
+/// in a temporary disk-backed spool.
+#[cfg(test)]
 pub fn classify(
     rows: Vec<ScanClassificationRow>,
     context: &ScanClassificationContext,
@@ -429,6 +458,201 @@ pub fn classify(
         conflict_sets,
         counts,
     }
+}
+
+/// Classify one generation through a disk-backed spool.
+///
+/// Git group and Local Conflict Set membership require cross-entity joins.
+/// The spool keeps those joins on disk, then emits each immutable output row
+/// through `sink`; only one entity or one group is resident at a time.
+pub fn classify_stream(
+    source: &mut dyn ClassificationRowSource,
+    context: &ScanClassificationContext,
+    spool: &mut dyn ScanClassificationSpool,
+    sink: &mut dyn ClassificationSink,
+) -> Result<ScanSourceCounts, String> {
+    let managed_paths: HashSet<&Path> = context
+        .managed_entity_paths
+        .iter()
+        .map(|path| path.as_path())
+        .collect();
+    let managed_name_keys: HashSet<String> = context
+        .managed_directory_names
+        .iter()
+        .map(|name| skill_identity_key(name))
+        .collect();
+    let faulted_roots: Vec<(&Path, &str)> = context
+        .faulted_lock_roots
+        .iter()
+        .map(|(path, fault)| (path.as_path(), fault.as_str()))
+        .collect();
+    {
+        let mut insert_row = |row: ScanClassificationRow| -> Result<(), String> {
+            let entity = classify_entity(
+                row,
+                context,
+                &managed_paths,
+                &managed_name_keys,
+                &faulted_roots,
+            );
+            let (shape, provider, repository) = match &entity.shape {
+                VerdictShape::Git {
+                    provider,
+                    canonical_repository,
+                } => (
+                    "git",
+                    Some(provider.as_str()),
+                    Some(canonical_repository.as_str()),
+                ),
+                VerdictShape::Local => ("local", None, None),
+                _ => ("other", None, None),
+            };
+            let payload = serde_json::to_vec(&entity)
+                .map_err(|error| format!("serialize classification row: {error}"))?;
+            spool.insert_entity(
+                entity.seq,
+                &payload,
+                shape,
+                provider,
+                repository,
+                &entity.identity_key,
+            )?;
+            Ok(())
+        };
+        source.for_each_row(&mut insert_row)?;
+    }
+
+    let mut next_group_seq = 1_u64;
+    let mut git_groups = 0_u64;
+    let mut git_groups_conflicted = 0_u64;
+    while let Some((provider, repository)) = spool.next_git_group()? {
+        let mut acc = GroupAcc {
+            provider: provider.clone(),
+            canonical_repository: repository.clone(),
+            ..GroupAcc::default()
+        };
+        let mut collect_member = |payload: Vec<u8>| -> Result<(), String> {
+            let entity = serde_json::from_slice::<PerEntity>(&payload)
+                .map_err(|error| format!("parse classification Git member: {error}"))?;
+            acc.members.push(entity.seq);
+            acc.member_paths.push(entity.canonical_path);
+            acc.member_names.push(entity.display_name);
+            acc.claims.extend(entity.lock_claims);
+            for hint in entity.worktree_hints {
+                if hint.gitdir_kind != "uninterpretable" {
+                    acc.repository_root = Some(hint.repository_root);
+                    acc.remote_urls_seen.extend(hint.remote_urls);
+                }
+            }
+            Ok(())
+        };
+        spool.for_each_git_member(&provider, &repository, &mut collect_member)?;
+        acc.dedupe();
+        let (status, detail) = group_status(&acc);
+        let is_candidate = status == "candidate";
+        if is_candidate {
+            git_groups += 1;
+        } else {
+            git_groups_conflicted += 1;
+        }
+        sink.append_git_group(&ScanGitSourceGroupRecord {
+            group_seq: next_group_seq,
+            provider: acc.provider,
+            canonical_repository: acc.canonical_repository,
+            repository_root: acc.repository_root,
+            remote_urls_seen: acc.remote_urls_seen,
+            member_entity_seqs: acc.members,
+            member_paths: acc.member_paths,
+            member_names: acc.member_names,
+            lock_claims: acc.claims,
+            refs: acc.refs.into_iter().collect(),
+            lock_paths: acc.lock_paths.into_iter().collect(),
+            status: status.clone(),
+            operations: if is_candidate {
+                vec![eligibility(
+                    OP_GIT_FETCH_MANAGE,
+                    context.report_complete,
+                    Some(CLOSED_REASON_SCAN_INCOMPLETE),
+                )]
+            } else {
+                Vec::new()
+            },
+            detail: detail.clone(),
+        })?;
+        spool.mark_git_group(
+            &provider,
+            &repository,
+            next_group_seq,
+            &status,
+            detail.as_deref(),
+        )?;
+        next_group_seq = next_group_seq.saturating_add(1);
+    }
+
+    let mut next_conflict_seq = 1_u64;
+    while let Some(identity_key) = spool.next_local_conflict_key()? {
+        let mut member_entity_seqs = Vec::new();
+        let mut member_paths = Vec::new();
+        let mut representative_name = String::new();
+        let mut collect_member = |payload: Vec<u8>| -> Result<(), String> {
+            let entity = serde_json::from_slice::<PerEntity>(&payload)
+                .map_err(|error| format!("parse classification Conflict member: {error}"))?;
+            if representative_name.is_empty() {
+                representative_name = entity.display_name;
+            }
+            member_entity_seqs.push(entity.seq);
+            member_paths.push(entity.canonical_path);
+            Ok(())
+        };
+        spool.for_each_local_member(&identity_key, &mut collect_member)?;
+        sink.append_conflict_set(&ScanConflictSetRecord {
+            set_seq: next_conflict_seq,
+            directory_identity_key: identity_key.clone(),
+            directory_name: representative_name,
+            member_entity_seqs: member_entity_seqs.clone(),
+            member_paths,
+            winner_entity_seq: None,
+        })?;
+        spool.mark_local_conflict(&identity_key, next_conflict_seq)?;
+        next_conflict_seq = next_conflict_seq.saturating_add(1);
+    }
+
+    let mut counts = ScanSourceCounts {
+        git_groups,
+        git_groups_conflicted,
+        conflict_sets: next_conflict_seq.saturating_sub(1),
+        ..ScanSourceCounts::default()
+    };
+    let mut emit_verdict = |row: ScanClassificationSpoolEntity| -> Result<(), String> {
+        let mut entity = serde_json::from_slice::<PerEntity>(&row.payload)
+            .map_err(|error| format!("parse classification verdict: {error}"))?;
+        entity.git_group_seq = row.group_seq;
+        if let Some(status) = row.group_status {
+            if status != "candidate" {
+                entity.shape = VerdictShape::Blocked;
+                entity.reason_kind = Some(
+                    if status == "ownership_split" {
+                        REASON_OWNERSHIP_SPLIT
+                    } else {
+                        REASON_REF_CONFLICT
+                    }
+                    .to_owned(),
+                );
+                entity.detail = row.group_detail;
+            }
+        }
+        if let Some(conflict_seq) = row.conflict_seq {
+            entity.shape = VerdictShape::ConflictSetMember;
+            entity.conflict_set_seq = Some(conflict_seq);
+        }
+        let verdict = entity.to_record(context.report_complete);
+        add_verdict_counts(&mut counts, &verdict);
+        sink.append_verdict(&verdict)?;
+        Ok(())
+    };
+    spool.for_each_entity(&mut emit_verdict)?;
+    counts.needs_attention = counts.blocked + counts.deferred + counts.identity_conflicts;
+    Ok(counts)
 }
 
 fn classify_entity(
@@ -651,6 +875,29 @@ fn git_hint_outcome(entity: &mut PerEntity, inside: bool) -> GitHintOutcome {
         };
     }
 
+    if claim_repos.len() > 1 {
+        return GitHintOutcome::Blocked {
+            reason: REASON_PROVENANCE_CONTRADICTION,
+            detail: format!(
+                "lock repositories: {}",
+                claim_repos
+                    .iter()
+                    .map(|(_, repository)| repository.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+    }
+    if ambiguous && !claim_repos.is_empty() {
+        return GitHintOutcome::Blocked {
+            reason: REASON_PROVENANCE_CONTRADICTION,
+            detail: "lock claim contradicts ambiguous worktree repositories".to_owned(),
+        };
+    }
+    if let Some((reason, detail)) = faulty_claim {
+        return GitHintOutcome::Blocked { reason, detail };
+    }
+
     match (claim_repos.len(), worktree_attributed) {
         (1, Some(worktree)) => {
             let (provider, canonical_repository) =
@@ -692,9 +939,6 @@ fn git_hint_outcome(entity: &mut PerEntity, inside: bool) -> GitHintOutcome {
             }
         }
         (0, None) => {
-            if let Some((reason, detail)) = faulty_claim {
-                return GitHintOutcome::Blocked { reason, detail };
-            }
             if has_uninterpretable || has_valid {
                 // Uninterpretable or un-attributable Git metadata.
                 if inside {
@@ -716,7 +960,10 @@ fn git_hint_outcome(entity: &mut PerEntity, inside: bool) -> GitHintOutcome {
                 GitHintOutcome::None
             }
         }
-        (_, _) => GitHintOutcome::None,
+        (_, _) => GitHintOutcome::Blocked {
+            reason: REASON_PROVENANCE_CONTRADICTION,
+            detail: "Git claims could not be attributed to one repository".to_owned(),
+        },
     }
 }
 
@@ -754,6 +1001,46 @@ impl GroupAcc {
     }
 }
 
+fn group_status(acc: &GroupAcc) -> (String, Option<String>) {
+    if acc.lock_paths.len() > 1 {
+        (
+            "ownership_split".to_owned(),
+            Some(format!(
+                "lock files: {}",
+                acc.lock_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        )
+    } else if acc.refs.len() > 1 {
+        (
+            "repository_ref_conflict".to_owned(),
+            Some(format!(
+                "refs: {}",
+                acc.refs.iter().cloned().collect::<Vec<_>>().join(", ")
+            )),
+        )
+    } else {
+        ("candidate".to_owned(), None)
+    }
+}
+
+fn add_verdict_counts(counts: &mut ScanSourceCounts, verdict: &ScanSourceVerdictRecord) {
+    match verdict.verdict.as_str() {
+        VERDICT_LOCAL => counts.local_candidates += 1,
+        VERDICT_CONFLICT_SET => counts.conflict_members += 1,
+        VERDICT_IDENTITY_CONFLICT => counts.identity_conflicts += 1,
+        VERDICT_BLOCKED => counts.blocked += 1,
+        VERDICT_DEFERRED => counts.deferred += 1,
+        VERDICT_ALREADY_MANAGED => counts.already_managed += 1,
+        VERDICT_EXCLUDED => counts.excluded += 1,
+        _ => {}
+    }
+}
+
+#[cfg(test)]
 fn count(
     verdicts: &[ScanSourceVerdictRecord],
     groups: &[ScanGitSourceGroupRecord],
@@ -1154,6 +1441,36 @@ mod tests {
         );
         assert!(verdict.operations.is_empty());
         assert_eq!(output.counts.needs_attention, 1);
+    }
+
+    #[test]
+    fn claims_for_multiple_repositories_are_provenance_conflict() {
+        let ctx = context();
+        let mut row = row(1, "/root/installer/skill", "skill");
+        row.lock_claims = vec![
+            claim(
+                "/root/installer/.skill-lock.json",
+                "skill",
+                "github",
+                "https://github.com/owner/one",
+                Some("v1"),
+            ),
+            claim(
+                "/root/installer/.skill-lock.json",
+                "skill",
+                "github",
+                "https://github.com/owner/two",
+                Some("v1"),
+            ),
+        ];
+        let output = classify(vec![row], &ctx);
+        let verdict = &output.verdicts[0];
+        assert_eq!(verdict.verdict, VERDICT_BLOCKED);
+        assert_eq!(
+            verdict.reason_kind.as_deref(),
+            Some(REASON_PROVENANCE_CONTRADICTION)
+        );
+        assert!(verdict.operations.is_empty());
     }
 
     #[test]

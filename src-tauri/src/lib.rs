@@ -158,6 +158,7 @@ pub fn run() {
             let write_gate = Arc::new(WriteGate::new(WriteGateState::Closed {
                 reason: ClosedReason::Unconfigured,
             }));
+            let scan_evidence_factory = Arc::new(SystemScanEvidenceStoreFactory);
             let bootstrap = Arc::new(BootstrapService::new(
                 app_state.clone(),
                 volume_identity.clone(),
@@ -183,9 +184,9 @@ pub fn run() {
                     catalog_file_name: catalog_file_name.clone(),
                 },
             )
-            .with_delete_qualification(Arc::new(SnapshotDeleteQualifier::new(Arc::new(
-                SystemScanEvidenceStoreFactory,
-            )))));
+            .with_delete_qualification(Arc::new(SnapshotDeleteQualifier::new(
+                scan_evidence_factory.clone(),
+            ))));
             // The one-time Home Binding flow (spec §5.3–§5.4): candidates
             // may not overlap the known Agent skills roots (ADR-0012 §3).
             let home_binding_service = Arc::new(HomeBindingService::new(
@@ -456,7 +457,7 @@ pub fn run() {
             let scan_mutation = Arc::new(ScanMutationCoordinator::new());
             app.manage(scan_mutation.clone());
             let scan_coordinator = Arc::new(ScanCoordinator::new(
-                Arc::new(SystemScanEvidenceStoreFactory),
+                scan_evidence_factory.clone(),
                 filesystem.clone(),
                 Arc::new(SystemInstallerLockStore::new(home_directory.clone())),
                 Arc::new(SystemLocalGitProbe),
@@ -574,6 +575,7 @@ pub fn run() {
                     source_transition.clone(),
                     source_update.clone(),
                     source_lifecycle.clone(),
+                    scan_evidence_factory.clone(),
                 ),
             )
             .with_library_root(resolved_library_root.clone())

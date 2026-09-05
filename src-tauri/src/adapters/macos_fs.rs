@@ -3522,10 +3522,10 @@ impl FileSystem for MacOsFileSystem {
             if !metadata.is_dir() && !metadata.file_type().is_symlink() {
                 continue;
             }
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let name = name.to_owned();
+            let name = entry_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             match self.inspect_link_source(&entry_path) {
                 Ok(snapshot) => entries.push(ScannedSkillEntry {
                     entry_path: entry_path.clone(),
@@ -3582,10 +3582,10 @@ impl FileSystem for MacOsFileSystem {
             if !metadata.is_dir() && !metadata.file_type().is_symlink() {
                 continue;
             }
-            let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let name = name.to_owned();
+            let name = entry_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             // The chain evidence is produced per entry by the Run through
             // `inspect_evidence_chain`; here only the raw kind is surfaced so
             // the caller can stream without holding the full listing.

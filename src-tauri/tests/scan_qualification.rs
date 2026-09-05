@@ -185,6 +185,16 @@ fn seal_qualification(mut q: scan::ScanSnapshotQualification) -> scan::ScanSnaps
     q
 }
 
+fn prepare_empty_report(store: &dyn ScanEvidenceStore, run: &scan::ScanRunRecord) {
+    store.create_run(run).expect("create scan run");
+    store
+        .build_entity_index(&run.run_id)
+        .expect("build empty scan index");
+    store
+        .write_classification_stream(&run.run_id, &mut |_writer| Ok(()))
+        .expect("write empty classification index");
+}
+
 /// The Restore → successful startup → manual Complete chain: marker, report,
 /// qualification, exactly as the Run engine writes them.
 fn qualify(
@@ -204,7 +214,8 @@ fn qualify(
         marked_at_ms: now_ms + 3_600_000,
     };
     store.write_startup_marker(&marker).expect("marker");
-    let (mut manifest, _run) = base_manifest(home, trigger, report_state);
+    let (mut manifest, run) = base_manifest(home, trigger, report_state);
+    prepare_empty_report(&store, &run);
     manifest = seal_manifest(manifest);
     store
         .publish_report("run-qual", &manifest)
@@ -362,7 +373,8 @@ fn startup_marker_missing_or_stale_never_qualifies() {
     store
         .write_startup_marker(&stale_marker)
         .expect("stale marker");
-    let (mut manifest, _run) = base_manifest(&home, "manual", "complete");
+    let (mut manifest, run) = base_manifest(&home, "manual", "complete");
+    prepare_empty_report(&store, &run);
     manifest = seal_manifest(manifest);
     store
         .publish_report("run-qual", &manifest)

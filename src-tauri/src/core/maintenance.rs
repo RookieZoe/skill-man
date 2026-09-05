@@ -31,6 +31,7 @@ use crate::seams::maintenance_store::{
     HandoffRecoveredRecord, LinkSkillRecord, MaintenanceStore, MaintenanceStoreError,
     ManagedSkillBaseline, RelocateActivationBaseline, RemoveTarget, SkillHealthObservation,
 };
+use crate::seams::scan_evidence_store::ScanEvidenceStoreFactory;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -170,6 +171,7 @@ pub struct StartupRecoveryServices {
     source_transition: Arc<SourceTransitionService>,
     source_update: Arc<SourceUpdateService>,
     source_lifecycle: Arc<SourceLifecycleService>,
+    scan_evidence_factory: Arc<dyn ScanEvidenceStoreFactory>,
 }
 
 impl StartupRecoveryServices {
@@ -177,11 +179,13 @@ impl StartupRecoveryServices {
         source_transition: Arc<SourceTransitionService>,
         source_update: Arc<SourceUpdateService>,
         source_lifecycle: Arc<SourceLifecycleService>,
+        scan_evidence_factory: Arc<dyn ScanEvidenceStoreFactory>,
     ) -> Self {
         Self {
             source_transition,
             source_update,
             source_lifecycle,
+            scan_evidence_factory,
         }
     }
 }
@@ -391,6 +395,16 @@ impl MaintenanceService {
     }
 
     fn recover_startup_operations(&self) -> Result<(), MaintenanceError> {
+        if let StartupRecovery::Configured(recovery) = &self.startup_recovery {
+            if let Ok(bound) = self.write_gate.bound_home() {
+                recovery
+                    .scan_evidence_factory
+                    .store_for(&bound)
+                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?
+                    .cleanup_temporary_runs()
+                    .map_err(|error| MaintenanceError::Internal(error.to_string()))?;
+            }
+        }
         if let Some(library_root) = self.active_library_root()? {
             let baselines = self
                 .store

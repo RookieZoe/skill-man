@@ -14,7 +14,9 @@
 //!   roots/<root_key>/
 //!     root.json                # terminal Root record (atomic)
 //!     entries.jsonl            # streamed entry evidence
-//!     entities.jsonl           # streamed entity evidence
+//!     entities.jsonl            # streamed entity evidence
+//!   index.sqlite3              # temporary disk-backed aggregation joins
+//!   classification.sqlite3    # temporary disk-backed classification joins
 //!   manifest.json              # terminal Run manifest (atomic write before current.json)
 //! ```
 //!
@@ -139,7 +141,7 @@ impl ScanRunRecord {
             return None;
         }
         if record.home_id.is_empty()
-            || record.run_id.is_empty()
+            || !is_safe_artifact_id(&record.run_id)
             || !matches!(record.trigger.as_str(), "onboarding" | "manual")
         {
             return None;
@@ -325,8 +327,8 @@ pub struct ScanAppearanceRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScanDiagnosticRecord {
     pub root_index: u32,
-    /// `root_failed | root_unresponsive | root_record_missing |
-    /// chain_dangling | chain_cycle | chain_hop_limit | chain_non_utf8 |
+    /// `root_failed | root_unresponsive | root_non_utf8 |
+    /// root_record_missing | chain_dangling | chain_cycle | chain_hop_limit | chain_non_utf8 |
     /// chain_read_failed | chain_not_directory | chain_identity_replaced |
     /// entity_hash_fault | entity_identity_fault`.
     pub kind: String,
@@ -563,6 +565,88 @@ pub enum ScanReportPageError {
     NotFound,
 }
 
+/// One disk-spooled entity row after Git/Conflict membership joins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanClassificationSpoolEntity {
+    pub payload: Vec<u8>,
+    pub group_seq: Option<u64>,
+    pub group_status: Option<String>,
+    pub group_detail: Option<String>,
+    pub conflict_seq: Option<u64>,
+}
+
+/// Disk-backed join storage used by the Core classification pass.
+///
+/// The trait deliberately exposes records and scalar join keys rather than
+/// an adapter-specific database type. Core can classify without importing
+/// SQLite, while the system adapter keeps the unbounded join state on disk.
+pub trait ScanClassificationSpool {
+    fn insert_entity(
+        &mut self,
+        entity_seq: u64,
+        payload: &[u8],
+        shape: &str,
+        provider: Option<&str>,
+        repository: Option<&str>,
+        identity_key: &str,
+    ) -> Result<(), String>;
+
+    fn next_git_group(&mut self) -> Result<Option<(String, String)>, String>;
+
+    fn for_each_git_member(
+        &mut self,
+        provider: &str,
+        repository: &str,
+        visitor: &mut dyn FnMut(Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String>;
+
+    fn mark_git_group(
+        &mut self,
+        provider: &str,
+        repository: &str,
+        group_seq: u64,
+        status: &str,
+        detail: Option<&str>,
+    ) -> Result<(), String>;
+
+    fn next_local_conflict_key(&mut self) -> Result<Option<String>, String>;
+
+    fn for_each_local_member(
+        &mut self,
+        identity_key: &str,
+        visitor: &mut dyn FnMut(Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String>;
+
+    fn mark_local_conflict(&mut self, identity_key: &str, conflict_seq: u64) -> Result<(), String>;
+
+    fn for_each_entity(
+        &mut self,
+        visitor: &mut dyn FnMut(ScanClassificationSpoolEntity) -> Result<(), String>,
+    ) -> Result<(), String>;
+}
+
+/// Streaming sink for the immutable classification indexes of one Run.
+///
+/// The Core classifier writes one record at a time through this seam. It
+/// never needs to materialize all verdicts, Git groups or Conflict Sets in
+/// memory before the manifest switch.
+pub trait ScanClassificationWriter {
+    fn append_verdict(
+        &mut self,
+        record: &ScanSourceVerdictRecord,
+    ) -> Result<(), ScanEvidenceStoreError>;
+
+    fn append_git_group(
+        &mut self,
+        record: &ScanGitSourceGroupRecord,
+    ) -> Result<(), ScanEvidenceStoreError>;
+
+    fn append_conflict_set(
+        &mut self,
+        record: &ScanConflictSetRecord,
+    ) -> Result<(), ScanEvidenceStoreError>;
+}
+
 /// One Root line of the coverage table in the terminal manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScanRootCoverageRecord {
@@ -613,6 +697,7 @@ impl ScanReportManifest {
         }
         if manifest.home_id.is_empty()
             || manifest.run_id.is_empty()
+            || !is_safe_artifact_id(&manifest.run_id)
             || !matches!(manifest.trigger.as_str(), "onboarding" | "manual")
             || !matches!(manifest.state.as_str(), "complete" | "incomplete")
         {
@@ -623,6 +708,14 @@ impl ScanReportManifest {
                 "scan-report-v1:{}:{}:{}:{}",
                 manifest.home_id, manifest.run_id, manifest.generation, manifest.state
             )
+        {
+            return None;
+        }
+        if manifest.state == "complete"
+            && manifest
+                .roots
+                .iter()
+                .any(|root| root.state != ScanRootState::Completed)
         {
             return None;
         }
@@ -643,6 +736,13 @@ impl ScanReportManifest {
         };
         crate::seams::scan_integrity::canonical_json_digest(&value) == *expected
     }
+}
+
+fn is_safe_artifact_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// Read outcome of the current terminal manifest: a live Report, a genuine
@@ -736,6 +836,11 @@ impl ScanSnapshotQualification {
 pub enum ScanEvidenceStoreError {
     #[error("the Scan Evidence Store write failed: {operation}: {detail}")]
     Write {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("the Scan Evidence Store artifact is corrupt: {operation}: {detail}")]
+    Corrupt {
         operation: &'static str,
         detail: String,
     },
@@ -838,24 +943,31 @@ pub trait ScanEvidenceStore: Send + Sync {
     /// anything unproven is left behind (`ProvenanceMismatch`).
     fn remove_run(&self, run_id: &str) -> Result<(), ScanEvidenceStoreError>;
 
-    /// Compact classification input of every canonical entity (spec §8.1):
-    /// entity facts plus the aggregated appearance evidence (names, lock
-    /// claims, worktree hints). Fail-closed: no partial rows.
-    fn classification_rows(
+    /// Stream compact classification input of every canonical entity
+    /// (spec §8.1): entity facts plus the aggregated appearance evidence
+    /// (names, lock claims, worktree hints). The callback sees one entity at
+    /// a time; no full classification vector is retained in Core memory.
+    fn open_classification_spool(
         &self,
         run_id: &str,
-    ) -> Result<Vec<ScanClassificationRow>, ScanEvidenceStoreError>;
+    ) -> Result<Box<dyn ScanClassificationSpool>, ScanEvidenceStoreError>;
 
-    /// Persist the classification pass of a Run (spec §8.2): verdicts,
-    /// Git groups and Conflict Sets are written as immutable run-level
-    /// index streams before the manifest switch, so a torn classification
-    /// is never published.
-    fn write_classification(
+    fn stream_classification_rows(
         &self,
         run_id: &str,
-        verdicts: &[ScanSourceVerdictRecord],
-        git_groups: &[ScanGitSourceGroupRecord],
-        conflict_sets: &[ScanConflictSetRecord],
+        visitor: &mut dyn FnMut(ScanClassificationRow) -> Result<(), ScanEvidenceStoreError>,
+    ) -> Result<(), ScanEvidenceStoreError>;
+
+    /// Persist the classification pass of a Run (spec §8.2) through a
+    /// streaming writer. Verdicts, Git groups and Conflict Sets are written
+    /// as immutable run-level index streams before the manifest switch, so a
+    /// torn classification is never published.
+    fn write_classification_stream(
+        &self,
+        run_id: &str,
+        write: &mut dyn FnMut(
+            &mut dyn ScanClassificationWriter,
+        ) -> Result<(), ScanEvidenceStoreError>,
     ) -> Result<(), ScanEvidenceStoreError>;
 
     /// Startup sweep: remove every temporary Run not referenced by the

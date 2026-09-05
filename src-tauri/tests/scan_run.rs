@@ -17,6 +17,7 @@ use skill_man_lib::adapters::scan_evidence_store::FaultInjectingScanEvidenceStor
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::scan::mutation::ScanMutationCoordinator;
 use skill_man_lib::core::scan::{ScanCoordinator, ScanRunState, ScanTrigger};
+use skill_man_lib::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGateState};
 use skill_man_lib::seams::agent_configuration_store::{
     AgentConfigurationStore, AgentConfigurationStoreChange, AgentConfigurationStoreError,
     AgentConfigurationStoreSnapshot, RecentProjectFolder, StoredGlobalSkillRoot,
@@ -156,6 +157,7 @@ struct TestScanFileSystem {
     /// slices, so cancel, supersede and the watchdog can always interrupt:
     /// the Run never blocks inside a filesystem call forever.
     stall: Arc<Mutex<Option<PathBuf>>>,
+    synthetic_non_utf8_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl TestScanFileSystem {
@@ -163,6 +165,7 @@ impl TestScanFileSystem {
         Self {
             inner: MacOsFileSystem::new(home_directory),
             stall: Arc::new(Mutex::new(None)),
+            synthetic_non_utf8_root: Arc::new(Mutex::new(None)),
         }
     }
     fn stall_path(&self, path: PathBuf) {
@@ -172,12 +175,24 @@ impl TestScanFileSystem {
     fn unblock_all(&self) {
         *self.stall.lock().unwrap() = None;
     }
+    fn inject_non_utf8_entry(&self, root: &Path) {
+        *self.synthetic_non_utf8_root.lock().unwrap() =
+            Some(std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+    }
     fn is_stalled(&self, path: &Path) -> bool {
         self.stall
             .lock()
             .unwrap()
             .as_deref()
             .map(|stalled| stalled == path)
+            .unwrap_or(false)
+    }
+    fn is_synthetic_non_utf8_root(&self, path: &Path) -> bool {
+        self.synthetic_non_utf8_root
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(|root| root == path)
             .unwrap_or(false)
     }
 }
@@ -326,7 +341,17 @@ impl FileSystem for TestScanFileSystem {
         while self.is_stalled(path) {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        self.inner.scan_skills_directory_stream(path, visitor)
+        self.inner.scan_skills_directory_stream(path, visitor)?;
+        if self.is_synthetic_non_utf8_root(path) {
+            visitor(ScannedSkillEntry {
+                entry_path: path.join("synthetic-non-utf8"),
+                name: "synthetic-non-utf8".into(),
+                kind: skill_man_lib::seams::filesystem::LinkSourceEntryKind::Directory,
+                final_entity_path: None,
+                dangling: false,
+            })?;
+        }
+        Ok(())
     }
 
     fn scan_tree_statistics(
@@ -340,6 +365,18 @@ impl FileSystem for TestScanFileSystem {
         &self,
         path: &Path,
     ) -> Result<skill_man_lib::seams::filesystem::EvidenceChain, FileSystemError> {
+        if path.file_name().and_then(|name| name.to_str()) == Some("synthetic-non-utf8") {
+            return Ok(skill_man_lib::seams::filesystem::EvidenceChain {
+                entry_path: path.to_path_buf(),
+                entry_device: 1,
+                entry_inode: 1,
+                hops: Vec::new(),
+                final_entity: None,
+                fault: Some(skill_man_lib::seams::filesystem::ChainFault::NonUtf8 {
+                    at: path.to_path_buf(),
+                }),
+            });
+        }
         self.inner.inspect_evidence_chain(path)
     }
 
@@ -481,6 +518,44 @@ fn setup() -> (
         .with_unresponsive_ms(1_000),
     );
     (home, coordinator, factory, mutation)
+}
+
+fn setup_with_test_scan_filesystem()
+-> (BoundTestHome, Arc<ScanCoordinator>, Arc<TestScanFileSystem>) {
+    let home = BoundTestHome::new();
+    let root = home.path().join("agent-skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    let filesystem = Arc::new(TestScanFileSystem::new(home.path().to_path_buf()));
+    let factory = Arc::new(FaultInjectingScanEvidenceStoreFactory::new(
+        home.path().to_path_buf(),
+    ));
+    let coordinator = Arc::new(
+        ScanCoordinator::new(
+            factory,
+            filesystem.clone(),
+            Arc::new(EmptyInstallerLockStore),
+            Arc::new(SystemLocalGitProbe),
+            home.write_gate.clone(),
+            Arc::new(StubAgentStore {
+                roots: vec![StoredGlobalSkillRoot {
+                    root_id: "root-0".into(),
+                    configured_path: root,
+                    path_identity_key: "root-0".into(),
+                    consumer_agent_ids: vec!["a1".into()],
+                    activation_skill_ids: vec![],
+                }],
+                configurations: vec![],
+                version: 1,
+            }),
+            Arc::new(ScanMutationCoordinator::new()),
+            Arc::new(AppStateStoreFileSystem::new(home.state_dir.clone())),
+            Arc::new(StubManagedFacts),
+            home.state_dir.clone(),
+            Arc::new(SystemClock::new()),
+        )
+        .with_unresponsive_ms(1_000),
+    );
+    (home, coordinator, filesystem)
 }
 
 use skill_man_lib::adapters::app_state_store::AppStateStoreFileSystem;
@@ -1456,6 +1531,130 @@ fn write_failures_classify_root_local_vs_store_wide() {
     );
 }
 
+/// A terminal Root record is the Root commit point: its write failure marks
+/// that Root failed instead of leaving the progress record Completed.
+#[test]
+fn root_terminal_write_failure_publishes_incomplete_report() {
+    let (_home, coordinator, factory, _mutation) = setup();
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("first");
+    wait_terminal(&coordinator, 10_000);
+
+    factory.fail_next(skill_man_lib::seams::scan_evidence_store::fault_points::WRITE_ROOT);
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("second");
+    wait_terminal(&coordinator, 10_000);
+
+    let snapshot = coordinator.snapshot();
+    assert_eq!(
+        snapshot.run.as_ref().unwrap().state,
+        ScanRunState::Completed
+    );
+    let report = snapshot.current_report.summary.expect("incomplete report");
+    assert!(report.incomplete);
+    assert_eq!(report.coverage.failed, 1);
+    let roots = page_roots(&coordinator, &report);
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0].state,
+        skill_man_lib::seams::scan_evidence_store::ScanRootState::Failed
+    );
+}
+
+#[test]
+fn read_only_and_closed_gates_browse_stale_report_without_starting_rescan() {
+    let (home, coordinator, _factory, _mutation) = setup();
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("first");
+    wait_terminal(&coordinator, 10_000);
+    let report = coordinator
+        .snapshot()
+        .current_report
+        .summary
+        .expect("current report");
+
+    home.write_gate
+        .transition_to(WriteGateState::CatalogReadOnly {
+            reason: ReadOnlyReason::OpenFailed,
+        })
+        .expect("read-only gate");
+    let read_only = coordinator.snapshot();
+    assert_eq!(
+        read_only.current_report.freshness,
+        skill_man_lib::core::scan::ReportFreshness::Stale
+    );
+    let page = coordinator
+        .report_page(
+            ScanReportCursor {
+                report_content_identity: report.content_identity.clone(),
+                run_id: report.run_id.clone(),
+                generation: report.generation,
+                section: ScanReportSection::Roots,
+                offset: 0,
+            },
+            16,
+        )
+        .expect("read-only report page");
+    assert_eq!(page.rows.len(), 1);
+    assert!(
+        coordinator.start_rescan(ScanTrigger::Manual).is_err(),
+        "read-only gate must reject a new Run"
+    );
+
+    home.write_gate
+        .transition_to(WriteGateState::Closed {
+            reason: ClosedReason::HomeUnavailable,
+        })
+        .expect("closed gate");
+    let page = coordinator
+        .report_page(
+            ScanReportCursor {
+                report_content_identity: report.content_identity,
+                run_id: report.run_id,
+                generation: report.generation,
+                section: ScanReportSection::Entities,
+                offset: 0,
+            },
+            16,
+        )
+        .expect("closed report page");
+    assert!(!page.rows.is_empty());
+}
+
+#[test]
+fn non_utf8_root_entry_fails_coverage_with_typed_diagnostic() {
+    let (home, coordinator, filesystem) = setup_with_test_scan_filesystem();
+    let root = home.path().join("agent-skills");
+    filesystem.inject_non_utf8_entry(&root);
+
+    coordinator
+        .start_rescan(ScanTrigger::Manual)
+        .expect("start");
+    wait_terminal(&coordinator, 10_000);
+    let snapshot = coordinator.snapshot();
+    let report = snapshot.current_report.summary.expect("report");
+    assert!(report.incomplete);
+    assert_eq!(report.coverage.failed, 1);
+    let roots = page_roots(&coordinator, &report);
+    assert!(
+        roots.iter().any(|root| root
+            .diagnostic
+            .as_deref()
+            .is_some_and(|detail| { detail.contains("non_utf8_entry") })),
+        "coverage failure must retain the typed non-UTF-8 diagnostic: {roots:?}"
+    );
+    let (diagnostics, _) = page_section(&coordinator, &report, ScanReportSection::Diagnostics, 16);
+    assert!(diagnostics.iter().any(|row| {
+        matches!(
+            row,
+            ScanReportRow::Diagnostic(diagnostic) if diagnostic.kind == "root_non_utf8"
+        )
+    }));
+}
+
 /// Orphaned temporary Runs are swept at the next run creation by
 /// provenance (home_id + run_id + artifact identity).
 #[test]
@@ -2008,7 +2207,11 @@ fn synthetic_large_root_streams_and_pages_bounded() {
         ScanRunState::Completed
     );
     let report = snapshot.current_report.summary.expect("report");
-    assert_eq!(report.counts.entries, 303, "3 real + 300 aliases");
+    assert_eq!(
+        report.counts.entries, 303,
+        "3 real + 300 aliases; coverage={:?}, summary={:?}",
+        report.coverage, report
+    );
     assert_eq!(
         report.counts.entities, 3,
         "exactly three distinct objects despite 303 appearances"

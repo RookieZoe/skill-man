@@ -649,15 +649,10 @@ impl ScanCoordinator {
         cursor: crate::seams::scan_evidence_store::ScanReportCursor,
         limit: usize,
     ) -> Result<ScanReportPageRead, ScanError> {
-        let gate = self.write_gate.snapshot();
-        let bound = match &gate.state {
-            WriteGateState::Open(home) => home.clone(),
-            other => {
-                return Err(ScanError::NotWritable(
-                    write_gate_state_summary(other).to_string(),
-                ));
-            }
-        };
+        // Report browsing is read-only. A verified CatalogReadOnly or
+        // closed session may still expose the previous generation as stale;
+        // only Rescan/Adopt/write paths require Open.
+        let bound = self.report_read_home()?;
         let store = self
             .factory
             .store_for(&bound)
@@ -686,15 +681,7 @@ impl ScanCoordinator {
         generation: u64,
         entity_seq: u64,
     ) -> Result<ScanEntityEvidence, ScanError> {
-        let gate = self.write_gate.snapshot();
-        let bound = match &gate.state {
-            WriteGateState::Open(home) => home.clone(),
-            other => {
-                return Err(ScanError::NotWritable(
-                    write_gate_state_summary(other).to_string(),
-                ));
-            }
-        };
+        let bound = self.report_read_home()?;
         let store = self
             .factory
             .store_for(&bound)
@@ -885,10 +872,14 @@ impl ScanCoordinator {
         // manifest is returned so the caller caches it under its own lock.
         let load_cross_startup = || -> Option<Arc<ScanReportManifest>> {
             let gate = self.write_gate.snapshot();
-            let WriteGateState::Open(home) = &gate.state else {
-                return None;
-            };
-            match self.factory.store_for(home) {
+            let home = match &gate.state {
+                WriteGateState::Open(home) => Some(home.clone()),
+                WriteGateState::CatalogReadOnly { .. } | WriteGateState::Closed { .. } => {
+                    self.write_gate.bound_home().ok()
+                }
+                WriteGateState::Recovery { .. } => None,
+            }?;
+            match self.factory.store_for(&home) {
                 Ok(store) => match store.current_manifest() {
                     Ok(CurrentManifestRead::Report(manifest)) => Some(Arc::new(manifest)),
                     Ok(CurrentManifestRead::Absent) => None,
@@ -933,7 +924,10 @@ impl ScanCoordinator {
         let gate = self.write_gate.snapshot();
         let bound_home = match &gate.state {
             WriteGateState::Open(home) => Some(home.clone()),
-            _ => None,
+            WriteGateState::CatalogReadOnly { .. } | WriteGateState::Closed { .. } => {
+                self.write_gate.bound_home().ok()
+            }
+            WriteGateState::Recovery { .. } => None,
         };
         let home_matches = bound_home
             .as_ref()
@@ -998,6 +992,20 @@ impl ScanCoordinator {
             },
             loaded,
         )
+    }
+
+    fn report_read_home(&self) -> Result<BoundHome, ScanError> {
+        let gate = self.write_gate.snapshot();
+        match &gate.state {
+            WriteGateState::Open(home) => Ok(home.clone()),
+            WriteGateState::CatalogReadOnly { .. } | WriteGateState::Closed { .. } => self
+                .write_gate
+                .bound_home()
+                .map_err(|error| ScanError::NotWritable(error.to_string())),
+            WriteGateState::Recovery { .. } => Err(ScanError::NotWritable(
+                write_gate_state_summary(&gate.state),
+            )),
+        }
     }
 }
 
@@ -1098,6 +1106,7 @@ fn write_gate_state_summary(state: &WriteGateState) -> String {
 }
 
 pub(crate) fn seal_manifest(mut manifest: ScanReportManifest) -> ScanReportManifest {
+    manifest.integrity = None;
     let value = serde_json::to_value(&manifest).expect("manifest serializes");
     manifest.integrity = Some(canonical_json_digest(&value));
     manifest
