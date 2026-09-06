@@ -53,6 +53,8 @@ Source Group Preview 在一个来源父节点下显示 provider、规范化 repo
 
 单一 external installer lock 文件中属于该来源的全部 applicable claims 以一次 full-file exact CAS 共同释放，这是唯一逻辑 commit point。此前任何失败都恢复全部隔离来源并保持零 Catalog/lock 变化；此后只能按 journal 把完整来源 roll-forward 到固定目标 release。绝不留下同一 release 的部分成员、长期双 owner 或无人 owner。
 
+外部声明不要求覆盖远端全部成员。首次纳管仍安装完整 Source Release，但只接管与声明的名称和 `skillPath` 精确匹配且验证通过的外部实体；没有声明的成员仅安装到 Home，其他外部目录不变。声明无法唯一匹配、外部实体缺失或不安全时仍拒绝。两个同名成员以不同 `skillPath` 保留为独立成员，暂存路径必须互不冲突；恢复和撤销继续验证冻结的声明及实体事实，不推断新的所有权。
+
 Source Undo 是结果窗口内的条件性来源级整体逆转：只有全部成员、来源记录、Home 实体、external path 和旧 lock claims 都仍满足 guard 才能恢复；任一 guard 失败则整体拒绝。普通 Remove 不恢复 external owner。
 
 日后 Update 重新获取唯一 tracking ref，发现新的完整 Source Release，并重复 Source Group Preview、冲突草案、最终确认和 Source Transition。外部 installer 重新出现仍是 Ownership Conflict，不是 Update；不自动覆盖、合并或再次纳管。

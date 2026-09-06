@@ -438,7 +438,7 @@ fn confirmation(fixture: &Fixture) -> ConfirmSourceTransitionRequest {
     let SourceGroupPreviewOutcome::Preview(preview) = outcome else {
         panic!("expected clean preview");
     };
-    assert_eq!(preview.members.len(), 2);
+    assert!(!preview.members.is_empty());
     ConfirmSourceTransitionRequest {
         source_type: "git".into(),
         source_url: preview.source_url,
@@ -487,6 +487,111 @@ fn count(connection: &Connection, table: &str) -> i64 {
 
 fn namespace_members(fixture: &Fixture, remote_id: &str) -> PathBuf {
     fixture.library.join("skills/git").join(remote_id)
+}
+
+#[test]
+fn partial_claims_refuse_unmatched_paths_before_any_external_change() {
+    let fixture = fixture();
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    lock["skills"].as_object_mut().unwrap().remove("beta");
+    lock["skills"]["source"]["skillPath"] = "plugins/not-the-same-skill".into();
+    let original_lock = serde_json::to_vec(&lock).unwrap();
+    std::fs::write(&lock_path, &original_lock).unwrap();
+    let external = fixture.home.join(".agents/skills/source/SKILL.md");
+    let original = std::fs::read(&external).unwrap();
+    let result = service(&fixture, fixture.catalog.clone()).confirm(confirmation(&fixture));
+    assert!(matches!(result, Err(SourceTransitionError::Validation(_))));
+    assert_eq!(std::fs::read(&lock_path).unwrap(), original_lock);
+    assert_eq!(std::fs::read(&external).unwrap(), original);
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+    assert!(
+        fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn partial_claims_recover_without_refetching_or_touching_unclaimed_files() {
+    let fixture = fixture();
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    lock["skills"].as_object_mut().unwrap().remove("beta");
+    std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    let unclaimed = fixture.home.join(".agents/skills/beta/SKILL.md");
+    let original = std::fs::read(&unclaimed).unwrap();
+    let flaky: Arc<dyn SourceTransitionStore> =
+        Arc::new(FailOnceSourceStore::new(fixture.catalog.clone(), true));
+    let error = service(&fixture, flaky.clone())
+        .confirm(confirmation(&fixture))
+        .expect_err("injected failure");
+    assert!(matches!(error, SourceTransitionError::RecoveryRequired(_)));
+    let recovery = SourceTransitionService::new(
+        fixture.preview.clone(),
+        Arc::new(NoFetchGitSource),
+        fixture.locks.clone(),
+        flaky,
+        fixture.filesystem.clone(),
+        Arc::new(FixtureClock),
+        fixture.library.clone(),
+        fixture.home.clone(),
+        fixture.write_gate.clone(),
+    );
+    recovery
+        .recover_pending(&fixture.library)
+        .expect("partial claim recovery");
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+    assert_eq!(std::fs::read(&unclaimed).unwrap(), original);
+}
+
+#[test]
+fn partial_claims_install_same_named_members_and_preserve_unclaimed_entities() {
+    let fixture = fixture();
+    let repository = fixture._workspace.path().join("source-repository");
+    write_file(
+        &repository,
+        "plugins/source/SKILL.md",
+        "---\nname: Source Root\ndescription: Another path\n---\n# Other\n",
+    );
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "same name"],
+    );
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    lock["skills"].as_object_mut().unwrap().remove("beta");
+    let original_lock = serde_json::to_vec(&lock).unwrap();
+    std::fs::write(&lock_path, &original_lock).unwrap();
+    let unclaimed = fixture.home.join(".agents/skills/beta/SKILL.md");
+    let original_bytes = std::fs::read(&unclaimed).unwrap();
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("partial ownership transition");
+    assert_eq!(result.member_count, 3);
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 3);
+    assert_eq!(std::fs::read(&unclaimed).unwrap(), original_bytes);
+    transition
+        .undo(&result.operation_id)
+        .expect("undo partial claims");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&lock_path).unwrap()).unwrap(),
+        lock
+    );
+    assert_eq!(std::fs::read(&unclaimed).unwrap(), original_bytes);
+    assert!(
+        fixture
+            .home
+            .join(".agents/skills/source/SKILL.md")
+            .is_file()
+    );
 }
 
 #[test]

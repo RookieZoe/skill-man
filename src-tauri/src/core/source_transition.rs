@@ -295,11 +295,11 @@ impl SourceTransitionService {
                         description: member.description.clone(),
                         canonical_entity: claims
                             .canonical_entities
-                            .get(&member.directory_name)
+                            .get(&member.skill_path)
                             .cloned(),
                         canonical_entity_fingerprint: claims
                             .canonical_entity_fingerprints
-                            .get(&member.directory_name)
+                            .get(&member.skill_path)
                             .cloned(),
                         staged_root: library_root
                             .join("staging")
@@ -324,6 +324,7 @@ impl SourceTransitionService {
             update_previous: None,
         };
         let _write_guard = self.acquire_write_guard(&write_context)?;
+        assign_member_staging_paths(&mut journal);
         self.persist_transition_intent(&library_root, &journal)?;
 
         let result = self.apply_confirmed_transition(&library_root, &mut journal);
@@ -446,13 +447,10 @@ impl SourceTransitionService {
                 identity_key: member.directory_identity_key.clone(),
                 display_name: member.display_name.clone(),
                 description: member.description.clone(),
-                canonical_entity: claims
-                    .canonical_entities
-                    .get(&member.directory_name)
-                    .cloned(),
+                canonical_entity: claims.canonical_entities.get(&member.skill_path).cloned(),
                 canonical_entity_fingerprint: claims
                     .canonical_entity_fingerprints
-                    .get(&member.directory_name)
+                    .get(&member.skill_path)
                     .cloned(),
                 staged_root: staging_root.join(&member.directory_name),
                 isolated_path: None,
@@ -522,6 +520,7 @@ impl SourceTransitionService {
             update_previous: None,
         };
         let _write_guard = self.acquire_write_guard(&write_context)?;
+        assign_member_staging_paths(&mut journal);
         self.persist_transition_intent(&library_root, &journal)?;
 
         let result = self.apply_confirmed_transition(&library_root, &mut journal);
@@ -805,6 +804,7 @@ impl SourceTransitionService {
             update_previous: Some(update_previous.to_json()),
         };
         let _write_guard = self.acquire_write_guard(&write_context)?;
+        assign_member_staging_paths(&mut journal);
         self.persist_transition_intent(&library_root, &journal)?;
         let mut frozen_record = update_record;
 
@@ -1187,6 +1187,7 @@ impl SourceTransitionService {
                 member.tree_hash = snapshot.content_hash.clone();
                 member.provider_hash = entry_by_name
                     .get(member.directory_name.as_str())
+                    .filter(|entry| entry.skill_path == member.skill_path)
                     .map(|entry| entry.skill_folder_hash.clone());
                 member.staged_snapshot = Some(snapshot);
             }
@@ -3014,11 +3015,6 @@ impl SourceTransitionService {
         let canonical_root = self
             .filesystem
             .canonical_directory(&self.external_skills_root_for_lock(&report.path)?)?;
-        let expected = preview
-            .members
-            .iter()
-            .map(|member| (member.directory_name.clone(), member.skill_path.clone()))
-            .collect::<BTreeMap<_, _>>();
         let mut entries = report
             .entries
             .into_iter()
@@ -3033,23 +3029,29 @@ impl SourceTransitionService {
             .iter()
             .map(|entry| entry.name.clone())
             .collect::<BTreeSet<_>>();
-        // A clean transition requires the claims to exactly cover the
-        // discovered member set (each member's external entity is what the
-        // installer claimed). A Promotion releases whatever the legacy
+        // Every claim must identify exactly one discovered path. Members
+        // without claims are installed only into Home, never adopted from
+        // an external directory merely because their names match.
+        // A Promotion releases whatever the legacy
         // installer claimed for this repository — old member paths may have
         // disappeared upstream (removed) or be absent locally: the single
         // CAS still must release every claim as one exact file update.
         if require_exact_member_set {
-            if entries.len() != expected.len()
-                || names.len() != expected.len()
-                || names != expected.keys().cloned().collect()
-            {
+            if names.len() != entries.len() {
                 return Err(SourceTransitionError::Validation(
-                    "the external lock does not claim the complete source member set".into(),
+                    "the external lock contains duplicate claims".into(),
                 ));
             }
             for entry in &entries {
-                if expected.get(&entry.name) != Some(&entry.skill_path) {
+                if preview
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        member.directory_name == entry.name && member.skill_path == entry.skill_path
+                    })
+                    .count()
+                    != 1
+                {
                     return Err(SourceTransitionError::Validation(format!(
                         "external lock entry '{}' does not match the fixed source release",
                         entry.name
@@ -3090,8 +3092,8 @@ impl SourceTransitionService {
                     entry.name
                 )));
             }
-            canonical_entities.insert(entry.name.clone(), path);
-            canonical_entity_fingerprints.insert(entry.name.clone(), fingerprint);
+            canonical_entities.insert(entry.skill_path.clone(), path);
+            canonical_entity_fingerprints.insert(entry.skill_path.clone(), fingerprint);
         }
         let lock_path = report.path.clone();
         let lock_fingerprint = report.fingerprint.clone();
@@ -3299,9 +3301,22 @@ impl SourceTransitionService {
             .iter()
             .map(|entry| (entry.name.as_str(), entry))
             .collect::<BTreeMap<_, _>>();
-        if external_root.is_some() && claims.len() != journal.members.len() {
+        if claims.len() != journal.lock_entries.len()
+            || (journal.promotion_legacy.is_none()
+                && claims.values().any(|claim| {
+                    journal
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member.directory_name == claim.name
+                                && member.skill_path == claim.skill_path
+                        })
+                        .count()
+                        != 1
+                }))
+        {
             return Err(SourceTransitionError::RecoveryRequired(
-                "the Source Transition journal does not carry one claim per member".into(),
+                "the Source Transition journal claims do not identify unique members".into(),
             ));
         }
         for member in &journal.members {
@@ -3314,7 +3329,10 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
-            let claim = claims.get(member.directory_name.as_str()).cloned();
+            let claim = claims
+                .get(member.directory_name.as_str())
+                .filter(|claim| claim.skill_path == member.skill_path)
+                .cloned();
             let canonical_facts_match = match (&member.canonical_entity, &claim, &external_root) {
                 (Some(canonical_entity), Some(_), Some(external_root)) => {
                     canonical_entity == &external_root.join(&member.directory_name)
@@ -3327,7 +3345,7 @@ impl SourceTransitionService {
                 (None, None, None) => true,
                 _ => false,
             };
-            if member.staged_root != staging_root.join(&member.directory_name)
+            if member.staged_root != member_staging_path(journal, member)
                 || member.namespace_path
                     != git_member_namespace_path(library_root, &journal.remote_id, &member.skill_id)
                 || !canonical_facts_match
@@ -3335,6 +3353,7 @@ impl SourceTransitionService {
                     && member.canonical_entity_fingerprint.is_none()
                 || member.canonical_entity.is_none()
                     && member.canonical_entity_fingerprint.is_some()
+                || member.canonical_entity.is_none() && member.isolated_path.is_some()
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "the Source Transition journal member '{}' escapes its owned path",
@@ -3483,7 +3502,7 @@ impl SourceTransitionService {
                     member.directory_name
                 )));
             }
-            if member.staged_root != staging_root.join(&member.directory_name)
+            if member.staged_root != member_staging_path(journal, member)
                 || member.namespace_path
                     != git_member_namespace_path(library_root, &journal.remote_id, &member.skill_id)
             {
@@ -3701,6 +3720,33 @@ fn git_member_namespace_path(library_root: &Path, remote_id: &str, skill_id: &st
         .join(GIT_SKILLS_NAMESPACE)
         .join(remote_id)
         .join(skill_id)
+}
+
+fn member_staging_path(
+    journal: &SourceTransitionJournal,
+    member: &SourceTransitionJournalMember,
+) -> PathBuf {
+    // Preserve the layout of existing unique-name journals. If any names
+    // collide, put every member in its own stable ID directory.
+    let names: BTreeSet<_> = journal.members.iter().map(|m| &m.directory_name).collect();
+    journal
+        .staging_operation_root
+        .join(if names.len() == journal.members.len() {
+            &member.directory_name
+        } else {
+            &member.skill_id
+        })
+}
+
+fn assign_member_staging_paths(journal: &mut SourceTransitionJournal) {
+    let paths: Vec<_> = journal
+        .members
+        .iter()
+        .map(|member| member_staging_path(journal, member))
+        .collect();
+    for (member, path) in journal.members.iter_mut().zip(paths) {
+        member.staged_root = path;
+    }
 }
 
 fn is_safe_source_transition_member_name(name: &str) -> bool {

@@ -137,7 +137,7 @@ test("collapses technical details by default", () => {
   expect(screen.queryByText("auto_release_tag_head")).not.toBeInTheDocument();
 });
 
-test("blocks replacement before confirmation when a source member has no external claim", async () => {
+test("allows complete installation with partial external ownership claims", async () => {
   const user = userEvent.setup();
   const onConfirm = vi.fn();
   const incomplete: SourceGroupPreviewOutcome = {
@@ -178,15 +178,13 @@ test("blocks replacement before confirmation when a source member has no externa
     />,
   );
 
-  expect(screen.getByRole("alert")).toHaveTextContent(
-    "does not declare every Source Member",
-  );
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   const replacement = screen.getByRole("button", {
     name: "Use latest remote release",
   });
-  expect(replacement).toBeDisabled();
+  expect(replacement).toBeEnabled();
   await user.click(replacement);
-  expect(onConfirm).not.toHaveBeenCalled();
+  expect(onConfirm).toHaveBeenCalledOnce();
 });
 
 test("offers only whole-source Undo in the completed result window", async () => {

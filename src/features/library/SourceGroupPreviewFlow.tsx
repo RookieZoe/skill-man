@@ -251,18 +251,6 @@ export function SourceGroupPreviewFlow({
 
   if (outcome?.kind === "preview") {
     const { preview } = outcome;
-    const hasExternalOwnershipClaims =
-      preview.externalOwnershipClaims.length > 0;
-    const hasCompleteExternalClaims =
-      preview.members.length > 0 &&
-      preview.externalOwnershipClaims.length === preview.members.length &&
-      preview.members.every((member) =>
-        preview.externalOwnershipClaims.some(
-          (claim) => claim.entryName === member.directoryName,
-        ),
-      );
-    const replacementBlocked =
-      hasExternalOwnershipClaims && !hasCompleteExternalClaims;
     return (
       <>
         <div className="activation-sheet-heading">
@@ -349,8 +337,8 @@ export function SourceGroupPreviewFlow({
           </ul>
         </section>
         <ExternalClaims claims={preview.externalOwnershipClaims} />
-        {replacementBlocked ? (
-          <div className="activation-error" role="alert">
+        {preview.externalOwnershipClaims.length > 0 ? (
+          <div className="source-ownership-note" role="note">
             <strong>{t("library.source_group.incomplete_claims_title")}</strong>
             <span>
               {t("library.source_group.incomplete_claims_body", {
@@ -379,7 +367,7 @@ export function SourceGroupPreviewFlow({
           <button
             type="button"
             className="activation-confirm-button"
-            disabled={isBusy || replacementBlocked}
+            disabled={isBusy}
             onClick={onConfirm}
           >
             {activity === "confirming"
