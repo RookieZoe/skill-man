@@ -72,6 +72,7 @@ function agentsTrigger() {
 async function renderWideLibrary() {
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
 }
 
 afterEach(() => {
@@ -567,9 +568,9 @@ test("dense English and 简体中文 source content renders verbatim without a l
         ? "不间断简体中文长文本用于验证换行行为在任何断点宽度下都不会产生页面级横向滚动或者内容被裁剪同时保持全部操作可达"
         : "UninterruptedEnglishTextWithoutAnyBreakingOpportunitiesThatForcesWrappingDecisionsInsideEveryPaneAtEveryBreakpointWidthInTheMatrix";
     expect(screen.getAllByText(denseText).length).toBeGreaterThan(0);
-    expect(
-      document.querySelector(".document-preview pre")?.textContent,
-    ).toContain(denseText);
+    expect(document.querySelector(".markdown-body")?.textContent).toContain(
+      denseText,
+    );
     expect(screen.queryByText("Loading Skill detail")).not.toBeInTheDocument();
     expect(shell()).toHaveAttribute("data-layout-mode", "wide");
     unmount();
@@ -590,3 +591,4 @@ test("window height never changes the layout mode at any breakpoint", async () =
   setViewportWidth(1180);
   expect(shell()).toHaveAttribute("data-layout-mode", "wide");
 });
+import { expandLibrary } from "../test-fixtures/expand-library";

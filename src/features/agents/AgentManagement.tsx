@@ -216,10 +216,7 @@ export function AgentManagement({
   // as absence, so the pending Run is never rendered as "no agents".
   const detectionPending =
     observation === null || observation.detection.generation === 0;
-  const availablePresets =
-    snapshot?.presets.filter(
-      (preset) => !configuredPresetKeys.has(preset.presetKey),
-    ) ?? [];
+  const availablePresets = snapshot?.presets ?? [];
   const selectedConfiguration =
     selection?.kind === "configuration"
       ? (snapshot?.configurations.find(
@@ -286,6 +283,13 @@ export function AgentManagement({
   }
 
   function openPresetSheet(preset: AgentPreset) {
+    const existing = snapshot?.configurations.find(
+      (configuration) => configuration.presetKey === preset.presetKey,
+    );
+    if (existing) {
+      openEditSheet(existing);
+      return;
+    }
     sheetOpener.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -864,7 +868,15 @@ function AgentList({
                   <strong>{preset.name}</strong>
                   <small>{preset.activationTarget}</small>
                 </span>
-                <em>{t("agents.list.configure")}</em>
+                <em>
+                  {t(
+                    snapshot.configurations.some(
+                      (item) => item.presetKey === preset.presetKey,
+                    )
+                      ? "agents.nav.configured"
+                      : "agents.list.configure",
+                  )}
+                </em>
               </button>
             ))}
           </div>
@@ -936,7 +948,13 @@ function AgentDetail({
           className="primary-button agent-detail-primary-action"
           onClick={() => onConfigure(preset)}
         >
-          {t("agents.detail.configure_template")}
+          {t(
+            snapshot?.configurations.some(
+              (item) => item.presetKey === preset.presetKey,
+            )
+              ? "agents.detail.edit"
+              : "agents.detail.configure_template",
+          )}
         </button>
       </div>
     );

@@ -120,6 +120,7 @@ test("global activation changes refresh the Skill list count immediately", async
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
   const row = screen.getByRole("button", { name: "skill-authoring" });
   expect(within(row).getByLabelText("2 Agents")).toBeInTheDocument();
   await user.click(await screen.findByRole("switch", { name: "Claude Code" }));
@@ -127,6 +128,30 @@ test("global activation changes refresh the Skill list count immediately", async
     expect(within(row).getByLabelText("1 Agents")).toBeInTheDocument(),
   );
 });
+
+test.each([
+  ["Local", "local"],
+  ["Git", "git"],
+  ["Enabled", "enabled"],
+  ["Not enabled", "disabled"],
+] as const)(
+  "%s filter requests and displays the matching catalog",
+  async (label, filter) => {
+    const client = createFixtureCatalogClient();
+    const list = vi.spyOn(client, "listSkills");
+    render(<App client={client} />);
+    await screen.findByRole("heading", { name: "skill-authoring" });
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(filter));
+    const expected = await client.listSkills(filter);
+    expect(expected.items.length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText(`${expected.items.length} visible Skills`),
+      ).toBeVisible(),
+    );
+  },
+);
 
 test("Git import refreshes members and repository grouping before returning to Library", async () => {
   const user = userEvent.setup();
@@ -227,19 +252,20 @@ test("scan Adopt and Undo refresh the Library without navigation", async () => {
   };
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
   await user.click(await screen.findByRole("button", { name: "Scan report" }));
   await user.click(await screen.findByRole("checkbox", { name: "Local Link" }));
   await user.click(screen.getByRole("button", { name: "Plan Adopt" }));
   await user.click(await screen.findByRole("button", { name: "Apply" }));
   await waitFor(() =>
     expect(
-      document.querySelector('.skill-row[aria-label="media-xray"]'),
+      document.querySelector('.library-source-heading[aria-label="Git 1"]'),
     ).not.toBeNull(),
   );
   await user.click(screen.getByRole("button", { name: "Undo" }));
   await waitFor(() =>
     expect(
-      document.querySelector('.skill-row[aria-label="media-xray"]'),
+      document.querySelector('.library-source-heading[aria-label="Git 1"]'),
     ).toBeNull(),
   );
 });
@@ -324,7 +350,7 @@ test("repository member health is independent of the Library filter", async () =
   const user = userEvent.setup();
   render(<App client={createGitPreviewClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
-  await user.click(screen.getByRole("button", { name: "Link" }));
+  await user.click(screen.getByRole("button", { name: "Local" }));
   await user.click(screen.getByRole("tab", { name: "Repositories" }));
   await user.click(
     await screen.findByRole("heading", {
@@ -335,7 +361,7 @@ test("repository member health is independent of the Library filter", async () =
     await screen.findByText("Modified", { selector: ".member-health-badge" }),
   ).toBeVisible();
   await user.click(screen.getByRole("tab", { name: "Library" }));
-  expect(screen.getByRole("button", { name: "Link" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Local" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
@@ -357,6 +383,7 @@ function deferred<T>() {
 test("scan workspace opens separately and returns without losing the selected Skill", async () => {
   const user = userEvent.setup();
   render(<App client={createScanPreviewClient()} />);
+  await expandLibrary();
   await user.click(await screen.findByRole("button", { name: "media-xray" }));
   const open = screen.getByRole("button", { name: "Scan report" });
   expect(open).toHaveAttribute("aria-expanded", "false");
@@ -419,6 +446,7 @@ test("opens the Library Desk with a selected Skill and Target-scoped placeholder
 test("selects another Skill from the Library without leaving the three-column context", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
+  await expandLibrary();
 
   const mediaXray = await screen.findByRole("button", { name: "media-xray" });
   await user.click(mediaXray);
@@ -493,7 +521,7 @@ test("imports a linked local folder and returns to its Library detail", async ()
   await user.click(screen.getByRole("button", { name: "View in Library" }));
 
   expect(
-    await screen.findByRole("heading", { name: "linked-workflow" }),
+    await screen.findByRole("heading", { name: "linked-workflow", level: 2 }),
   ).toBeInTheDocument();
   expect(
     await screen.findByRole("switch", { name: "Claude Code" }),
@@ -1938,3 +1966,4 @@ test("repository removal stays completed when refreshing the library fails", asy
   expect(notice.querySelector('[data-state="failed"]')).toBeNull();
   expect(client.removeGitSource).toHaveBeenCalledTimes(1);
 });
+import { expandLibrary } from "../test-fixtures/expand-library";

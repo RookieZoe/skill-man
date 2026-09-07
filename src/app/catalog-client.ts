@@ -1,7 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export type CatalogFilter = "all" | "broken" | "modified" | "link" | "install";
+export type CatalogFilter =
+  | "all"
+  | "broken"
+  | "modified"
+  | "link"
+  | "install"
+  | "local"
+  | "git"
+  | "enabled"
+  | "disabled";
 export type SourceKind = "link" | "remote_install" | "file_install";
 export type GitSourceCapabilityKind =
   | "git_repository_source"

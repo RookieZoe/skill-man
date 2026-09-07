@@ -118,6 +118,10 @@ pub enum CatalogFilter {
     Modified,
     Link,
     Install,
+    Local,
+    Git,
+    Enabled,
+    Disabled,
 }
 
 impl CatalogFilter {
@@ -128,6 +132,10 @@ impl CatalogFilter {
             Self::Modified => skill.health == Health::Modified,
             Self::Link => skill.source_kind == SourceKind::Link,
             Self::Install => skill.source_kind.is_install(),
+            Self::Local => skill.source_kind != SourceKind::RemoteInstall,
+            Self::Git => skill.source_kind == SourceKind::RemoteInstall,
+            Self::Enabled => skill.enabled_agent_count > 0,
+            Self::Disabled => skill.enabled_agent_count == 0,
         }
     }
 }

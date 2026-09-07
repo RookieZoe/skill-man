@@ -49,6 +49,12 @@ test("groups by repository identity and expands without selecting a Skill", asyn
   const group = screen.getByRole("button", { name: "acme/skills 2" });
   expect(group).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("button", { name: "one" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "local" }),
+  ).not.toBeInTheDocument();
+  const localGroup = screen.getByRole("button", { name: "Local sources 1" });
+  expect(localGroup).toHaveAttribute("aria-expanded", "false");
+  await user.click(localGroup);
   expect(screen.getByRole("button", { name: "local" })).toBeInTheDocument();
   await user.click(group);
   expect(onSelect).not.toHaveBeenCalled();
@@ -75,8 +81,12 @@ test("keeps collapse state across filtering and retains selection behavior", asy
   expect(onToggleSkillSelection).toHaveBeenCalledWith("one");
 });
 
-test("never drops Skills while repository facts are unavailable", () => {
+test("never drops Skills while repository facts are unavailable", async () => {
   render(<LibrarySidebar {...defaults} gitSourceCapability={null} />);
+  await userEvent.click(screen.getByRole("button", { name: "Git 2" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Local sources 1" }),
+  );
   for (const skill of skills)
     expect(screen.getByRole("button", { name: skill.id })).toBeInTheDocument();
 });

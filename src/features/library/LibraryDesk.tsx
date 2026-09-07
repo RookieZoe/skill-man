@@ -60,6 +60,7 @@ import { ProjectEnableSheet } from "./ProjectEnableSheet";
 import { SelectionShelf } from "./SelectionShelf";
 import { SelectionControls } from "../../ui/SelectionControls";
 import { BatchDisableSheet } from "./BatchDisableSheet";
+import { SkillDocument } from "./SkillDocument";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
@@ -67,8 +68,10 @@ const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
   { value: "broken", labelKey: "library.filter.broken" },
   { value: "modified", labelKey: "library.filter.modified" },
-  { value: "link", labelKey: "library.filter.link" },
-  { value: "install", labelKey: "library.filter.install" },
+  { value: "local", labelKey: "library.filter.link" },
+  { value: "git", labelKey: "library.filter.install" },
+  { value: "enabled", labelKey: "library.filter.enabled" },
+  { value: "disabled", labelKey: "library.filter.disabled" },
 ];
 
 export type LayoutMode = "wide" | "mid" | "narrow";
@@ -1185,6 +1188,17 @@ export function LibrarySidebar({
         skills: members,
       });
     }
+    const ungroupedGit = [...remaining.values()].filter(
+      (skill) => skill.sourceKind === "remote_install",
+    );
+    if (ungroupedGit.length) {
+      result.push({
+        id: "ungrouped-git",
+        title: t("library.filter.install"),
+        skills: ungroupedGit,
+      });
+      for (const skill of ungroupedGit) remaining.delete(skill.id);
+    }
     if (remaining.size)
       result.push({
         id: "other",
@@ -1257,23 +1271,22 @@ export function LibrarySidebar({
                 type="button"
                 className="library-source-heading"
                 aria-label={`${group.title} ${group.skills.length}`}
-                aria-expanded={expanded[group.id] ?? !group.url}
+                aria-expanded={expanded[group.id] ?? false}
                 title={group.url}
                 onClick={() =>
                   setExpanded((current) => ({
                     ...current,
-                    [group.id]: !(current[group.id] ?? !group.url),
+                    [group.id]: !(current[group.id] ?? false),
                   }))
                 }
               >
-                <span aria-hidden="true">
-                  {(expanded[group.id] ?? !group.url) ? "▾" : "▸"}
-                </span>
+                <span aria-hidden="true">{expanded[group.id] ? "▾" : "▸"}</span>
                 <span className="library-source-title">{group.title}</span>
                 <span className="count-badge">{group.skills.length}</span>
               </button>
-              {(expanded[group.id] ?? !group.url) && (
+              {expanded[group.id] && (
                 <PluginGroups
+                  defaultOpen={false}
                   items={group.skills}
                   pluginName={(skill) => group.plugins?.get(skill.id)}
                 >
@@ -1474,16 +1487,10 @@ function SkillDetailPanel({
               <code>{detail.frontmatterName}</code>
             </p>
           ) : null}
-          <section className="document-preview" aria-labelledby="preview-title">
-            <div className="document-toolbar">
-              <div>
-                <span className="document-dot" />
-                <h3 id="preview-title">SKILL.md</h3>
-              </div>
-              <span>{t("library.detail.read_only")}</span>
-            </div>
-            <pre>{detail.skillMarkdown}</pre>
-          </section>
+          <SkillDocument
+            key={`document-${detail.id}`}
+            markdown={detail.skillMarkdown}
+          />
         </>
       ) : error ? (
         <div className="detail-state detail-state--error" role="alert">

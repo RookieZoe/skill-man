@@ -22,6 +22,7 @@ test("batch disable becomes available when any selected Skill is enabled", async
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
   await user.click(screen.getByRole("button", { name: "Batch actions" }));
   await user.click(screen.getByRole("button", { name: "Select all" }));
   const button = screen.getByRole("button", {
@@ -86,6 +87,7 @@ test("LibraryDesk multi-select: Select button enters mode, toggles skills, shelf
 
   // Wait for library to load
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
 
   // 1. Enter multi-select mode via Toolbar Select button
   const selectBtn = screen.getByRole("button", { name: "Batch actions" });
@@ -138,6 +140,7 @@ test("LibraryDesk multi-select: opens Global Enable sheet in batch mode and clea
   render(<App client={client} />);
 
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
 
   // Enter select mode and select 2 skills
   await user.click(screen.getByRole("button", { name: "Batch actions" }));
@@ -178,6 +181,7 @@ test("LibraryDesk multi-select: opens Project Enable sheet in batch mode and cle
   render(<App client={client} />);
 
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
 
   // Enter select mode and select 2 skills
   await user.click(screen.getByRole("button", { name: "Batch actions" }));
@@ -211,3 +215,4 @@ test("LibraryDesk multi-select: opens Project Enable sheet in batch mode and cle
     "false",
   );
 });
+import { expandLibrary } from "../../test-fixtures/expand-library";

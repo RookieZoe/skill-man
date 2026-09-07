@@ -6,6 +6,38 @@ use skill_man_lib::tauri_adapter::catalog_api::CatalogApi;
 use skill_man_lib::tauri_adapter::dto::{CatalogFilterDto, ListSkillsRequestDto, SourceKindDto};
 
 #[test]
+fn source_and_activation_filters_partition_the_catalog() {
+    let api = CatalogApi::new(CatalogService::new(Arc::new(
+        FixtureCatalogStore::library_desk(),
+    )));
+    let list = |filter| {
+        api.list_skills(ListSkillsRequestDto { filter })
+            .unwrap()
+            .items
+    };
+    let all = list(CatalogFilterDto::All);
+    let local = list(CatalogFilterDto::Local);
+    let git = list(CatalogFilterDto::Git);
+    assert_eq!(local.len() + git.len(), all.len());
+    assert!(
+        local
+            .iter()
+            .all(|s| s.source_kind != SourceKindDto::RemoteInstall)
+    );
+    assert!(
+        git.iter()
+            .all(|s| s.source_kind == SourceKindDto::RemoteInstall)
+    );
+    let enabled = list(CatalogFilterDto::Enabled);
+    let disabled = list(CatalogFilterDto::Disabled);
+    assert_eq!(enabled.len() + disabled.len(), all.len());
+    assert!(!enabled.is_empty());
+    assert!(!disabled.is_empty());
+    assert!(enabled.iter().all(|s| s.enabled_agent_count > 0));
+    assert!(disabled.iter().all(|s| s.enabled_agent_count == 0));
+}
+
+#[test]
 fn the_catalog_adapter_returns_a_filtered_snapshot_of_fixture_skills() {
     let store = FixtureCatalogStore::library_desk();
     let api = CatalogApi::new(CatalogService::new(Arc::new(store)));

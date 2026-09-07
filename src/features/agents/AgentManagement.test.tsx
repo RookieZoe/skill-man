@@ -131,6 +131,22 @@ test("fresh Home renders empty configured state and all zero-write presets", asy
   ).toBeInTheDocument();
 });
 
+test("Codex remains in presets when configured and opens the existing configuration", async () => {
+  const client = createFixtureCatalogClient();
+  const createPlan = vi.spyOn(client, "planCreateAgentConfiguration");
+  const updatePlan = vi.spyOn(client, "planEditAgentConfiguration");
+  render(<AgentManagement client={client} layoutMode="wide" />);
+  const nav = await screen.findByRole("navigation", { name: "Agent groups" });
+  await userEvent.click(within(nav).getByText("Preset templates"));
+  await userEvent.click(await screen.findByRole("button", { name: /Codex/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+  await userEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Review" }),
+  );
+  await waitFor(() => expect(updatePlan).toHaveBeenCalledTimes(1));
+  expect(createPlan).not.toHaveBeenCalled();
+});
+
 test("mid drawer traps Escape and focuses its close control", async () => {
   const user = userEvent.setup();
   render(

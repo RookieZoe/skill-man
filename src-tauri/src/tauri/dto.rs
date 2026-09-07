@@ -924,6 +924,10 @@ pub enum CatalogFilterDto {
     Modified,
     Link,
     Install,
+    Local,
+    Git,
+    Enabled,
+    Disabled,
 }
 
 impl From<CatalogFilterDto> for CatalogFilter {
@@ -934,6 +938,10 @@ impl From<CatalogFilterDto> for CatalogFilter {
             CatalogFilterDto::Modified => Self::Modified,
             CatalogFilterDto::Link => Self::Link,
             CatalogFilterDto::Install => Self::Install,
+            CatalogFilterDto::Local => Self::Local,
+            CatalogFilterDto::Git => Self::Git,
+            CatalogFilterDto::Enabled => Self::Enabled,
+            CatalogFilterDto::Disabled => Self::Disabled,
         }
     }
 }

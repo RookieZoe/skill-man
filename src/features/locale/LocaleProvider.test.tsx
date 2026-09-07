@@ -60,6 +60,7 @@ test("runtime switch keeps the sheet open and preserves filter, selection and fo
   renderWithLocale(client, <App client={client} />);
 
   // Establish ephemeral UI state: a filter and a selected Skill.
+  await expandLibrary();
   await screen.findByRole("navigation", { name: "Library" });
   const skillRow = await screen.findByRole("button", {
     name: "skill-authoring",
@@ -247,6 +248,9 @@ test("same Source Content renders byte-identical in both locales", async () => {
   const enPath = screen.getAllByText(
     "/Users/zoe/Codes/AI/skills/skill-authoring",
   )[0];
+  await userEvent.click(
+    screen.getByRole("switch", { name: "View raw source" }),
+  );
   const enMarkdown = screen.getByText(/# Skill authoring/);
   const enMarkdownText = enMarkdown.textContent;
   first.unmount();
@@ -269,6 +273,7 @@ test("same Source Content renders byte-identical in both locales", async () => {
     "/Users/zoe/Codes/AI/skills/skill-authoring",
   )[0];
   expect(zhPath.textContent).toBe(enPath.textContent);
+  await userEvent.click(screen.getByRole("switch", { name: "查看原文" }));
   const zhMarkdown = screen.getByText(/# Skill authoring/);
   expect(zhMarkdown.textContent).toBe(enMarkdownText);
 });
@@ -284,3 +289,4 @@ test("the Language control renders in the Unconfigured bootstrap shell", async (
     await within(route).findByRole("radio", { name: "System" }),
   ).toBeChecked();
 });
+import { expandLibrary } from "../../test-fixtures/expand-library";

@@ -432,7 +432,12 @@ export function createFixtureCatalogClient(
         items: skills
           .map(toDetail)
           .filter((skill) =>
-            includesFilter(filter, skill.health, skill.sourceKind),
+            includesFilter(
+              filter,
+              skill.health,
+              skill.sourceKind,
+              skill.enabledAgentCount,
+            ),
           )
           .map(toSummary),
       };
@@ -1514,10 +1519,15 @@ function includesFilter(
   filter: CatalogFilter,
   health: Health,
   sourceKind: SourceKind,
+  enabledAgentCount: number,
 ) {
   if (filter === "all") return true;
   if (filter === "broken" || filter === "modified") return health === filter;
   if (filter === "link") return sourceKind === "link";
+  if (filter === "local") return sourceKind !== "remote_install";
+  if (filter === "git") return sourceKind === "remote_install";
+  if (filter === "enabled") return enabledAgentCount > 0;
+  if (filter === "disabled") return enabledAgentCount === 0;
   return sourceKind === "remote_install" || sourceKind === "file_install";
 }
 

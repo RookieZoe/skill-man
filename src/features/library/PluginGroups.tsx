@@ -23,10 +23,12 @@ export function PluginGroups<T>({
   items,
   pluginName,
   children,
+  defaultOpen = true,
 }: {
   items: T[];
   pluginName: (item: T) => string | null | undefined;
   children: (members: T[]) => ReactNode;
+  defaultOpen?: boolean;
 }) {
   const { t } = useLocale();
   const groups = groupPluginMembers(items, pluginName);
@@ -34,7 +36,7 @@ export function PluginGroups<T>({
   return (
     <div className="plugin-groups">
       {groups.map(([name, members]) => (
-        <details className="plugin-group" key={name} open>
+        <details className="plugin-group" key={name} open={defaultOpen}>
           <summary className="plugin-group-heading">
             <span>
               {name
