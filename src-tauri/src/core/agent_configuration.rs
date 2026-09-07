@@ -146,9 +146,9 @@ impl PresetRegistry {
             preset(
                 "codex",
                 "Codex",
-                vec![PathBuf::from("~/.agents/skills"), codex_legacy],
-                PathBuf::from("~/.agents/skills"),
-                ".agents/skills",
+                vec![codex_legacy.clone()],
+                codex_legacy,
+                ".codex/skills",
             ),
             preset(
                 "gemini-cli",
@@ -195,8 +195,8 @@ impl PresetRegistry {
                 ".github/skills",
             ),
             preset(
-                "zed",
-                "Zed",
+                "general",
+                "General",
                 vec![PathBuf::from("~/.agents/skills")],
                 PathBuf::from("~/.agents/skills"),
                 ".agents/skills",
@@ -214,6 +214,11 @@ impl PresetRegistry {
             ),
         ];
         for preset in &mut presets {
+            if preset.preset_key != "general" {
+                preset
+                    .roots
+                    .retain(|root| root != &PathBuf::from("~/.agents/skills"));
+            }
             let mut seen = BTreeSet::new();
             preset
                 .roots
@@ -227,6 +232,13 @@ impl PresetRegistry {
     }
 
     pub fn get(&self, preset_key: &str) -> Option<&AgentPreset> {
+        // Older Zed configurations used only the shared roots. Keep their
+        // validation/edit path valid without offering a duplicate template.
+        let preset_key = if preset_key == "zed" {
+            "general"
+        } else {
+            preset_key
+        };
         self.presets
             .iter()
             .find(|preset| preset.preset_key == preset_key)

@@ -25,6 +25,30 @@ test("the toolbar reuses the packaged main app logo", async () => {
   expect(mark).toHaveAttribute("alt", "");
 });
 
+test("agent toolbar and preset actions use compact desktop button dimensions", async () => {
+  await renderWideLibrary();
+  expect(
+    within(inspector()).queryByRole("button", { name: "Enable globally…" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "Agents" }));
+  const primaryTab = getComputedStyle(
+    screen.getByRole("tab", { name: "Agents" }),
+  );
+  const newButton = screen.getByRole("button", { name: "New custom agent" });
+  const newStyle = getComputedStyle(newButton);
+  expect(newStyle.height).toBe(primaryTab.minHeight);
+  expect(newStyle.padding).toBe(primaryTab.padding);
+  expect(newStyle.fontSize).toBe(primaryTab.fontSize);
+  await userEvent.click(
+    screen.getByRole("button", { name: /Preset templates/ }),
+  );
+  const action = await screen.findByRole("button", {
+    name: /Configure from template|Edit/,
+  });
+  expect(getComputedStyle(action).height).toBe("30px");
+  expect(getComputedStyle(action).padding).toBe("0px 12px");
+});
+
 function setViewportWidth(width: number) {
   Object.defineProperty(window, "innerWidth", {
     value: width,
@@ -69,8 +93,22 @@ function agentsTrigger() {
   return within(toolbar()).queryByRole("button", { name: "Target groups" });
 }
 
-async function renderWideLibrary() {
-  render(<App client={createFixtureCatalogClient()} />);
+async function renderWideLibrary(conflict = false) {
+  const client = createFixtureCatalogClient();
+  if (conflict) {
+    const lifecycle = client.planGlobalLifecycle;
+    client.planGlobalLifecycle = async (...args) => {
+      const plan = await lifecycle(...args);
+      return {
+        ...plan,
+        cells: plan.cells.map((cell) => ({
+          ...cell,
+          eligibility: "conflict" as const,
+        })),
+      };
+    };
+  }
+  render(<App client={client} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
   await expandLibrary();
 }
@@ -160,9 +198,9 @@ test("batch selection stays in the Library heading and adds one column to the sa
 });
 
 test("enable dialogs have a padded scroll body, visible steps and separated footer", async () => {
-  await renderWideLibrary();
+  await renderWideLibrary(true);
   await userEvent.click(
-    screen.getByRole("button", { name: "Enable globally…" }),
+    within(inspector()).getByRole("switch", { name: "Claude Code" }),
   );
   const dialog = await screen.findByRole("dialog");
   expect(
@@ -314,8 +352,8 @@ test("drawer traps Tab focus within its Target-scoped placeholder", async () => 
   await user.click(screen.getByRole("button", { name: "Target groups" }));
   expect(inspector()).toHaveFocus();
 
-  const enableButton = within(inspector()).getByRole("button", {
-    name: "Enable globally…",
+  const enableButton = within(inspector()).getByRole("switch", {
+    name: "Claude Code",
   });
   await user.tab();
   expect(enableButton).toHaveFocus();
@@ -387,9 +425,9 @@ test("Agent Configuration sheet survives resize, inerts the workspace, and resto
 
 test("Global Enable sheet traps focus outside the inert app rows", async () => {
   const user = userEvent.setup();
-  await renderWideLibrary();
-  const opener = within(inspector()).getByRole("button", {
-    name: "Enable globally…",
+  await renderWideLibrary(true);
+  const opener = within(inspector()).getByRole("switch", {
+    name: "Claude Code",
   });
   await user.click(opener);
 

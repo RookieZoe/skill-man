@@ -30,6 +30,7 @@ interface AgentManagementProps {
   layoutMode: LayoutMode;
   onOverlayChange?: (open: boolean) => void;
   onCatalogChanged?: () => Promise<void>;
+  toolbarTarget?: HTMLElement | null;
 }
 
 type AgentSection = "configured" | "detected" | "presets";
@@ -52,6 +53,7 @@ export function AgentManagement({
   layoutMode,
   onOverlayChange,
   onCatalogChanged,
+  toolbarTarget,
 }: AgentManagementProps) {
   const { t } = useLocale();
   const [snapshot, setSnapshot] = useState<AgentManagementSnapshot | null>(
@@ -501,16 +503,29 @@ export function AgentManagement({
     />
   );
 
+  const navigation = (
+    <AgentNavigation
+      section={section}
+      configuredCount={snapshot?.configurations.length ?? 0}
+      detectedCount={detectedObservations.length}
+      presetCount={availablePresets.length}
+      onSelect={selectSection}
+      onNewCustom={openCustomSheet}
+    />
+  );
+
   return (
     <>
       <section
         id="agent-management"
         className="agent-management"
+        data-section={section}
+        data-toolbar-external={Boolean(toolbarTarget)}
         data-layout-mode={layoutMode}
         data-narrow-pane={narrowPane}
         aria-label={t("agents.surface.label")}
       >
-        {layoutMode === "narrow" ? (
+        {layoutMode === "narrow" && section !== "detected" ? (
           <div
             className="agent-management-pane-nav"
             role="group"
@@ -529,14 +544,7 @@ export function AgentManagement({
           </div>
         ) : null}
 
-        <AgentNavigation
-          section={section}
-          configuredCount={snapshot?.configurations.length ?? 0}
-          detectedCount={detectedObservations.length}
-          presetCount={availablePresets.length}
-          onSelect={selectSection}
-          onNewCustom={openCustomSheet}
-        />
+        {toolbarTarget ? createPortal(navigation, toolbarTarget) : navigation}
 
         <AgentList
           section={section}
@@ -554,13 +562,13 @@ export function AgentManagement({
           onNewCustom={openCustomSheet}
         />
 
-        {layoutMode === "wide" ? (
+        {layoutMode === "wide" && section !== "detected" ? (
           <aside className="agent-management-detail">{detail}</aside>
         ) : null}
-        {layoutMode === "narrow" ? (
+        {layoutMode === "narrow" && section !== "detected" ? (
           <aside className="agent-management-detail">{detail}</aside>
         ) : null}
-        {layoutMode === "mid" ? (
+        {layoutMode === "mid" && section !== "detected" ? (
           <>
             {selection && !detailDrawerOpen ? (
               <button
@@ -972,7 +980,9 @@ function AgentDetail({
         <span className="eyebrow">{t("agents.detail.configured_eyebrow")}</span>
         <h2>{configuration.name}</h2>
       </header>
-      <CompatibilityEvidence compatibility={configuration.compatibility} />
+      {configuration.origin !== "custom" && (
+        <CompatibilityEvidence compatibility={configuration.compatibility} />
+      )}
       <RootEvidenceList roots={configuration.roots} />
       <section className="agent-detail-card">
         <span className="agent-detail-card-label">

@@ -431,6 +431,9 @@ _Avoid_: Scan Report, Scan Task
 generation-bound 的只读扫描结果,包含 Scan Coverage、Canonical Skill Entity、来源分组、Conflict Set、typed diagnostics 与操作资格。它是 Preview 证据,不是 Catalog truth。
 _Avoid_: Catalog snapshot, Adopt plan
 
+**Scan Exclusion**:
+用户从当前 Scan Report 显式忽略的 Local 候选。按 Bound Home 与 canonical entity path 持久化到 Home 的 `scan-exclusions.json`，不写入可清理的扫描缓存，不按名称匹配其他路径。后续 Scan Report 将它归入“已排除 · 已忽略”，不提供 Adopt 操作；仍保留 Root coverage 与安全检查，且已纳管实体优先按 Catalog 归类。忽略不删除文件，也不修改已有启用项。保存会使旧 Report 的操作证据失效，UI 随后发起完整 Rescan。
+
 **Scan Incomplete**:
 至少一个 configured canonical Global Skills Root 未成功覆盖的 Scan Report 状态。健康 Root 的非破坏操作可以继续;可能移动、删除、替换实体或释放 external ownership 的操作须等待完整 Scan Coverage。
 _Avoid_: Scan failed, Partial success

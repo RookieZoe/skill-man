@@ -287,11 +287,13 @@ export function ScanEvidenceLedger({
   onAdoptHandoffHandled,
   expanded = true,
   onExpandedChange,
+  onOpenScanSetup,
 }: {
   client: CatalogClient;
   onCatalogChanged?: () => Promise<void>;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  onOpenScanSetup?: () => void;
   /** The surface is not writable (ReadOnly/Closed gate): hide the actions. */
   idle?: boolean;
   /** A modal Agent Inspector is open; keep the ledger out of the tab order. */
@@ -513,6 +515,25 @@ export function ScanEvidenceLedger({
     }
   }
 
+  async function ignoreCandidate(entitySeq: number) {
+    if (!summary) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.ignoreScanLocalCandidate(
+        summary.contentIdentity,
+        summary.generation,
+        entitySeq,
+      );
+      setSelected({});
+      setObservation(await client.startRescan("manual"));
+    } catch (reason) {
+      setError(commandErrorMessage(reason, t));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function loadSection(section: ScanReportSection, offset: number) {
     if (!summary) return;
     const current = sections[section];
@@ -702,6 +723,11 @@ export function ScanEvidenceLedger({
           ) : null}
         </div>
         <div className="scan-ledger-actions">
+          {!idle && onOpenScanSetup ? (
+            <button type="button" onClick={onOpenScanSetup}>
+              {t("scan.setup.open")}
+            </button>
+          ) : null}
           {onExpandedChange ? (
             <button
               type="button"
@@ -915,6 +941,11 @@ export function ScanEvidenceLedger({
                 <h4>{t(sectionKey(section))}</h4>
                 <ul className="scan-summary-rows">
                   {sections[section].rows.map((row, index) => {
+                    if (
+                      row.kind === "source_verdict" &&
+                      row.reasonKind === "ignored"
+                    )
+                      return null;
                     const key = candidateKey(row);
                     const destination =
                       row.kind === "source_verdict" ? row.canonicalPath : "";
@@ -962,6 +993,20 @@ export function ScanEvidenceLedger({
                           reason; Blocked/Deferred have no control at all. */}
                         {clearable && !idle ? (
                           <div className="scan-summary-row-operations">
+                            {row.kind === "source_verdict" &&
+                            row.verdict === "local" ? (
+                              <button
+                                type="button"
+                                disabled={
+                                  busy || runActive || adoptBusy || stale
+                                }
+                                onClick={() =>
+                                  void ignoreCandidate(row.entitySeq)
+                                }
+                              >
+                                {t("scan.summary.ignore")}
+                              </button>
+                            ) : null}
                             {row.kind === "git_source_group" &&
                             row.status === "candidate" &&
                             onManageGitGroup ? (
@@ -1024,7 +1069,11 @@ export function ScanEvidenceLedger({
                     );
                   })}
                   {sections[section].loaded &&
-                  sections[section].rows.length === 0 ? (
+                  sections[section].rows.filter(
+                    (row) =>
+                      row.kind !== "source_verdict" ||
+                      row.reasonKind !== "ignored",
+                  ).length === 0 ? (
                     <li className="scan-summary-none">
                       {t("scan.summary.noCandidates")}
                     </li>
@@ -1112,6 +1161,34 @@ export function ScanEvidenceLedger({
                 ) : null}
               </section>
             ))}
+            <section
+              className="scan-summary-block"
+              aria-label={t("scan.summary.block.ignored")}
+            >
+              <h4>{t("scan.summary.block.ignored")}</h4>
+              <ul className="scan-summary-rows">
+                {sections.excluded.rows
+                  .filter(
+                    (row) =>
+                      row.kind === "source_verdict" &&
+                      row.reasonKind === "ignored",
+                  )
+                  .map((row, index) => (
+                    <li className="scan-summary-row" key={index}>
+                      <div className="scan-summary-row-destination">
+                        <span className="scan-summary-row-text">
+                          {rowText(row, t)}
+                        </span>
+                        <span className="scan-summary-row-path">
+                          {row.kind === "source_verdict"
+                            ? row.canonicalPath
+                            : ""}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+              </ul>
+            </section>
           </div>
         ) : null}
 

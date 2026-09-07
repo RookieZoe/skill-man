@@ -2,6 +2,7 @@ import { useBackgroundOperations } from "../../ui/BackgroundOperations";
 import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
 import { PluginGroups } from "./PluginGroups";
 import { SelectionControls } from "../../ui/SelectionControls";
+import { RepositoryLink } from "../../ui/RepositoryLink";
 import { createPortal } from "react-dom";
 import type {
   GitSourceCapabilitySource,
@@ -87,7 +88,9 @@ export function SourceGroupCard({
       >
         <header className="source-group-header">
           <h3>{t("library.source_capability.legacy_per_skill_git_state")}</h3>
-          <p className="source-group-url">{source.canonicalUrl}</p>
+          <p className="source-group-url">
+            <RepositoryLink url={source.canonicalUrl} />
+          </p>
         </header>
         <p className="source-group-detail">
           {t("library.source_capability.legacy_per_skill_git_state_detail")}
@@ -123,7 +126,9 @@ export function SourceGroupCard({
           <h3>
             {t("library.source_capability.remote_source_identity_conflict")}
           </h3>
-          <p className="source-group-url">{source.canonicalUrl}</p>
+          <p className="source-group-url">
+            <RepositoryLink url={source.canonicalUrl} />
+          </p>
         </header>
         <p className="source-group-detail">
           {t(
@@ -237,7 +242,9 @@ export function SourceGroupCard({
         className={`source-group-header${embedded ? "" : " source-group-summary"}`}
       >
         <div className="source-group-title-row">
-          <h3>{source.canonicalUrl}</h3>
+          <h3>
+            <RepositoryLink url={source.canonicalUrl} />
+          </h3>
           {source.selectedRef ? (
             <span className="source-group-ref">
               {t("sourceGroup.selectedRef", { ref: source.selectedRef })}
@@ -323,21 +330,6 @@ export function SourceGroupCard({
 
       {/* Source-level Update and whole-source Remove */}
       <div className="source-group-actions">
-        {onCopyMember && (
-          <button
-            type="button"
-            className="repair-button source-copy-batch-button"
-            disabled={actionActivity || copying || !selectedMembers.length}
-            title={t("sourceGroup.copyBatchHint")}
-            onClick={() => void handleCopy()}
-          >
-            {t(
-              copying
-                ? "sourceGroup.copyBatchBusy"
-                : "sourceGroup.createLocalCopy",
-            )}
-          </button>
-        )}
         {onUpdate ? (
           <button
             type="button"
@@ -389,12 +381,27 @@ export function SourceGroupCard({
       >
         <h4>{t("sourceGroup.membersLabel")}</h4>
         {onCopyMember && (
-          <SelectionControls
-            ids={copyableMembers.map((member) => member.skillId)}
-            selected={selectedIds}
-            onChange={setSelectedIds}
-            disabled={copying || actionActivity}
-          />
+          <div className="source-member-selection-actions">
+            <SelectionControls
+              ids={copyableMembers.map((member) => member.skillId)}
+              selected={selectedIds}
+              onChange={setSelectedIds}
+              disabled={copying || actionActivity}
+            />
+            <button
+              type="button"
+              className="repair-button"
+              disabled={actionActivity || copying || !selectedMembers.length}
+              title={t("sourceGroup.copyBatchHint")}
+              onClick={() => void handleCopy()}
+            >
+              {t(
+                copying
+                  ? "sourceGroup.copyBatchBusy"
+                  : "sourceGroup.createLocalCopy",
+              )}
+            </button>
+          </div>
         )}
         {source.members.length === 0 ? (
           <p className="source-group-empty-members">

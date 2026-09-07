@@ -99,6 +99,7 @@ pub struct TargetGroupMember {
     pub agent_id: String,
     pub agent_name: String,
     pub compatibility: Compatibility,
+    pub user_configured: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -586,6 +587,7 @@ impl EnableService {
                 agent_id: configuration.agent_id.clone(),
                 agent_name: configuration.name.clone(),
                 compatibility: configuration.compatibility,
+                user_configured: configuration.preset_key.is_none(),
             })
             .collect()
     }

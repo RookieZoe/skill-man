@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import type {
   ObservationAndScanSnapshot,
@@ -236,7 +236,7 @@ test("classified summary shows the funnel and the four count cards", async () =>
     ["Git source candidates", "1"],
     ["Local candidates", "2"],
     ["Conflict set", "0"],
-    ["Excluded · already managed", "2"],
+    ["Excluded", "2"],
   ] as const) {
     const card = within(cards).getByLabelText(label);
     expect(card.textContent).toContain(value);
@@ -251,6 +251,78 @@ test("classified summary shows the funnel and the four count cards", async () =>
   ]) {
     expect(screen.getAllByText(text).length).toBeGreaterThanOrEqual(1);
   }
+});
+
+test("Ignore saves the exact Local candidate then rescans and separates ignored from managed", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const ignore = vi.spyOn(client, "ignoreScanLocalCandidate");
+  const rescan = vi.spyOn(client, "startRescan");
+  render(<ScanEvidenceLedger client={client} />);
+  publish(client, COMPLETE_SUMMARY, {
+    local_candidates: [LOCAL_ROW],
+    excluded: [EXCLUDED_ROW],
+  });
+  await user.click(await screen.findByRole("button", { name: "Ignore" }));
+  expect(ignore).toHaveBeenCalledWith(
+    COMPLETE_SUMMARY.contentIdentity,
+    COMPLETE_SUMMARY.generation,
+    2,
+  );
+  expect(rescan).toHaveBeenCalledWith("manual");
+  publish(
+    client,
+    { ...COMPLETE_SUMMARY, generation: 5, contentIdentity: "next-report" },
+    {
+      local_candidates: [],
+      excluded: [
+        EXCLUDED_ROW,
+        {
+          ...LOCAL_ROW,
+          verdict: "excluded",
+          reasonKind: "ignored",
+          operations: [],
+        },
+      ],
+    },
+  );
+  const ignored = await screen.findByRole("region", {
+    name: "Excluded · Ignored",
+  });
+  await waitFor(() =>
+    expect(within(ignored).getByText("my-skill")).toBeInTheDocument(),
+  );
+  expect(
+    within(ignored).getByText("/dev/projects/my-skill"),
+  ).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Local sources" })).queryByText(
+      "my-skill",
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(
+      screen.getByRole("region", { name: "Excluded · already managed" }),
+    ).queryByText("my-skill"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Ignore" }),
+  ).not.toBeInTheDocument();
+});
+
+test("an Ignore write failure keeps the candidate and does not start a scan", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  vi.spyOn(client, "ignoreScanLocalCandidate").mockRejectedValue({
+    error: { code: "catalog_unavailable" },
+  });
+  const rescan = vi.spyOn(client, "startRescan");
+  render(<ScanEvidenceLedger client={client} />);
+  publish(client, COMPLETE_SUMMARY, { local_candidates: [LOCAL_ROW] });
+  await user.click(await screen.findByRole("button", { name: "Ignore" }));
+  expect(rescan).not.toHaveBeenCalled();
+  expect(screen.getByText("my-skill")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
 });
 
 test("candidate blocks render in the fixed §8.1 order with default-empty selections", async () => {

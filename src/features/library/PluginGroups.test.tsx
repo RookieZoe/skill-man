@@ -14,6 +14,21 @@ test("groups plugin members before Other without inventing categories", () => {
   expect(groupPluginMembers([items[0]], (m) => m.pluginName)).toBeNull();
 });
 
+test("Library categories are static headings with visible members", () => {
+  const { container } = render(
+    <PluginGroups
+      items={[{ name: "waza-ui" }]}
+      pluginName={(m) => m.name}
+      collapsible={false}
+    >
+      {() => <button>ui</button>}
+    </PluginGroups>,
+  );
+  expect(screen.getByRole("heading", { name: /Waza Ui/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: "ui" })).toBeVisible();
+  expect(container.querySelector("details")).toBeNull();
+});
+
 test("category disclosure hides members without changing their selection", async () => {
   const user = userEvent.setup();
   render(

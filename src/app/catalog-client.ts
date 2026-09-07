@@ -438,6 +438,7 @@ export interface TargetGroupMember {
   agentId: string;
   agentName: string;
   compatibility: Compatibility;
+  userConfigured?: boolean;
 }
 
 export interface GlobalTargetGroup {
@@ -1725,6 +1726,11 @@ export interface CatalogClient {
   ): Promise<ObservationAndScanSnapshot>;
   /** Coordinate cancellation of the active Rescan Run. */
   cancelRescan(runId: string): Promise<ObservationAndScanSnapshot>;
+  ignoreScanLocalCandidate(
+    reportContentIdentity: string,
+    generation: number,
+    entitySeq: number,
+  ): Promise<void>;
   /** The unique paged Report read contract (spec §4.10 `report_page`). */
   getScanReportPage(
     cursor: ScanReportCursor,
@@ -1981,6 +1987,13 @@ const tauriCatalogClient: CatalogClient = {
   getScanReportPage(cursor, limit) {
     return invoke<ScanReportPage>("get_scan_report_page", {
       request: { cursor, limit: limit ?? 64 },
+    });
+  },
+  ignoreScanLocalCandidate(reportContentIdentity, generation, entitySeq) {
+    return invoke<void>("ignore_scan_local_candidate", {
+      reportContentIdentity,
+      generation,
+      entitySeq,
     });
   },
   listTargetGroups(skillId) {

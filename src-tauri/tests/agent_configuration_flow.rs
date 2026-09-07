@@ -37,6 +37,31 @@ fn open_service(
 }
 
 #[test]
+fn only_general_preset_owns_the_shared_skill_directories() {
+    let registry = PresetRegistry::system();
+    let general = registry.get("general").unwrap();
+    assert_eq!(general.roots, vec![PathBuf::from("~/.agents/skills")]);
+    assert_eq!(general.activation_target, PathBuf::from("~/.agents/skills"));
+    assert_eq!(general.project_skills_dir, PathBuf::from(".agents/skills"));
+    for preset in registry
+        .presets()
+        .iter()
+        .filter(|p| p.preset_key != "general")
+    {
+        assert!(!preset.roots.contains(&PathBuf::from("~/.agents/skills")));
+        assert_ne!(preset.project_skills_dir, PathBuf::from(".agents/skills"));
+        assert!(!preset.roots.is_empty());
+    }
+    let codex = registry.get("codex").unwrap();
+    assert_eq!(codex.roots, vec![codex.activation_target.clone()]);
+    assert_eq!(codex.project_skills_dir, PathBuf::from(".codex/skills"));
+    assert!(
+        registry.get("zed").is_some(),
+        "existing configurations stay editable"
+    );
+}
+
+#[test]
 fn create_configuration_persists_multiple_roots_one_target_and_nfkc_name_identity() {
     let temp = tempfile::tempdir().expect("temp directory");
     let home = temp.path().join("bound-home");

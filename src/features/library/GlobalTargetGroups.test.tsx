@@ -30,6 +30,12 @@ function renderPanel({
   );
 }
 
+test("user-configured targets do not display compatibility warnings", async () => {
+  renderPanel();
+  await screen.findByRole("switch", { name: "Workbench" });
+  expect(screen.queryByText("Compatibility unknown")).not.toBeInTheDocument();
+});
+
 test("group cards merge consumers and show one desired state per Target", async () => {
   renderPanel();
   const panel = await screen.findByRole("complementary", {

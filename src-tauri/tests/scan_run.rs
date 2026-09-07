@@ -16,7 +16,7 @@ use skill_man_lib::adapters::macos_fs::MacOsFileSystem;
 use skill_man_lib::adapters::scan_evidence_store::FaultInjectingScanEvidenceStoreFactory;
 use skill_man_lib::adapters::system_clock::SystemClock;
 use skill_man_lib::core::scan::mutation::ScanMutationCoordinator;
-use skill_man_lib::core::scan::{ScanCoordinator, ScanRunState, ScanTrigger};
+use skill_man_lib::core::scan::{ReportFreshness, ScanCoordinator, ScanRunState, ScanTrigger};
 use skill_man_lib::core::write_gate::{ClosedReason, ReadOnlyReason, WriteGateState};
 use skill_man_lib::seams::agent_configuration_store::{
     AgentConfigurationStore, AgentConfigurationStoreChange, AgentConfigurationStoreError,
@@ -29,8 +29,8 @@ use skill_man_lib::seams::filesystem::{
 };
 use skill_man_lib::seams::installer_lock_store::EmptyInstallerLockStore;
 use skill_man_lib::seams::scan_evidence_store::{
-    CurrentManifestRead, ScanEvidenceStore, ScanReportCursor, ScanReportRow, ScanReportSection,
-    ScanRootCoverageRecord,
+    CurrentManifestRead, ScanEvidenceStore, ScanEvidenceStoreFactory, ScanReportCursor,
+    ScanReportRow, ScanReportSection, ScanRootCoverageRecord,
 };
 use skill_man_lib::seams::scan_managed_facts::{ManagedSkillPathFact, ScanManagedFactsReader};
 
@@ -631,6 +631,74 @@ fn manual_rescan_streams_evidence_and_publishes_complete_report() {
         .expect("second");
     assert_eq!(second.run.as_ref().unwrap().generation, 2);
     let _ = home.dir.path();
+}
+
+#[test]
+fn ignoring_a_local_candidate_persists_and_excludes_only_that_entity() {
+    let (home, coordinator, factory, mutation) = setup();
+    coordinator.start_rescan(ScanTrigger::Manual).unwrap();
+    wait_terminal(&coordinator, 10_000);
+    let report = coordinator.snapshot().current_report.summary.unwrap();
+    let (rows, _) = page_section(
+        &coordinator,
+        &report,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
+    let ScanReportRow::SourceVerdict(candidate) = &rows[0] else {
+        panic!("local candidate")
+    };
+    let original = std::fs::read(candidate.canonical_path.join("SKILL.md")).unwrap();
+    assert!(
+        coordinator
+            .ignore_local_candidate("wrong report", report.generation, candidate.entity_seq)
+            .is_err()
+    );
+    assert_eq!(mutation.generation(), 0);
+    coordinator
+        .ignore_local_candidate(
+            &report.content_identity,
+            report.generation,
+            candidate.entity_seq,
+        )
+        .unwrap();
+    assert_eq!(mutation.generation(), 1);
+    assert_eq!(
+        coordinator.snapshot().current_report.freshness,
+        ReportFreshness::Stale
+    );
+    // A new store instance reads the durable choice, not process-local state.
+    let bound = home.write_gate.bound_home().unwrap();
+    assert_eq!(
+        factory.store_for(&bound).unwrap().ignored_paths().unwrap(),
+        vec![candidate.canonical_path.clone()]
+    );
+    coordinator.start_rescan(ScanTrigger::Manual).unwrap();
+    wait_terminal(&coordinator, 10_000);
+    let next = coordinator.snapshot().current_report.summary.unwrap();
+    let (remaining, _) = page_section(&coordinator, &next, ScanReportSection::LocalCandidates, 64);
+    assert_eq!(remaining.len(), rows.len() - 1);
+    let (excluded, _) = page_section(&coordinator, &next, ScanReportSection::Excluded, 64);
+    let ignored = excluded
+        .iter()
+        .find_map(|row| match row {
+            ScanReportRow::SourceVerdict(row) if row.reason_kind.as_deref() == Some("ignored") => {
+                Some(row)
+            }
+            _ => None,
+        })
+        .expect("ignored classification");
+    assert_eq!(ignored.canonical_path, candidate.canonical_path);
+    assert!(ignored.operations.is_empty());
+    assert!(
+        coordinator
+            .ignore_local_candidate(&next.content_identity, next.generation, ignored.entity_seq)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(candidate.canonical_path.join("SKILL.md")).unwrap(),
+        original
+    );
 }
 
 /// Full #84 classification contract over the real engine: Local candidates

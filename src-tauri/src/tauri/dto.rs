@@ -4903,6 +4903,8 @@ pub struct TargetGroupMemberDto {
     #[serde(rename = "agentName")]
     pub agent_name: String,
     pub compatibility: CompatibilityDto,
+    #[serde(default)]
+    pub user_configured: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -5298,6 +5300,7 @@ impl From<GlobalTargetGroup> for GlobalTargetGroupDto {
                     agent_id: member.agent_id,
                     agent_name: member.agent_name,
                     compatibility: member.compatibility.into(),
+                    user_configured: member.user_configured,
                 })
                 .collect(),
             availability: match value.availability {

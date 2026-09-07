@@ -426,11 +426,16 @@ impl ScanClassificationSpool for SqliteClassificationSpool {
 pub struct SystemScanEvidenceStore {
     scan_dir: PathBuf,
     home_id: String,
+    ignored_paths_file: PathBuf,
 }
 
 impl SystemScanEvidenceStore {
     pub fn new(scan_dir: PathBuf, home_id: String) -> Self {
-        Self { scan_dir, home_id }
+        Self {
+            ignored_paths_file: scan_dir.join("ignored-paths.json"),
+            scan_dir,
+            home_id,
+        }
     }
 
     pub fn scan_dir(&self) -> &Path {
@@ -736,6 +741,70 @@ impl SystemScanEvidenceStore {
 }
 
 impl ScanEvidenceStore for SystemScanEvidenceStore {
+    fn ignored_paths(&self) -> Result<Vec<PathBuf>, ScanEvidenceStoreError> {
+        let bytes = match fs::read(&self.ignored_paths_file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ScanEvidenceStoreError::io(
+                    "read Scan exclusions",
+                    &self.ignored_paths_file,
+                    &error,
+                ));
+            }
+        };
+        let record: ScanExclusions = serde_json::from_slice(&bytes)
+            .map_err(|error| corrupt_artifact("read Scan exclusions", error.to_string()))?;
+        if record.schema_version != 1
+            || record.home_id != self.home_id
+            || record.paths.iter().any(|path| !path.is_absolute())
+        {
+            return Err(corrupt_artifact(
+                "read Scan exclusions",
+                "invalid exclusion identity",
+            ));
+        }
+        Ok(record.paths)
+    }
+
+    fn write_ignored_paths(&self, paths: &[PathBuf]) -> Result<(), ScanEvidenceStoreError> {
+        if paths.iter().any(|path| !path.is_absolute()) {
+            return Err(corrupt_artifact(
+                "write Scan exclusions",
+                "relative exclusion path",
+            ));
+        }
+        let operation = "write Scan exclusions";
+        let parent = self
+            .ignored_paths_file
+            .parent()
+            .ok_or_else(|| corrupt_artifact(operation, "missing parent"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| ScanEvidenceStoreError::io(operation, parent, &error))?;
+        // An exclusive random sibling avoids following a pre-existing temp symlink.
+        let mut staged = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| ScanEvidenceStoreError::io(operation, parent, &error))?;
+        serde_json::to_writer(
+            &mut staged,
+            &ScanExclusions {
+                schema_version: 1,
+                home_id: self.home_id.clone(),
+                paths: paths.to_vec(),
+            },
+        )
+        .map_err(|error| corrupt_artifact(operation, error.to_string()))?;
+        staged
+            .as_file()
+            .sync_all()
+            .map_err(|error| ScanEvidenceStoreError::io(operation, parent, &error))?;
+        staged.persist(&self.ignored_paths_file).map_err(|error| {
+            ScanEvidenceStoreError::io(operation, &self.ignored_paths_file, &error.error)
+        })?;
+        File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| ScanEvidenceStoreError::io(operation, parent, &error))
+    }
+
     fn create_run(&self, run: &ScanRunRecord) -> Result<(), ScanEvidenceStoreError> {
         let run_dir = self.run_dir(&run.run_id);
         // A stale artifact with the same id is never recycled: refuse so the
@@ -1884,15 +1953,26 @@ fn root_key(index: u32) -> String {
 
 pub struct SystemScanEvidenceStoreFactory;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanExclusions {
+    schema_version: u32,
+    home_id: String,
+    paths: Vec<PathBuf>,
+}
+
 impl ScanEvidenceStoreFactory for SystemScanEvidenceStoreFactory {
     fn store_for(
         &self,
         home: &BoundHome,
     ) -> Result<Arc<dyn ScanEvidenceStore>, ScanEvidenceStoreError> {
-        Ok(Arc::new(SystemScanEvidenceStore::new(
+        let mut store = SystemScanEvidenceStore::new(
             home.path.join("cache").join(SCAN_DIR_NAME),
             home.home_id.0.clone(),
-        )))
+        );
+        // User choices are durable Home state, not disposable scan cache.
+        store.ignored_paths_file = home.path.join("scan-exclusions.json");
+        Ok(Arc::new(store))
     }
 }
 
@@ -1967,6 +2047,13 @@ impl FaultInjectingScanEvidenceStore {
 }
 
 impl ScanEvidenceStore for FaultInjectingScanEvidenceStore {
+    fn ignored_paths(&self) -> Result<Vec<PathBuf>, ScanEvidenceStoreError> {
+        self.inner.ignored_paths()
+    }
+    fn write_ignored_paths(&self, paths: &[PathBuf]) -> Result<(), ScanEvidenceStoreError> {
+        self.inner.write_ignored_paths(paths)
+    }
+
     fn create_run(&self, run: &ScanRunRecord) -> Result<(), ScanEvidenceStoreError> {
         self.inner.create_run(run)
     }
@@ -2160,6 +2247,46 @@ mod tests {
             "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
             PathBuf::from("/tmp/scan-store-home"),
         )
+    }
+
+    #[test]
+    fn exclusions_survive_cache_removal_and_reopen_and_reject_corrupt_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = BoundHome::test_value(
+            "b1c4e6f8-1a2b-4c3d-8e9f-0123456789ab",
+            temporary.path().to_path_buf(),
+        );
+        let factory = SystemScanEvidenceStoreFactory;
+        let store = factory.store_for(&home).unwrap();
+        assert!(store.ignored_paths().unwrap().is_empty());
+        let paths = vec![PathBuf::from("/local/first"), PathBuf::from("/other/first")];
+        store.write_ignored_paths(&paths).unwrap();
+        assert!(
+            store
+                .write_ignored_paths(&[PathBuf::from("relative")])
+                .is_err()
+        );
+        let cache = temporary.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::remove_dir_all(&cache).unwrap();
+        drop(store);
+        assert_eq!(
+            factory.store_for(&home).unwrap().ignored_paths().unwrap(),
+            paths
+        );
+        let other_home = BoundHome::test_value(
+            "00000000-0000-4000-8000-000000000000",
+            temporary.path().to_path_buf(),
+        );
+        assert!(
+            factory
+                .store_for(&other_home)
+                .unwrap()
+                .ignored_paths()
+                .is_err()
+        );
+        fs::write(temporary.path().join("scan-exclusions.json"), b"{").unwrap();
+        assert!(factory.store_for(&home).unwrap().ignored_paths().is_err());
     }
 
     fn run_record(home: &BoundHome, run_id: &str) -> ScanRunRecord {

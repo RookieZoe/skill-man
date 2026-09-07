@@ -1400,6 +1400,10 @@ fn classify_run(
         }
     }
     let context = ScanClassificationContext {
+        ignored_entity_paths: slot
+            .store
+            .ignored_paths()
+            .map_err(|error| error.to_string())?,
         control_zones,
         home_skills_path: Some(bound.path.join("skills")),
         managed_entity_paths: managed

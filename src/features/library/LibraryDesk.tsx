@@ -61,17 +61,18 @@ import { SelectionShelf } from "./SelectionShelf";
 import { SelectionControls } from "../../ui/SelectionControls";
 import { BatchDisableSheet } from "./BatchDisableSheet";
 import { SkillDocument } from "./SkillDocument";
+import { RepositoryLink } from "../../ui/RepositoryLink";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
 const filters: Array<{ value: CatalogFilter; labelKey: MessageKey }> = [
   { value: "all", labelKey: "library.filter.all" },
+  { value: "enabled", labelKey: "library.filter.enabled" },
+  { value: "disabled", labelKey: "library.filter.disabled" },
   { value: "broken", labelKey: "library.filter.broken" },
   { value: "modified", labelKey: "library.filter.modified" },
   { value: "local", labelKey: "library.filter.link" },
   { value: "git", labelKey: "library.filter.install" },
-  { value: "enabled", labelKey: "library.filter.enabled" },
-  { value: "disabled", labelKey: "library.filter.disabled" },
 ];
 
 export type LayoutMode = "wide" | "mid" | "narrow";
@@ -315,6 +316,8 @@ export function LibraryDesk({
     };
   }, [client, surface, skills, gitSourceCapability]);
   const [scanExpanded, setScanExpanded] = useState(false);
+  const [agentToolbarTarget, setAgentToolbarTarget] =
+    useState<HTMLDivElement | null>(null);
   const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
   const [isBatchGlobalEnableOpen, setIsBatchGlobalEnableOpen] = useState(false);
   const [isBatchDisableOpen, setIsBatchDisableOpen] = useState(false);
@@ -557,7 +560,7 @@ export function LibraryDesk({
           onOpenLinkImport();
         }}
         onOpenPreferences={onOpenPreferences}
-        onOpenScanSetup={onOpenScanSetup}
+        agentToolbarRef={setAgentToolbarTarget}
       />
       <div
         className="notice-region"
@@ -579,13 +582,8 @@ export function LibraryDesk({
           <main
             id="repository-management"
             className="repository-management"
-            aria-labelledby="repository-management-title"
+            aria-label={t("library.source_management")}
           >
-            <header className="repository-management-header">
-              <h1 id="repository-management-title">
-                {t("library.source_management")}
-              </h1>
-            </header>
             <nav
               className="repository-list"
               aria-label={t("repositories.list")}
@@ -680,6 +678,7 @@ export function LibraryDesk({
           </main>
         ) : surface === "agents" ? (
           <AgentManagement
+            toolbarTarget={agentToolbarTarget}
             onCatalogChanged={onCatalogChanged}
             key={isOnboardingOpen ? "setup" : "configured"}
             client={client}
@@ -826,6 +825,7 @@ export function LibraryDesk({
           </div>
         )}
         <ScanEvidenceLedger
+          onOpenScanSetup={onOpenScanSetup}
           client={client}
           expanded={scanExpanded}
           onExpandedChange={(expanded) => {
@@ -1025,7 +1025,7 @@ function Toolbar({
   onToggleAgentDrawer,
   onImport,
   onOpenPreferences,
-  onOpenScanSetup,
+  agentToolbarRef,
 }: {
   surface: "library" | "agents" | "repositories";
   scanExpanded: boolean;
@@ -1036,7 +1036,7 @@ function Toolbar({
   onToggleAgentDrawer: () => void;
   onImport: () => void;
   onOpenPreferences: () => void;
-  onOpenScanSetup: () => void;
+  agentToolbarRef: (element: HTMLDivElement | null) => void;
 }) {
   const { t } = useLocale();
   return (
@@ -1103,10 +1103,8 @@ function Toolbar({
             </button>
           </>
         ) : null}
-        {surface === "agents" && (
-          <button className="toolbar-button" onClick={onOpenScanSetup}>
-            {t("scan.setup.open")}
-          </button>
+        {surface === "agents" && !scanExpanded && (
+          <div className="agent-toolbar-slot" ref={agentToolbarRef} />
         )}
         <button
           id="preferences-trigger"
@@ -1286,7 +1284,7 @@ export function LibrarySidebar({
               </button>
               {expanded[group.id] && (
                 <PluginGroups
-                  defaultOpen={false}
+                  collapsible={false}
                   items={group.skills}
                   pluginName={(skill) => group.plugins?.get(skill.id)}
                 >
@@ -1468,17 +1466,27 @@ function SkillDetailPanel({
               sourceRelease={sourceReleaseText}
               activationEvidence={activationEvidenceText}
               health={detail.health}
-            />
-            <dl className="metadata-grid">
-              <div>
-                <dt>{t("library.detail.source")}</dt>
-                <dd>{sourceDetailLabel(t, detail)}</dd>
-              </div>
-              <div>
-                <dt>{t("library.detail.last_activity")}</dt>
-                <dd>{formatDateTime(locale, detail.lastActivityAt)}</dd>
-              </div>
-            </dl>
+            >
+              <dl className="evidence-extra">
+                <div>
+                  <dt>{t("library.detail.source")}</dt>
+                  <dd>
+                    {gitSource ? (
+                      <>
+                        {t("library.source.git")} ·{" "}
+                        <RepositoryLink url={gitSource.canonicalUrl} />
+                      </>
+                    ) : (
+                      sourceDetailLabel(t, detail)
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{t("library.detail.last_activity")}</dt>
+                  <dd>{formatDateTime(locale, detail.lastActivityAt)}</dd>
+                </div>
+              </dl>
+            </EvidenceRail>
           </details>
           {detail.frontmatterName &&
           detail.frontmatterName !== detail.directoryName ? (
@@ -2879,9 +2887,9 @@ function sourceDetailLabel(
   if (detail.sourceKind === "remote_install") {
     return t("library.source.git");
   }
-  return detail.fileSourceOriginalPath
-    ? t("library.source.file_path", { path: detail.fileSourceOriginalPath })
-    : t("library.source.file");
+  return t("library.source.file_path", {
+    path: detail.fileSourceOriginalPath ?? detail.finalEntityPath,
+  });
 }
 
 function preferencesWarningText(

@@ -331,14 +331,6 @@ export function GlobalTargetGroupsPanel({
           <span className="eyebrow">{t("library.activation.eyebrow")}</span>
           <h2>{t("library.activation.target_groups")}</h2>
         </div>
-        <button
-          type="button"
-          className="toolbar-button"
-          disabled={snapshot === null || snapshot.skillHealth !== "healthy"}
-          onClick={() => openEnableSheet([])}
-        >
-          {t("inspector.enableGlobally")}
-        </button>
       </div>
       <p className="inspector-intro">
         {t("library.activation.target_groups_body")}
@@ -484,7 +476,8 @@ function TargetGroupCard({
       <div className="target-group-members">
         {consumersLabel}
         {group.consumers.some(
-          (consumer) => consumer.compatibility === "unknown",
+          (consumer) =>
+            !consumer.userConfigured && consumer.compatibility === "unknown",
         ) && (
           <span className="compat-unknown">
             {t("library.activation.compat_unknown")}

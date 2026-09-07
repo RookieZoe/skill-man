@@ -134,12 +134,12 @@ export function createFixtureCatalogClient(
   const presetRows = [
     ["omp", "omp", "~/.omp/agent/skills", ".omp/skills"],
     ["claude-code", "Claude Code", "~/.claude/skills", ".claude/skills"],
-    ["codex", "Codex", "~/.agents/skills", ".agents/skills"],
+    ["codex", "Codex", "~/.codex/skills", ".codex/skills"],
     ["gemini-cli", "Gemini CLI", "~/.gemini/skills", ".gemini/skills"],
     ["cursor", "Cursor", "~/.cursor/skills", ".cursor/skills"],
     ["opencode", "opencode", "~/.config/opencode/skills", ".opencode/skills"],
     ["github-copilot", "GitHub Copilot", "~/.copilot/skills", ".github/skills"],
-    ["zed", "Zed", "~/.agents/skills", ".agents/skills"],
+    ["general", "General", "~/.agents/skills", ".agents/skills"],
     ["windsurf", "Windsurf", "~/.codeium/windsurf/skills", ".windsurf/skills"],
   ] as const;
   const agentPresets: AgentPreset[] = presetRows.map(
@@ -486,6 +486,7 @@ export function createFixtureCatalogClient(
               agentId: config.agentId,
               agentName: config.name,
               compatibility: config.compatibility,
+              userConfigured: config.origin === "custom",
             },
           ],
           availability: "available",
@@ -1054,6 +1055,30 @@ export function createFixtureCatalogClient(
         rows: pageRows,
         nextOffset,
       };
+    },
+    async ignoreScanLocalCandidate(identity, generation, entitySeq) {
+      const summary = fixtureCurrentReport.summary;
+      const row = fixtureReportPages.local_candidates.find(
+        (item) =>
+          item.kind === "source_verdict" && item.entitySeq === entitySeq,
+      );
+      if (
+        !summary ||
+        summary.contentIdentity !== identity ||
+        summary.generation !== generation ||
+        row?.kind !== "source_verdict" ||
+        row.verdict !== "local"
+      ) {
+        throw new Error("stale candidate");
+      }
+      fixtureReportPages.local_candidates =
+        fixtureReportPages.local_candidates.filter((item) => item !== row);
+      fixtureReportPages.excluded.push({
+        ...row,
+        verdict: "excluded",
+        reasonKind: "ignored",
+        operations: [],
+      });
     },
     async planCreateAgentConfiguration(draft) {
       const planToken = `fixture-agent-plan-${planCounter++}`;

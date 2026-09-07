@@ -670,6 +670,18 @@ pub fn get_scan_report_page(
 }
 
 #[tauri::command]
+pub fn ignore_scan_local_candidate(
+    state: State<'_, Arc<ObservationApi>>,
+    report_content_identity: String,
+    generation: u64,
+    entity_seq: u64,
+) -> Result<(), CommandFailureDto> {
+    state
+        .ignore_local_candidate(&report_content_identity, generation, entity_seq)
+        .map_err(|error| scan_command_failure(&error))
+}
+
+#[tauri::command]
 pub fn plan_create_agent_configuration(
     state: State<'_, AgentConfigurationApi>,
     request: CreateAgentConfigurationRequestDto,

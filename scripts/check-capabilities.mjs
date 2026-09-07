@@ -70,7 +70,8 @@ for (const dependency of ["tauri-plugin-fs", "tauri-plugin-shell", "clap"]) {
   }
 }
 
-for (const permission of capability.permissions ?? []) {
+for (const entry of capability.permissions ?? []) {
+  const permission = typeof entry === "string" ? entry : entry.identifier;
   if (
     permission.startsWith("fs:") ||
     permission.startsWith("process:") ||

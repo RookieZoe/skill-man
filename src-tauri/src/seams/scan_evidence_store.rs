@@ -435,7 +435,7 @@ pub struct ScanSourceVerdictRecord {
     /// Closed reason kind: `uninterpretable_metadata |
     /// provenance_contradiction | lock_file_fault | repository_ref_conflict
     /// | ownership_split | verification_deferred |
-    /// multiple_directory_identities | managed_name_collision`.
+    /// multiple_directory_identities | managed_name_collision | ignored`.
     pub reason_kind: Option<String>,
     /// Source Content facts of the reason (refs, lock paths, fault detail).
     pub detail: Option<String>,
@@ -860,9 +860,14 @@ impl ScanEvidenceStoreError {
 }
 
 /// Seam: the atomic, provenance-checked Evidence Store. Operations are
-/// either identity-checked writes or identity-checked removals; nothing
-/// outside `scan_dir` is ever touched.
+/// identity-checked writes or removals within `scan_dir`. Explicit user
+/// exclusions are stored separately in the bound Home so cache cleanup
+/// does not discard them.
 pub trait ScanEvidenceStore: Send + Sync {
+    /// Explicit user exclusions, persisted independently of cached Runs.
+    fn ignored_paths(&self) -> Result<Vec<PathBuf>, ScanEvidenceStoreError>;
+    fn write_ignored_paths(&self, paths: &[PathBuf]) -> Result<(), ScanEvidenceStoreError>;
+
     fn create_run(&self, run: &ScanRunRecord) -> Result<(), ScanEvidenceStoreError>;
 
     fn append_entry(

@@ -9,6 +9,7 @@ pub fn run() {
 
     use ::tauri::tray::TrayIconBuilder;
     use ::tauri::{Listener, Manager, RunEvent, WindowEvent};
+    use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
     use crate::adapters::agent_configuration_fs::MacOsAgentConfigurationFileSystem;
     use crate::adapters::app_state_store::AppStateStoreFileSystem;
@@ -91,9 +92,9 @@ pub fn run() {
         finalize_source_promotion, finalize_source_transition, finalize_source_update,
         get_agent_management_snapshot, get_bootstrap_snapshot, get_fixture_recovery_preview,
         get_git_source_capability, get_locale_snapshot, get_observation_page,
-        get_observation_snapshot, get_scan_report_page, inspect_skill, install_app_update,
-        list_recent_project_folders, list_safety_snapshots, list_skills, list_target_groups,
-        load_preferences, pin_skill_updates, plan_abandon, plan_adopt,
+        get_observation_snapshot, get_scan_report_page, ignore_scan_local_candidate, inspect_skill,
+        install_app_update, list_recent_project_folders, list_safety_snapshots, list_skills,
+        list_target_groups, load_preferences, pin_skill_updates, plan_abandon, plan_adopt,
         plan_create_agent_configuration, plan_delete_agent_configuration,
         plan_delete_safety_snapshot, plan_edit_agent_configuration, plan_file_import,
         plan_file_import_selection, plan_file_reinstall, plan_fixture_recovery, plan_global_enable,
@@ -132,6 +133,10 @@ pub fn run() {
         .on_menu_event(crate::tauri_adapter::menu::handle_app_menu_event)
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
+        .plugin(tauri_plugin_window_state::Builder::default()
+            .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+            .build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
@@ -748,6 +753,7 @@ pub fn run() {
             start_rescan,
             cancel_rescan,
             get_scan_report_page,
+            ignore_scan_local_candidate,
             plan_create_agent_configuration,
             plan_edit_agent_configuration,
             plan_delete_agent_configuration,
@@ -816,6 +822,40 @@ pub fn run() {
         // rest). Absent outside Bound: the tray keeps its last good menu.
         let tray_store = app_handle.try_state::<Arc<dyn CatalogStore>>();
         match event {
+            // Programmatic restoration can bypass macOS interactive size limits.
+            // Reuse the configured logical minimum, converted for the current display.
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Resized(size),
+                ..
+            } if label == "main" => {
+                if let (Some(window), Some(config)) = (
+                    app_handle.get_webview_window("main"),
+                    app_handle
+                        .config()
+                        .app
+                        .windows
+                        .iter()
+                        .find(|window| window.label == "main"),
+                ) {
+                    if let Ok(scale) = window.scale_factor() {
+                        let minimum = ::tauri::LogicalSize::new(
+                            config.min_width.unwrap_or(0.0),
+                            config.min_height.unwrap_or(0.0),
+                        )
+                        .to_physical::<u32>(scale);
+                        let clamped = ::tauri::PhysicalSize::new(
+                            size.width.max(minimum.width),
+                            size.height.max(minimum.height),
+                        );
+                        if clamped != size {
+                            if let Err(error) = window.set_size(clamped) {
+                                eprintln!("failed to enforce main window minimum size: {error}");
+                            }
+                        }
+                    }
+                }
+            }
             // Red close button only closes the main window; the app stays
             // resident in the menu bar (spec §9.4).
             RunEvent::WindowEvent {
@@ -824,6 +864,7 @@ pub fn run() {
                 ..
             } if label == "main" => {
                 api.prevent_close();
+                let _ = app_handle.save_window_state(StateFlags::SIZE | StateFlags::POSITION);
                 hide_main_window(app_handle);
             }
             // Dock icon click reopens the window (spec §10.3) and, in System

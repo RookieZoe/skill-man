@@ -24,33 +24,56 @@ export function PluginGroups<T>({
   pluginName,
   children,
   defaultOpen = true,
+  collapsible = true,
 }: {
   items: T[];
   pluginName: (item: T) => string | null | undefined;
   children: (members: T[]) => ReactNode;
   defaultOpen?: boolean;
+  collapsible?: boolean;
 }) {
   const { t } = useLocale();
   const groups = groupPluginMembers(items, pluginName);
   if (!groups) return children(items);
   return (
     <div className="plugin-groups">
-      {groups.map(([name, members]) => (
-        <details className="plugin-group" key={name} open={defaultOpen}>
-          <summary className="plugin-group-heading">
-            <span>
-              {name
-                ? name
-                    .split("-")
-                    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-                    .join(" ")
-                : t("library.sidebar.other_plugins")}
-            </span>
-            <span className="count-badge">{members.length}</span>
-          </summary>
-          {children(members)}
-        </details>
-      ))}
+      {groups.map(([name, members]) =>
+        collapsible ? (
+          <details className="plugin-group" key={name} open={defaultOpen}>
+            <summary className="plugin-group-heading">
+              <span>
+                {name
+                  ? name
+                      .split("-")
+                      .map(
+                        (part) => part.charAt(0).toUpperCase() + part.slice(1),
+                      )
+                      .join(" ")
+                  : t("library.sidebar.other_plugins")}
+              </span>
+              <span className="count-badge">{members.length}</span>
+            </summary>
+            {children(members)}
+          </details>
+        ) : (
+          <section className="plugin-group" key={name}>
+            <h3 className="plugin-group-heading">
+              <span>
+                {name
+                  ? name
+                      .split("-")
+                      .map(
+                        (part) => part.charAt(0).toUpperCase() + part.slice(1),
+                      )
+                      .join(" ")
+                  : t("library.sidebar.other_plugins")}
+              </span>
+              <span className="count-badge">{members.length}</span>
+            </h3>
+            {children(members)}
+          </section>
+        ),
+      )}
     </div>
   );
 }

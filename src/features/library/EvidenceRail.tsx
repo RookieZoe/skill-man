@@ -1,4 +1,5 @@
 import type { Health } from "../../app/catalog-client";
+import type { ReactNode } from "react";
 import { useLocale } from "../locale/LocaleProvider";
 
 export interface EvidenceRailProps {
@@ -7,6 +8,7 @@ export interface EvidenceRailProps {
   sourceRelease?: string | null;
   activationEvidence?: string | null;
   health: Health;
+  children?: ReactNode;
 }
 
 /**
@@ -23,6 +25,7 @@ export function EvidenceRail({
   sourceRelease,
   activationEvidence,
   health,
+  children,
 }: EvidenceRailProps) {
   const { t } = useLocale();
   const tone =
@@ -76,6 +79,7 @@ export function EvidenceRail({
           {activationEvidence ?? t("evidenceRail.activationNone")}
         </span>
       </div>
+      {children}
     </section>
   );
 }

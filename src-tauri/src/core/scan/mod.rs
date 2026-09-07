@@ -638,6 +638,51 @@ impl ScanCoordinator {
         })
     }
 
+    /// Persist only a Local candidate selected from the current immutable Report.
+    /// The caller supplies evidence identity, never a writable filesystem path.
+    pub fn ignore_local_candidate(
+        &self,
+        report_content_identity: &str,
+        generation: u64,
+        entity_seq: u64,
+    ) -> Result<(), ScanError> {
+        let context = self
+            .write_gate
+            .capture_open_context()
+            .map_err(|error| ScanError::NotWritable(error.to_string()))?;
+        let _guard = self
+            .write_gate
+            .acquire_product_write(&context)
+            .map_err(|error| ScanError::NotWritable(error.to_string()))?;
+        let state = self.state_lock();
+        let (view, _) = self.compute_report_view(&state);
+        if view.freshness != ReportFreshness::Current || state.run.is_some() {
+            return Err(ScanError::Superseded);
+        }
+        let evidence = self.entity_evidence(report_content_identity, generation, entity_seq)?;
+        if evidence.verdict.verdict != classification::VERDICT_LOCAL {
+            return Err(ScanError::Superseded);
+        }
+        let store = self
+            .factory
+            .store_for(&context.home)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        let mut paths = store
+            .ignored_paths()
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        let path = evidence.verdict.canonical_path;
+        if !paths.contains(&path) {
+            paths.push(path);
+            // A parent fsync failure can occur after atomic replacement;
+            // conservatively invalidate old Adopt evidence before attempting the write.
+            self.mutation.bump();
+            store
+                .write_ignored_paths(&paths)
+                .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// The unique paged Report read contract (spec §4.10 `report_page`;
     /// ADR-0017): Root coverage, canonical entities, appearances and typed
     /// diagnostics of the current Report generation only. A cursor whose

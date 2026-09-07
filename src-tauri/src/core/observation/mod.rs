@@ -370,6 +370,18 @@ impl ObservationService {
         scan.report_page(cursor, limit)
     }
 
+    pub fn ignore_local_candidate(
+        &self,
+        identity: &str,
+        generation: u64,
+        entity_seq: u64,
+    ) -> Result<(), ScanError> {
+        self.scan
+            .as_ref()
+            .ok_or_else(|| ScanError::Internal("the Scan Coordinator is not attached".into()))?
+            .ignore_local_candidate(identity, generation, entity_seq)
+    }
+
     /// The unique paged observation read contract (spec §4.10
     /// `observation_page`): rows of one generation only; a cursor whose
     /// generation is no longer current returns typed stale, a kind that was

@@ -85,6 +85,7 @@ pub const CLOSED_REASON_SCAN_INCOMPLETE: &str = "scan_incomplete";
 /// classifier is pure; the engine assembles these.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScanClassificationContext {
+    pub ignored_entity_paths: Vec<PathBuf>,
     /// Home, Global Skills Roots, installer-managed roots and App state
     /// paths: an entity inside any of them is inside the control zone.
     pub control_zones: Vec<PathBuf>,
@@ -707,6 +708,15 @@ fn classify_entity(
         return entity;
     }
 
+    if context
+        .ignored_entity_paths
+        .contains(&entity.canonical_path)
+    {
+        entity.shape = VerdictShape::Excluded;
+        entity.reason_kind = Some("ignored".to_owned());
+        return entity;
+    }
+
     // 3. A structurally faulted governing lock file blocks every entity
     // inside the installer root (ADR-0013 §2.1).
     if let Some((_, fault)) = faulted_roots
@@ -1232,6 +1242,7 @@ mod tests {
 
     fn context() -> ScanClassificationContext {
         ScanClassificationContext {
+            ignored_entity_paths: Vec::new(),
             control_zones: vec![PathBuf::from("/root/agent-skills")],
             home_skills_path: Some(PathBuf::from("/home/skills")),
             managed_entity_paths: Vec::new(),

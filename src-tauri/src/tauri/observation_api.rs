@@ -161,6 +161,16 @@ impl ObservationApi {
     ) -> Result<crate::seams::scan_evidence_store::ScanReportPageRead, ScanError> {
         self.service.report_page(cursor, limit)
     }
+
+    pub fn ignore_local_candidate(
+        &self,
+        identity: &str,
+        generation: u64,
+        entity_seq: u64,
+    ) -> Result<(), ScanError> {
+        self.service
+            .ignore_local_candidate(identity, generation, entity_seq)
+    }
 }
 
 /// The API is the scan progress observer: the coordinator throttles to

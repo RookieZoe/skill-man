@@ -46,6 +46,19 @@ test("groups by repository identity and expands without selecting a Skill", asyn
   const user = userEvent.setup();
   const onSelect = vi.fn();
   render(<LibrarySidebar {...defaults} onSelect={onSelect} />);
+  expect(
+    [...document.querySelectorAll(".filter-chip")].map(
+      (button) => button.textContent,
+    ),
+  ).toEqual([
+    "All",
+    "Enabled",
+    "Not enabled",
+    "Broken",
+    "Modified",
+    "Local",
+    "Git",
+  ]);
   const group = screen.getByRole("button", { name: "acme/skills 2" });
   expect(group).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("button", { name: "one" })).not.toBeInTheDocument();

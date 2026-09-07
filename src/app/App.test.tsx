@@ -15,6 +15,7 @@ import type {
 } from "./catalog-client";
 import { App } from "./App";
 import { createGitPreviewClient } from "../test-fixtures/git-preview";
+import { LocaleProvider } from "../features/locale/LocaleProvider";
 
 test.each([false, true])(
   "force replacement preserves its result when catalog refresh fails: %s",
@@ -399,6 +400,88 @@ test("scan workspace opens separately and returns without losing the selected Sk
   expect(
     screen.getByRole("heading", { name: "media-xray" }),
   ).toBeInTheDocument();
+});
+
+test("Chinese detail labels and local source preserve the original path", async () => {
+  const client = createFixtureCatalogClient();
+  await client.setLocaleSelection("zh-Hans");
+  render(
+    <LocaleProvider client={client}>
+      <App client={client} />
+    </LocaleProvider>,
+  );
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await userEvent.click(
+    await screen.findByText("来源与技术详情", { selector: "summary" }),
+  );
+  for (const label of ["目录名称", "实际路径", "来源版本", "启用状态"]) {
+    expect(screen.getByText(label)).toBeInTheDocument();
+  }
+  expect(
+    screen.getByText("本地 · /Users/zoe/Codes/AI/skills/skill-authoring"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Directory identity")).not.toBeInTheDocument();
+});
+
+test("Git source combines its kind and clickable URL without a duplicate repository row", async () => {
+  render(<App client={createGitPreviewClient()} />);
+  await expandLibrary();
+  await userEvent.click(
+    await screen.findByRole("button", { name: "media-xray" }),
+  );
+  await userEvent.click(
+    screen.getByText("Source and technical details", { selector: "summary" }),
+  );
+  const detail = screen.getByRole("main", { name: "Skill detail" });
+  const link = within(detail).getByRole("link", {
+    name: "https://github.com/example/media-skills",
+  });
+  expect(link).toHaveAttribute(
+    "href",
+    "https://github.com/example/media-skills",
+  );
+  expect(link.closest("dd")).toHaveTextContent(
+    "Git · https://github.com/example/media-skills",
+  );
+  expect(
+    within(detail).getAllByRole("link", { name: link.textContent! }),
+  ).toHaveLength(1);
+});
+
+test("Agent actions live in the toolbar, detection has no detail pane, and scan setup lives in the ledger", async () => {
+  render(<App client={createGitPreviewClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  const toolbar = screen.getByRole("banner");
+  const ledger = screen.getByRole("region", { name: "Scan evidence" });
+  expect(
+    within(toolbar).queryByRole("button", { name: "Configure scan scope" }),
+  ).not.toBeInTheDocument();
+  expect(
+    within(ledger).getByRole("button", { name: "Configure scan scope" }),
+  ).toBeEnabled();
+  expect(
+    within(toolbar).queryByText("Detected but unconfigured"),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "Agents" }));
+  await userEvent.click(
+    await within(toolbar).findByText("Detected but unconfigured"),
+  );
+  expect(
+    document.querySelector(".agent-management-detail"),
+  ).not.toBeInTheDocument();
+  expect(document.querySelector(".agent-detection-list")).toBeInTheDocument();
+  await userEvent.click(
+    within(toolbar).getByRole("button", { name: "New custom agent" }),
+  );
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Repositories" }));
+  expect(
+    within(toolbar).queryByText("Detected but unconfigured"),
+  ).not.toBeInTheDocument();
+  expect(
+    within(toolbar).queryByRole("button", { name: "New custom agent" }),
+  ).not.toBeInTheDocument();
 });
 
 test("technical evidence is collapsed and Agents keeps one working Rescan entry", async () => {
@@ -1824,6 +1907,8 @@ test("Global single-skill Adopt hands off to the ledger lifecycle", async () => 
       projectRoot: null,
       cells: [adoptCell(targetRootIds[0])],
     }) satisfies EnablePlan;
+  client.planGlobalLifecycle = async (skillId, targetRootId) =>
+    client.planGlobalEnable([skillId], [targetRootId], []);
   let finalized = false;
   client.planAdopt = async (_generation, selections) => {
     expect(selections).toEqual([{ entityRef, action: "local_link" }]);
@@ -1900,13 +1985,10 @@ test("Global single-skill Adopt hands off to the ledger lifecycle", async () => 
 
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "skill-authoring" });
-  await user.click(
-    await screen.findByRole("button", { name: "Enable globally…" }),
-  );
+  await user.click(await screen.findByRole("switch", { name: /Claude Code/ }));
   const dialog = await screen.findByRole("dialog", {
     name: "Enable Skill authoring globally",
   });
-  await user.click(within(dialog).getByText("Claude Code"));
   await user.click(
     within(dialog).getByRole("button", { name: "Review the plan" }),
   );
