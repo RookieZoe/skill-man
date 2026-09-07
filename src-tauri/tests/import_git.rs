@@ -88,6 +88,7 @@ fn complete_repository_source_scan(
                         }],
                     }),
                     manifest: GitSourceManifestFact::Present {
+                        member_plugins: Default::default(),
                         remote_id: remote_id.into(),
                         canonical_url: canonical_url.into(),
                         aliases: vec![],

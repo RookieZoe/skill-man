@@ -880,7 +880,7 @@ mod probe_run {
         let mut root_counts = types::StartupProbeRootCounts::default();
         let mut target_counts = types::StartupProbeTargetCounts::default();
         let mut slow = false;
-        for root in &snapshot.roots {
+        for root in snapshot.configured_roots() {
             let observation = service.probe_root(&root.configured_path);
             let state = observation.state;
             let is_target = target_ids.contains(&root.root_id);
@@ -1324,18 +1324,14 @@ mod tests {
         ))))
     }
 
-    fn root(root_id: &str, path: &str, role: AgentRootRole) -> StoredGlobalSkillRoot {
-        let mut root = StoredGlobalSkillRoot {
+    fn root(root_id: &str, path: &str, _role: AgentRootRole) -> StoredGlobalSkillRoot {
+        StoredGlobalSkillRoot {
             root_id: root_id.into(),
             configured_path: PathBuf::from(path),
             path_identity_key: crate::core::domain::configured_path_identity_key(path),
-            consumer_agent_ids: Vec::new(),
+            consumer_agent_ids: vec!["agent-1".into()],
             activation_skill_ids: Vec::new(),
-        };
-        if role == AgentRootRole::ActivationTarget {
-            root.consumer_agent_ids.push("agent-1".into());
         }
-        root
     }
 
     fn stored_row(
@@ -1574,6 +1570,23 @@ mod tests {
             "slow never downgrades an observation"
         );
         assert!(agent_fs.calls.load(AtomicOrdering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn startup_probe_excludes_history_only_roots() {
+        let store = StubAgentStore::new(1);
+        let mut historical = root("old", "/missing/removed-agent", AgentRootRole::ScanOnly);
+        historical.consumer_agent_ids.clear();
+        store.with(|snapshot| snapshot.roots = vec![historical]);
+        let (service, agent_fs, _, _) = harness(
+            StubAgentFs::new(vec![]),
+            StubFs::new(),
+            store,
+            StubActivationStore::new(),
+        );
+        let snapshot = service.refresh_startup_probe();
+        assert_eq!(snapshot.startup_probe.unwrap().root_counts.total, 0);
+        assert_eq!(agent_fs.calls.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[test]

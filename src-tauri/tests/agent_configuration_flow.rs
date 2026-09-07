@@ -365,6 +365,31 @@ fn shared_target_detach_preserves_activations_and_last_reference_is_blocked() {
         )
         .expect("retained history");
     assert_eq!(retained, 1, "keep disabled history and its target root");
+    let current = _sqlite
+        .agent_configuration_snapshot()
+        .expect("current scan scope");
+    assert!(
+        current
+            .configured_roots()
+            .all(|root| root.root_id != root_id),
+        "a history-only Root must not remain in the configured scan scope"
+    );
+    std::fs::remove_dir(&shared_target).expect("remove unused fixture directory");
+    let filesystem =
+        skill_man_lib::adapters::macos_fs::MacOsFileSystem::new(temp.path().to_path_buf());
+    let plan =
+        skill_man_lib::core::scan::plan::plan_roots_with_failures(&filesystem, &current).unwrap();
+    assert!(
+        plan.iter()
+            .all(|root| root.configured_path != shared_target && root.plan_error.is_none())
+    );
+    std::fs::create_dir(&shared_target).unwrap();
+    let readded = service
+        .plan_create(draft("Readded", &shared_target))
+        .unwrap();
+    service.apply(&readded.plan_token).unwrap();
+    let current = _sqlite.agent_configuration_snapshot().unwrap();
+    assert!(current.roots.iter().any(|root| root.root_id == root_id));
 }
 
 #[test]

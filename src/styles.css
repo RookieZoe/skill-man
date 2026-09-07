@@ -699,10 +699,27 @@ button:active:not(:disabled) {
 }
 
 .skill-detail {
+  --detail-content-width: 960px;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-6);
   background: var(--surface-raised);
+}
+
+/* One centered reading column for headings, actions, evidence and SKILL.md. */
+.skill-detail > .detail-heading,
+.skill-detail > .detail-actions,
+.skill-detail > .health-notice,
+.skill-detail > .name-notice,
+.skill-detail > .detail-evidence,
+.skill-detail > .document-preview {
+  width: 100%;
+  max-width: var(--detail-content-width);
+  margin-inline: auto;
+}
+
+.skill-detail .detail-heading p {
+  max-width: none;
 }
 
 .agent-inspector {
@@ -783,6 +800,8 @@ button:active:not(:disabled) {
   z-index: 14;
   inset: 0;
   display: block;
+  overflow-x: clip;
+  overflow-y: clip;
   background: transparent;
   pointer-events: none;
 }
@@ -1772,6 +1791,36 @@ button:active:not(:disabled) {
   justify-self: start;
 }
 
+.operation-notice {
+  margin: 16px 24px;
+  flex: 0 0 auto;
+}
+
+.operation-notice p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.operation-dismiss {
+  margin-top: 8px;
+}
+
+.operation-status-window-item[data-state="completed"]
+  .operation-status-window-item-heading
+  > span {
+  background: #368346;
+}
+
+.operation-status-window-item[data-state="failed"]
+  .operation-status-window-item-heading
+  > span,
+.operation-status-window-item[data-state="partial"]
+  .operation-status-window-item-heading
+  > span {
+  background: #b56c13;
+}
+
 .operation-status-window {
   position: fixed;
   z-index: 70;
@@ -1791,7 +1840,7 @@ button:active:not(:disabled) {
     0 18px 48px oklch(20% 0.02 250 / 0.22),
     0 2px 8px oklch(20% 0.02 250 / 0.12);
   backdrop-filter: blur(16px) saturate(1.12);
-  pointer-events: none;
+  pointer-events: auto;
   animation: operation-status-window-enter 180ms ease-out both;
 }
 
@@ -1829,6 +1878,7 @@ button:active:not(:disabled) {
 }
 
 .operation-status-window-list {
+  overflow-wrap: anywhere;
   max-height: min(320px, calc(100vh - 230px));
   display: grid;
   gap: var(--space-3);
@@ -5389,4 +5439,56 @@ details[open] > .source-group-summary::before {
 }
 .scan-root-list small {
   color: var(--text-secondary);
+}
+.plugin-groups {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-group {
+  min-width: 0;
+}
+
+.plugin-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.plugin-group-heading::before {
+  content: "▸";
+  flex: none;
+}
+
+.plugin-group[open] > .plugin-group-heading::before {
+  content: "▾";
+}
+
+.plugin-group-heading::-webkit-details-marker {
+  display: none;
+}
+
+.plugin-group-heading > span:first-of-type {
+  min-width: 0;
+  flex: 1;
+}
+
+.plugin-group-heading .count-badge {
+  flex: none;
+  margin-left: auto;
+}
+.source-force-acknowledgment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-force-acknowledgment input {
+  flex: 0 0 auto;
 }

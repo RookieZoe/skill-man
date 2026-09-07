@@ -45,7 +45,7 @@ async function renderApplication() {
             : import.meta.env.DEV && params.get("fixture") === "git-preview"
               ? (
                   await import("./test-fixtures/git-preview")
-                ).createGitPreviewClient()
+                ).createGitPreviewClient(params.get("removed") === "true")
               : import.meta.env.DEV && params.get("fixture") === "enable"
                 ? (
                     await import("./test-fixtures/catalog")

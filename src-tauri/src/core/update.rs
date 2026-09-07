@@ -790,6 +790,7 @@ fn ensure_parent_manifest(
     filesystem.write_remote_parent_manifest(
         remotes_root,
         &RemoteParentManifest {
+            member_plugins: Default::default(),
             schema_version: 1,
             remote_id: record.remote_id.clone(),
             canonical_url: record.source_url.clone(),

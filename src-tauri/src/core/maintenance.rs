@@ -565,6 +565,7 @@ impl MaintenanceService {
                     self.filesystem.write_remote_parent_manifest(
                         &remotes_root,
                         &RemoteParentManifest {
+                            member_plugins: Default::default(),
                             schema_version: 1,
                             remote_id: parent.remote_id.clone(),
                             canonical_url: parent.canonical_url.clone(),

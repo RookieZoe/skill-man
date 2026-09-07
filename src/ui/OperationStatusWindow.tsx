@@ -8,12 +8,15 @@ export interface OperationStatus {
   id: string;
   title: string;
   detail: string;
+  state?: "running" | "completed" | "failed" | "cancelled" | "partial";
 }
 
 interface OperationStatusWindowProps {
   ariaLabel: string;
   heading: string;
   operations: readonly OperationStatus[];
+  onDismiss?: (id: string) => void;
+  dismissLabel?: string;
 }
 
 /**
@@ -25,6 +28,8 @@ export function OperationStatusWindow({
   ariaLabel,
   heading,
   operations,
+  onDismiss,
+  dismissLabel,
 }: OperationStatusWindowProps) {
   const [isVisible, setIsVisible] = useState(false);
 
@@ -52,13 +57,27 @@ export function OperationStatusWindow({
       </header>
       <ul className="operation-status-window-list">
         {operations.map((operation) => (
-          <li className="operation-status-window-item" key={operation.id}>
+          <li
+            className="operation-status-window-item"
+            key={operation.id}
+            data-state={operation.state ?? "running"}
+          >
             <div className="operation-status-window-item-heading">
               <span aria-hidden="true" />
               <h2>{operation.title}</h2>
             </div>
             <p>{operation.detail}</p>
-            <IndeterminateProgress label={operation.title} />
+            {!operation.state || operation.state === "running" ? (
+              <IndeterminateProgress label={operation.title} />
+            ) : onDismiss ? (
+              <button
+                type="button"
+                className="toolbar-button operation-dismiss"
+                onClick={() => onDismiss(operation.id)}
+              >
+                {dismissLabel}
+              </button>
+            ) : null}
           </li>
         ))}
       </ul>

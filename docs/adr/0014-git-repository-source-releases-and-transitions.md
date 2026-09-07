@@ -57,6 +57,10 @@ Source Group Preview 在一个来源父节点下显示 provider、规范化 repo
 
 Source Undo 是结果窗口内的条件性来源级整体逆转：只有全部成员、来源记录、Home 实体、external path 和旧 lock claims 都仍满足 guard 才能恢复；任一 guard 失败则整体拒绝。普通 Remove 不恢复 external owner。
 
+首次来源替换纳管时，确认阶段只为当前配置的 Activation Target 中原先实际使用的已声明成员冻结启用计划（原实体目录或直指它的软链接）。所有远端成员仍全量安装，但不为未使用成员或 scan-only Root 自动启用。Journal 保存目标父目录身份、原链接文本和新的 Home namespace；CAS 前不写启用链接，CAS 后恢复直链并在来源 Catalog 事务内共同写入 Activation。失败恢复不重新扫描、不 refetch；已提交后被改动或移除的启用项拒绝重放。Source Undo 同时撤回本次 Activation 并还原原目录/链接，任何后续启用状态变化均令条件性撤销失效。Legacy Source Promotion 保持其独立的既有 Activation 迁移协议，不复用首次纳管计划。
+
+“使用远端最新替代”不要求外部旧实体与目标 Source Release 内容相同。Journal 分别冻结外部旧内容摘要与远端目标摘要：隔离、提交前回滚、撤销使用前者；Home 安装与发布使用后者。确认后的并发改动仍拒绝。旧 Journal 未记录独立外部摘要时，沿用旧实体必须等于目标摘要的保守规则。外部 lock 的 `SKILL.md` 文件路径只在成员匹配时投影为目录路径，CAS 与撤销仍保留原始声明。
+
 日后 Update 重新获取唯一 tracking ref，发现新的完整 Source Release，并重复 Source Group Preview、冲突草案、最终确认和 Source Transition。外部 installer 重新出现仍是 Ownership Conflict，不是 Update；不自动覆盖、合并或再次纳管。
 
 ## Consequences

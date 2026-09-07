@@ -22,6 +22,7 @@ export interface GitSourceCapabilitySource {
 }
 
 export interface GitSourceCapabilityMember {
+  pluginName?: string | null;
   skillId: string;
   skillPath: string;
   /** `false` marks a tombstoned member (no bytes to copy). */
@@ -1306,6 +1307,7 @@ export interface ExternalOwnershipClaim {
 export type SourceGroupMemberAction = "added" | "current";
 
 export interface SourceGroupMember {
+  pluginName?: string | null;
   directoryName: string;
   displayName: string;
   description: string;
@@ -1329,6 +1331,8 @@ export interface SourceGroupPreview {
   policy: SourceGroupPolicyFacts;
   members: SourceGroupMember[];
   externalOwnershipClaims: ExternalOwnershipClaim[];
+  removedExternalClaims?: string[];
+  addedMemberNames?: string[];
 }
 
 export interface RepositoryRefConflict {
@@ -1356,6 +1360,7 @@ export interface ConfirmSourceTransitionRequest {
   trackingPolicy: SourceTrackingPolicy | null;
   expectedSelectedRef: string;
   expectedResolvedCommit: string;
+  expectedRemovedClaims?: string[];
 }
 
 export interface SourceTransitionResult {
@@ -1377,6 +1382,7 @@ export interface SourceUndoResult {
 export type SourcePromotionMemberState = "added" | "current";
 
 export interface SourcePromotionDraftMember {
+  pluginName?: string | null;
   skillPath: string;
   directoryName: string;
   directoryIdentityKey: string;
@@ -1431,6 +1437,7 @@ export interface SourcePromotionResult {
 export type SourceUpdateMemberState = "current" | "added" | "removed";
 
 export interface SourceUpdateDraftMember {
+  pluginName?: string | null;
   skillId: string;
   skillPath: string;
   directoryName: string;

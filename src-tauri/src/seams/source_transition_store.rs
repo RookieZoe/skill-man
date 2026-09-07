@@ -4,9 +4,29 @@
 //! that makes every release/member fact current together after the Source
 //! Ownership Commit Point.
 
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::core::domain::SkillId;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceTransitionTarget {
+    pub root_id: String,
+    pub path: PathBuf,
+}
+
+/// Previous global use, frozen before isolation; never inferred on recovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceTransitionActivation {
+    pub skill_id: String,
+    pub target_root_id: String,
+    pub entry_path: PathBuf,
+    pub target_path: PathBuf,
+    pub parent_fingerprint: crate::seams::filesystem::DirectoryFingerprint,
+    /// None means the original entry was the isolated real directory.
+    pub previous_target: Option<PathBuf>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTransitionMemberRecord {
@@ -24,6 +44,7 @@ pub struct SourceTransitionMemberRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTransitionRecord {
+    pub activations: Vec<SourceTransitionActivation>,
     pub remote_id: String,
     pub provider: String,
     pub canonical_url: String,
@@ -66,6 +87,15 @@ pub enum SourceTransitionStoreError {
 /// release facts, all Managed Skills and all current-member rows together;
 /// individual members never carry a ref or commit.
 pub trait SourceTransitionStore: Send + Sync {
+    fn activation_targets(&self)
+    -> Result<Vec<SourceTransitionTarget>, SourceTransitionStoreError>;
+
+    /// Separate from release identity: later Enable/Disable is not an
+    /// uncommitted Source Release.
+    fn transition_activations_match(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError>;
     /// Current v9 members of a managed source identified by canonical URL.
     /// `None` when no v9 Git Repository Source owns the canonical URL; a
     /// Legacy parent (v7 bindings) is also `None` here.

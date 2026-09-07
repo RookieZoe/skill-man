@@ -1853,6 +1853,43 @@ impl SourcePromotionStore for SqliteCatalogStore {
 }
 
 impl SourceTransitionStore for SqliteCatalogStore {
+    fn transition_activations_match(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| SourceTransitionStoreError::Unavailable("SQLite lock poisoned".into()))?;
+        transition_activations_match(&connection, record)
+    }
+    fn activation_targets(
+        &self,
+    ) -> Result<
+        Vec<crate::seams::source_transition_store::SourceTransitionTarget>,
+        SourceTransitionStoreError,
+    > {
+        let snapshot = crate::seams::agent_configuration_store::AgentConfigurationStore::agent_configuration_snapshot(self).map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+        Ok(snapshot
+            .roots
+            .iter()
+            .filter(|root| {
+                snapshot.configurations.iter().any(|agent| {
+                    agent.memberships.iter().any(|membership| {
+                        membership.root_id == root.root_id
+                            && membership.role
+                                == crate::core::agent_configuration::AgentRootRole::ActivationTarget
+                    })
+                })
+            })
+            .map(
+                |root| crate::seams::source_transition_store::SourceTransitionTarget {
+                    root_id: root.root_id.clone(),
+                    path: root.configured_path.clone(),
+                },
+            )
+            .collect())
+    }
     fn existing_current_members(
         &self,
         canonical_url: &str,
@@ -1984,7 +2021,9 @@ impl SourceTransitionStore for SqliteCatalogStore {
             )
             .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
         if source_exists {
-            if source_transition_matches(&transaction, &record)? {
+            if source_transition_matches(&transaction, &record)?
+                && transition_activations_match(&transaction, &record)?
+            {
                 let snapshot_version: i64 = transaction
                     .query_row(
                         "SELECT snapshot_version FROM catalog_meta WHERE singleton = 1",
@@ -2006,6 +2045,7 @@ impl SourceTransitionStore for SqliteCatalogStore {
                 record.canonical_url
             )));
         }
+        validate_transition_activation_targets(&transaction, &record)?;
         for member in &record.members {
             let existing: Option<String> = transaction
                 .query_row(
@@ -2139,6 +2179,20 @@ impl SourceTransitionStore for SqliteCatalogStore {
                 )
                 .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
         }
+        for activation in &record.activations {
+            let member = record
+                .members
+                .iter()
+                .find(|member| member.skill_id.0 == activation.skill_id)
+                .ok_or_else(|| {
+                    SourceTransitionStoreError::Conflict("activation member is absent".into())
+                })?;
+            transaction.execute(
+                "INSERT INTO activations (skill_id, target_root_id, directory_identity_key, desired_enabled, expected_entry_path, expected_target_path, observed_state, last_enabled_at, last_checked_at)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, 'present', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![activation.skill_id, activation.target_root_id, member.identity_key, activation.entry_path.to_string_lossy(), activation.target_path.to_string_lossy()],
+            ).map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+        }
         transaction
             .execute(
                 "UPDATE catalog_meta SET snapshot_version = snapshot_version + 1 WHERE singleton = 1",
@@ -2182,7 +2236,9 @@ impl SourceTransitionStore for SqliteCatalogStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| SourceTransitionStoreError::Unavailable(error.to_string()))?;
-        if !source_transition_matches(&transaction, record)? {
+        if !source_transition_matches(&transaction, record)?
+            || !transition_activations_match(&transaction, record)?
+        {
             return Err(SourceTransitionStoreError::Conflict(
                 "the Source Release no longer matches the frozen Source Undo result".into(),
             ));
@@ -2781,6 +2837,7 @@ fn validate_new_source_transition(
     connection: &Connection,
     record: &SourceTransitionRecord,
 ) -> Result<(), SourceTransitionStoreError> {
+    validate_transition_activation_targets(connection, record)?;
     if record.members.is_empty() {
         return Err(SourceTransitionStoreError::Conflict(
             "a Source Release must contain at least one member".into(),
@@ -2842,9 +2899,52 @@ fn validate_new_source_transition(
     Ok(())
 }
 
-/// Exact, source-level state check shared by idempotent post-CAS recovery
-/// and Source Undo: the source row, its current immutable release and every
-/// frozen current member must still match the record exactly.
+/// Revalidate configured target membership and entry ownership inside the
+/// same transaction that publishes the Source Release.
+fn validate_transition_activation_targets(
+    connection: &Connection,
+    record: &SourceTransitionRecord,
+) -> Result<(), SourceTransitionStoreError> {
+    let mut entries = BTreeSet::new();
+    for activation in &record.activations {
+        let member = record
+            .members
+            .iter()
+            .find(|m| m.skill_id.0 == activation.skill_id)
+            .ok_or_else(|| {
+                SourceTransitionStoreError::Conflict("activation member is absent".into())
+            })?;
+        let path: Option<String> = connection.query_row(
+            "SELECT configured_path FROM global_skill_roots WHERE root_id = ?1 AND EXISTS (SELECT 1 FROM agent_global_roots WHERE root_id = ?1 AND role = 'activation_target')",
+            [&activation.target_root_id], |row| row.get(0),
+        ).optional().map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+        if path
+            .as_ref()
+            .map(|path| std::path::Path::new(path).join(&member.directory_name))
+            != Some(activation.entry_path.clone())
+            || !entries.insert((&activation.target_root_id, &member.identity_key))
+            || member.storage_relpath
+                != format!("skills/git/{}/{}", record.remote_id, member.skill_id.0)
+            || !activation.target_path.is_absolute()
+            || !activation
+                .target_path
+                .ends_with(std::path::Path::new(&member.storage_relpath))
+        {
+            return Err(SourceTransitionStoreError::Conflict(
+                "the activation target changed or is ambiguous".into(),
+            ));
+        }
+        let occupied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM activations WHERE target_root_id = ?1 AND directory_identity_key = ?2 AND desired_enabled = 1)", params![activation.target_root_id, member.identity_key], |row| row.get(0)).map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+        if occupied {
+            return Err(SourceTransitionStoreError::Conflict(
+                "the activation target is already managed".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Release identity only; activation intent is checked independently.
 fn source_transition_matches(
     connection: &Connection,
     record: &SourceTransitionRecord,
@@ -2969,6 +3069,42 @@ fn source_transition_matches(
         (left.1.as_str(), left.0.as_str()).cmp(&(right.1.as_str(), right.0.as_str()))
     });
     Ok(actual_members == expected_members)
+}
+
+fn transition_activations_match(
+    connection: &Connection,
+    record: &SourceTransitionRecord,
+) -> Result<bool, SourceTransitionStoreError> {
+    let mut statement = connection.prepare("SELECT a.skill_id, a.target_root_id, a.expected_entry_path, a.expected_target_path, a.desired_enabled FROM activations a JOIN git_source_members m ON m.skill_id = a.skill_id WHERE m.remote_id = ?1 ORDER BY a.skill_id, a.target_root_id")
+        .map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+    let actual = statement
+        .query_map([&record.remote_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| SourceTransitionStoreError::Unavailable(e.to_string()))?;
+    let mut expected = record
+        .activations
+        .iter()
+        .map(|a| {
+            (
+                a.skill_id.clone(),
+                a.target_root_id.clone(),
+                a.entry_path.to_string_lossy().into_owned(),
+                a.target_path.to_string_lossy().into_owned(),
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    Ok(actual == expected)
 }
 
 impl ImportStore for SqliteCatalogStore {
@@ -5780,6 +5916,7 @@ mod tests {
         let path = dir.path().join("skill-man.sqlite3");
         let store = SqliteCatalogStore::open(&path).expect("fresh open");
         let record = crate::seams::source_transition_store::SourceTransitionRecord {
+            activations: Vec::new(),
             remote_id: "remote-source-1".into(),
             provider: "github".into(),
             canonical_url: "https://github.com/acme/source".into(),

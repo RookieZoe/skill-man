@@ -1,4 +1,6 @@
+import { useBackgroundOperations } from "../../ui/BackgroundOperations";
 import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
+import { PluginGroups } from "./PluginGroups";
 import { createPortal } from "react-dom";
 import type {
   GitSourceCapabilitySource,
@@ -45,7 +47,6 @@ export function SourceGroupCard({
   source,
   skills,
   actionActivity = false,
-  actionNotice = null,
   onPromote,
   onUpdate,
   onRestore,
@@ -55,6 +56,7 @@ export function SourceGroupCard({
   pickDirectory = defaultCopyDestinationPicker,
 }: SourceGroupCardProps) {
   const { t, tPlural } = useLocale();
+  const notifications = useBackgroundOperations();
   const [expanded, setExpanded] = useState(!defaultCollapsed);
   const [removeTrigger, setRemoveTrigger] = useState<HTMLButtonElement | null>(
     null,
@@ -65,7 +67,6 @@ export function SourceGroupCard({
   const copyableMembers = source.members.filter((m) => m.presence);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [copying, setCopying] = useState(false);
-  const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -147,13 +148,17 @@ export function SourceGroupCard({
     if (!onCopyMember || copying || actionActivity || !selectedMembers.length)
       return;
     setCopying(true);
-    setCopyMessage(null);
     let completed = 0;
+    let noticeId: string | null = null;
     try {
       const parent = await pickDirectory();
       if (!parent || !mounted.current) return;
+      noticeId = notifications.begin({
+        title: t("operation.background.copy"),
+        detail: t("operation.background.working"),
+      });
+      // Once confirmed, the batch belongs to the workspace, not this card's mount.
       for (const member of selectedMembers) {
-        if (!mounted.current) break;
         const name = member.skillPath.split("/").at(-1);
         if (!name || name === "." || name === ".." || name.includes("\\"))
           throw new Error();
@@ -162,23 +167,45 @@ export function SourceGroupCard({
           member.skillId,
           parent.replace(/\/$/, "") + "/" + name,
         );
-        if (ok === false) break;
+        if (ok === false) throw new Error();
         completed++;
         setSelectedIds((ids) => ids.filter((id) => id !== member.skillId));
       }
-      setCopyMessage(
-        t("sourceGroup.copyBatchResult", {
-          completed,
-          total: selectedMembers.length,
-        }),
-      );
-    } catch {
-      setCopyMessage(
-        t("sourceGroup.copyBatchFailed", {
-          completed,
-          total: selectedMembers.length,
-        }),
-      );
+      notifications.finish(noticeId, {
+        title: t(
+          completed === selectedMembers.length
+            ? "operation.background.done"
+            : "operation.background.partial",
+        ),
+        detail:
+          t("sourceGroup.copyBatchResult", {
+            completed,
+            total: selectedMembers.length,
+          }) +
+          " " +
+          t("operation.background.copy_next"),
+        state: completed === selectedMembers.length ? "completed" : "partial",
+      });
+    } catch (reason) {
+      if (noticeId)
+        notifications.finish(noticeId, {
+          title: t(
+            completed
+              ? "operation.background.partial"
+              : "operation.background.failed",
+          ),
+          detail:
+            t("sourceGroup.copyBatchFailed", {
+              completed,
+              total: selectedMembers.length,
+            }) +
+            " " +
+            (reason instanceof Error && reason.message
+              ? reason.message + " "
+              : "") +
+            t("operation.background.copy_next"),
+          state: completed ? "partial" : "failed",
+        });
     } finally {
       setCopying(false);
     }
@@ -343,108 +370,112 @@ export function SourceGroupCard({
         ) : null}
       </div>
 
-      {actionNotice && actionNotice.message !== null ? (
-        <p
-          className="source-group-action-notice"
-          role={actionNotice.ok ? "status" : "alert"}
-        >
-          {actionNotice.message}
-        </p>
-      ) : null}
-
       {/* Read-only member rows */}
       <section
         className="source-group-members"
         aria-label={t("sourceGroup.membersLabel")}
       >
-        {copyMessage && <p role="status">{copyMessage}</p>}
         <h4>{t("sourceGroup.membersLabel")}</h4>
         {source.members.length === 0 ? (
           <p className="source-group-empty-members">
             {t("sourceGroup.emptyMembers")}
           </p>
         ) : (
-          <ul className="source-member-list">
-            {source.members.map((member) => {
-              const skill = skills.find((s) => s.id === member.skillId);
-              const isBroken = !member.presence || skill?.health === "broken";
-              const targetCount = skill?.enabledAgentCount ?? 0;
+          <PluginGroups
+            items={source.members}
+            pluginName={(member) => member.pluginName}
+          >
+            {(members) => (
+              <ul className="source-member-list">
+                {members.map((member) => {
+                  const skill = skills.find((s) => s.id === member.skillId);
+                  const isBroken =
+                    !member.presence || skill?.health === "broken";
+                  const targetCount = skill?.enabledAgentCount ?? 0;
 
-              return (
-                <li
-                  key={member.skillId}
-                  className={`source-member-row${onCopyMember ? " source-member-row--selectable" : ""}`}
-                >
-                  {onCopyMember && (
-                    <input
-                      type="checkbox"
-                      className="source-member-checkbox"
-                      aria-label={member.skillPath}
-                      checked={
-                        member.presence && selectedIds.includes(member.skillId)
-                      }
-                      disabled={!member.presence || copying || actionActivity}
-                      onChange={() =>
-                        setSelectedIds((ids) =>
-                          ids.includes(member.skillId)
-                            ? ids.filter((id) => id !== member.skillId)
-                            : [...ids, member.skillId],
-                        )
-                      }
-                    />
-                  )}
-                  <div className="member-path-column">
-                    <span className="member-skill-path">
-                      {member.skillPath}
-                    </span>
-                    {!member.presence ? (
-                      <div className="member-tombstone-info">
-                        <span className="tombstone-badge">
-                          {t("sourceGroup.tombstoned")}
-                        </span>
-                        <small className="tombstone-hint">
-                          {t("sourceGroup.autoRecoverHint")}
-                        </small>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="member-health-column">
-                    <span
-                      className={`member-health-badge member-health-badge--${skill?.health ?? "broken"}`}
+                  return (
+                    <li
+                      key={member.skillId}
+                      className={`source-member-row${onCopyMember ? " source-member-row--selectable" : ""}`}
                     >
-                      {memberHealthLabel(skill?.health, t)}
-                    </span>
-                  </div>
+                      {onCopyMember && (
+                        <input
+                          type="checkbox"
+                          className="source-member-checkbox"
+                          aria-label={member.skillPath}
+                          checked={
+                            member.presence &&
+                            selectedIds.includes(member.skillId)
+                          }
+                          disabled={
+                            !member.presence || copying || actionActivity
+                          }
+                          onChange={() =>
+                            setSelectedIds((ids) =>
+                              ids.includes(member.skillId)
+                                ? ids.filter((id) => id !== member.skillId)
+                                : [...ids, member.skillId],
+                            )
+                          }
+                        />
+                      )}
+                      <div className="member-path-column">
+                        <span className="member-skill-path">
+                          {member.skillPath}
+                        </span>
+                        {!member.presence ? (
+                          <div className="member-tombstone-info">
+                            <span className="tombstone-badge">
+                              {t("sourceGroup.tombstoned")}
+                            </span>
+                            <small className="tombstone-hint">
+                              {t("sourceGroup.autoRecoverHint")}
+                            </small>
+                          </div>
+                        ) : null}
+                      </div>
 
-                  <div className="member-target-column">
-                    <span className="member-target-count">
-                      {tPlural("sourceGroup.targetGroupsCount", targetCount)}
-                    </span>
-                  </div>
+                      <div className="member-health-column">
+                        <span
+                          className={`member-health-badge member-health-badge--${skill?.health ?? "broken"}`}
+                        >
+                          {memberHealthLabel(skill?.health, t)}
+                        </span>
+                      </div>
 
-                  <div className="member-action-column">
-                    {isBroken && onOpenBrokenDisable ? (
-                      <button
-                        type="button"
-                        className="repair-button danger-button"
-                        disabled={actionActivity}
-                        onClick={(event) =>
-                          onOpenBrokenDisable(
-                            member.skillId,
-                            member.skillPath,
-                            event.currentTarget,
-                          )
-                        }
-                      >
-                        {t("sourceGroup.memberBrokenDisable")}
-                      </button>
-                    ) : null}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+                      <div className="member-target-column">
+                        <span className="member-target-count">
+                          {tPlural(
+                            "sourceGroup.targetGroupsCount",
+                            targetCount,
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="member-action-column">
+                        {isBroken && onOpenBrokenDisable ? (
+                          <button
+                            type="button"
+                            className="repair-button danger-button"
+                            disabled={actionActivity}
+                            onClick={(event) =>
+                              onOpenBrokenDisable(
+                                member.skillId,
+                                member.skillPath,
+                                event.currentTarget,
+                              )
+                            }
+                          >
+                            {t("sourceGroup.memberBrokenDisable")}
+                          </button>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </PluginGroups>
         )}
       </section>
     </details>

@@ -61,7 +61,7 @@ pub fn plan_roots_with_failures(
         .collect();
     let mut planned = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (index, root) in snapshot.roots.iter().enumerate() {
+    for (index, root) in snapshot.configured_roots().enumerate() {
         let configured = root.configured_path.clone();
         let consumer_agents = root
             .consumer_agent_ids

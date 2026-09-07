@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useCallback, useEffect, useState } from "react";
 
 import type {
@@ -116,6 +117,7 @@ export function RestoreView({ client, onSnapshot, onBack }: RestoreViewProps) {
     <section className="recovery-route" aria-labelledby="restore-title">
       <LanguageControl />
       <h1 id="restore-title">{t("restore.title")}</h1>
+      <OperationNotice busy={busy !== null} />
       {eligible ? (
         <>
           <p className="recovery-summary">

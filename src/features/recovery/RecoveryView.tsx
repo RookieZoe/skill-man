@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useCallback, useEffect, useState } from "react";
 
 import type {
@@ -107,6 +108,7 @@ export function RecoveryView({ client }: RecoveryViewProps) {
       </p>
       <p className="recovery-path">{preview.path}</p>
 
+      <OperationNotice busy={busy !== null} />
       <ClassificationEvidence preview={preview} />
 
       {error ? <ErrorNotice error={error} /> : null}

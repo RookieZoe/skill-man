@@ -643,6 +643,26 @@ impl SourceUpdateStore for RuntimeCatalogStore {
 }
 
 impl SourceTransitionStore for RuntimeCatalogStore {
+    fn transition_activations_match(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError> {
+        self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?
+        .transition_activations_match(record)
+    }
+    fn activation_targets(
+        &self,
+    ) -> Result<
+        Vec<crate::seams::source_transition_store::SourceTransitionTarget>,
+        SourceTransitionStoreError,
+    > {
+        self.writable_store_or(|| {
+            SourceTransitionStoreError::Unavailable("catalog startup is read-only".into())
+        })?
+        .activation_targets()
+    }
     fn existing_current_members(
         &self,
         canonical_url: &str,

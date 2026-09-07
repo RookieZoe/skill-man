@@ -57,11 +57,12 @@ const preview: SourceGroupPreviewOutcome = {
 function renderFlow(
   outcome: SourceGroupPreviewOutcome | null,
   activity: "idle" | "fetching" | "confirming" = "idle",
+  sourceUrl = "https://github.com/acme/repository",
 ) {
   return render(
     <SourceGroupPreviewFlow
       sourceType="github"
-      sourceUrl="https://github.com/acme/repository"
+      sourceUrl={sourceUrl}
       policyMode="branch"
       policyValue="main"
       outcome={outcome}
@@ -82,6 +83,68 @@ function renderFlow(
     />,
   );
 }
+
+test("GitHub shorthand is valid in the native input and enables fetching", () => {
+  renderFlow(null, "idle", "tw93/kami");
+  const input = screen.getByDisplayValue("tw93/kami") as HTMLInputElement;
+  expect(input).toHaveAttribute("type", "text");
+  expect(input.checkValidity()).toBe(true);
+  expect(input).toHaveAttribute("aria-invalid", "false");
+  expect(screen.getByRole("button", { name: /fetch.*preview/i })).toBeEnabled();
+});
+
+test("removed external members require explicit force confirmation and new members stay disabled", async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const changed: SourceGroupPreviewOutcome = {
+    ...preview,
+    preview: {
+      ...preview.preview,
+      removedExternalClaims: ["design"],
+      addedMemberNames: ["ui"],
+    },
+  };
+  render(
+    <SourceGroupPreviewFlow
+      sourceType="github"
+      sourceUrl={changed.preview.sourceUrl}
+      policyMode="branch"
+      policyValue="main"
+      outcome={changed}
+      promotionDraft={null}
+      promotionOutcome={null}
+      updateDraft={null}
+      result={null}
+      error={null}
+      activity="idle"
+      onSourceTypeChange={vi.fn()}
+      onSourceUrlChange={vi.fn()}
+      onSourceGroupPolicyChange={vi.fn()}
+      onFetch={vi.fn()}
+      onConfirm={onConfirm}
+      onConfirmPromotion={vi.fn()}
+      onUndo={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("design")).toBeVisible();
+  expect(screen.getByText("ui")).toBeVisible();
+  expect(
+    screen.getByText(/new Skills will not be enabled automatically/i),
+  ).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Use latest remote release" }),
+  ).not.toBeInTheDocument();
+  const force = screen.getByRole("button", {
+    name: "Force remote replacement",
+  });
+  expect(force).toBeDisabled();
+  await user.click(
+    screen.getByRole("checkbox", { name: /remove the listed Skills/i }),
+  );
+  await user.click(force);
+  expect(onConfirm).toHaveBeenCalledExactlyOnceWith(["design"]);
+});
 
 test("renders the complete source group without per-member Include controls", () => {
   renderFlow(preview);
@@ -119,12 +182,12 @@ test("allows a new Git source that has no external ownership claims", () => {
   ).toBeEnabled();
 });
 
-test("shows indeterminate feedback while fetching and installing", () => {
+test("leaves foreground progress to the enclosing import sheet", () => {
   const fetching = renderFlow(null, "fetching");
-  expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   fetching.unmount();
   renderFlow(preview, "confirming");
-  expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
 });
 

@@ -789,6 +789,7 @@ fn transition_member(
 fn git_sources_allow_same_directory_identity_within_and_across_sources() {
     let home = common::BoundTestHome::new();
     let same_source = SourceTransitionRecord {
+        activations: Vec::new(),
         remote_id: "remote-same".into(),
         provider: "github".into(),
         canonical_url: "https://github.com/acme/same".into(),
@@ -812,6 +813,7 @@ fn git_sources_allow_same_directory_identity_within_and_across_sources() {
         .expect("commit same-source duplicate identity");
 
     let other_source = SourceTransitionRecord {
+        activations: Vec::new(),
         remote_id: "remote-other".into(),
         provider: "github".into(),
         canonical_url: "https://github.com/acme/other".into(),

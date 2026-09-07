@@ -41,6 +41,7 @@ pub enum SourceUpdateMemberState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceUpdateDraftMember {
+    pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
     pub directory_name: String,
@@ -207,10 +208,17 @@ impl SourceUpdateService {
                     .map(|member| member.skill_id.0.clone())
                     .unwrap_or_default();
                 SourceUpdateDraftMember {
+                    plugin_name: member.plugin_name.clone(),
                     skill_id,
                     skill_path: member.skill_path.clone(),
-                    directory_name: member.directory_name.clone(),
-                    directory_identity_key: member.directory_identity_key.clone(),
+                    directory_name: current_by_path
+                        .get(&member.skill_path)
+                        .map(|existing| existing.directory_name.clone())
+                        .unwrap_or_else(|| member.directory_name.clone()),
+                    directory_identity_key: current_by_path
+                        .get(&member.skill_path)
+                        .map(|existing| existing.identity_key.clone())
+                        .unwrap_or_else(|| member.directory_identity_key.clone()),
                     display_name: member.display_name.clone(),
                     description: member.description.clone(),
                     tree_summary: member.tree_summary.clone(),
@@ -228,6 +236,7 @@ impl SourceUpdateService {
                 && !discovered_paths.contains(skill_path.as_str())
             {
                 members.push(SourceUpdateDraftMember {
+                    plugin_name: None,
                     skill_id: member.skill_id.0.clone(),
                     skill_path: skill_path.clone(),
                     directory_name: member.directory_name.clone(),

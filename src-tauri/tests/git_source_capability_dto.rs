@@ -13,6 +13,7 @@ fn source_capability_report_serializes_closed_source_states() {
                 canonical_url: "https://github.com/acme/skills".into(),
                 kind: GitSourceCapabilityKind::GitRepositorySource,
                 members: vec![GitSourceCapabilityMember {
+                    plugin_name: Some("mattpocock-skills".into()),
                     skill_id: "skill-a".into(),
                     skill_path: "skills/alpha".into(),
                     presence: true,
@@ -51,6 +52,6 @@ fn source_capability_report_serializes_closed_source_states() {
 
     assert_eq!(
         serde_json::to_string(&dto).expect("serialize typed source report"),
-        r#"{"sources":[{"remoteId":"healthy","canonicalUrl":"https://github.com/acme/skills","kind":"git_repository_source","members":[{"skillId":"skill-a","skillPath":"skills/alpha","presence":true}]},{"remoteId":"legacy","canonicalUrl":"https://github.com/acme/legacy","kind":"legacy_per_skill_git_state","members":[]},{"remoteId":"conflicted","canonicalUrl":"https://github.com/acme/conflicted","kind":"remote_source_identity_conflict","members":[]}]}"#
+        r#"{"sources":[{"remoteId":"healthy","canonicalUrl":"https://github.com/acme/skills","kind":"git_repository_source","members":[{"pluginName":"mattpocock-skills","skillId":"skill-a","skillPath":"skills/alpha","presence":true}]},{"remoteId":"legacy","canonicalUrl":"https://github.com/acme/legacy","kind":"legacy_per_skill_git_state","members":[]},{"remoteId":"conflicted","canonicalUrl":"https://github.com/acme/conflicted","kind":"remote_source_identity_conflict","members":[]}]}"#
     );
 }

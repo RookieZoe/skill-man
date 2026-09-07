@@ -330,6 +330,7 @@ fn confirm_transition(fixture: &Fixture) -> String {
     fixture
         .transition
         .confirm(ConfirmSourceTransitionRequest {
+            expected_removed_claims: Vec::new(),
             source_type: "git".into(),
             source_url: preview.source_url,
             tracking_policy: Some(SourceTrackingOverride {
@@ -1323,7 +1324,7 @@ fn update_reuses_persisted_policy_and_reappearing_members_recover() {
     write_file(
         &fixture.repository,
         "skills/beta/SKILL.md",
-        "---\nname: Source Beta\n---\n# Beta v2\n",
+        "---\nname: Source Beta\ndescription: Beta skill\n---\n# Beta v2\n",
     );
     git(&fixture.repository, &["add", "-A"]);
     git(

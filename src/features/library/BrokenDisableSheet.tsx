@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
@@ -216,6 +217,7 @@ export function BrokenDisableSheet({
               })}
             </div>
 
+            <OperationNotice busy={isBusy} />
             <div className="activation-sheet-actions">
               <button
                 type="button"

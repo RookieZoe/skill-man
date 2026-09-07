@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
-use crate::core::domain::{SkillId, parse_skill_metadata, skill_identity_key};
+use crate::core::domain::{SkillId, skill_identity_key};
 use crate::core::git_source::{git_mirror_path, parse_git_source_input, resolve_git_ref};
 use crate::core::source_group_preview::{
     FetchLatestAndManageRequest, SourceGroupPreview, SourceGroupPreviewError,
@@ -40,8 +40,8 @@ use crate::seams::source_promotion_store::{
     SourcePromotionStoreError,
 };
 use crate::seams::source_transition_store::{
-    SourceTransitionMemberRecord, SourceTransitionRecord, SourceTransitionStore,
-    SourceTransitionStoreError,
+    SourceTransitionActivation, SourceTransitionMemberRecord, SourceTransitionRecord,
+    SourceTransitionStore, SourceTransitionStoreError,
 };
 use crate::seams::source_update_store::{
     SourceMemberPresence, SourceUpdateCurrentSource, SourceUpdateMemberOrigin,
@@ -53,17 +53,43 @@ const SOURCE_TRANSITION_JOURNAL_VERSION: u32 = 2;
 /// The immutable namespace of every Git Source Member snapshot.
 const GIT_SKILLS_NAMESPACE: &str = "skills/git";
 
+/// Installer locks may identify the document rather than its directory.
+/// Keep the original claim untouched for CAS/Undo; only project its member key.
+fn claim_member_path(entry: &LockEntry) -> &str {
+    crate::core::source_group_preview::external_claim_member_path(&entry.skill_path)
+}
+
+fn external_tree_hash(member: &SourceTransitionJournalMember) -> &str {
+    member
+        .external_tree_hash
+        .as_deref()
+        .unwrap_or(&member.tree_hash)
+}
+
+fn mapped_claim_path<'a>(paths: &'a BTreeMap<String, String>, entry: &'a LockEntry) -> &'a str {
+    paths
+        .get(&entry.name)
+        .map(String::as_str)
+        .unwrap_or_else(|| claim_member_path(entry))
+}
+
 struct CleanClaimSet {
+    removed_claims: Vec<String>,
+    relocated_claim_paths: BTreeMap<String, String>,
     lock_path: PathBuf,
     lock_fingerprint: String,
     lock_identity: Option<LockFileIdentity>,
     lock_entries: Vec<LockEntry>,
     canonical_entities: BTreeMap<String, PathBuf>,
     canonical_entity_fingerprints: BTreeMap<String, DirectoryFingerprint>,
+    external_tree_hashes: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConfirmSourceTransitionRequest {
+    /// Exact disappeared installer entry names explicitly acknowledged by
+    /// the caller. An empty list authorizes no removals.
+    pub expected_removed_claims: Vec<String>,
     pub source_type: String,
     pub source_url: String,
     /// The frozen Source Tracking Policy / override selected at preview.
@@ -226,7 +252,7 @@ impl SourceTransitionService {
         request: ConfirmSourceTransitionRequest,
     ) -> Result<SourceTransitionResult, SourceTransitionError> {
         let write_context = self.capture_write_context()?;
-        let preview = self.refresh_preview(
+        let mut preview = self.refresh_preview(
             &request.source_type,
             &request.source_url,
             &request.tracking_policy,
@@ -247,11 +273,51 @@ impl SourceTransitionService {
         }
         let library_root = self.library_root_for_context(&write_context)?;
         let claims = self.clean_claim_set(&preview, true)?;
+        let mut expected_removed = request.expected_removed_claims.clone();
+        expected_removed.sort();
+        if expected_removed != claims.removed_claims {
+            return Err(SourceTransitionError::Validation(
+                "the exact removed external claim list must be explicitly confirmed".into(),
+            ));
+        }
+        let removed_members = claims
+            .lock_entries
+            .iter()
+            .filter(|entry| claims.removed_claims.contains(&entry.name))
+            .map(|entry| SourceTransitionRemovedMember {
+                skill_id: self.next_uuid(),
+                directory_name: entry.name.clone(),
+                skill_path: claim_member_path(entry).to_owned(),
+                legacy_path: claims.canonical_entities[claim_member_path(entry)].clone(),
+                legacy_fingerprint: Some(
+                    claims.canonical_entity_fingerprints[claim_member_path(entry)].clone(),
+                ),
+                tree_hash: claims.external_tree_hashes[claim_member_path(entry)].clone(),
+                isolated_path: None,
+                external_links: Vec::new(),
+            })
+            .collect();
+        // The installer entry is the existing Directory Identity; skillPath,
+        // not the repository basename or display name, identifies its member.
+        for member in &mut preview.members {
+            if let Some(entry) = claims.lock_entries.iter().find(|entry| {
+                claims
+                    .relocated_claim_paths
+                    .get(&entry.name)
+                    .map(String::as_str)
+                    .unwrap_or_else(|| claim_member_path(entry))
+                    == member.skill_path
+            }) {
+                member.directory_name = entry.name.clone();
+                member.directory_identity_key = skill_identity_key(&entry.name);
+            }
+        }
         let operation_id = self.next_operation_id();
         let remote_id = self.next_uuid();
         let release_id = format!("source-release-{operation_id}");
         let staging_operation_root = library_root.join("staging").join(&operation_id);
         let mut journal = SourceTransitionJournal {
+            activations: Vec::new(),
             version: SOURCE_TRANSITION_JOURNAL_VERSION,
             operation_id: operation_id.clone(),
             phase: SourceTransitionPhase::Planned,
@@ -267,6 +333,15 @@ impl SourceTransitionService {
             selected_ref: preview.policy.selected_ref.clone(),
             resolved_commit: preview.policy.resolved_commit.clone(),
             target_manifest: Some(RemoteParentManifest {
+                member_plugins: preview
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        m.plugin_name
+                            .clone()
+                            .map(|name| (m.skill_path.clone(), name))
+                    })
+                    .collect(),
                 schema_version: 1,
                 remote_id: remote_id.clone(),
                 canonical_url: preview.source_url.clone(),
@@ -281,6 +356,7 @@ impl SourceTransitionService {
             lock_path: claims.lock_path,
             lock_fingerprint: claims.lock_fingerprint,
             lock_identity: claims.lock_identity,
+            relocated_claim_paths: claims.relocated_claim_paths,
             lock_entries: claims.lock_entries,
             members: preview
                 .members
@@ -314,17 +390,24 @@ impl SourceTransitionService {
                         ),
                         skill_path: member.skill_path.clone(),
                         tree_hash: String::new(),
+                        external_tree_hash: claims
+                            .external_tree_hashes
+                            .get(&member.skill_path)
+                            .cloned(),
                         provider_hash: None,
                         action: crate::seams::filesystem::SourceTransitionMemberAction::Added,
                     }
                 })
                 .collect(),
-            removed_members: Vec::new(),
+            removed_members,
             promotion_legacy: None,
             update_previous: None,
         };
         let _write_guard = self.acquire_write_guard(&write_context)?;
+        journal.activations = self.plan_previous_activations(&journal)?;
+        self.plan_removed_external_links(&mut journal)?;
         assign_member_staging_paths(&mut journal);
+        self.validate_journal_layout(&library_root, &journal)?;
         self.persist_transition_intent(&library_root, &journal)?;
 
         let result = self.apply_confirmed_transition(&library_root, &mut journal);
@@ -462,6 +545,7 @@ impl SourceTransitionService {
                 ),
                 skill_path: member.skill_path.clone(),
                 tree_hash: String::new(),
+                external_tree_hash: claims.external_tree_hashes.get(&member.skill_path).cloned(),
                 provider_hash: None,
                 action,
             });
@@ -470,6 +554,7 @@ impl SourceTransitionService {
             .into_iter()
             .map(|member| {
                 Ok(SourceTransitionRemovedMember {
+                    external_links: Vec::new(),
                     skill_id: member.skill_id.0.clone(),
                     directory_name: member.directory_name.clone(),
                     skill_path: member.skill_path.clone(),
@@ -484,6 +569,7 @@ impl SourceTransitionService {
             })
             .collect::<Result<Vec<_>, SourceTransitionError>>()?;
         let mut journal = SourceTransitionJournal {
+            activations: Vec::new(),
             version: SOURCE_TRANSITION_JOURNAL_VERSION,
             operation_id: operation_id.clone(),
             phase: SourceTransitionPhase::Planned,
@@ -499,6 +585,15 @@ impl SourceTransitionService {
             selected_ref: preview.policy.selected_ref.clone(),
             resolved_commit: preview.policy.resolved_commit.clone(),
             target_manifest: Some(RemoteParentManifest {
+                member_plugins: preview
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        m.plugin_name
+                            .clone()
+                            .map(|name| (m.skill_path.clone(), name))
+                    })
+                    .collect(),
                 schema_version: 1,
                 remote_id: legacy.remote_id.clone(),
                 canonical_url: preview.source_url.clone(),
@@ -513,6 +608,7 @@ impl SourceTransitionService {
             lock_path: claims.lock_path,
             lock_fingerprint: claims.lock_fingerprint,
             lock_identity: claims.lock_identity,
+            relocated_claim_paths: claims.relocated_claim_paths,
             lock_entries: claims.lock_entries,
             members,
             removed_members,
@@ -657,10 +753,14 @@ impl SourceTransitionService {
                     crate::seams::filesystem::SourceTransitionMemberAction::Added,
                 ),
             };
+            let directory_name = current_by_path
+                .get(member.skill_path.as_str())
+                .map(|existing| existing.directory_name.clone())
+                .unwrap_or_else(|| member.directory_name.clone());
             members.push(SourceTransitionJournalMember {
                 skill_id: skill_id.0.clone(),
-                directory_name: member.directory_name.clone(),
-                identity_key: member.directory_identity_key.clone(),
+                identity_key: skill_identity_key(&directory_name),
+                directory_name,
                 display_name: member.display_name.clone(),
                 description: member.description.clone(),
                 canonical_entity: None,
@@ -675,6 +775,7 @@ impl SourceTransitionService {
                 ),
                 skill_path: member.skill_path.clone(),
                 tree_hash: String::new(),
+                external_tree_hash: None,
                 provider_hash: None,
                 action,
             });
@@ -684,6 +785,7 @@ impl SourceTransitionService {
             .map(|member| {
                 let legacy_path = library_root.join(&member.storage_relpath);
                 Ok(SourceTransitionRemovedMember {
+                    external_links: Vec::new(),
                     skill_id: member.skill_id.0.clone(),
                     directory_name: member.directory_name.clone(),
                     skill_path: member.skill_path.clone(),
@@ -768,6 +870,7 @@ impl SourceTransitionService {
                 .collect(),
         };
         let mut journal = SourceTransitionJournal {
+            activations: Vec::new(),
             version: SOURCE_TRANSITION_JOURNAL_VERSION,
             operation_id: operation_id.clone(),
             phase: SourceTransitionPhase::Planned,
@@ -783,6 +886,15 @@ impl SourceTransitionService {
             selected_ref: preview.policy.selected_ref.clone(),
             resolved_commit: preview.policy.resolved_commit.clone(),
             target_manifest: Some(RemoteParentManifest {
+                member_plugins: preview
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        m.plugin_name
+                            .clone()
+                            .map(|name| (m.skill_path.clone(), name))
+                    })
+                    .collect(),
                 schema_version: 1,
                 remote_id: current.remote_id.clone(),
                 canonical_url: preview.source_url.clone(),
@@ -797,6 +909,7 @@ impl SourceTransitionService {
             lock_path: PathBuf::new(),
             lock_fingerprint: String::new(),
             lock_identity: None,
+            relocated_claim_paths: BTreeMap::new(),
             lock_entries: Vec::new(),
             members,
             removed_members,
@@ -1089,6 +1202,7 @@ impl SourceTransitionService {
                 "the Source Transition is not ready to finalize".into(),
             ));
         }
+        self.check_retained_external_copies(&journal)?;
         for member in &journal.members {
             if let Some(isolated) = &member.isolated_path
                 && self.filesystem.path_is_directory(isolated)?
@@ -1135,6 +1249,345 @@ impl SourceTransitionService {
         }
     }
 
+    fn plan_previous_activations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<Vec<SourceTransitionActivation>, SourceTransitionError> {
+        let mut activations = Vec::new();
+        for root in self.store.activation_targets()? {
+            if !self.filesystem.path_is_directory(&root.path)? {
+                continue;
+            }
+            let parent = self.filesystem.directory_fingerprint(&root.path)?;
+            for member in &journal.members {
+                let Some(entity) = &member.canonical_entity else {
+                    continue;
+                };
+                let entry = parent.canonical_path.join(&member.directory_name);
+                let previous_target = if &entry == entity {
+                    None
+                } else {
+                    match self.filesystem.activation_snapshot(&entry)? {
+                        ActivationEntrySnapshot::Symlink { target }
+                            if self.filesystem.canonical_directory(&entry).ok().as_ref()
+                                == Some(entity) =>
+                        {
+                            if self.previous_activation_entity(&entry, &target)? != *entity {
+                                return Err(SourceTransitionError::Validation(
+                                    "an activation uses an indirect symlink chain".into(),
+                                ));
+                            }
+                            Some(target)
+                        }
+                        _ => continue,
+                    }
+                };
+                activations.push(SourceTransitionActivation {
+                    skill_id: member.skill_id.clone(),
+                    target_root_id: root.root_id.clone(),
+                    entry_path: entry,
+                    target_path: member.namespace_path.clone(),
+                    parent_fingerprint: parent.clone(),
+                    previous_target,
+                });
+            }
+        }
+        Ok(activations)
+    }
+
+    fn plan_removed_external_links(
+        &self,
+        journal: &mut SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for root in self.store.activation_targets()? {
+            if !self.filesystem.path_is_directory(&root.path)? {
+                continue;
+            }
+            let parent = self.filesystem.directory_fingerprint(&root.path)?;
+            for removed in &mut journal.removed_members {
+                let entry = parent.canonical_path.join(&removed.directory_name);
+                if entry == removed.legacy_path {
+                    continue;
+                }
+                if let ActivationEntrySnapshot::Symlink { target } =
+                    self.filesystem.activation_snapshot(&entry)?
+                {
+                    if self.filesystem.canonical_directory(&entry).ok().as_ref()
+                        != Some(&removed.legacy_path)
+                    {
+                        continue;
+                    }
+                    if self.previous_activation_entity(&entry, &target)? != removed.legacy_path {
+                        return Err(SourceTransitionError::Validation(
+                            "a removed external alias uses an indirect symlink chain".into(),
+                        ));
+                    }
+                    removed.external_links.push(SourceTransitionActivation {
+                        skill_id: removed.skill_id.clone(),
+                        target_root_id: root.root_id.clone(),
+                        entry_path: entry,
+                        target_path: removed.legacy_path.clone(),
+                        parent_fingerprint: parent.clone(),
+                        previous_target: Some(target),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_removed_external_links(
+        &self,
+        journal: &SourceTransitionJournal,
+        before_cas: bool,
+    ) -> Result<(), SourceTransitionError> {
+        for link in journal
+            .removed_members
+            .iter()
+            .flat_map(|m| &m.external_links)
+        {
+            self.check_activation_parent(link)?;
+            let expected = if before_cas {
+                ActivationEntrySnapshot::Symlink {
+                    target: link.previous_target.clone().ok_or_else(|| {
+                        SourceTransitionError::RecoveryRequired(
+                            "removed alias has no original target".into(),
+                        )
+                    })?,
+                }
+            } else {
+                ActivationEntrySnapshot::Missing
+            };
+            if self.filesystem.activation_snapshot(&link.entry_path)? != expected {
+                return Err(SourceTransitionError::Validation(
+                    "a removed external alias changed".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn change_removed_external_links(
+        &self,
+        journal: &SourceTransitionJournal,
+        undo: bool,
+    ) -> Result<(), SourceTransitionError> {
+        for link in journal
+            .removed_members
+            .iter()
+            .flat_map(|m| &m.external_links)
+        {
+            self.check_activation_parent(link)?;
+            let target = link.previous_target.as_ref().ok_or_else(|| {
+                SourceTransitionError::RecoveryRequired(
+                    "removed alias has no original target".into(),
+                )
+            })?;
+            match self.filesystem.activation_snapshot(&link.entry_path)? {
+                ActivationEntrySnapshot::Missing => {
+                    if undo {
+                        self.filesystem.create_activation_nofollow(
+                            target,
+                            &link.entry_path,
+                            &link.parent_fingerprint,
+                        )?;
+                    }
+                }
+                ActivationEntrySnapshot::Symlink { target: actual } if &actual == target => {
+                    if !undo {
+                        self.filesystem.remove_activation_nofollow(
+                            target,
+                            &link.entry_path,
+                            &link.parent_fingerprint,
+                        )?;
+                    }
+                }
+                _ => {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "a removed external alias is occupied by another owner".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the parent only: after installation the old entity itself is
+    /// a new symlink, so canonicalizing the entire path loses the before-state.
+    fn previous_activation_entity(
+        &self,
+        entry: &Path,
+        previous: &Path,
+    ) -> Result<PathBuf, SourceTransitionError> {
+        let parent = entry
+            .parent()
+            .ok_or_else(|| SourceTransitionError::Validation("activation has no parent".into()))?;
+        let resolved = parent.join(previous);
+        let name = resolved.file_name().ok_or_else(|| {
+            SourceTransitionError::Validation("invalid previous activation target".into())
+        })?;
+        let target_parent = resolved.parent().ok_or_else(|| {
+            SourceTransitionError::Validation("invalid previous activation parent".into())
+        })?;
+        Ok(self
+            .filesystem
+            .canonical_directory(target_parent)?
+            .join(name))
+    }
+
+    fn check_activation_parent(
+        &self,
+        activation: &SourceTransitionActivation,
+    ) -> Result<(), SourceTransitionError> {
+        let parent = activation
+            .entry_path
+            .parent()
+            .ok_or_else(|| SourceTransitionError::Validation("activation has no parent".into()))?;
+        if !self.filesystem.path_has_no_symlink_component(parent)?
+            || self.filesystem.directory_fingerprint(parent)? != activation.parent_fingerprint
+        {
+            return Err(SourceTransitionError::Validation(
+                "the activation target directory changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn is_transition_activation(
+        &self,
+        journal: &SourceTransitionJournal,
+        entry: &Path,
+    ) -> Result<bool, SourceTransitionError> {
+        let Some(activation) = journal.activations.iter().find(|a| a.entry_path == entry) else {
+            return Ok(false);
+        };
+        self.check_activation_parent(activation)?;
+        Ok(self.filesystem.activation_snapshot(entry)?
+            == ActivationEntrySnapshot::Symlink {
+                target: activation.target_path.clone(),
+            })
+    }
+
+    /// Before CAS the real directory has been isolated, but alias links must
+    /// still be exactly the original links. No activation is written yet.
+    fn preflight_previous_activations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        let targets = self.store.activation_targets()?;
+        for activation in &journal.activations {
+            self.check_activation_parent(activation)?;
+            if !targets.iter().any(|root| {
+                root.root_id == activation.target_root_id
+                    && self
+                        .filesystem
+                        .normalize_configured_path(&root.path)
+                        .ok()
+                        .as_ref()
+                        == Some(&activation.parent_fingerprint.canonical_path)
+            }) {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+            let expected = activation.previous_target.as_ref().map_or(
+                ActivationEntrySnapshot::Missing,
+                |target| ActivationEntrySnapshot::Symlink {
+                    target: target.clone(),
+                },
+            );
+            if self
+                .filesystem
+                .activation_snapshot(&activation.entry_path)?
+                != expected
+            {
+                return Err(SourceTransitionError::Validation(
+                    "the original activation entry changed".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_previous_activations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for activation in &journal.activations {
+            self.check_activation_parent(activation)?;
+            match self
+                .filesystem
+                .activation_snapshot(&activation.entry_path)?
+            {
+                ActivationEntrySnapshot::Symlink { target } if target == activation.target_path => {
+                    continue;
+                }
+                ActivationEntrySnapshot::Symlink { target }
+                    if Some(&target) == activation.previous_target.as_ref() =>
+                {
+                    self.filesystem.remove_activation_nofollow(
+                        &target,
+                        &activation.entry_path,
+                        &activation.parent_fingerprint,
+                    )?;
+                }
+                ActivationEntrySnapshot::Missing => {}
+                _ => {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "the activation entry is occupied by another owner".into(),
+                    ));
+                }
+            }
+            self.filesystem.create_activation_nofollow(
+                &activation.target_path,
+                &activation.entry_path,
+                &activation.parent_fingerprint,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn undo_previous_activations(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for activation in &journal.activations {
+            self.check_activation_parent(activation)?;
+            match self
+                .filesystem
+                .activation_snapshot(&activation.entry_path)?
+            {
+                ActivationEntrySnapshot::Symlink { target } if target == activation.target_path => {
+                    self.filesystem.remove_activation_nofollow(
+                        &target,
+                        &activation.entry_path,
+                        &activation.parent_fingerprint,
+                    )?;
+                }
+                ActivationEntrySnapshot::Symlink { target }
+                    if Some(&target) == activation.previous_target.as_ref() =>
+                {
+                    continue;
+                }
+                ActivationEntrySnapshot::Missing => {}
+                // A resumed Undo may already have restored the real directory;
+                // complete_undo verifies its bytes and absent preservation copy.
+                ActivationEntrySnapshot::Other if activation.previous_target.is_none() => continue,
+                _ => {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "the activation entry changed during Undo".into(),
+                    ));
+                }
+            }
+            if let Some(previous) = &activation.previous_target {
+                self.filesystem.create_activation_nofollow(
+                    previous,
+                    &activation.entry_path,
+                    &activation.parent_fingerprint,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn apply_confirmed_transition(
         &self,
         library_root: &Path,
@@ -1179,15 +1632,17 @@ impl SourceTransitionService {
                 crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &snapshot)
                     .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
                 let document = self.filesystem.read_skill_document(&member.staged_root)?;
-                let metadata = parse_skill_metadata(&document);
-                member.display_name = metadata
-                    .name
-                    .unwrap_or_else(|| member.directory_name.clone());
-                member.description = metadata.description.unwrap_or_default();
+                let (name, description) = crate::core::repository_discovery::metadata(&document)
+                    .ok_or(SourceTransitionError::PreviewStale)?;
+                member.display_name = name;
+                member.description = description;
                 member.tree_hash = snapshot.content_hash.clone();
                 member.provider_hash = entry_by_name
                     .get(member.directory_name.as_str())
-                    .filter(|entry| entry.skill_path == member.skill_path)
+                    .filter(|entry| {
+                        mapped_claim_path(&journal.relocated_claim_paths, entry)
+                            == member.skill_path
+                    })
                     .map(|entry| entry.skill_folder_hash.clone());
                 member.staged_snapshot = Some(snapshot);
             }
@@ -1199,6 +1654,11 @@ impl SourceTransitionService {
             let snapshot = self
                 .filesystem
                 .staged_tree_snapshot(&journal.removed_members[index].legacy_path)?;
+            if journal.promotion_legacy.is_none()
+                && snapshot.content_hash != journal.removed_members[index].tree_hash
+            {
+                return Err(SourceTransitionError::PreviewStale);
+            }
             journal.removed_members[index].tree_hash = snapshot.content_hash.clone();
         }
         journal.phase = SourceTransitionPhase::MembersStaged;
@@ -1213,6 +1673,27 @@ impl SourceTransitionService {
         }
         self.ensure_external_trees_match(journal)?;
         for index in 0..journal.members.len() {
+            if let Some(canonical_entity) = &journal.members[index].canonical_entity {
+                let isolation_intent = canonical_entity
+                    .parent()
+                    .ok_or_else(|| {
+                        SourceTransitionError::Validation(
+                            "external member path has no parent".into(),
+                        )
+                    })?
+                    .join(format!(
+                        ".skill-man-source-transition-{}-{}",
+                        journal.operation_id, journal.members[index].directory_name
+                    ));
+                if self.filesystem.path_is_occupied(&isolation_intent)? {
+                    return Err(SourceTransitionError::Validation(
+                        "the external member isolation destination is occupied".into(),
+                    ));
+                }
+                journal.members[index].isolated_path = Some(isolation_intent);
+                self.filesystem
+                    .write_source_transition_journal(library_root, journal)?;
+            }
             {
                 let member = &mut journal.members[index];
                 if let Some(canonical_entity) = &member.canonical_entity {
@@ -1226,18 +1707,49 @@ impl SourceTransitionService {
                                     member.directory_name
                                 ))
                             })?;
-                    member.isolated_path = Some(self.filesystem.isolate_external_source_verified(
+                    let isolated = self.filesystem.isolate_external_source_verified(
                         canonical_entity,
                         &journal.operation_id,
                         expected,
-                        &member.tree_hash,
-                    )?);
+                        external_tree_hash(member),
+                    )?;
+                    if member.isolated_path.as_ref() != Some(&isolated) {
+                        return Err(SourceTransitionError::RecoveryRequired(
+                            "external member isolation returned an unexpected preservation path"
+                                .into(),
+                        ));
+                    }
                 }
             }
             self.filesystem
                 .write_source_transition_journal(library_root, journal)?;
         }
         for index in 0..journal.removed_members.len() {
+            // Write-ahead isolation intent: rename may succeed before the
+            // adapter reports an error or the process can persist its result.
+            // Recovery must already know the only permitted preservation path.
+            let removed = &journal.removed_members[index];
+            let isolation_intent = removed
+                .legacy_path
+                .parent()
+                .ok_or_else(|| {
+                    SourceTransitionError::Validation("removed member path has no parent".into())
+                })?
+                .join(format!(
+                    ".skill-man-source-transition-{}-{}",
+                    journal.operation_id, removed.directory_name
+                ));
+            let isolation_intent = self
+                .filesystem
+                .normalize_configured_path(&isolation_intent)?;
+            if self.filesystem.path_is_occupied(&isolation_intent)? {
+                return Err(SourceTransitionError::Validation(
+                    "the removed member isolation destination is occupied".into(),
+                ));
+            }
+            journal.removed_members[index].isolated_path = Some(isolation_intent.clone());
+            self.filesystem
+                .write_source_transition_journal(library_root, journal)?;
             let expected = journal.removed_members[index]
                 .legacy_fingerprint
                 .as_ref()
@@ -1261,7 +1773,11 @@ impl SourceTransitionService {
                         journal.removed_members[index].directory_name
                     ))
                 })?;
-            journal.removed_members[index].isolated_path = Some(isolated);
+            if isolated != isolation_intent {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "removed member isolation returned an unexpected preservation path".into(),
+                ));
+            }
             self.filesystem
                 .write_source_transition_journal(library_root, journal)?;
         }
@@ -1280,6 +1796,10 @@ impl SourceTransitionService {
             .write_source_transition_journal(library_root, journal)?;
         self.reserve_member_destinations(library_root, journal)?;
         self.ensure_reserved_destinations_match(journal)?;
+        self.preflight_previous_activations(journal)?;
+        self.check_removed_external_links(journal, true)?;
+        self.validate_journal_layout(library_root, journal)?;
+        self.ensure_isolated_trees_match(journal)?;
 
         // The whole claim set is removed in one full-file CAS. From this
         // return onward, failures are recovery-only roll-forward failures.
@@ -1296,6 +1816,8 @@ impl SourceTransitionService {
             .write_source_transition_journal(library_root, journal)?;
 
         self.publish_members(library_root, journal)?;
+        self.restore_previous_activations(journal)?;
+        self.change_removed_external_links(journal, false)?;
         self.discard_removed_legacy_entities(journal)?;
         let snapshot_version = match promotion_record {
             None => self.store.commit_source_transition(record)?,
@@ -1354,11 +1876,10 @@ impl SourceTransitionService {
                 crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &snapshot)
                     .map_err(|error| SourceTransitionError::Validation(error.to_string()))?;
                 let document = self.filesystem.read_skill_document(&member.staged_root)?;
-                let metadata = parse_skill_metadata(&document);
-                member.display_name = metadata
-                    .name
-                    .unwrap_or_else(|| member.directory_name.clone());
-                member.description = metadata.description.unwrap_or_default();
+                let (name, description) = crate::core::repository_discovery::metadata(&document)
+                    .ok_or(SourceTransitionError::PreviewStale)?;
+                member.display_name = name;
+                member.description = description;
                 member.tree_hash = snapshot.content_hash.clone();
                 member.staged_snapshot = Some(snapshot);
             }
@@ -2271,9 +2792,44 @@ impl SourceTransitionService {
         library_root: &Path,
         journal: &mut SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
-        self.publish_members(library_root, journal)?;
-        self.discard_removed_legacy_entities(journal)?;
         let record = record_from_journal(journal)?;
+        let committed = journal.promotion_legacy.is_none()
+            && self.store.source_transition_is_committed(&record)?;
+        if journal.promotion_legacy.is_none()
+            && !committed
+            && (matches!(
+                journal.phase,
+                SourceTransitionPhase::ManagedCommitted | SourceTransitionPhase::Finalized
+            ) || self.store.existing_source(&record.remote_id)?.is_some()
+                || self
+                    .store
+                    .existing_current_members(&record.canonical_url)?
+                    .is_some())
+        {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "the frozen Source Release conflicts with committed Catalog state".into(),
+            ));
+        }
+        if committed {
+            self.check_removed_external_links(journal, false)?;
+            if !self.store.transition_activations_match(&record)? {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "committed activation records changed; refusing to replay Enable".into(),
+                ));
+            }
+            for activation in &journal.activations {
+                if !self.is_transition_activation(journal, &activation.entry_path)? {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "a committed activation was changed or removed".into(),
+                    ));
+                }
+            }
+        }
+        self.check_retained_external_copies(journal)?;
+        self.publish_members(library_root, journal)?;
+        self.restore_previous_activations(journal)?;
+        self.change_removed_external_links(journal, false)?;
+        self.discard_removed_legacy_entities(journal)?;
         let promotion_record = promotion_record_from_journal(journal)?;
         let _ = match promotion_record {
             None => self.store.commit_source_transition(record)?,
@@ -2411,16 +2967,51 @@ impl SourceTransitionService {
             }
         }
         for member in journal.members.iter_mut().rev() {
-            if let Some(isolated) = &member.isolated_path
-                && self.filesystem.path_is_directory(isolated)?
-            {
+            if let Some(isolated) = &member.isolated_path {
                 match &member.canonical_entity {
                     Some(canonical_entity) => {
-                        self.filesystem.restore_isolated_source(
-                            isolated,
-                            canonical_entity,
-                            &member.tree_hash,
-                        )?;
+                        let original_identity = member
+                            .canonical_entity_fingerprint
+                            .as_ref()
+                            .ok_or_else(|| {
+                                SourceTransitionError::RecoveryRequired(
+                                    "external isolation intent has no frozen identity".into(),
+                                )
+                            })?;
+                        if self.filesystem.path_is_occupied(isolated)? {
+                            let mut isolated_identity = original_identity.clone();
+                            isolated_identity.canonical_path = isolated.clone();
+                            if !self.filesystem.path_has_no_symlink_component(isolated)?
+                                || self.filesystem.directory_fingerprint(isolated)?
+                                    != isolated_identity
+                                || self.filesystem.staged_tree_snapshot(isolated)?.content_hash
+                                    != external_tree_hash(member)
+                            {
+                                return Err(SourceTransitionError::RecoveryRequired(
+                                    "external preservation identity or bytes changed".into(),
+                                ));
+                            }
+                            self.filesystem.restore_isolated_source(
+                                isolated,
+                                canonical_entity,
+                                external_tree_hash(member),
+                            )?;
+                        }
+                        if !self
+                            .filesystem
+                            .path_has_no_symlink_component(canonical_entity)?
+                            || self.filesystem.directory_fingerprint(canonical_entity)?
+                                != *original_identity
+                            || self
+                                .filesystem
+                                .staged_tree_snapshot(canonical_entity)?
+                                .content_hash
+                                != external_tree_hash(member)
+                        {
+                            return Err(SourceTransitionError::RecoveryRequired(
+                                "the external member has not been safely restored".into(),
+                            ));
+                        }
                     }
                     None => self.filesystem.discard_isolated_source(isolated)?,
                 }
@@ -2428,14 +3019,50 @@ impl SourceTransitionService {
             member.isolated_path = None;
         }
         for removed in journal.removed_members.iter_mut().rev() {
-            if let Some(isolated) = &removed.isolated_path
-                && self.filesystem.path_is_directory(isolated)?
-            {
-                self.filesystem.restore_isolated_source(
-                    isolated,
-                    &removed.legacy_path,
-                    &removed.tree_hash,
-                )?;
+            if let Some(isolated) = &removed.isolated_path {
+                let original_identity = removed.legacy_fingerprint.as_ref().ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "removed member isolation intent has no frozen identity".into(),
+                    )
+                })?;
+                if self.filesystem.path_is_occupied(isolated)? {
+                    let mut isolated_identity = original_identity.clone();
+                    isolated_identity.canonical_path = isolated.clone();
+                    if !self.filesystem.path_has_no_symlink_component(isolated)?
+                        || self.filesystem.directory_fingerprint(isolated)? != isolated_identity
+                        || self.filesystem.staged_tree_snapshot(isolated)?.content_hash
+                            != removed.tree_hash
+                    {
+                        return Err(SourceTransitionError::RecoveryRequired(
+                            "the removed member preservation identity or bytes changed".into(),
+                        ));
+                    }
+                    self.filesystem.restore_isolated_source(
+                        isolated,
+                        &removed.legacy_path,
+                        &removed.tree_hash,
+                    )?;
+                }
+                // Intent may precede rename, or a previous restore may have
+                // succeeded before reporting an error. Both are safe only
+                // when the original entity is provably back in place.
+                if !self
+                    .filesystem
+                    .path_has_no_symlink_component(&removed.legacy_path)?
+                    || self
+                        .filesystem
+                        .directory_fingerprint(&removed.legacy_path)?
+                        != *original_identity
+                    || self
+                        .filesystem
+                        .staged_tree_snapshot(&removed.legacy_path)?
+                        .content_hash
+                        != removed.tree_hash
+                {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "the removed member has not been safely restored".into(),
+                    ));
+                }
             }
             removed.isolated_path = None;
         }
@@ -2459,6 +3086,14 @@ impl SourceTransitionService {
                 .promotion_store
                 .source_promotion_is_committed(promotion)?,
         };
+        if !catalog_is_committed
+            && promotion_record.is_none()
+            && self.store.existing_source(&record.remote_id)?.is_some()
+        {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "the Source or its Activations changed during Undo".into(),
+            ));
+        }
         // Revalidate the entire conditional Undo after the durable Undoing
         // cursor exists and immediately before Catalog mutation. A changed
         // Home path, external path, lock or preservation copy is never
@@ -2478,6 +3113,7 @@ impl SourceTransitionService {
         };
         self.filesystem
             .remove_remote_parent_manifest(&library_root.join("remotes"), &journal.remote_id)?;
+        self.undo_previous_activations(journal)?;
         for member in &journal.members {
             if self.namespace_occupied(&member.namespace_path)? {
                 if !self.filesystem.path_is_directory(&member.namespace_path)? {
@@ -2545,7 +3181,7 @@ impl SourceTransitionService {
                         }
                         let canonical_snapshot =
                             self.filesystem.staged_tree_snapshot(canonical_entity)?;
-                        if canonical_snapshot.content_hash != member.tree_hash {
+                        if canonical_snapshot.content_hash != external_tree_hash(member) {
                             return Err(self.block_for_recovery(
                                 "complete Source Undo",
                                 format!(
@@ -2567,7 +3203,7 @@ impl SourceTransitionService {
                         self.filesystem.restore_isolated_source(
                             isolated,
                             canonical_entity,
-                            &member.tree_hash,
+                            external_tree_hash(member),
                         )?;
                     }
                 }
@@ -2628,6 +3264,7 @@ impl SourceTransitionService {
                 )?;
             }
         }
+        self.change_removed_external_links(journal, true)?;
         // A crash may happen after the atomic restore but before this journal
         // can be archived. The live complete claim set proves that exact
         // sub-step already happened, so recovery skips a second restore;
@@ -2648,6 +3285,7 @@ impl SourceTransitionService {
         &self,
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
+        self.check_removed_external_links(journal, false)?;
         let record = record_from_journal(journal)?;
         let promotion_record = promotion_record_from_journal(journal)?;
         let committed = match &promotion_record {
@@ -2661,14 +3299,27 @@ impl SourceTransitionService {
                 "the Source Release no longer matches the result window".into(),
             ));
         }
+        if promotion_record.is_none() && !self.store.transition_activations_match(&record)? {
+            return Err(SourceTransitionError::Validation(
+                "the Source Activations changed after confirmation".into(),
+            ));
+        }
         if self.lock_claim_state(journal)? != LockClaimState::Released {
             return Err(SourceTransitionError::Validation(
                 "the installer lock claims changed after the Source Transition".into(),
             ));
         }
+        for activation in &journal.activations {
+            if !self.is_transition_activation(journal, &activation.entry_path)? {
+                return Err(SourceTransitionError::Validation(
+                    "an activation changed after the Source Transition".into(),
+                ));
+            }
+        }
         for member in &journal.members {
             if let Some(canonical_entity) = &member.canonical_entity
                 && self.filesystem.path_is_occupied(canonical_entity)?
+                && !self.is_transition_activation(journal, canonical_entity)?
             {
                 return Err(SourceTransitionError::Validation(format!(
                     "the external source location for '{}' is occupied",
@@ -2692,7 +3343,7 @@ impl SourceTransitionService {
             }
             if let Some(isolated) = &member.isolated_path {
                 let isolated_snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
-                if isolated_snapshot.content_hash != member.tree_hash {
+                if isolated_snapshot.content_hash != external_tree_hash(member) {
                     return Err(SourceTransitionError::Validation(format!(
                         "the external preservation copy for '{}' changed",
                         member.directory_name
@@ -2821,7 +3472,7 @@ impl SourceTransitionService {
                 )));
             }
             let snapshot = self.filesystem.staged_tree_snapshot(canonical_entity)?;
-            if snapshot.content_hash != member.tree_hash {
+            if snapshot.content_hash != external_tree_hash(member) {
                 return Err(SourceTransitionError::Validation(format!(
                     "the external member '{}' does not match the frozen Source Release",
                     member.directory_name
@@ -2833,6 +3484,39 @@ impl SourceTransitionService {
                     "the external member '{}' changed identity after planning",
                     member.directory_name
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalization can resume after some copies have already been removed.
+    /// Any copy still present must retain the frozen old bytes.
+    fn check_retained_external_copies(
+        &self,
+        journal: &SourceTransitionJournal,
+    ) -> Result<(), SourceTransitionError> {
+        for removed in &journal.removed_members {
+            if let Some(isolated) = &removed.isolated_path
+                && self.filesystem.path_is_occupied(isolated)?
+                && (!self.filesystem.path_has_no_symlink_component(isolated)?
+                    || self.filesystem.staged_tree_snapshot(isolated)?.content_hash
+                        != removed.tree_hash)
+            {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "the removed external preservation copy changed".into(),
+                ));
+            }
+        }
+        for member in &journal.members {
+            if let Some(isolated) = &member.isolated_path
+                && self.filesystem.path_is_occupied(isolated)?
+                && (!self.filesystem.path_has_no_symlink_component(isolated)?
+                    || self.filesystem.staged_tree_snapshot(isolated)?.content_hash
+                        != external_tree_hash(member))
+            {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "the retained external copy changed; refusing to discard it".into(),
+                ));
             }
         }
         Ok(())
@@ -2854,7 +3538,7 @@ impl SourceTransitionService {
                 ))
             })?;
             let snapshot = self.filesystem.staged_tree_snapshot(isolated)?;
-            if snapshot.content_hash != member.tree_hash {
+            if snapshot.content_hash != external_tree_hash(member) {
                 return Err(SourceTransitionError::PreviewStale);
             }
         }
@@ -2877,6 +3561,13 @@ impl SourceTransitionService {
         &self,
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
+        for activation in &journal.activations {
+            if !self.is_transition_activation(journal, &activation.entry_path)? {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "the restored activation link no longer matches".into(),
+                ));
+            }
+        }
         let expected_manifest = journal.target_manifest.as_ref().ok_or_else(|| {
             SourceTransitionError::RecoveryRequired(
                 "the Source Transition journal has no frozen source manifest".into(),
@@ -2894,6 +3585,7 @@ impl SourceTransitionService {
         for member in &journal.members {
             if let Some(canonical_entity) = &member.canonical_entity
                 && self.filesystem.path_is_directory(canonical_entity)?
+                && !self.is_transition_activation(journal, canonical_entity)?
             {
                 return Err(SourceTransitionError::RecoveryRequired(format!(
                     "external source '{}' reappeared after the ownership commit point",
@@ -2946,6 +3638,7 @@ impl SourceTransitionService {
     ) -> Result<(), SourceTransitionError> {
         if journal.target_manifest.is_none() {
             journal.target_manifest = Some(RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: journal.remote_id.clone(),
                 canonical_url: journal.canonical_url.clone(),
@@ -2993,12 +3686,15 @@ impl SourceTransitionService {
             // carries no lock facts and the Home snapshot becomes the sole
             // managed copy. No ownership claim is fabricated.
             return Ok(CleanClaimSet {
+                removed_claims: Vec::new(),
+                relocated_claim_paths: BTreeMap::new(),
                 lock_path: PathBuf::new(),
                 lock_fingerprint: String::new(),
                 lock_identity: None,
                 lock_entries: Vec::new(),
                 canonical_entities: BTreeMap::new(),
                 canonical_entity_fingerprints: BTreeMap::new(),
+                external_tree_hashes: BTreeMap::new(),
             });
         }
         if relevant.len() != 1 {
@@ -3036,31 +3732,57 @@ impl SourceTransitionService {
         // installer claimed for this repository — old member paths may have
         // disappeared upstream (removed) or be absent locally: the single
         // CAS still must release every claim as one exact file update.
+        let mut relocated_claim_paths = BTreeMap::new();
+        let mut removed_claims = Vec::new();
         if require_exact_member_set {
-            if names.len() != entries.len() {
+            if names.len() != entries.len()
+                || entries
+                    .iter()
+                    .map(claim_member_path)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != entries.len()
+                || entries
+                    .iter()
+                    .any(|entry| !is_safe_source_transition_member_name(&entry.name))
+            {
                 return Err(SourceTransitionError::Validation(
                     "the external lock contains duplicate claims".into(),
                 ));
             }
             for entry in &entries {
-                if preview
-                    .members
-                    .iter()
-                    .filter(|member| {
-                        member.directory_name == entry.name && member.skill_path == entry.skill_path
-                    })
-                    .count()
-                    != 1
+                match crate::core::source_group_preview::match_external_claim(
+                    &preview.members,
+                    &entry.name,
+                    &entry.skill_path,
+                )
+                .map_err(SourceTransitionError::Validation)?
                 {
-                    return Err(SourceTransitionError::Validation(format!(
-                        "external lock entry '{}' does not match the fixed source release",
-                        entry.name
-                    )));
+                    Some(member) if member.skill_path != claim_member_path(entry) => {
+                        relocated_claim_paths.insert(entry.name.clone(), member.skill_path.clone());
+                    }
+                    Some(_) => {}
+                    None => removed_claims.push(entry.name.clone()),
                 }
+            }
+            let targets: BTreeSet<_> = entries
+                .iter()
+                .map(|entry| {
+                    relocated_claim_paths
+                        .get(&entry.name)
+                        .map(String::as_str)
+                        .unwrap_or_else(|| claim_member_path(entry))
+                })
+                .collect();
+            if targets.len() != entries.len() {
+                return Err(SourceTransitionError::Validation(
+                    "multiple claims resolve to one source member".into(),
+                ));
             }
         }
         let mut canonical_entities = BTreeMap::new();
         let mut canonical_entity_fingerprints = BTreeMap::new();
+        let mut external_tree_hashes = BTreeMap::new();
         for entry in &entries {
             let path = canonical_root.join(&entry.name);
             if !self.filesystem.path_has_no_symlink_component(&path)? {
@@ -3092,8 +3814,26 @@ impl SourceTransitionService {
                     entry.name
                 )));
             }
-            canonical_entities.insert(entry.skill_path.clone(), path);
-            canonical_entity_fingerprints.insert(entry.skill_path.clone(), fingerprint);
+            if relocated_claim_paths.contains_key(&entry.name) {
+                let document = self.filesystem.read_skill_document(&path)?;
+                if crate::core::repository_discovery::metadata(&document)
+                    .is_none_or(|(name, _)| name != entry.name)
+                {
+                    return Err(SourceTransitionError::Validation(
+                        "the local Skill does not identify the relocated member".into(),
+                    ));
+                }
+            }
+            let member_path = relocated_claim_paths
+                .get(&entry.name)
+                .map(String::as_str)
+                .unwrap_or_else(|| claim_member_path(entry));
+            external_tree_hashes.insert(
+                member_path.to_owned(),
+                self.filesystem.staged_tree_snapshot(&path)?.content_hash,
+            );
+            canonical_entities.insert(member_path.to_owned(), path);
+            canonical_entity_fingerprints.insert(member_path.to_owned(), fingerprint);
         }
         let lock_path = report.path.clone();
         let lock_fingerprint = report.fingerprint.clone();
@@ -3101,12 +3841,15 @@ impl SourceTransitionService {
             .lock_store
             .observed_identity(&lock_path, &lock_fingerprint);
         Ok(CleanClaimSet {
+            removed_claims,
+            relocated_claim_paths,
             lock_path,
             lock_fingerprint,
             lock_identity,
             lock_entries: entries,
             canonical_entities,
             canonical_entity_fingerprints,
+            external_tree_hashes,
         })
     }
 
@@ -3257,6 +4000,107 @@ impl SourceTransitionService {
         library_root: &Path,
         journal: &SourceTransitionJournal,
     ) -> Result<(), SourceTransitionError> {
+        let roots = self.store.activation_targets()?;
+        let mut link_entries: BTreeSet<_> = journal
+            .activations
+            .iter()
+            .map(|a| a.entry_path.clone())
+            .collect();
+        for removed in &journal.removed_members {
+            for link in &removed.external_links {
+                let target = link.previous_target.as_ref().ok_or_else(|| {
+                    SourceTransitionError::RecoveryRequired(
+                        "removed alias has no original target".into(),
+                    )
+                })?;
+                if journal.promotion_legacy.is_some()
+                    || journal.update_previous.is_some()
+                    || link.skill_id != removed.skill_id
+                    || link.target_path != removed.legacy_path
+                    || link.entry_path == removed.legacy_path
+                    || link.entry_path
+                        != link
+                            .parent_fingerprint
+                            .canonical_path
+                            .join(&removed.directory_name)
+                    || self.previous_activation_entity(&link.entry_path, target)?
+                        != removed.legacy_path
+                    || !link_entries.insert(link.entry_path.clone())
+                    || !roots.iter().any(|root| {
+                        root.root_id == link.target_root_id
+                            && self
+                                .filesystem
+                                .normalize_configured_path(&root.path)
+                                .ok()
+                                .as_ref()
+                                == Some(&link.parent_fingerprint.canonical_path)
+                    })
+                {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "removed alias escapes its frozen external claim".into(),
+                    ));
+                }
+                self.check_activation_parent(link)?;
+            }
+        }
+        if !journal.activations.is_empty() {
+            if journal.update_previous.is_some() || journal.promotion_legacy.is_some() {
+                return Err(SourceTransitionError::RecoveryRequired(
+                    "unexpected activation adoption in an Update or Promotion journal".into(),
+                ));
+            }
+            let roots = self.store.activation_targets()?;
+            let mut entries = BTreeSet::new();
+            for activation in &journal.activations {
+                let member = journal
+                    .members
+                    .iter()
+                    .find(|m| m.skill_id == activation.skill_id)
+                    .ok_or_else(|| {
+                        SourceTransitionError::RecoveryRequired("unknown activation member".into())
+                    })?;
+                let valid_root = roots.iter().any(|root| {
+                    root.root_id == activation.target_root_id
+                        && self
+                            .filesystem
+                            .normalize_configured_path(&root.path)
+                            .ok()
+                            .as_ref()
+                            == Some(&activation.parent_fingerprint.canonical_path)
+                });
+                if let Some(previous) = &activation.previous_target {
+                    if member.canonical_entity.as_ref()
+                        != Some(&self.previous_activation_entity(&activation.entry_path, previous)?)
+                    {
+                        return Err(SourceTransitionError::RecoveryRequired(
+                            "previous activation target escapes the original entity".into(),
+                        ));
+                    }
+                }
+                if !valid_root
+                    || !entries.insert(&activation.entry_path)
+                    || activation.entry_path
+                        != activation
+                            .parent_fingerprint
+                            .canonical_path
+                            .join(&member.directory_name)
+                    || activation.target_path
+                        != git_member_namespace_path(
+                            library_root,
+                            &journal.remote_id,
+                            &member.skill_id,
+                        )
+                    || member.canonical_entity.is_none()
+                    || (activation.previous_target.is_none()
+                        && member.canonical_entity.as_ref() != Some(&activation.entry_path))
+                {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "activation journal escapes its frozen target/member".into(),
+                    ));
+                }
+                self.check_activation_parent(activation)?;
+            }
+        }
         if journal.update_previous.is_some() {
             return self.validate_update_journal_layout(library_root, journal);
         }
@@ -3301,6 +4145,31 @@ impl SourceTransitionService {
             .iter()
             .map(|entry| (entry.name.as_str(), entry))
             .collect::<BTreeMap<_, _>>();
+        if journal.relocated_claim_paths.iter().any(|(name, path)| {
+            let Some(claim) = claims.get(name.as_str()) else {
+                return true;
+            };
+            journal.promotion_legacy.is_some()
+                || path == claim_member_path(claim)
+                || journal
+                    .members
+                    .iter()
+                    .any(|m| m.skill_path == claim_member_path(claim))
+                || journal
+                    .members
+                    .iter()
+                    .filter(|m| {
+                        m.skill_path == *path
+                            && m.directory_name == *name
+                            && m.display_name == *name
+                    })
+                    .count()
+                    != 1
+        }) {
+            return Err(SourceTransitionError::RecoveryRequired(
+                "invalid frozen member relocation".into(),
+            ));
+        }
         if claims.len() != journal.lock_entries.len()
             || (journal.promotion_legacy.is_none()
                 && claims.values().any(|claim| {
@@ -3309,9 +4178,18 @@ impl SourceTransitionService {
                         .iter()
                         .filter(|member| {
                             member.directory_name == claim.name
-                                && member.skill_path == claim.skill_path
+                                && member.skill_path
+                                    == mapped_claim_path(&journal.relocated_claim_paths, claim)
                         })
                         .count()
+                        + journal
+                            .removed_members
+                            .iter()
+                            .filter(|removed| {
+                                removed.directory_name == claim.name
+                                    && removed.skill_path == claim_member_path(claim)
+                            })
+                            .count()
                         != 1
                 }))
         {
@@ -3331,7 +4209,9 @@ impl SourceTransitionService {
             }
             let claim = claims
                 .get(member.directory_name.as_str())
-                .filter(|claim| claim.skill_path == member.skill_path)
+                .filter(|claim| {
+                    mapped_claim_path(&journal.relocated_claim_paths, claim) == member.skill_path
+                })
                 .cloned();
             let canonical_facts_match = match (&member.canonical_entity, &claim, &external_root) {
                 (Some(canonical_entity), Some(_), Some(external_root)) => {
@@ -3364,13 +4244,16 @@ impl SourceTransitionService {
                 &member.canonical_entity,
                 &member.canonical_entity_fingerprint,
             ) {
-                if !self
+                if (!self
                     .filesystem
                     .path_has_no_symlink_component(canonical_entity)?
-                    || self
-                        .filesystem
-                        .normalize_configured_path(canonical_entity)?
-                        != fingerprint.canonical_path
+                    && !self.is_transition_activation(journal, canonical_entity)?)
+                    || (if self.is_transition_activation(journal, canonical_entity)? {
+                        canonical_entity.clone()
+                    } else {
+                        self.filesystem
+                            .normalize_configured_path(canonical_entity)?
+                    }) != fingerprint.canonical_path
                 {
                     return Err(SourceTransitionError::RecoveryRequired(format!(
                         "the Source Transition journal member '{}' has unsafe external identity facts",
@@ -3405,7 +4288,9 @@ impl SourceTransitionService {
                         claim.name
                     ))
                 })?;
-                if claim.skill_path != member.skill_path || source.url != journal.canonical_url {
+                if mapped_claim_path(&journal.relocated_claim_paths, claim) != member.skill_path
+                    || source.url != journal.canonical_url
+                {
                     return Err(SourceTransitionError::RecoveryRequired(format!(
                         "the Source Transition journal claim '{}' changed repository facts",
                         claim.name
@@ -3413,6 +4298,12 @@ impl SourceTransitionService {
                 }
             }
         }
+        let mut removed_names = BTreeSet::new();
+        let mut member_ids: BTreeSet<_> = journal
+            .members
+            .iter()
+            .map(|m| m.skill_id.as_str())
+            .collect();
         for removed in &journal.removed_members {
             // Removed legacy entities live in the external Skills root (the
             // legacy installer's tree), never under the managed library.
@@ -3421,6 +4312,33 @@ impl SourceTransitionService {
                     "an unowned Source Transition journal cannot remove legacy entities".into(),
                 )
             })?;
+            if journal.promotion_legacy.is_none() {
+                let valid_claim =
+                    claims
+                        .get(removed.directory_name.as_str())
+                        .is_some_and(|claim| {
+                            claim_member_path(claim) == removed.skill_path
+                                && parse_git_source_input(&claim.source_url)
+                                    .is_ok_and(|source| source.url == journal.canonical_url)
+                        });
+                if !valid_claim
+                    || removed.legacy_path != external_root.join(&removed.directory_name)
+                    || journal
+                        .relocated_claim_paths
+                        .contains_key(&removed.directory_name)
+                    || !removed_names.insert(&removed.directory_name)
+                    || !member_ids.insert(&removed.skill_id)
+                    || journal.members.iter().any(|m| {
+                        m.skill_path == removed.skill_path
+                            || (m.directory_name == removed.directory_name
+                                && m.display_name == removed.directory_name)
+                    })
+                {
+                    return Err(SourceTransitionError::RecoveryRequired(
+                        "invalid removed external claim facts".into(),
+                    ));
+                }
+            }
             if !is_safe_source_transition_member_name(&removed.directory_name)
                 || !is_safe_source_transition_member_name(&removed.skill_id)
                 || !self
@@ -3948,6 +4866,7 @@ fn record_from_journal(
     }
     match &journal.promotion_legacy {
         None => Ok(SourceTransitionRecord {
+            activations: journal.activations.clone(),
             remote_id: journal.remote_id.clone(),
             provider: journal.provider.clone(),
             canonical_url: journal.canonical_url.clone(),
@@ -3961,6 +4880,7 @@ fn record_from_journal(
             members: journal_member_records(journal),
         }),
         Some(legacy) => Ok(SourceTransitionRecord {
+            activations: journal.activations.clone(),
             remote_id: journal.remote_id.clone(),
             provider: journal.provider.clone(),
             canonical_url: journal.canonical_url.clone(),

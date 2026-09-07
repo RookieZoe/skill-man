@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useCallback, useEffect, useState } from "react";
 
 import type {
@@ -83,6 +84,7 @@ export function AbandonFlow({ client, onSnapshot, onClose }: AbandonFlowProps) {
         aria-modal="true"
         aria-labelledby="abandon-title"
       >
+        <OperationNotice busy={busy} />
         {!preview && !error ? <p>{t("lifecycle.abandon_title")}</p> : null}
         {error ? (
           <>

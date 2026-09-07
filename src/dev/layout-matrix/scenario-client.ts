@@ -83,6 +83,26 @@ export function createMatrixCatalogClient(
   scenario: MatrixScenario,
 ): CatalogClient {
   const client = createFixtureCatalogClient();
+  // Explicit dev-only grouping fixture, never used by the production client.
+  if (new URLSearchParams(window.location.search).get("plugins") === "1") {
+    client.getGitSourceCapability = async () => ({
+      sources: [
+        {
+          remoteId: "plugin-category-fixture",
+          canonicalUrl: "https://github.com/mattpocock/skills",
+          kind: "git_repository_source",
+          members: (await client.listSkills("all")).items
+            .slice(0, 3)
+            .map((skill, index) => ({
+              skillId: skill.id,
+              skillPath: skill.directoryName,
+              presence: true,
+              pluginName: index < 2 ? "mattpocock-skills" : null,
+            })),
+        },
+      ],
+    });
+  }
   const denseText = scenario.language === "zh" ? DENSE_ZH : DENSE_EN;
   const denseMarkdown =
     scenario.language === "zh" ? DENSE_MARKDOWN_ZH : DENSE_MARKDOWN_EN;

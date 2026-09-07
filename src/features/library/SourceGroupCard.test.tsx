@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { BackgroundOperations } from "../../ui/BackgroundOperations";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -95,19 +96,21 @@ describe("SourceGroupCard", () => {
       .mockResolvedValueOnce(false);
     const picker = vi.fn().mockResolvedValue("/Users/test/copies");
     render(
-      <SourceGroupCard
-        source={healthySource}
-        skills={skills}
-        onCopyMember={onCopyMember}
-        pickDirectory={picker}
-      />,
+      <BackgroundOperations>
+        <SourceGroupCard
+          source={healthySource}
+          skills={skills}
+          onCopyMember={onCopyMember}
+          pickDirectory={picker}
+        />
+      </BackgroundOperations>,
     );
     await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
     await user.click(screen.getByRole("checkbox", { name: "skills/beta" }));
     await user.click(screen.getByRole("button", { name: "Create local copy" }));
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Created 1 of 2 copies",
-    );
+    expect(
+      await screen.findByRole("region", { name: "Current activity" }),
+    ).toHaveTextContent("Copy stopped: 1 of 2 completed.");
     expect(picker).toHaveBeenCalledTimes(1);
     expect(onCopyMember.mock.calls).toEqual([
       ["source-1", "skill-1", "/Users/test/copies/alpha"],
@@ -333,4 +336,65 @@ describe("SourceGroupCard", () => {
       screen.queryByRole("button", { name: "Update" }),
     ).not.toBeInTheDocument();
   });
+});
+
+it("continues a confirmed copy batch after its card unmounts", async () => {
+  const user = userEvent.setup();
+  let resolve!: (value: boolean) => void;
+  const pending = new Promise<boolean>((done) => {
+    resolve = done;
+  });
+  const copy = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(true);
+  const view = render(
+    <BackgroundOperations>
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onCopyMember={copy}
+        pickDirectory={async () => "/tmp/copies"}
+      />
+    </BackgroundOperations>,
+  );
+  await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
+  await user.click(screen.getByRole("checkbox", { name: "skills/beta" }));
+  await user.click(screen.getByRole("button", { name: "Create local copy" }));
+  expect(copy).toHaveBeenCalledTimes(1);
+  view.rerender(
+    <BackgroundOperations>
+      <p>Another page</p>
+    </BackgroundOperations>,
+  );
+  await act(async () => {
+    resolve(true);
+    await pending;
+  });
+  await waitFor(() => expect(copy).toHaveBeenCalledTimes(2));
+  expect(
+    await screen.findByRole("region", { name: "Current activity" }),
+  ).toHaveTextContent("Created 2 of 2 copies");
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+});
+
+it("reports zero-copy failures with the actionable error, not partial success", async () => {
+  const user = userEvent.setup();
+  render(
+    <BackgroundOperations>
+      <SourceGroupCard
+        source={healthySource}
+        skills={skills}
+        onCopyMember={async () => {
+          throw new Error("Choose an empty destination.");
+        }}
+        pickDirectory={async () => "/tmp/copies"}
+      />
+    </BackgroundOperations>,
+  );
+  await user.click(screen.getByRole("checkbox", { name: "skills/alpha" }));
+  await user.click(screen.getByRole("button", { name: "Create local copy" }));
+  const notice = await screen.findByRole("region", {
+    name: "Current activity",
+  });
+  expect(notice).toHaveTextContent("Choose an empty destination.");
+  expect(notice.querySelector('[data-state="failed"]')).not.toBeNull();
+  expect(screen.getByRole("checkbox", { name: "skills/alpha" })).toBeChecked();
 });

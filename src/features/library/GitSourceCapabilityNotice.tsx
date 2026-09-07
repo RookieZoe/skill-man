@@ -1,3 +1,4 @@
+import { useBackgroundOperations } from "../../ui/BackgroundOperations";
 import { useState } from "react";
 import type {
   GitSourceCapabilityMember,
@@ -160,6 +161,7 @@ function GitRepositorySourceActions({
   pickDirectory: () => Promise<string | null>;
 }) {
   const { t } = useLocale();
+  const notifications = useBackgroundOperations();
   const [confirming, setConfirming] = useState<"restore" | "remove" | null>(
     null,
   );
@@ -172,7 +174,28 @@ function GitRepositorySourceActions({
   async function startCopy() {
     if (!onCopyMember || !copySkillId) return;
     const destination = await pickDirectory();
-    if (destination) onCopyMember(remoteId, copySkillId, destination);
+    if (destination) {
+      const noticeId = notifications.begin({
+        title: t("operation.background.copy"),
+        detail: t("operation.background.working"),
+      });
+      try {
+        await onCopyMember(remoteId, copySkillId, destination);
+        notifications.finish(noticeId, {
+          title: t("operation.background.done"),
+          detail: t("operation.background.copy_next"),
+        });
+      } catch (reason) {
+        notifications.finish(noticeId, {
+          title: t("operation.background.failed"),
+          detail:
+            reason instanceof Error
+              ? reason.message
+              : t("operation.background.copy_next"),
+          state: "failed",
+        });
+      }
+    }
   }
 
   return (

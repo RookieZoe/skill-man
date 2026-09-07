@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import {
   useEffect,
   useMemo,
@@ -1284,6 +1285,7 @@ function AgentConfigurationSheet({
           ) : null}
         </div>
 
+        <OperationNotice busy={busy} />
         <div className="activation-sheet-actions">
           <button
             ref={

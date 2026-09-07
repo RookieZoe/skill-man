@@ -1,3 +1,4 @@
+import { useScanOperation } from "../../ui/useScanOperation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
@@ -96,16 +97,6 @@ function stateKey(run: ScanRunSnapshot): MessageKey {
     case "failed":
       return "scan.ledger.failed";
   }
-}
-
-function phaseKey(run: ScanRunSnapshot): MessageKey {
-  return `scan.ledger.phase.${run.phase}` as MessageKey;
-}
-
-function triggerKey(run: ScanRunSnapshot): MessageKey {
-  return run.trigger === "manual"
-    ? "scan.ledger.triggerManual"
-    : "scan.ledger.triggerOnboarding";
 }
 
 function reportStateKey(report: CurrentReport["summary"]): MessageKey {
@@ -394,6 +385,7 @@ export function ScanEvidenceLedger({
   }, [client]);
 
   const run = observation?.scanRun ?? null;
+  useScanOperation(observation);
   const report = observation?.currentReport ?? null;
   const summary = report?.summary ?? null;
   const hasReport = summary !== null;
@@ -706,11 +698,6 @@ export function ScanEvidenceLedger({
           {cacheUnreadable ? (
             <span className="scan-ledger-stale">
               {t("scan.ledger.cacheUnreadable")}
-            </span>
-          ) : null}
-          {runActive ? (
-            <span className="scan-ledger-phase">
-              {t(phaseKey(run))} · {t(triggerKey(run))}
             </span>
           ) : null}
         </div>

@@ -34,6 +34,7 @@ fn legacy_per_skill_git_state_stays_readable_and_closes_source_writes() {
                 catalog_aliases: vec![],
                 repository: None,
                 manifest: GitSourceManifestFact::Present {
+                    member_plugins: Default::default(),
                     remote_id: "parent-1".into(),
                     canonical_url: "https://github.com/acme/skills".into(),
                     aliases: vec![],
@@ -91,6 +92,7 @@ fn sqlite_scan_reads_a_legacy_home_without_changing_catalog_or_manifest() {
         .write_remote_parent_manifest(
             &home.library_root.join("remotes"),
             &RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
@@ -179,6 +181,7 @@ fn missing_or_unreadable_manifest_keeps_an_otherwise_complete_source_legacy() {
 fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
     for manifest in [
         GitSourceManifestFact::Present {
+            member_plugins: Default::default(),
             remote_id: "parent-1".into(),
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
@@ -189,6 +192,7 @@ fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
             current_release_id: Some("release-parent-1".into()),
         },
         GitSourceManifestFact::Present {
+            member_plugins: Default::default(),
             remote_id: "parent-1".into(),
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
@@ -199,6 +203,7 @@ fn partial_manifest_keeps_an_otherwise_complete_source_legacy() {
             current_release_id: Some("release-parent-1".into()),
         },
         GitSourceManifestFact::Present {
+            member_plugins: Default::default(),
             remote_id: "parent-1".into(),
             canonical_url: "https://github.com/acme/parent-1".into(),
             aliases: vec![],
@@ -232,6 +237,7 @@ fn manifest_conflict_closes_only_the_affected_source() {
     let mut conflicted = repository_source_fact("parent-conflicted");
     conflicted.catalog_aliases = vec!["https://github.com/acme/previous-name".into()];
     conflicted.manifest = GitSourceManifestFact::Present {
+        member_plugins: Default::default(),
         remote_id: "parent-conflicted".into(),
         canonical_url: "https://github.com/acme/parent-conflicted".into(),
         aliases: vec!["https://github.com/acme/different-name".into()],
@@ -318,6 +324,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
         .write_remote_parent_manifest(
             &home.library_root.join("remotes"),
             &RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
@@ -349,6 +356,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                 kind: GitSourceCapabilityKind::GitRepositorySource,
                 members: vec![
                     skill_man_lib::core::git_source_capability::GitSourceCapabilityMember {
+                        plugin_name: None,
                         skill_id: "networking".into(),
                         skill_path: "skills/networking".into(),
                         presence: true,
@@ -367,6 +375,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
         .write_remote_parent_manifest(
             &home.library_root.join("remotes"),
             &RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/renamed-elsewhere".into(),
@@ -396,6 +405,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
         .write_remote_parent_manifest(
             &home.library_root.join("remotes"),
             &RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
@@ -452,6 +462,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
         .write_remote_parent_manifest(
             &home.library_root.join("remotes"),
             &RemoteParentManifest {
+                member_plugins: Default::default(),
                 schema_version: 1,
                 remote_id: "parent-1".into(),
                 canonical_url: "https://github.com/acme/skills".into(),
@@ -524,6 +535,7 @@ fn repository_source_fact(remote_id: &str) -> GitSourceFact {
             }],
         }),
         manifest: GitSourceManifestFact::Present {
+            member_plugins: Default::default(),
             remote_id: remote_id.into(),
             canonical_url,
             aliases: vec![],

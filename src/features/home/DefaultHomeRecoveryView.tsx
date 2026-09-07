@@ -98,7 +98,7 @@ export function DefaultHomeRecoveryView({
     return (
       <RouteShell
         title={t("bootstrap.home.binding_in_progress_title")}
-        summary={t("bootstrap.home.binding_in_progress_summary")}
+        summary={t("operation.foreground.locked")}
       />
     );
   }

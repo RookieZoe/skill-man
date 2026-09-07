@@ -81,6 +81,7 @@ pub enum GitSourceManifestFact {
     Missing,
     Unreadable,
     Present {
+        member_plugins: Box<std::collections::BTreeMap<String, String>>,
         remote_id: String,
         canonical_url: String,
         aliases: Vec<String>,

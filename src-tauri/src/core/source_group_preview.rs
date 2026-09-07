@@ -12,10 +12,8 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::core::domain::parse_skill_metadata;
 use crate::core::git_source::{
-    DiscoveryMode, GitResolveError, discover_skills_from_paths, git_mirror_path,
-    parse_git_source_input, repo_name_from_url, resolve_git_ref, skill_document_path,
+    GitResolveError, git_mirror_path, parse_git_source_input, repo_name_from_url, resolve_git_ref,
     validate_skill_path,
 };
 use crate::core::source_tracking_policy::{
@@ -27,6 +25,42 @@ use crate::seams::remote_provider::{ProviderReleaseFact, RemoteProvider};
 use crate::seams::source::{GitSource, GitTreeEntryKind, SourceError};
 
 const MAX_SKILL_DOCUMENT_BYTES: usize = 512 * 1024;
+
+pub(crate) fn external_claim_member_path(path: &str) -> &str {
+    if path == "SKILL.md" {
+        ""
+    } else {
+        path.strip_suffix("/SKILL.md").unwrap_or(path)
+    }
+}
+
+/// Paths identify existing members. Only a unique same-name relocation may
+/// survive a disappeared path; a renamed Skill is a removal plus an addition.
+pub(crate) fn match_external_claim<'a>(
+    members: &'a [SourceGroupMember],
+    name: &str,
+    path: &str,
+) -> Result<Option<&'a SourceGroupMember>, String> {
+    let path = external_claim_member_path(path);
+    let exact: Vec<_> = members.iter().filter(|m| m.skill_path == path).collect();
+    if exact.len() == 1 {
+        return Ok(Some(exact[0]));
+    }
+    if exact.len() > 1 {
+        return Err("duplicate source member paths".into());
+    }
+    let candidates: Vec<_> = members
+        .iter()
+        .filter(|m| m.directory_name == name && m.display_name == name)
+        .collect();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [member] => Ok(Some(*member)),
+        _ => Err(format!(
+            "external lock entry '{name}' has no unique relocated member"
+        )),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTrackingOverride {
@@ -79,6 +113,10 @@ pub struct SourceGroupPreview {
     /// Legacy locks can only make an external ownership claim. They never
     /// establish remote provenance or contribute a tree summary.
     pub external_ownership_claims: Vec<ExternalOwnershipClaim>,
+    /// Exact installer entry names absent from the remote release.
+    pub removed_external_claims: Vec<String>,
+    /// Directory names of remote members with no matched external claim.
+    pub added_member_names: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +133,7 @@ pub struct SourceGroupMember {
     pub directory_identity_key: String,
     pub display_name: String,
     pub description: String,
+    pub plugin_name: Option<String>,
     pub skill_path: String,
     pub tree_summary: String,
     pub action: SourceGroupMemberAction,
@@ -104,6 +143,7 @@ pub struct SourceGroupMember {
 pub struct ExternalOwnershipClaim {
     pub lock_path: PathBuf,
     pub entry_name: String,
+    pub skill_path: String,
     pub requested_ref: String,
 }
 
@@ -296,14 +336,30 @@ impl SourceGroupPreviewService {
         }
         let tree_files = tree_entries
             .into_iter()
-            .filter_map(|entry| (entry.kind == GitTreeEntryKind::Blob).then_some(entry.path))
+            .filter_map(|entry| {
+                (entry.kind == GitTreeEntryKind::Blob)
+                    .then(|| entry.path.to_string_lossy().into_owned())
+            })
             .collect::<Vec<_>>();
-        let discovered = discover_skills_from_paths(
-            &repo_name_from_url(&spec.url),
-            &tree_files,
-            None,
-            DiscoveryMode::ForceFullDepth,
-        );
+        let mut read_error = None;
+        let discovered =
+            crate::core::repository_discovery::discover_repository(&tree_files, &mut |path| {
+                match self.git_source.read_blob(
+                    &mirror,
+                    &resolved.commit,
+                    path,
+                    MAX_SKILL_DOCUMENT_BYTES,
+                ) {
+                    Ok(bytes) => bytes.and_then(|bytes| String::from_utf8(bytes).ok()),
+                    Err(error) => {
+                        read_error = Some(error);
+                        None
+                    }
+                }
+            });
+        if let Some(error) = read_error {
+            return Err(error.into());
+        }
         if discovered.is_empty() {
             return Err(SourceGroupPreviewError::Validation(
                 "the source repository contains no discoverable Skills".into(),
@@ -312,50 +368,48 @@ impl SourceGroupPreviewService {
 
         let mut members = Vec::with_capacity(discovered.len());
         for skill in discovered {
-            validate_skill_path(&skill.skill_path)
+            validate_skill_path(&skill.path)
                 .map_err(|error| SourceGroupPreviewError::Validation(error.to_string()))?;
-            let document_path = skill_document_path(&skill.skill_path);
-            let bytes = self
-                .git_source
-                .read_blob(
-                    &mirror,
-                    &resolved.commit,
-                    &document_path,
-                    MAX_SKILL_DOCUMENT_BYTES,
-                )?
-                .ok_or_else(|| {
-                    SourceGroupPreviewError::Validation(format!(
-                        "discovered source member '{}' has no readable SKILL.md",
-                        skill.skill_path
-                    ))
-                })?;
-            let document = String::from_utf8(bytes).map_err(|_| {
-                SourceGroupPreviewError::Validation(format!(
-                    "discovered source member '{}' has a non-UTF-8 SKILL.md",
-                    skill.skill_path
-                ))
-            })?;
-            let metadata = parse_skill_metadata(&document);
-            let display_name = metadata
-                .name
-                .unwrap_or_else(|| skill.directory_name.clone());
+            let directory_name = if skill.path.is_empty() {
+                repo_name_from_url(&spec.url)
+            } else {
+                skill.path.rsplit('/').next().unwrap().to_owned()
+            };
             members.push(SourceGroupMember {
-                directory_identity_key: crate::core::domain::skill_identity_key(
-                    &skill.directory_name,
-                ),
-                display_name,
-                description: metadata.description.unwrap_or_default(),
+                directory_identity_key: crate::core::domain::skill_identity_key(&directory_name),
+                display_name: skill.name,
+                description: skill.description,
+                plugin_name: skill.plugin_name,
                 tree_summary: self.git_source.tree_summary(
                     &mirror,
                     &resolved.commit,
-                    &skill.skill_path,
+                    &skill.path,
                 )?,
-                skill_path: skill.skill_path,
+                skill_path: skill.path,
                 action: SourceGroupMemberAction::Added,
-                directory_name: skill.directory_name,
+                directory_name,
             });
         }
         members.sort_by(|left, right| left.skill_path.cmp(&right.skill_path));
+
+        let mut matched = BTreeSet::new();
+        let mut removed_external_claims = Vec::new();
+        for claim in &claims {
+            match match_external_claim(&members, &claim.entry_name, &claim.skill_path) {
+                Ok(Some(member)) => {
+                    matched.insert(member.skill_path.clone());
+                }
+                Ok(None) => removed_external_claims.push(claim.entry_name.clone()),
+                // Ambiguity is not permission to remove; confirmation fails closed.
+                Err(_) => {}
+            }
+        }
+        removed_external_claims.sort();
+        let added_member_names = members
+            .iter()
+            .filter(|member| !matched.contains(&member.skill_path))
+            .map(|member| member.directory_name.clone())
+            .collect();
 
         Ok(SourceGroupPreviewOutcome::Preview(SourceGroupPreview {
             provider,
@@ -370,6 +424,8 @@ impl SourceGroupPreviewService {
             },
             members,
             external_ownership_claims: claims,
+            removed_external_claims,
+            added_member_names,
         }))
     }
 
@@ -453,6 +509,7 @@ impl SourceGroupPreviewService {
                 claims.push(ExternalOwnershipClaim {
                     lock_path: report.path.clone(),
                     entry_name: entry.name,
+                    skill_path: entry.skill_path,
                     requested_ref: entry.requested_ref.unwrap_or_else(|| "HEAD".into()),
                 });
             }

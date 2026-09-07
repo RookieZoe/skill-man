@@ -6,7 +6,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import "../styles.css";
 import {
@@ -177,6 +177,34 @@ test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", a
 });
 
 // -- Agent drawer (760–1059) --
+
+test("detail heading, actions and document share one centered reading width", async () => {
+  await renderWideLibrary();
+  const styles = [
+    ".detail-heading",
+    ".detail-actions",
+    ".document-preview",
+  ].map((selector) => getComputedStyle(document.querySelector(selector)!));
+  expect(new Set(styles.map((style) => style.maxWidth)).size).toBe(1);
+  for (const style of styles) {
+    expect(style.marginInline).toBe("auto");
+  }
+});
+
+test("opening the sliding inspector does not scroll its workspace into the offscreen animation", async () => {
+  const user = userEvent.setup();
+  await renderWideLibrary();
+  setViewportWidth(800);
+  const focus = vi.spyOn(inspector(), "focus");
+  try {
+    await user.click(screen.getByRole("button", { name: "Target groups" }));
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(inspector()).toHaveFocus();
+    expect(getComputedStyle(drawer()).overflowX).toBe("clip");
+  } finally {
+    focus.mockRestore();
+  }
+});
 
 test("mid mode opens the Agent Inspector as a modal drawer with inert background", async () => {
   const user = userEvent.setup();

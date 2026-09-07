@@ -153,7 +153,11 @@ fn write_file(repo: &Path, path: &str, contents: &str) {
 fn committed_repo(root: &Path) -> PathBuf {
     let repo = root.join("source-repo");
     std::fs::create_dir_all(&repo).expect("create repository");
-    write_file(&repo, "SKILL.md", "---\nname: Root Skill\n---\n# Root\n");
+    write_file(
+        &repo,
+        "packages/root/SKILL.md",
+        "---\nname: Root Skill\ndescription: Root member\n---\n# Root\n",
+    );
     write_file(
         &repo,
         "packages/beta/SKILL.md",
@@ -165,6 +169,35 @@ fn committed_repo(root: &Path) -> PathBuf {
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "source release"]);
     repo
+}
+
+#[test]
+fn cli_discovery_stops_at_a_valid_root_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = committed_repo(temp.path());
+    write_file(
+        &repo,
+        "SKILL.md",
+        "---\nname: kami\ndescription: Documents\n---\n",
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "valid root"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let SourceGroupPreviewOutcome::Preview(preview) = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source.git".into(),
+            tracking_policy: None,
+        })
+        .unwrap()
+    else {
+        panic!("preview")
+    };
+    assert_eq!(preview.members.len(), 1);
+    assert_eq!(preview.members[0].display_name, "kami");
 }
 
 #[test]
@@ -200,7 +233,7 @@ fn app_home_cache_survives_preview_refreshes_and_rebuilds_after_cleanup() {
     write_file(
         &repo,
         "packages/added/SKILL.md",
-        "---\nname: Added\n---\n# Added\n",
+        "---\nname: Added\ndescription: Added member\n---\n# Added\n",
     );
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-q", "-m", "new member"]);
@@ -307,7 +340,7 @@ fn fetch_latest_and_manage_previews_every_discovered_member_without_writing_a_dr
             .iter()
             .map(|member| member.skill_path.as_str())
             .collect::<Vec<_>>(),
-        vec!["", "packages/beta"]
+        vec!["packages/beta", "packages/root"]
     );
     assert!(
         preview

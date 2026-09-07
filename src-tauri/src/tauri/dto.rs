@@ -98,6 +98,7 @@ pub struct GitSourceCapabilitySourceDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitSourceCapabilityMemberDto {
+    pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
     pub presence: bool,
@@ -115,6 +116,7 @@ impl From<crate::core::git_source_capability::GitSourceCapabilitySource>
                 .members
                 .into_iter()
                 .map(|member| GitSourceCapabilityMemberDto {
+                    plugin_name: member.plugin_name,
                     skill_id: member.skill_id,
                     skill_path: member.skill_path,
                     presence: member.presence,
@@ -216,6 +218,7 @@ impl From<SourceGroupMemberAction> for SourceGroupMemberActionDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceGroupMemberDto {
+    pub plugin_name: Option<String>,
     pub directory_name: String,
     pub display_name: String,
     pub description: String,
@@ -227,6 +230,7 @@ pub struct SourceGroupMemberDto {
 impl From<SourceGroupMember> for SourceGroupMemberDto {
     fn from(value: SourceGroupMember) -> Self {
         Self {
+            plugin_name: value.plugin_name,
             directory_name: value.directory_name,
             display_name: value.display_name,
             description: value.description,
@@ -256,11 +260,15 @@ pub struct SourceGroupPreviewDto {
     pub policy: SourceGroupPolicyFactsDto,
     pub members: Vec<SourceGroupMemberDto>,
     pub external_ownership_claims: Vec<ExternalOwnershipClaimDto>,
+    pub removed_external_claims: Vec<String>,
+    pub added_member_names: Vec<String>,
 }
 
 impl From<SourceGroupPreview> for SourceGroupPreviewDto {
     fn from(value: SourceGroupPreview) -> Self {
         Self {
+            removed_external_claims: value.removed_external_claims,
+            added_member_names: value.added_member_names,
             provider: value.provider,
             source_url: value.source_url,
             aliases: value.aliases,
@@ -387,6 +395,7 @@ impl From<SourcePromotionMemberState> for SourcePromotionMemberStateDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourcePromotionDraftMemberDto {
+    pub plugin_name: Option<String>,
     pub skill_path: String,
     pub directory_name: String,
     pub directory_identity_key: String,
@@ -436,6 +445,7 @@ impl From<SourcePromotionDraft> for SourcePromotionDraftDto {
                 .members
                 .into_iter()
                 .map(|member| SourcePromotionDraftMemberDto {
+                    plugin_name: member.plugin_name,
                     skill_path: member.skill_path,
                     directory_name: member.directory_name,
                     directory_identity_key: member.directory_identity_key,
@@ -557,11 +567,14 @@ pub struct ConfirmSourceTransitionRequestDto {
     pub tracking_policy: Option<SourceTrackingPolicyDto>,
     pub expected_selected_ref: String,
     pub expected_resolved_commit: String,
+    #[serde(default)]
+    pub expected_removed_claims: Vec<String>,
 }
 
 impl From<ConfirmSourceTransitionRequestDto> for ConfirmSourceTransitionRequest {
     fn from(value: ConfirmSourceTransitionRequestDto) -> Self {
         Self {
+            expected_removed_claims: value.expected_removed_claims,
             source_type: value.source_type,
             source_url: value.source_url,
             tracking_policy: value.tracking_policy.map(Into::into),
@@ -642,6 +655,7 @@ impl From<crate::core::source_update::SourceUpdateMemberState> for SourceUpdateM
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceUpdateDraftMemberDto {
+    pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
     pub directory_name: String,
@@ -681,6 +695,7 @@ impl From<crate::core::source_update::SourceUpdateDraft> for SourceUpdateDraftDt
                 .members
                 .into_iter()
                 .map(|member| SourceUpdateDraftMemberDto {
+                    plugin_name: member.plugin_name,
                     skill_id: member.skill_id,
                     skill_path: member.skill_path,
                     directory_name: member.directory_name,
@@ -4723,14 +4738,39 @@ mod tests {
     }
 
     #[test]
+    fn source_transition_force_acknowledgment_is_explicit_and_defaults_to_empty() {
+        let mut payload = json!({
+            "sourceType": "github", "sourceUrl": "https://github.com/acme/source",
+            "trackingPolicy": null, "expectedSelectedRef": "HEAD",
+            "expectedResolvedCommit": "a".repeat(40)
+        });
+        let ordinary: ConfirmSourceTransitionRequestDto =
+            serde_json::from_value(payload.clone()).unwrap();
+        assert!(
+            ConfirmSourceTransitionRequest::from(ordinary)
+                .expected_removed_claims
+                .is_empty()
+        );
+        payload["expectedRemovedClaims"] = json!(["design"]);
+        let forced: ConfirmSourceTransitionRequestDto = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            ConfirmSourceTransitionRequest::from(forced).expected_removed_claims,
+            vec!["design"]
+        );
+    }
+
+    #[test]
     fn source_group_preview_outcomes_keep_the_typed_wire_contract() {
         let claim = ExternalOwnershipClaim {
             lock_path: PathBuf::from("/locks/source.lock.json"),
             entry_name: "legacy-skill".into(),
+            skill_path: "skills/legacy-skill".into(),
             requested_ref: "main".into(),
         };
         let preview = SourceGroupPreviewOutcomeDto::from(SourceGroupPreviewOutcome::Preview(
             SourceGroupPreview {
+                removed_external_claims: vec!["legacy-skill".into()],
+                added_member_names: vec!["Skill A".into()],
                 provider: "github".into(),
                 source_url: "https://github.com/acme/source".into(),
                 aliases: Vec::new(),
@@ -4742,6 +4782,7 @@ mod tests {
                     resolved_commit: "a".repeat(40),
                 },
                 members: vec![SourceGroupMember {
+                    plugin_name: None,
                     directory_name: "skill-a".into(),
                     directory_identity_key: crate::core::domain::skill_identity_key("skill-a"),
                     display_name: "Skill A".into(),
@@ -4781,6 +4822,8 @@ mod tests {
                     "provider": "github",
                     "sourceUrl": "https://github.com/acme/source",
                     "aliases": [],
+                    "removedExternalClaims": ["legacy-skill"],
+                    "addedMemberNames": ["Skill A"],
                     "policy": {
                         "mode": "auto_release_tag_head",
                         "value": null,
@@ -4789,6 +4832,7 @@ mod tests {
                         "resolvedCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     },
                     "members": [{
+                        "pluginName": null,
                         "directoryName": "skill-a",
                         "displayName": "Skill A",
                         "description": "A complete member",

@@ -25,6 +25,7 @@ pub enum GitSourceCapabilityKind {
 /// Copy). Labels use `skill_path`, which is unique within the source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourceCapabilityMember {
+    pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
     /// `false` marks a tombstoned member (no bytes to copy).
@@ -98,6 +99,12 @@ impl GitSourceCapabilityScan {
                             .current_members
                             .iter()
                             .map(|member| GitSourceCapabilityMember {
+                                plugin_name: match &source.manifest {
+                                    GitSourceManifestFact::Present { member_plugins, .. } => {
+                                        member_plugins.get(&member.skill_path).cloned()
+                                    }
+                                    _ => None,
+                                },
                                 skill_id: member.skill_id.clone(),
                                 skill_path: member.skill_path.clone(),
                                 presence: member.presence,
@@ -172,6 +179,7 @@ fn manifest_is_complete(manifest: &GitSourceManifestFact) -> bool {
         tracking_value,
         current_selected_ref,
         current_release_id,
+        ..
     } = manifest
     else {
         return false;
@@ -296,6 +304,7 @@ fn manifest_matches(source: &GitSourceFact, repository_is_complete: bool) -> boo
         tracking_value,
         current_selected_ref,
         current_release_id,
+        ..
     } = &source.manifest
     else {
         return false;

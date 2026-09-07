@@ -455,6 +455,7 @@ fn read_sources(
             let manifest = match filesystem.read_remote_parent_manifest(remotes_root, &remote_id) {
                 Ok(None) => GitSourceManifestFact::Missing,
                 Ok(Some(manifest)) => GitSourceManifestFact::Present {
+                    member_plugins: Box::new(manifest.member_plugins),
                     remote_id: manifest.remote_id,
                     canonical_url: manifest.canonical_url,
                     aliases: manifest.aliases,

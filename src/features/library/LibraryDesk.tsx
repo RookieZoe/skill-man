@@ -1,3 +1,5 @@
+import { OperationNotice } from "../../ui/OperationNotice";
+import { PluginGroups } from "./PluginGroups";
 import {
   useEffect,
   useLayoutEffect,
@@ -40,7 +42,6 @@ import { AgentManagement } from "../agents/AgentManagement";
 import { ScanRootSetup } from "../agents/ScanRootSetup";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
-import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
 import { LockIcon, SettingsIcon } from "../../ui/icons";
@@ -131,7 +132,7 @@ interface LibraryDeskProps {
   onSourceGroupTypeChange: (sourceType: GitRepositorySourceType) => void;
   onSourceGroupUrlChange: (sourceUrl: string) => void;
   onSourceGroupPolicyChange: (mode: string, value: string) => void;
-  onConfirmSourceTransition: () => void;
+  onConfirmSourceTransition: (removedClaims?: string[]) => void;
   onUndoSourceTransition: () => void;
   onPreviewSourcePromotion: (remoteId: string) => void;
   onPreviewSourceUpdate: (remoteId: string) => void;
@@ -456,7 +457,9 @@ export function LibraryDesk({
   useLayoutEffect(() => {
     if (isAgentDrawerModal && pendingDrawerFocus.current) {
       pendingDrawerFocus.current = false;
-      agentInspectorRef.current?.focus();
+      // The inspector is still translated offscreen on its first frame.
+      // Focusing it must not scroll the clipped workspace towards that frame.
+      agentInspectorRef.current?.focus({ preventScroll: true });
     }
   }, [isAgentDrawerModal]);
 
@@ -1088,6 +1091,7 @@ export function LibrarySidebar({
       id: string;
       title: string;
       url?: string;
+      plugins?: Map<string, string | null | undefined>;
       skills: SkillSummary[];
     }[] = [];
     for (const source of gitSourceCapability?.sources ?? []) {
@@ -1110,6 +1114,9 @@ export function LibrarySidebar({
         id: source.remoteId,
         title,
         url: source.canonicalUrl,
+        plugins: new Map(
+          source.members.map((member) => [member.skillId, member.pluginName]),
+        ),
         skills: members,
       });
     }
@@ -1193,52 +1200,60 @@ export function LibrarySidebar({
                 <span className="library-source-title">{group.title}</span>
                 <span className="count-badge">{group.skills.length}</span>
               </button>
-              {(expanded[group.id] ?? !group.url) &&
-                group.skills.map((skill) => {
-                  const isChecked = selectedSkillIds.includes(skill.id);
-                  return (
-                    <button
-                      type="button"
-                      className={`skill-row${isSelectMode ? " skill-row--selectable" : ""}${isChecked ? " skill-row--selected" : ""}`}
-                      aria-label={skill.directoryName}
-                      aria-pressed={
-                        isSelectMode ? isChecked : selectedId === skill.id
-                      }
-                      key={skill.id}
-                      onClick={() => {
-                        if (isSelectMode) {
-                          onToggleSkillSelection(skill.id);
-                        } else {
-                          onSelect(skill.id);
-                        }
-                      }}
-                    >
-                      {isSelectMode && (
-                        <input
-                          type="checkbox"
-                          className="skill-select-checkbox"
-                          checked={isChecked}
-                          onChange={() => onToggleSkillSelection(skill.id)}
-                          onClick={(e) => e.stopPropagation()}
+              {(expanded[group.id] ?? !group.url) && (
+                <PluginGroups
+                  items={group.skills}
+                  pluginName={(skill) => group.plugins?.get(skill.id)}
+                >
+                  {(members) =>
+                    members.map((skill) => {
+                      const isChecked = selectedSkillIds.includes(skill.id);
+                      return (
+                        <button
+                          type="button"
+                          className={`skill-row${isSelectMode ? " skill-row--selectable" : ""}${isChecked ? " skill-row--selected" : ""}`}
                           aria-label={skill.directoryName}
-                        />
-                      )}
-                      <StatusDot health={skill.health} />
-                      <span className="skill-row-copy">
-                        <strong>{skill.directoryName}</strong>
-                        <span>{skill.description}</span>
-                      </span>
-                      <span
-                        className="agent-count"
-                        aria-label={t("library.sidebar.agent_count", {
-                          count: skill.enabledAgentCount,
-                        })}
-                      >
-                        {skill.enabledAgentCount}
-                      </span>
-                    </button>
-                  );
-                })}
+                          aria-pressed={
+                            isSelectMode ? isChecked : selectedId === skill.id
+                          }
+                          key={skill.id}
+                          onClick={() => {
+                            if (isSelectMode) {
+                              onToggleSkillSelection(skill.id);
+                            } else {
+                              onSelect(skill.id);
+                            }
+                          }}
+                        >
+                          {isSelectMode && (
+                            <input
+                              type="checkbox"
+                              className="skill-select-checkbox"
+                              checked={isChecked}
+                              onChange={() => onToggleSkillSelection(skill.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label={skill.directoryName}
+                            />
+                          )}
+                          <StatusDot health={skill.health} />
+                          <span className="skill-row-copy">
+                            <strong>{skill.directoryName}</strong>
+                            <span>{skill.description}</span>
+                          </span>
+                          <span
+                            className="agent-count"
+                            aria-label={t("library.sidebar.agent_count", {
+                              count: skill.enabledAgentCount,
+                            })}
+                          >
+                            {skill.enabledAgentCount}
+                          </span>
+                        </button>
+                      );
+                    })
+                  }
+                </PluginGroups>
+              )}
             </section>
           ))
         ) : (
@@ -1528,7 +1543,7 @@ function LinkImportSheet({
   onSourceGroupUrlChange: (sourceUrl: string) => void;
   onSourceGroupPolicyChange: (mode: string, value: string) => void;
   onFetchLatestAndManage: () => void;
-  onConfirmSourceTransition: () => void;
+  onConfirmSourceTransition: (removedClaims?: string[]) => void;
   onUndoSourceTransition: () => void;
   onConfirmSourcePromotion: () => void;
   onUndoSourcePromotion: () => void;
@@ -1557,7 +1572,6 @@ function LinkImportSheet({
     }
   }
   const isGit = kind === "git";
-  const sourceGroupIsFetching = sourceGroupActivity !== "idle";
   const gitStep =
     sourceTransitionResult || sourcePromotionResult
       ? "result"
@@ -1575,7 +1589,7 @@ function LinkImportSheet({
           : "source";
   const modalRef = useModalFocus<HTMLElement>({
     opener,
-    busy: isRunning,
+    busy: isRunning && !isDiscovering,
     focusKey: `${currentStep}:${preview !== null}:${result !== null}:${sourcePromotionDraft !== null}:${sourceUpdateDraft !== null}`,
     onClose,
   });
@@ -1616,8 +1630,7 @@ function LinkImportSheet({
         if (
           event.currentTarget === event.target &&
           !isPickingDirectory &&
-          !isApplying &&
-          !sourceGroupIsFetching
+          (!isRunning || isDiscovering)
         )
           onClose();
       }}
@@ -1636,6 +1649,12 @@ function LinkImportSheet({
               : t("library.import.dialog_link_import")
         }
       >
+        <OperationNotice
+          busy={isRunning && !isPickingDirectory}
+          cancelHint={
+            isDiscovering ? t("operation.foreground.cancel_preview") : undefined
+          }
+        />
         <ol
           className="import-progress"
           aria-label={t("library.import.progress_label")}
@@ -1992,12 +2011,7 @@ function OnboardingSheet({
             </div>
           </dl>
         ) : null}
-        {activity !== "idle" ? (
-          <IndeterminateProgress
-            className="onboarding-operation-progress"
-            label={progressLabel}
-          />
-        ) : null}
+        <OperationNotice busy={isBusy} label={progressLabel} />
         {step === 1 && activity === "idle" ? (
           <ScanRootSetup
             client={client}
@@ -2175,24 +2189,9 @@ function PreferencesSheet({
             disabled={appUpdatePanel.activity === "checking"}
             onClick={onCheckAppUpdate}
           >
-            {appUpdatePanel.activity === "checking"
-              ? t("library.preferences.checking")
-              : t("library.preferences.check_now")}
+            {t("library.preferences.check_now")}
           </button>
         </div>
-        {appUpdatePanel.checkStatus ? (
-          <div className="app-update-check-result" role="status">
-            {appUpdatePanel.checkStatus === "up_to_date"
-              ? t("library.preferences.up_to_date")
-              : t("library.preferences.skipped")}
-          </div>
-        ) : null}
-        {appUpdatePanel.error && appUpdatePanel.update === null ? (
-          <div className="activation-error" role="alert">
-            <strong>{t("library.preferences.check_failed")}</strong>
-            <span>{appUpdatePanel.error}</span>
-          </div>
-        ) : null}
         {warning ? (
           <div className="activation-warning" role="status">
             <strong>{t("library.preferences.applied_warning")}</strong>
@@ -2310,11 +2309,17 @@ function AppUpdateSheet({
             <dd>{update.releaseNotes || t("library.app_update.no_notes")}</dd>
           </div>
         </dl>
-        {panel.activity === "downloading" ? (
-          <div className="app-update-progress" role="status">
-            {t("library.app_update.downloading")}
-          </div>
-        ) : null}
+        <OperationNotice
+          busy={panel.activity === "downloading" || blocksDismissal}
+          cancellable={panel.activity === "downloading"}
+          label={t(
+            isInstalling
+              ? "library.app_update.installing"
+              : isCancelling
+                ? "library.app_update.cancelling"
+                : "library.app_update.downloading",
+          )}
+        />
         {isReady ? (
           <div className="app-update-ready" role="status">
             {t("library.app_update.ready")}
@@ -2408,6 +2413,7 @@ function RemoveSheet({
         tabIndex={-1}
         aria-label={t("library.remove.dialog")}
       >
+        <OperationNotice busy={isBusy} />
         {panel.result ? (
           <>
             <div className="activation-sheet-heading">
@@ -2599,6 +2605,7 @@ function RelocateSheet({
         tabIndex={-1}
         aria-label={t("library.relocate.dialog")}
       >
+        <OperationNotice busy={isBusy} />
         <ol
           className="import-progress"
           aria-label={t("library.relocate.progress")}

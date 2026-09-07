@@ -5,9 +5,9 @@ import { listen } from "@tauri-apps/api/event";
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import { parseRepositoryInput } from "../features/library/git-repository-input";
 import {
-  OperationStatusWindow,
-  type OperationStatus,
-} from "../ui/OperationStatusWindow";
+  BackgroundOperations,
+  useBackgroundOperations,
+} from "../ui/BackgroundOperations";
 import {
   useLocale,
   type LocaleContextValue,
@@ -15,7 +15,6 @@ import {
 import {
   errorMessageKey,
   errorMessageParams,
-  type MessageKey,
 } from "../features/locale/messages";
 import type {
   AppPreferences,
@@ -81,96 +80,17 @@ export interface AppUpdatePanelState {
   error: string | null;
 }
 
-type OperationCopy = Readonly<{
-  title: MessageKey;
-  detail: MessageKey;
-}>;
-
-const LINK_IMPORT_OPERATION_COPIES = {
-  discovering: {
-    title: "library.import.checking_source",
-    detail: "operation.detail.import.link.discover",
-  },
-  applying: {
-    title: "library.import.importing",
-    detail: "operation.detail.import.link.apply",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
-const SOURCE_GROUP_OPERATION_COPIES = {
-  fetching: {
-    title: "library.source_group.fetching",
-    detail: "operation.detail.import.git.discover",
-  },
-  confirming: {
-    title: "library.source_group.confirming",
-    detail: "operation.detail.import.git.apply",
-  },
-  undoing: {
-    title: "library.source_group.undoing",
-    detail: "operation.detail.import.git.undo",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
-const RELOCATE_OPERATION_COPIES = {
-  previewing: {
-    title: "library.relocate.checking",
-    detail: "operation.detail.relocate.check",
-  },
-  applying: {
-    title: "library.relocate.relocating",
-    detail: "operation.detail.relocate.apply",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
-const REMOVE_OPERATION_COPIES = {
-  planning: {
-    title: "library.adopt.planning",
-    detail: "operation.detail.remove.plan",
-  },
-  applying: {
-    title: "library.remove.removing",
-    detail: "operation.detail.remove.apply",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
-const APP_UPDATE_OPERATION_COPIES = {
-  checking: {
-    title: "library.preferences.checking",
-    detail: "operation.detail.app_update.check",
-  },
-  downloading: {
-    title: "library.app_update.downloading",
-    detail: "operation.detail.app_update.download",
-  },
-  cancelling: {
-    title: "library.app_update.cancelling",
-    detail: "operation.detail.app_update.cancel",
-  },
-  installing: {
-    title: "library.app_update.installing",
-    detail: "operation.detail.app_update.install",
-  },
-} as const satisfies Record<string, OperationCopy>;
-
-function operationFromActivity(
-  id: string,
-  activity: string,
-  copies: Readonly<Record<string, OperationCopy>>,
-  t: LocaleContextValue["t"],
-): OperationStatus | null {
-  const copy = copies[activity];
-  return copy ? { id, title: t(copy.title), detail: t(copy.detail) } : null;
+export function App(props: AppProps) {
+  return (
+    <BackgroundOperations>
+      <AppContent {...props} />
+    </BackgroundOperations>
+  );
 }
 
-function isOperationStatus(
-  operation: OperationStatus | null,
-): operation is OperationStatus {
-  return operation !== null;
-}
-
-export function App({ client }: AppProps) {
-  const { t, tPlural } = useLocale();
+function AppContent({ client }: AppProps) {
+  const { t } = useLocale();
+  const notifications = useBackgroundOperations();
   // Effects only render errors via `t`; a locale switch must not re-run
   // catalog/health effects, so the current `t` is mirrored into a ref.
   const tRef = useRef(t);
@@ -187,6 +107,8 @@ export function App({ client }: AppProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences | null>(null);
   const [preferencesWarning, setPreferencesWarning] =
     useState<PreferencesWarning | null>(null);
@@ -238,7 +160,9 @@ export function App({ client }: AppProps) {
   const [sourceUpdateActive, setSourceUpdateActive] = useState(false);
   const [sourceGroupError, setSourceGroupError] = useState<string | null>(null);
   const [sourceActionActivity, setSourceActionActivity] = useState(false);
-  const [sourceActionNotice, setSourceActionNotice] = useState<{
+  const sourceActionCount = useRef(0);
+  const [backgroundRefresh, setBackgroundRefresh] = useState(0);
+  const [sourceActionNotice] = useState<{
     kind: "restore" | "copy" | "remove";
     ok: boolean;
     message: string | null;
@@ -361,10 +285,10 @@ export function App({ client }: AppProps) {
         if (snapshot.items.length === 0) {
           setDetail(null);
         }
-        setError(null);
+        setListError(null);
       })
       .catch((reason: unknown) => {
-        if (current) setError(readError(reason, tRef.current));
+        if (current) setListError(readError(reason, tRef.current));
       })
       .finally(() => {
         if (current) setLibraryLoaded(true);
@@ -372,7 +296,7 @@ export function App({ client }: AppProps) {
     return () => {
       current = false;
     };
-  }, [client, filter]);
+  }, [client, filter, backgroundRefresh]);
 
   useEffect(() => {
     let current = true;
@@ -395,7 +319,7 @@ export function App({ client }: AppProps) {
     return () => {
       current = false;
     };
-  }, [client]);
+  }, [client, backgroundRefresh]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -406,15 +330,15 @@ export function App({ client }: AppProps) {
       .then((nextDetail) => {
         if (!current) return;
         setDetail(nextDetail);
-        setError(null);
+        setDetailError(null);
       })
       .catch((reason: unknown) => {
-        if (current) setError(readError(reason, tRef.current));
+        if (current) setDetailError(readError(reason, tRef.current));
       });
     return () => {
       current = false;
     };
-  }, [client, selectedId]);
+  }, [client, selectedId, backgroundRefresh]);
 
   // -- Activation Conflict: Adopt existing item / Remove then replace / Cancel
 
@@ -633,7 +557,7 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function confirmSourceTransition() {
+  async function confirmSourceTransition(expectedRemovedClaims: string[] = []) {
     if (sourceGroupOutcome?.kind !== "preview") return;
     const preview = sourceGroupOutcome.preview;
     const runId = ++sourceGroupRunId.current;
@@ -651,6 +575,7 @@ export function App({ client }: AppProps) {
           : null,
         expectedSelectedRef: preview.policy.selectedRef,
         expectedResolvedCommit: preview.policy.resolvedCommit,
+        expectedRemovedClaims,
       });
       if (runId !== sourceGroupRunId.current) return;
       await refreshLibraryAfterSourceAction(runId);
@@ -842,30 +767,43 @@ export function App({ client }: AppProps) {
     }
   }
 
-  async function restoreSourceRelease(remoteId: string) {
-    const runId = ++sourceGroupRunId.current;
+  function beginSourceAction() {
+    sourceActionCount.current++;
     setSourceActionActivity(true);
-    setSourceActionNotice({ kind: "restore", ok: true, message: null });
+  }
+
+  function endSourceAction() {
+    sourceActionCount.current--;
+    setSourceActionActivity(sourceActionCount.current > 0);
+  }
+
+  // Refresh is independent of the write outcome and of any open import dialog.
+  function refreshBackgroundCatalog() {
+    setBackgroundRefresh((value) => value + 1);
+    setCatalogRefreshToken((value) => value + 1);
+  }
+
+  async function restoreSourceRelease(remoteId: string) {
+    beginSourceAction();
+    const noticeId = notifications.begin({
+      title: t("sourceGroup.restoreRelease"),
+      detail: t("operation.background.working"),
+    });
     try {
-      const result = await client.restoreCurrentSourceRelease(remoteId);
-      await refreshLibraryAfterSourceAction(runId);
-      if (runId !== sourceGroupRunId.current) return;
-      setSourceActionNotice({
-        kind: "restore",
-        ok: true,
-        message: t("library.source_capability.restore_done", {
-          count: result.restoredMembers,
-        }),
+      await client.restoreCurrentSourceRelease(remoteId);
+      refreshBackgroundCatalog();
+      notifications.finish(noticeId, {
+        title: t("operation.background.done"),
+        detail: t("operation.background.next_library"),
       });
     } catch (reason) {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionNotice({
-          kind: "restore",
-          ok: false,
-          message: readError(reason, t),
-        });
+      notifications.finish(noticeId, {
+        title: t("operation.background.failed"),
+        detail: readError(reason, t),
+        state: "failed",
+      });
     } finally {
-      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
+      endSourceAction();
     }
   }
 
@@ -874,60 +812,39 @@ export function App({ client }: AppProps) {
     skillId: string,
     destination: string,
   ) {
-    const runId = ++sourceGroupRunId.current;
-    setSourceActionActivity(true);
-    setSourceActionNotice({ kind: "copy", ok: true, message: null });
+    beginSourceAction();
     try {
-      const result = await client.createLocalSourceCopy(
-        remoteId,
-        skillId,
-        destination,
-      );
-      await refreshLibraryAfterSourceAction(runId);
-      if (runId !== sourceGroupRunId.current) return false;
-      setSourceActionNotice({
-        kind: "copy",
-        ok: true,
-        message: t("library.source_capability.copy_done", {
-          name: result.directoryName,
-        }),
-      });
+      await client.createLocalSourceCopy(remoteId, skillId, destination);
+      refreshBackgroundCatalog();
       return true;
     } catch (reason) {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionNotice({
-          kind: "copy",
-          ok: false,
-          message: readError(reason, t),
-        });
-      return false;
+      throw new Error(readError(reason, t), { cause: reason });
     } finally {
-      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
+      endSourceAction();
     }
   }
 
   async function removeSource(remoteId: string) {
-    const runId = ++sourceGroupRunId.current;
-    setSourceActionActivity(true);
-    setSourceActionNotice({ kind: "remove", ok: true, message: null });
+    beginSourceAction();
+    const noticeId = notifications.begin({
+      title: t("sourceGroup.remove"),
+      detail: t("operation.background.working"),
+    });
     try {
       await client.removeGitSource(remoteId);
-      await refreshLibraryAfterSourceAction(runId);
-      if (runId !== sourceGroupRunId.current) return;
-      setSourceActionNotice({
-        kind: "remove",
-        ok: true,
-        message: t("library.source_capability.remove_done"),
+      refreshBackgroundCatalog();
+      notifications.finish(noticeId, {
+        title: t("operation.background.done"),
+        detail: t("operation.background.next_repositories"),
       });
     } catch (reason) {
-      if (runId === sourceGroupRunId.current)
-        setSourceActionNotice({
-          kind: "remove",
-          ok: false,
-          message: readError(reason, t),
-        });
+      notifications.finish(noticeId, {
+        title: t("operation.background.failed"),
+        detail: readError(reason, t),
+        state: "failed",
+      });
     } finally {
-      if (runId === sourceGroupRunId.current) setSourceActionActivity(false);
+      endSourceAction();
     }
   }
 
@@ -1116,6 +1033,10 @@ export function App({ client }: AppProps) {
   }
 
   async function checkAppUpdate() {
+    const noticeId = notifications.begin({
+      title: t("library.preferences.checking"),
+      detail: t("operation.background.working"),
+    });
     const runId = ++appUpdateCheckRunId.current;
     setAppUpdatePanel({
       activity: "checking",
@@ -1125,6 +1046,16 @@ export function App({ client }: AppProps) {
     });
     try {
       const result = await client.checkAppUpdate(true);
+      notifications.finish(noticeId, {
+        title: t("operation.background.done"),
+        detail: t(
+          result.status === "available"
+            ? "operation.background.update_available"
+            : result.status === "up_to_date"
+              ? "operation.background.update_current"
+              : "operation.background.update_skipped",
+        ),
+      });
       if (runId !== appUpdateCheckRunId.current) return;
       if (result.status === "available") {
         setAppUpdatePanel({
@@ -1143,6 +1074,11 @@ export function App({ client }: AppProps) {
         });
       }
     } catch (reason) {
+      notifications.finish(noticeId, {
+        title: t("operation.background.failed"),
+        detail: readAppUpdateError(reason, t),
+        state: "failed",
+      });
       if (runId !== appUpdateCheckRunId.current) return;
       setAppUpdatePanel({
         activity: "idle",
@@ -1333,45 +1269,6 @@ export function App({ client }: AppProps) {
     setOnboardingStep((step) => Math.min(step + 1, 2));
   }
 
-  const activeOperations = [
-    operationFromActivity(
-      "link-import",
-      linkImportActivity,
-      LINK_IMPORT_OPERATION_COPIES,
-      t,
-    ),
-    operationFromActivity(
-      "source-group-preview",
-      sourceGroupActivity,
-      SOURCE_GROUP_OPERATION_COPIES,
-      t,
-    ),
-    isPreferencesOpen
-      ? operationFromActivity(
-          "app-update",
-          appUpdatePanel.activity,
-          APP_UPDATE_OPERATION_COPIES,
-          t,
-        )
-      : null,
-    relocatePanel.isOpen
-      ? operationFromActivity(
-          "relocate",
-          relocatePanel.activity,
-          RELOCATE_OPERATION_COPIES,
-          t,
-        )
-      : null,
-    removePanel.isOpen
-      ? operationFromActivity(
-          "remove",
-          removePanel.activity,
-          REMOVE_OPERATION_COPIES,
-          t,
-        )
-      : null,
-  ].filter(isOperationStatus);
-
   return (
     <>
       <LibraryDesk
@@ -1383,7 +1280,7 @@ export function App({ client }: AppProps) {
         libraryEmpty={libraryLoaded && skills.length === 0}
         selectedId={selectedId}
         detail={detail}
-        error={error}
+        error={listError ?? detailError ?? error}
         gitSourceCapability={gitSourceCapability}
         gitSourceCapabilityFailure={gitSourceCapabilityFailure}
         isLinkImportOpen={isLinkImportOpen}
@@ -1485,19 +1382,6 @@ export function App({ client }: AppProps) {
           setIsOnboardingOpen(true);
         }}
       />
-      {activeOperations.length > 0 ? (
-        <OperationStatusWindow
-          ariaLabel={t("operation.status.label")}
-          heading={tPlural(
-            "operation.status.running",
-            activeOperations.length,
-            {
-              count: activeOperations.length,
-            },
-          )}
-          operations={activeOperations}
-        />
-      ) : null}
     </>
   );
 }

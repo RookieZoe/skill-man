@@ -478,6 +478,10 @@ pub struct AdoptJournal {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteParentManifest {
+    /// Display-only plugin grouping from the selected commit. Never identity
+    /// or ownership evidence; old manifests and journals default to ungrouped.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub member_plugins: std::collections::BTreeMap<String, String>,
     pub schema_version: u32,
     pub remote_id: String,
     pub canonical_url: String,
@@ -622,6 +626,10 @@ pub struct SourceTransitionJournalMember {
     pub namespace_path: PathBuf,
     pub skill_path: String,
     pub tree_hash: String,
+    /// Frozen external bytes before replacement, independent of the new
+    /// release. Absent in older journals, which required both trees to match.
+    #[serde(default)]
+    pub external_tree_hash: Option<String>,
     pub provider_hash: Option<String>,
     /// `Added` enters the Library with this release; `Current` reuses the
     /// stable skill_id of the source's existing member (a promotion keeps a
@@ -642,6 +650,10 @@ pub enum SourceTransitionMemberAction {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceTransitionRemovedMember {
+    /// Frozen direct external aliases removed after CAS and restored by Undo.
+    /// These are never inserted as managed Activation records.
+    #[serde(default)]
+    pub external_links: Vec<crate::seams::source_transition_store::SourceTransitionActivation>,
     pub skill_id: String,
     pub directory_name: String,
     pub skill_path: String,
@@ -658,6 +670,8 @@ pub struct SourceTransitionRemovedMember {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceTransitionJournal {
+    #[serde(default)]
+    pub activations: Vec<crate::seams::source_transition_store::SourceTransitionActivation>,
     pub version: u32,
     pub operation_id: String,
     pub phase: SourceTransitionPhase,
@@ -684,9 +698,13 @@ pub struct SourceTransitionJournal {
     #[serde(default)]
     pub lock_identity: Option<crate::seams::installer_lock_store::LockFileIdentity>,
     pub lock_entries: Vec<crate::seams::installer_lock_store::LockEntry>,
+    /// Original installer entry name -> relocated member path. Original lock
+    /// entries remain byte-semantically unchanged for CAS and Undo.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub relocated_claim_paths: std::collections::BTreeMap<String, String>,
     pub members: Vec<SourceTransitionJournalMember>,
-    /// Every legacy member absent from the target release (a Promotion
-    /// only; a clean transition has none).
+    /// Members absent from the target release, including explicitly confirmed
+    /// disappeared external claims without a Promotion or Update audit.
     #[serde(default)]
     pub removed_members: Vec<SourceTransitionRemovedMember>,
     /// Frozen Legacy audit for a Source Promotion; recovered Undo restores
@@ -2808,6 +2826,10 @@ pub trait FileSystem: Send + Sync {
     /// Verified Source Transition isolation. The system adapter binds the
     /// expected inode/tree facts to the descriptor-relative rename; the
     /// default is retained for lightweight test adapters.
+    /// An error does not prove rename had no effect: post-rename checks or
+    /// fsync may fail. Callers must durably record the derived isolation
+    /// path before invoking this method and retain that intent until the
+    /// original entity is verified restored or the transition commits.
     fn isolate_external_source_verified(
         &self,
         source: &Path,

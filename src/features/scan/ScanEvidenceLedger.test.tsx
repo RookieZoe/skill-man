@@ -1,3 +1,4 @@
+import { BackgroundOperations } from "../../ui/BackgroundOperations";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
@@ -11,22 +12,29 @@ import {
 } from "../../test-fixtures/scan-report";
 
 test("never-scanned surface shows the honest state and offers Rescan", async () => {
-  render(<ScanEvidenceLedger client={createFixtureCatalogClient()} />);
+  render(
+    <BackgroundOperations>
+      <ScanEvidenceLedger client={createFixtureCatalogClient()} />
+    </BackgroundOperations>,
+  );
   expect(await screen.findByText("Never scanned")).toBeInTheDocument();
   expect(screen.queryByText(/Stale report/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Rescan" })).toBeInTheDocument();
 });
 
-test("Rescan action starts a single-flight run and shows real progress facts", async () => {
+test("Rescan action shows background progress with real phase facts", async () => {
   const user = userEvent.setup();
-  render(<ScanEvidenceLedger client={createFixtureCatalogClient()} />);
+  render(
+    <BackgroundOperations>
+      <ScanEvidenceLedger client={createFixtureCatalogClient()} />
+    </BackgroundOperations>,
+  );
   await screen.findByText("Never scanned");
   await user.click(screen.getByRole("button", { name: "Rescan" }));
   await waitFor(() => {
-    expect(screen.getByText("Scanning")).toBeInTheDocument();
+    expect(screen.getAllByText("Scanning").length).toBeGreaterThan(0);
   });
-  expect(screen.getByText(/Walking roots/)).toBeInTheDocument();
-  expect(screen.getByText(/manual/)).toBeInTheDocument();
+  expect(await screen.findByText(/Walking roots/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
   // Progress carries real facts, never a percent or an ETA.
   expect(screen.queryByText(/percent/i)).not.toBeInTheDocument();
@@ -35,10 +43,14 @@ test("Rescan action starts a single-flight run and shows real progress facts", a
 
 test("cancel coordinates with the running Run", async () => {
   const user = userEvent.setup();
-  render(<ScanEvidenceLedger client={createFixtureCatalogClient()} />);
+  render(
+    <BackgroundOperations>
+      <ScanEvidenceLedger client={createFixtureCatalogClient()} />
+    </BackgroundOperations>,
+  );
   await screen.findByText("Never scanned");
   await user.click(screen.getByRole("button", { name: "Rescan" }));
-  await screen.findByText("Scanning");
+  await screen.findAllByText("Scanning");
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   await waitFor(() => {
     expect(screen.getByText("Cancelled")).toBeInTheDocument();

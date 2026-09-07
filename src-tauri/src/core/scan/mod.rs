@@ -536,7 +536,7 @@ impl ScanCoordinator {
                 .filter_map(|planned| planned.frozen.clone())
                 .collect::<Vec<_>>();
             let configured_agents = agent_snapshot.configurations.len() as u64;
-            let declared_roots = agent_snapshot.roots.len() as u64;
+            let declared_roots = agent_snapshot.configured_roots().count() as u64;
             let generation = state.next_generation.max(
                 state
                     .cross_startup_report

@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useEffect, useMemo, useState } from "react";
 
 import type {
@@ -340,6 +341,7 @@ export function GlobalEnableSheet({
             </p>
           )}
         </div>
+        <OperationNotice busy={busy} />
         <div className="import-actions enable-sheet-actions">
           {step !== "result" && (
             <button

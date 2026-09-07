@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { PluginGroups } from "./PluginGroups";
 import type {
   ExternalOwnershipClaim,
   GitRepositorySourceType,
@@ -11,7 +13,6 @@ import type {
 import type { MessageKey } from "../locale/messages";
 import { useLocale } from "../locale/LocaleProvider";
 import { parseRepositoryInput } from "./git-repository-input";
-import { IndeterminateProgress } from "../../ui/IndeterminateProgress";
 
 const PARAMETERISED_MODES = [
   "prerelease_channel",
@@ -73,13 +74,32 @@ export function SourceGroupPreviewFlow({
   onSourceUrlChange: (sourceUrl: string) => void;
   onSourceGroupPolicyChange: (mode: string, value: string) => void;
   onFetch: () => void;
-  onConfirm: () => void;
+  onConfirm: (removedClaims?: string[]) => void;
   onConfirmPromotion: () => void;
   onUndo: () => void;
   onClose: () => void;
 }) {
   const { t } = useLocale();
   const isBusy = activity !== "idle";
+  const [acknowledgedRevision, setAcknowledgedRevision] = useState<
+    string | null
+  >(null);
+  const removedClaims =
+    outcome?.kind === "preview"
+      ? (outcome.preview.removedExternalClaims ?? [])
+      : [];
+  const addedNames =
+    outcome?.kind === "preview" ? (outcome.preview.addedMemberNames ?? []) : [];
+  const forceRequired = removedClaims.length > 0;
+  const revision =
+    outcome?.kind === "preview"
+      ? JSON.stringify([
+          outcome.preview.sourceUrl,
+          outcome.preview.policy,
+          removedClaims,
+          addedNames,
+        ])
+      : "";
 
   if (result) {
     return (
@@ -95,6 +115,17 @@ export function SourceGroupPreviewFlow({
             })}
           </p>
         </div>
+        {forceRequired && (
+          <div className="source-ownership-note" role="status">
+            <strong>{t("library.source_group.force_complete")}</strong>
+            <span>
+              {t("library.source_group.force_removed", {
+                names: removedClaims.join(", "),
+              })}
+            </span>
+            <span>{t("library.source_group.force_next")}</span>
+          </div>
+        )}
         <dl className="activation-paths source-group-facts">
           <div>
             <dt>{t("library.source_group.release")}</dt>
@@ -208,21 +239,28 @@ export function SourceGroupPreviewFlow({
           aria-label={t("library.source_group.members")}
         >
           <h3>{t("library.source_group.members")}</h3>
-          <ul className="git-import-candidates">
-            {updateDraft.members.map((member) => (
-              <li key={member.skillPath || member.directoryName}>
-                <div className="source-group-member-copy">
-                  <strong>{member.displayName}</strong>
-                  <span className="candidate-path">
-                    {member.skillPath || t("library.import.repo_root")}
-                  </span>
-                  <span className="source-group-member-action">
-                    {t(`library.source_group.member_${member.state}`)}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <PluginGroups
+            items={updateDraft.members}
+            pluginName={(member) => member.pluginName}
+          >
+            {(members) => (
+              <ul className="git-import-candidates">
+                {members.map((member) => (
+                  <li key={member.skillPath || member.directoryName}>
+                    <div className="source-group-member-copy">
+                      <strong>{member.displayName}</strong>
+                      <span className="candidate-path">
+                        {member.skillPath || t("library.import.repo_root")}
+                      </span>
+                      <span className="source-group-member-action">
+                        {t(`library.source_group.member_${member.state}`)}
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </PluginGroups>
         </section>
         {error ? (
           <div className="activation-error" role="alert">
@@ -313,31 +351,81 @@ export function SourceGroupPreviewFlow({
           aria-label={t("library.source_group.members")}
         >
           <h3>{t("library.source_group.members")}</h3>
-          <ul className="git-import-candidates">
-            {preview.members.map((member) => (
-              <li key={member.skillPath || member.directoryName}>
-                <div className="source-group-member-copy">
-                  <strong>{member.displayName}</strong>
-                  <span className="candidate-path">
-                    {member.skillPath || t("library.import.repo_root")}
-                  </span>
-                  <span className="source-group-member-action">
-                    {t(`library.source_group.member_${member.action}`)}
-                  </span>
-                  {member.description ? (
-                    <small>{member.description}</small>
-                  ) : null}
-                </div>
-                <details className="source-member-details">
-                  <summary>{t("library.source_group.tree_summary")}</summary>
-                  <code>{member.treeSummary}</code>
-                </details>
-              </li>
-            ))}
-          </ul>
+          <PluginGroups
+            items={preview.members}
+            pluginName={(member) => member.pluginName}
+          >
+            {(members) => (
+              <ul className="git-import-candidates">
+                {members.map((member) => (
+                  <li key={member.skillPath || member.directoryName}>
+                    <div className="source-group-member-copy">
+                      <strong>{member.displayName}</strong>
+                      <span className="candidate-path">
+                        {member.skillPath || t("library.import.repo_root")}
+                      </span>
+                      <span className="source-group-member-action">
+                        {t(`library.source_group.member_${member.action}`)}
+                      </span>
+                      {member.description ? (
+                        <small>{member.description}</small>
+                      ) : null}
+                    </div>
+                    <details className="source-member-details">
+                      <summary>
+                        {t("library.source_group.tree_summary")}
+                      </summary>
+                      <code>{member.treeSummary}</code>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </PluginGroups>
         </section>
         <ExternalClaims claims={preview.externalOwnershipClaims} />
-        {preview.externalOwnershipClaims.length > 0 ? (
+        {forceRequired ? (
+          <section
+            className="source-ownership-note"
+            aria-label={t("library.source_group.force_title")}
+          >
+            <strong>{t("library.source_group.force_title")}</strong>
+            <span>{t("library.source_group.force_removed_heading")}</span>
+            <ul>
+              {removedClaims.map((name) => (
+                <li key={name}>
+                  <code>{name}</code>
+                </li>
+              ))}
+            </ul>
+            {addedNames.length > 0 && (
+              <>
+                <span>{t("library.source_group.force_added_heading")}</span>
+                <ul>
+                  {addedNames.map((name) => (
+                    <li key={name}>
+                      <code>{name}</code>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <span>{t("library.source_group.force_warning")}</span>
+            <label className="source-force-acknowledgment">
+              <input
+                type="checkbox"
+                disabled={isBusy}
+                checked={acknowledgedRevision === revision}
+                onChange={(event) =>
+                  setAcknowledgedRevision(
+                    event.currentTarget.checked ? revision : null,
+                  )
+                }
+              />
+              <span>{t("library.source_group.force_acknowledgment")}</span>
+            </label>
+          </section>
+        ) : preview.externalOwnershipClaims.length > 0 ? (
           <div className="source-ownership-note" role="note">
             <strong>{t("library.source_group.incomplete_claims_title")}</strong>
             <span>
@@ -354,12 +442,6 @@ export function SourceGroupPreviewFlow({
             <span>{error}</span>
           </div>
         ) : null}
-        {activity === "confirming" && (
-          <IndeterminateProgress
-            className="source-fetch-progress"
-            label={t("library.source_group.installing_hint")}
-          />
-        )}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
             {t("library.import.cancel")}
@@ -367,16 +449,22 @@ export function SourceGroupPreviewFlow({
           <button
             type="button"
             className="activation-confirm-button"
-            disabled={isBusy}
-            onClick={onConfirm}
+            disabled={
+              isBusy || (forceRequired && acknowledgedRevision !== revision)
+            }
+            onClick={() =>
+              forceRequired ? onConfirm(removedClaims) : onConfirm()
+            }
           >
             {activity === "confirming"
               ? t("library.source_group.confirming")
-              : preview.externalOwnershipClaims.length
-                ? t("library.source_group.confirm")
-                : t("library.source_group.install_all", {
-                    count: preview.members.length,
-                  })}
+              : forceRequired
+                ? t("library.source_group.force_confirm")
+                : preview.externalOwnershipClaims.length
+                  ? t("library.source_group.confirm")
+                  : t("library.source_group.install_all", {
+                      count: preview.members.length,
+                    })}
           </button>
         </div>
       </>
@@ -502,11 +590,11 @@ export function SourceGroupPreviewFlow({
         </label>
         <input
           id="git-repository-url"
-          type="url"
+          type="text"
           value={sourceUrl}
           disabled={isBusy}
           onChange={(event) => onSourceUrlChange(event.currentTarget.value)}
-          placeholder="https://"
+          placeholder={t("library.source_group.address_placeholder")}
           aria-invalid={!!sourceUrl.trim() && !parseRepositoryInput(sourceUrl)}
           aria-describedby="git-address-feedback"
         />
@@ -567,12 +655,6 @@ export function SourceGroupPreviewFlow({
           <span>{error}</span>
         </div>
       ) : null}
-      {activity === "fetching" && (
-        <IndeterminateProgress
-          className="source-fetch-progress"
-          label={t("library.source_group.fetching_hint")}
-        />
-      )}
       <div className="activation-sheet-actions">
         <button type="button" disabled={isBusy} onClick={onClose}>
           {t("library.import.cancel")}
@@ -604,32 +686,43 @@ function PromotionManifest({ draft }: { draft: SourcePromotionDraft }) {
       aria-label={t("library.source_group.members")}
     >
       <h3>{t("library.source_group.members")}</h3>
-      <ul className="git-import-candidates">
-        {draft.members.map((member) => (
-          <li key={member.skillPath || member.directoryName}>
-            <div className="source-group-member-copy">
-              <strong>{member.displayName}</strong>
-              <span className="candidate-path">
-                {member.skillPath || t("library.import.repo_root")}
-              </span>
-              <span className="source-group-member-action">
-                {t(`library.source_group.promotion_member_${member.state}`)}
-              </span>
-            </div>
-          </li>
-        ))}
-        {draft.removedMembers.map((member) => (
-          <li key={member.skillId}>
-            <div className="source-group-member-copy">
-              <strong>{member.directoryName}</strong>
-              <span className="candidate-path">{member.skillPath}</span>
-              <span className="source-group-member-action">
-                {t("library.source_group.promotion_member_removed")}
-              </span>
-            </div>
-          </li>
-        ))}
-      </ul>
+      <PluginGroups
+        items={draft.members}
+        pluginName={(member) => member.pluginName}
+      >
+        {(members) => (
+          <ul className="git-import-candidates">
+            {members.map((member) => (
+              <li key={member.skillPath || member.directoryName}>
+                <div className="source-group-member-copy">
+                  <strong>{member.displayName}</strong>
+                  <span className="candidate-path">
+                    {member.skillPath || t("library.import.repo_root")}
+                  </span>
+                  <span className="source-group-member-action">
+                    {t(`library.source_group.promotion_member_${member.state}`)}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PluginGroups>
+      {draft.removedMembers.length > 0 && (
+        <ul className="git-import-candidates">
+          {draft.removedMembers.map((member) => (
+            <li key={member.skillId}>
+              <div className="source-group-member-copy">
+                <strong>{member.directoryName}</strong>
+                <span className="candidate-path">{member.skillPath}</span>
+                <span className="source-group-member-action">
+                  {t("library.source_group.promotion_member_removed")}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

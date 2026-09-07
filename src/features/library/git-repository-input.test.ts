@@ -1,6 +1,13 @@
 import { expect, test } from "vitest";
 import { parseRepositoryInput } from "./git-repository-input";
 
+test("expands GitHub owner/repo shorthand into the submitted URL", () => {
+  expect(parseRepositoryInput(" tw93/kami ")).toEqual({
+    sourceType: "github",
+    sourceUrl: "https://github.com/tw93/kami",
+  });
+});
+
 test.each([
   [" https://github.com/MengTo/Skills.git ", "github"],
   ["https://www.GITHUB.com/a/b", "github"],

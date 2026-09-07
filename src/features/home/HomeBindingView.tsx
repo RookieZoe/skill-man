@@ -1,3 +1,4 @@
+import { OperationNotice } from "../../ui/OperationNotice";
 import { useCallback, useState } from "react";
 
 import type {
@@ -210,7 +211,7 @@ export function HomeBindingView({
         data-bootstrap-route
       >
         <h1>{t("bootstrap.home.binding_in_progress_title")}</h1>
-        <p>{t("bootstrap.home.binding_in_progress_summary")}</p>
+        <OperationNotice busy />
         <LanguageControl />
       </main>
     );

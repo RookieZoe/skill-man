@@ -16,6 +16,90 @@ import type {
 import { App } from "./App";
 import { createGitPreviewClient } from "../test-fixtures/git-preview";
 
+test("force replacement sends the acknowledged removal list and guides manual enablement", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient({
+    gitPreview: {
+      kind: "preview",
+      preview: {
+        provider: "github",
+        sourceUrl: "https://github.com/tw93/Waza",
+        aliases: [],
+        policy: {
+          mode: "head",
+          value: null,
+          selectionKind: "head",
+          selectedRef: "HEAD",
+          resolvedCommit: "a".repeat(40),
+        },
+        members: [
+          {
+            directoryName: "ui",
+            displayName: "ui",
+            description: "New member",
+            skillPath: "skills/ui",
+            treeSummary: "b".repeat(40),
+            action: "added",
+          },
+        ],
+        externalOwnershipClaims: [
+          {
+            lockPath: "/fixture/.skill-lock.json",
+            entryName: "design",
+            requestedRef: "HEAD",
+          },
+        ],
+        removedExternalClaims: ["design"],
+        addedMemberNames: ["ui"],
+      },
+    },
+  });
+  client.confirmSourceTransition = vi.fn(async () => ({
+    operationId: "force",
+    remoteId: "waza",
+    releaseId: "release",
+    resolvedCommit: "a".repeat(40),
+    memberCount: 1,
+    snapshotVersion: 2,
+    undoAvailable: true,
+  }));
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Repository URL" }),
+    "tw93/Waza",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Fetch latest preview" }),
+  );
+  const force = await screen.findByRole("button", {
+    name: "Force remote replacement",
+  });
+  expect(force).toBeDisabled();
+  expect(client.confirmSourceTransition).not.toHaveBeenCalled();
+  await user.click(
+    screen.getByRole("checkbox", { name: /remove the listed Skills/i }),
+  );
+  await user.click(force);
+  expect(client.confirmSourceTransition).toHaveBeenCalledExactlyOnceWith({
+    sourceType: "github",
+    sourceUrl: "https://github.com/tw93/Waza",
+    trackingPolicy: { mode: "head", value: null },
+    expectedSelectedRef: "HEAD",
+    expectedResolvedCommit: "a".repeat(40),
+    expectedRemovedClaims: ["design"],
+  });
+  expect(await screen.findByText("Remote replacement complete")).toBeVisible();
+  expect(screen.getByText("Removed: design")).toBeVisible();
+  expect(
+    screen.getByText(
+      "Open the Library to review and manually enable new Skills.",
+    ),
+  ).toBeVisible();
+});
+
 test("global activation changes refresh the Skill list count immediately", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
@@ -1197,7 +1281,7 @@ test("keeps a failed offline startup update check silent", async () => {
   ).not.toBeInTheDocument();
 });
 
-test("shows manual app update failures in Preferences", async () => {
+test("shows manual app update failures only in background feedback", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   client.loadPreferences = async () => ({
@@ -1217,7 +1301,9 @@ test("shows manual app update failures in Preferences", async () => {
   await user.click(await screen.findByRole("button", { name: "Preferences" }));
   await user.click(screen.getByRole("button", { name: "Check now" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  expect(
+    await screen.findByRole("region", { name: "Current activity" }),
+  ).toHaveTextContent(
     "Unable to reach the update service. Check your network and retry.",
   );
   expect(
@@ -1771,4 +1857,38 @@ test("Global single-skill Adopt hands off to the ledger lifecycle", async () => 
   await screen.findByText("Adopted prompt-linter");
   await user.click(screen.getByRole("button", { name: "Finalize" }));
   await waitFor(() => expect(finalized).toBe(true));
+});
+
+test("repository removal stays completed when refreshing the library fails", async () => {
+  const user = userEvent.setup();
+  const client = createGitPreviewClient();
+  client.removeGitSource = vi.fn(async () => {
+    client.listSkills = async () => {
+      throw { code: "catalog_unavailable" };
+    };
+    return {
+      operationId: "removed",
+      remoteId: "example-media",
+      memberCount: 1,
+      snapshotVersion: 2,
+    };
+  });
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("tab", { name: "Repositories" }));
+  await user.click(
+    await screen.findByRole("heading", {
+      name: "https://github.com/example/media-skills",
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Remove" }));
+  await user.click(
+    screen.getByRole("button", { name: "Remove complete source" }),
+  );
+  const notice = await screen.findByRole("region", {
+    name: "Current activity",
+  });
+  expect(notice).toHaveTextContent("Completed");
+  expect(notice.querySelector('[data-state="failed"]')).toBeNull();
+  expect(client.removeGitSource).toHaveBeenCalledTimes(1);
 });

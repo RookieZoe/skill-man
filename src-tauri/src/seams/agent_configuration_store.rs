@@ -40,6 +40,16 @@ pub struct AgentConfigurationStoreSnapshot {
     pub roots: Vec<StoredGlobalSkillRoot>,
 }
 
+impl AgentConfigurationStoreSnapshot {
+    /// Historical activations retain orphan Roots for identity reuse, but
+    /// only Roots consumed by a current configuration belong to scan scope.
+    pub fn configured_roots(&self) -> impl Iterator<Item = &StoredGlobalSkillRoot> {
+        self.roots
+            .iter()
+            .filter(|root| !root.consumer_agent_ids.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfigurationWrite {
     pub agent_id: String,

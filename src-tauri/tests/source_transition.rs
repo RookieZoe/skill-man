@@ -29,9 +29,554 @@ use skill_man_lib::seams::source_transition_store::{
 };
 use skill_man_lib::seams::source_update_store::SourceUpdateStore;
 
+mod isolation_failure_tests {
+    use super::*;
+    use skill_man_lib::seams::filesystem::*;
+
+    #[derive(Clone, Copy)]
+    enum Failure {
+        AfterRename,
+        BeforeResultJournal,
+    }
+
+    struct IsolationFaultFs {
+        inner: Arc<MacOsFileSystem>,
+        failure: Failure,
+        fail_name: String,
+        renamed: AtomicBool,
+        intent_was_durable: AtomicBool,
+        library: PathBuf,
+    }
+
+    impl FileSystem for IsolationFaultFs {
+        fn read_entropy(&self, buffer: &mut [u8]) -> Result<(), FileSystemError> {
+            self.inner.read_entropy(buffer)
+        }
+
+        fn inspect_link_source(&self, path: &Path) -> Result<LinkSourceSnapshot, FileSystemError> {
+            self.inner.inspect_link_source(path)
+        }
+
+        fn canonical_directory(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+            self.inner.canonical_directory(path)
+        }
+
+        fn normalize_configured_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+            self.inner.normalize_configured_path(path)
+        }
+
+        fn directory_fingerprint(
+            &self,
+            path: &Path,
+        ) -> Result<DirectoryFingerprint, FileSystemError> {
+            self.inner.directory_fingerprint(path)
+        }
+
+        fn activation_snapshot(
+            &self,
+            entry_path: &Path,
+        ) -> Result<ActivationEntrySnapshot, FileSystemError> {
+            self.inner.activation_snapshot(entry_path)
+        }
+
+        fn skill_directory_is_readable(&self, path: &Path) -> Result<bool, FileSystemError> {
+            self.inner.skill_directory_is_readable(path)
+        }
+
+        fn skill_fingerprint(&self, path: &Path) -> Result<SkillFingerprint, FileSystemError> {
+            self.inner.skill_fingerprint(path)
+        }
+
+        fn read_skill_document(&self, path: &Path) -> Result<String, FileSystemError> {
+            self.inner.read_skill_document(path)
+        }
+
+        fn tree_hash(&self, path: &Path) -> Result<String, FileSystemError> {
+            self.inner.tree_hash(path)
+        }
+
+        fn staged_tree_snapshot(&self, path: &Path) -> Result<StagedTreeSnapshot, FileSystemError> {
+            self.inner.staged_tree_snapshot(path)
+        }
+
+        fn available_space(&self, path: &Path) -> Result<u64, FileSystemError> {
+            self.inner.available_space(path)
+        }
+
+        fn staged_child_directories(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
+            self.inner.staged_child_directories(path)
+        }
+
+        fn staged_has_skill_document(
+            &self,
+            directory: &Path,
+            filename: &str,
+        ) -> Result<bool, FileSystemError> {
+            self.inner.staged_has_skill_document(directory, filename)
+        }
+
+        fn canonicalize_staged_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+            self.inner.canonicalize_staged_path(path)
+        }
+
+        fn install_staged_skill(
+            &self,
+            staged_skill_path: &Path,
+            final_entity_path: &Path,
+            library_root: &Path,
+            operation_id: &str,
+            expected_staged_tree: &StagedTreeSnapshot,
+        ) -> Result<DirectoryFingerprint, FileSystemError> {
+            self.inner.install_staged_skill(
+                staged_skill_path,
+                final_entity_path,
+                library_root,
+                operation_id,
+                expected_staged_tree,
+            )
+        }
+
+        fn install_git_member_snapshot(
+            &self,
+            staged_skill_path: &Path,
+            namespace_path: &Path,
+            library_root: &Path,
+            operation_id: &str,
+            expected_staged_tree: &StagedTreeSnapshot,
+        ) -> Result<DirectoryFingerprint, FileSystemError> {
+            self.inner.install_git_member_snapshot(
+                staged_skill_path,
+                namespace_path,
+                library_root,
+                operation_id,
+                expected_staged_tree,
+            )
+        }
+
+        fn discard_staging(
+            &self,
+            staging_operation_root: &Path,
+            library_root: &Path,
+            expected: Option<&DirectoryFingerprint>,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .discard_staging(staging_operation_root, library_root, expected)
+        }
+
+        fn discard_installed_skill(
+            &self,
+            final_entity_path: &Path,
+            library_root: &Path,
+            expected: &DirectoryFingerprint,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .discard_installed_skill(final_entity_path, library_root, expected)
+        }
+
+        fn create_activation(
+            &self,
+            target_path: &Path,
+            entry_path: &Path,
+        ) -> Result<(), FileSystemError> {
+            self.inner.create_activation(target_path, entry_path)
+        }
+
+        fn remove_activation(&self, entry_path: &Path) -> Result<(), FileSystemError> {
+            self.inner.remove_activation(entry_path)
+        }
+
+        fn scan_skills_directory(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<ScannedSkillEntry>, FileSystemError> {
+            self.inner.scan_skills_directory(path)
+        }
+
+        fn inspect_evidence_chain(&self, path: &Path) -> Result<EvidenceChain, FileSystemError> {
+            self.inner.inspect_evidence_chain(path)
+        }
+
+        fn scan_skills_evidence(
+            &self,
+            path: &Path,
+        ) -> Result<Vec<ScannedSkillEvidence>, FileSystemError> {
+            self.inner.scan_skills_evidence(path)
+        }
+
+        fn create_temp_workspace(&self, purpose: &str) -> Result<PathBuf, FileSystemError> {
+            self.inner.create_temp_workspace(purpose)
+        }
+
+        fn discard_temp_workspace(&self, path: &Path) -> Result<(), FileSystemError> {
+            self.inner.discard_temp_workspace(path)
+        }
+
+        fn stage_external_directory(
+            &self,
+            source: &Path,
+            staging_destination: &Path,
+        ) -> Result<DirectoryFingerprint, FileSystemError> {
+            self.inner
+                .stage_external_directory(source, staging_destination)
+        }
+
+        fn create_adopt_staging_operation(
+            &self,
+            library_root: &Path,
+            operation_id: &str,
+        ) -> Result<DirectoryFingerprint, FileSystemError> {
+            self.inner
+                .create_adopt_staging_operation(library_root, operation_id)
+        }
+
+        fn restore_external_directory(
+            &self,
+            source: &Path,
+            destination: &Path,
+            expected: &DirectoryFingerprint,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .restore_external_directory(source, destination, expected)
+        }
+
+        fn apply_adopt_appearances(
+            &self,
+            appearances: &[AdoptAppearanceStep],
+            activations: &[AdoptActivationStep],
+        ) -> Result<(), FileSystemError> {
+            self.inner.apply_adopt_appearances(appearances, activations)
+        }
+
+        fn write_adopt_journal(
+            &self,
+            library_root: &Path,
+            journal: &AdoptJournal,
+        ) -> Result<(), FileSystemError> {
+            self.inner.write_adopt_journal(library_root, journal)
+        }
+
+        fn finish_adopt_journal(
+            &self,
+            library_root: &Path,
+            operation_id: &str,
+        ) -> Result<(), FileSystemError> {
+            self.inner.finish_adopt_journal(library_root, operation_id)
+        }
+
+        fn recover_adopt_journals(
+            &self,
+            library_root: &Path,
+            baselines: &[FileImportRecoveryBaseline],
+            adopted_entities: &[FileImportRecoveryBaseline],
+        ) -> Result<u32, FileSystemError> {
+            self.inner
+                .recover_adopt_journals(library_root, baselines, adopted_entities)
+        }
+
+        fn path_is_directory(&self, path: &Path) -> Result<bool, FileSystemError> {
+            self.inner.path_is_directory(path)
+        }
+
+        fn path_is_occupied(&self, path: &Path) -> Result<bool, FileSystemError> {
+            self.inner.path_is_occupied(path)
+        }
+
+        fn list_directory(&self, path: &Path) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+            self.inner.list_directory(path)
+        }
+
+        fn path_has_no_symlink_component(&self, path: &Path) -> Result<bool, FileSystemError> {
+            self.inner.path_has_no_symlink_component(path)
+        }
+
+        fn remove_directory_verified_nofollow(
+            &self,
+            path: &Path,
+            expected: &DirectoryFingerprint,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .remove_directory_verified_nofollow(path, expected)
+        }
+
+        fn restore_isolated_source(
+            &self,
+            isolated: &Path,
+            source: &Path,
+            expected_tree_hash: &str,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .restore_isolated_source(isolated, source, expected_tree_hash)
+        }
+
+        fn discard_isolated_source(&self, isolated: &Path) -> Result<(), FileSystemError> {
+            self.inner.discard_isolated_source(isolated)
+        }
+
+        fn finish_source_transition_journal(
+            &self,
+            library_root: &Path,
+            operation_id: &str,
+        ) -> Result<(), FileSystemError> {
+            self.inner
+                .finish_source_transition_journal(library_root, operation_id)
+        }
+
+        fn list_source_transition_journals(
+            &self,
+            library_root: &Path,
+        ) -> Result<Vec<SourceTransitionJournal>, FileSystemError> {
+            self.inner.list_source_transition_journals(library_root)
+        }
+
+        fn isolate_external_source_verified(
+            &self,
+            source: &Path,
+            operation_id: &str,
+            expected: &DirectoryFingerprint,
+            expected_tree_hash: &str,
+        ) -> Result<PathBuf, FileSystemError> {
+            let isolated = self.inner.isolate_external_source_verified(
+                source,
+                operation_id,
+                expected,
+                expected_tree_hash,
+            )?;
+            if source.file_name().and_then(|name| name.to_str()) == Some(self.fail_name.as_str()) {
+                // Read what was durable BEFORE this method returns or fails.
+                let journals = self.inner.list_source_transition_journals(&self.library)?;
+                let journal = journals
+                    .iter()
+                    .find(|j| j.operation_id == operation_id)
+                    .unwrap();
+                let recorded = journal
+                    .removed_members
+                    .iter()
+                    .find(|m| m.legacy_path == source)
+                    .and_then(|m| m.isolated_path.as_ref())
+                    .or_else(|| {
+                        journal
+                            .members
+                            .iter()
+                            .find(|m| m.canonical_entity.as_deref() == Some(source))
+                            .and_then(|m| m.isolated_path.as_ref())
+                    });
+                self.intent_was_durable
+                    .store(recorded == Some(&isolated), Ordering::SeqCst);
+                self.renamed.store(true, Ordering::SeqCst);
+                if matches!(self.failure, Failure::AfterRename) {
+                    return Err(FileSystemError::Io {
+                        operation: "injected failure after isolation rename",
+                        path: isolated,
+                        source: std::io::Error::other("post-rename fsync failed"),
+                    });
+                }
+            }
+            Ok(isolated)
+        }
+
+        fn write_source_transition_journal(
+            &self,
+            library_root: &Path,
+            journal: &SourceTransitionJournal,
+        ) -> Result<(), FileSystemError> {
+            if matches!(self.failure, Failure::BeforeResultJournal)
+                && self.renamed.load(Ordering::SeqCst)
+            {
+                // Simulate process death before the first post-rename write.
+                panic!("injected crash before isolation result journal");
+            }
+            self.inner
+                .write_source_transition_journal(library_root, journal)
+        }
+    }
+
+    fn fault_service(
+        fixture: &Fixture,
+        filesystem: Arc<dyn FileSystem>,
+    ) -> SourceTransitionService {
+        SourceTransitionService::new(
+            fixture.preview.clone(),
+            fixture.source.clone(),
+            fixture.locks.clone(),
+            fixture.catalog.clone(),
+            filesystem,
+            Arc::new(FixtureClock),
+            fixture.library.clone(),
+            fixture.home.clone(),
+            fixture.write_gate.clone(),
+        )
+    }
+
+    #[test]
+    fn isolation_rename_then_error_restores_original_before_archiving() {
+        for name in ["design", "source"] {
+            let fixture = disappeared_claim_fixture();
+            let original_claims = fixture.locks.discover().unwrap()[0].entries.clone();
+            let original = fixture
+                .filesystem
+                .canonical_directory(&fixture.home.join(".agents/skills").join(name))
+                .unwrap();
+            let identity = fixture.filesystem.directory_fingerprint(&original).unwrap();
+            let bytes = std::fs::read(original.join("SKILL.md")).unwrap();
+            let filesystem = Arc::new(IsolationFaultFs {
+                inner: fixture.filesystem.clone(),
+                failure: Failure::AfterRename,
+                fail_name: name.into(),
+                renamed: AtomicBool::new(false),
+                intent_was_durable: AtomicBool::new(false),
+                library: fixture.library.clone(),
+            });
+            let result =
+                fault_service(&fixture, filesystem.clone()).confirm(force_confirmation(&fixture));
+            assert!(result.is_err());
+            assert!(
+                filesystem.renamed.load(Ordering::SeqCst),
+                "fault must occur after real rename"
+            );
+            assert!(
+                filesystem.intent_was_durable.load(Ordering::SeqCst),
+                "rename must have a durable recovery path"
+            );
+            assert_eq!(
+                fixture.filesystem.directory_fingerprint(&original).unwrap(),
+                identity
+            );
+            assert_eq!(std::fs::read(original.join("SKILL.md")).unwrap(), bytes);
+            assert_eq!(
+                fixture.locks.discover().unwrap()[0].entries,
+                original_claims
+            );
+            assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+            assert!(
+                fixture
+                    .home
+                    .join(".cursor/skills/design/SKILL.md")
+                    .is_file()
+            );
+            assert!(
+                fixture
+                    .filesystem
+                    .list_source_transition_journals(&fixture.library)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn isolation_crash_before_result_journal_recovers_or_preserves_changed_copy() {
+        for (name, replace_copy) in [("design", false), ("source", false), ("design", true)] {
+            let fixture = disappeared_claim_fixture();
+            let original_claims = fixture.locks.discover().unwrap()[0].entries.clone();
+            let original = fixture
+                .filesystem
+                .canonical_directory(&fixture.home.join(".agents/skills").join(name))
+                .unwrap();
+            let identity = fixture.filesystem.directory_fingerprint(&original).unwrap();
+            let bytes = std::fs::read(original.join("SKILL.md")).unwrap();
+            let filesystem = Arc::new(IsolationFaultFs {
+                inner: fixture.filesystem.clone(),
+                failure: Failure::BeforeResultJournal,
+                fail_name: name.into(),
+                renamed: AtomicBool::new(false),
+                intent_was_durable: AtomicBool::new(false),
+                library: fixture.library.clone(),
+            });
+            let transition = fault_service(&fixture, filesystem.clone());
+            let request = force_confirmation(&fixture);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transition.confirm(request)
+            }));
+            assert!(
+                result.is_err(),
+                "injected crash must prevent normal compensation"
+            );
+            assert!(filesystem.renamed.load(Ordering::SeqCst));
+            assert!(filesystem.intent_was_durable.load(Ordering::SeqCst));
+            assert!(!original.exists());
+            let journals = fixture
+                .filesystem
+                .list_source_transition_journals(&fixture.library)
+                .unwrap();
+            assert_eq!(journals.len(), 1);
+            let journal = &journals[0];
+            let isolated = journal
+                .removed_members
+                .iter()
+                .find(|m| m.legacy_path == original)
+                .and_then(|m| m.isolated_path.clone())
+                .or_else(|| {
+                    journal
+                        .members
+                        .iter()
+                        .find(|m| m.canonical_entity.as_ref() == Some(&original))
+                        .and_then(|m| m.isolated_path.clone())
+                })
+                .unwrap();
+            // Equal bytes on a different inode must not be accepted as our copy.
+            let preserved = fixture.home.join("preserved-original");
+            if replace_copy {
+                std::fs::rename(&isolated, &preserved).unwrap();
+                std::fs::create_dir(&isolated).unwrap();
+                std::fs::write(isolated.join("SKILL.md"), &bytes).unwrap();
+            }
+            let recovery = SourceTransitionService::new(
+                fixture.preview.clone(),
+                Arc::new(NoFetchGitSource),
+                fixture.locks.clone(),
+                fixture.catalog.clone(),
+                fixture.filesystem.clone(),
+                Arc::new(OffsetClock),
+                fixture.library.clone(),
+                fixture.home.clone(),
+                Arc::new(WriteGate::open_for_tests()),
+            );
+            let result = recovery.recover_pending(&fixture.library);
+            if replace_copy {
+                assert!(result.is_err());
+                assert!(
+                    !fixture
+                        .filesystem
+                        .list_source_transition_journals(&fixture.library)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(isolated.is_dir());
+                assert_eq!(std::fs::read(preserved.join("SKILL.md")).unwrap(), bytes);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    fixture.filesystem.directory_fingerprint(&original).unwrap(),
+                    identity
+                );
+                assert_eq!(std::fs::read(original.join("SKILL.md")).unwrap(), bytes);
+                assert!(
+                    fixture
+                        .home
+                        .join(".cursor/skills/design/SKILL.md")
+                        .is_file()
+                );
+                assert!(
+                    fixture
+                        .filesystem
+                        .list_source_transition_journals(&fixture.library)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                fixture.locks.discover().unwrap()[0].entries,
+                original_claims
+            );
+            assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+        }
+    }
+}
+
 struct FixtureGitSource {
     inner: SystemGitSource,
     fixture_url: String,
+    edit_during_stage: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -44,6 +589,15 @@ impl InstallerLockStore for EmptyLocks {
 }
 
 struct FaultedLocks;
+
+struct RefusingRelease(Arc<SystemInstallerLockStore>);
+
+impl InstallerLockStore for RefusingRelease {
+    fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError> {
+        self.0.discover()
+    }
+    // The default release refuses before touching the lock.
+}
 
 impl InstallerLockStore for FaultedLocks {
     fn discover(&self) -> Result<Vec<LockFileReport>, InstallerLockError> {
@@ -134,6 +688,7 @@ impl FixtureGitSource {
         Self {
             inner: SystemGitSource::new(),
             fixture_url: format!("file://{}", repository.display()),
+            edit_during_stage: None,
         }
     }
 }
@@ -182,7 +737,11 @@ impl GitSource for FixtureGitSource {
         destination: &Path,
     ) -> Result<(), SourceError> {
         self.inner
-            .stage_skill(mirror_dir, commit, skill_path, destination)
+            .stage_skill(mirror_dir, commit, skill_path, destination)?;
+        if let Some(path) = &self.edit_during_stage {
+            std::fs::write(path, "Concurrent edit during staging").unwrap();
+        }
+        Ok(())
     }
 
     fn list_tags(
@@ -230,6 +789,20 @@ impl FailOnceSourceStore {
 }
 
 impl SourceTransitionStore for FailOnceSourceStore {
+    fn transition_activations_match(
+        &self,
+        record: &SourceTransitionRecord,
+    ) -> Result<bool, SourceTransitionStoreError> {
+        self.inner.transition_activations_match(record)
+    }
+    fn activation_targets(
+        &self,
+    ) -> Result<
+        Vec<skill_man_lib::seams::source_transition_store::SourceTransitionTarget>,
+        SourceTransitionStoreError,
+    > {
+        self.inner.activation_targets()
+    }
     fn existing_current_members(
         &self,
         canonical_url: &str,
@@ -440,6 +1013,7 @@ fn confirmation(fixture: &Fixture) -> ConfirmSourceTransitionRequest {
     };
     assert!(!preview.members.is_empty());
     ConfirmSourceTransitionRequest {
+        expected_removed_claims: Vec::new(),
         source_type: "git".into(),
         source_url: preview.source_url,
         tracking_policy: Some(SourceTrackingOverride {
@@ -489,6 +1063,848 @@ fn namespace_members(fixture: &Fixture, remote_id: &str) -> PathBuf {
     fixture.library.join("skills/git").join(remote_id)
 }
 
+fn configure_target(fixture: &Fixture, path: &Path, name: &str) {
+    use skill_man_lib::adapters::agent_configuration_fs::MacOsAgentConfigurationFileSystem;
+    use skill_man_lib::core::agent_configuration::{
+        AgentConfigurationDraft, AgentConfigurationService, AgentRootDraft, AgentRootRole,
+        PresetRegistry,
+    };
+    let service = AgentConfigurationService::new(
+        fixture.catalog.clone(),
+        Arc::new(MacOsAgentConfigurationFileSystem::new(fixture.home.clone())),
+        fixture.write_gate.clone(),
+        PresetRegistry::system(),
+    );
+    let plan = service
+        .plan_create(AgentConfigurationDraft {
+            preset_key: None,
+            name: name.into(),
+            roots: vec![AgentRootDraft {
+                configured_path: path.into(),
+                role: AgentRootRole::ActivationTarget,
+            }],
+            project_skills_dir: None,
+        })
+        .expect("plan target");
+    service.apply(&plan.plan_token).expect("configure target");
+}
+
+fn disappeared_claim_fixture() -> Fixture {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    std::fs::rename(root.join("beta"), root.join("design")).unwrap();
+    write_file(
+        &root.join("design"),
+        "SKILL.md",
+        "---\nname: design\ndescription: Old local design\n---\nold user bytes\n",
+    );
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    let mut entry = lock["skills"]
+        .as_object_mut()
+        .unwrap()
+        .remove("beta")
+        .unwrap();
+    entry["skillPath"] = "skills/design/SKILL.md".into();
+    lock["skills"]["design"] = entry;
+    std::fs::write(lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    let repository = fixture._workspace.path().join("source-repository");
+    std::fs::rename(repository.join("skills/beta"), repository.join("skills/ui")).unwrap();
+    write_file(
+        &repository.join("skills/ui"),
+        "SKILL.md",
+        "---\nname: ui\ndescription: New remote UI\n---\nnew ui bytes\n",
+    );
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "replace design with ui",
+        ],
+    );
+    configure_target(&fixture, &root, "General");
+    let aliases = fixture.home.join(".cursor/skills");
+    std::fs::create_dir_all(&aliases).unwrap();
+    std::os::unix::fs::symlink("../../.agents/skills/design", aliases.join("design")).unwrap();
+    configure_target(&fixture, &aliases, "Cursor");
+    fixture
+}
+
+fn force_confirmation(fixture: &Fixture) -> ConfirmSourceTransitionRequest {
+    ConfirmSourceTransitionRequest {
+        expected_removed_claims: vec!["design".into()],
+        ..confirmation(fixture)
+    }
+}
+
+#[test]
+fn disappeared_claim_preview_and_exact_force_acknowledgment_agree() {
+    let fixture = disappeared_claim_fixture();
+    let request = force_confirmation(&fixture);
+    let SourceGroupPreviewOutcome::Preview(preview) = fixture
+        .preview
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: request.source_type.clone(),
+            source_url: request.source_url.clone(),
+            tracking_policy: request.tracking_policy.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("preview");
+    };
+    assert_eq!(preview.removed_external_claims, vec!["design"]);
+    assert_eq!(preview.added_member_names, vec!["ui"]);
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let before = std::fs::read(&lock_path).unwrap();
+    for names in [
+        vec![],
+        vec!["ui".into()],
+        vec!["design".into(), "design".into()],
+        vec!["design".into(), "source".into()],
+    ] {
+        let error = service(&fixture, fixture.catalog.clone())
+            .confirm(ConfirmSourceTransitionRequest {
+                expected_removed_claims: names,
+                ..request.clone()
+            })
+            .unwrap_err();
+        assert!(matches!(error, SourceTransitionError::Validation(_)));
+        assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+        assert!(
+            fixture
+                .home
+                .join(".agents/skills/design/SKILL.md")
+                .is_file()
+        );
+        assert!(fixture.home.join(".cursor/skills/design").is_symlink());
+        assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+        assert!(
+            fixture
+                .filesystem
+                .list_source_transition_journals(&fixture.library)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn forced_disappeared_claim_removes_old_use_keeps_unchanged_and_undo_restores_all() {
+    for recover_undo in [false, true] {
+        let fixture = disappeared_claim_fixture();
+        let original_claims = fixture.locks.discover().unwrap()[0].entries.clone();
+        let transition = service(&fixture, fixture.catalog.clone());
+        let result = transition.confirm(force_confirmation(&fixture)).unwrap();
+        let root = fixture.home.join(".agents/skills");
+        assert!(!root.join("design").exists());
+        assert!(!fixture.home.join(".cursor/skills/design").is_symlink());
+        assert!(!root.join("ui").exists());
+        assert!(root.join("source").is_symlink());
+        assert_eq!(count(&open_catalog(&fixture), "activations"), 1);
+        assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+        assert!(
+            fixture
+                .catalog
+                .read_current(&result.remote_id)
+                .unwrap()
+                .unwrap()
+                .members
+                .iter()
+                .any(|m| m.skill_path == "skills/ui")
+        );
+        if recover_undo {
+            let mut journal = fixture
+                .filesystem
+                .list_source_transition_journals(&fixture.library)
+                .unwrap()
+                .remove(0);
+            journal.phase = skill_man_lib::seams::filesystem::SourceTransitionPhase::Undoing;
+            fixture
+                .filesystem
+                .write_source_transition_journal(&fixture.library, &journal)
+                .unwrap();
+            transition.recover_pending(&fixture.library).unwrap();
+        } else {
+            transition.undo(&result.operation_id).unwrap();
+        }
+        assert!(
+            std::fs::read_to_string(root.join("design/SKILL.md"))
+                .unwrap()
+                .contains("old user bytes")
+        );
+        assert_eq!(
+            std::fs::read_link(fixture.home.join(".cursor/skills/design")).unwrap(),
+            PathBuf::from("../../.agents/skills/design")
+        );
+        assert!(root.join("source/SKILL.md").is_file());
+        assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+        assert_eq!(fixture.locks.discover().unwrap()[0].entries.len(), 2);
+        assert_eq!(
+            fixture.locks.discover().unwrap()[0].entries,
+            original_claims
+        );
+    }
+}
+
+#[test]
+fn forced_disappeared_claim_rejects_removed_bytes_changed_during_staging() {
+    let mut fixture = disappeared_claim_fixture();
+    let removed_document = fixture.home.join(".agents/skills/design/SKILL.md");
+    let mut source = FixtureGitSource::new(&fixture._workspace.path().join("source-repository"));
+    source.edit_during_stage = Some(removed_document.clone());
+    fixture.source = Arc::new(source);
+    let transition = service(&fixture, fixture.catalog.clone());
+    assert!(transition.confirm(force_confirmation(&fixture)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(removed_document).unwrap(),
+        "Concurrent edit during staging"
+    );
+    assert_eq!(fixture.locks.discover().unwrap()[0].entries.len(), 2);
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+    assert!(fixture.home.join(".cursor/skills/design").is_symlink());
+}
+
+#[test]
+fn forced_disappeared_claim_recovers_post_cas_without_remote_reads() {
+    let fixture = disappeared_claim_fixture();
+    let transition = service(
+        &fixture,
+        Arc::new(FailOnceSourceStore::new(fixture.catalog.clone(), true)),
+    );
+    assert!(matches!(
+        transition.confirm(force_confirmation(&fixture)),
+        Err(SourceTransitionError::RecoveryRequired(_))
+    ));
+    let recovery = SourceTransitionService::new(
+        fixture.preview.clone(),
+        Arc::new(NoFetchGitSource),
+        fixture.locks.clone(),
+        fixture.catalog.clone(),
+        fixture.filesystem.clone(),
+        Arc::new(OffsetClock),
+        fixture.library.clone(),
+        fixture.home.clone(),
+        Arc::new(WriteGate::open_for_tests()),
+    );
+    recovery.recover_pending(&fixture.library).unwrap();
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 1);
+    assert!(!fixture.home.join(".agents/skills/design").exists());
+    assert!(!fixture.home.join(".cursor/skills/design").is_symlink());
+    assert!(!fixture.home.join(".agents/skills/ui").exists());
+}
+
+#[test]
+fn forced_disappeared_claim_pre_cas_failure_restores_entities_and_aliases() {
+    let fixture = disappeared_claim_fixture();
+    let transition = service_with_locks(
+        &fixture,
+        Arc::new(RefusingRelease(fixture.locks.clone())),
+        fixture.catalog.clone(),
+    );
+    assert!(transition.confirm(force_confirmation(&fixture)).is_err());
+    assert!(
+        fixture
+            .home
+            .join(".agents/skills/design/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        fixture
+            .home
+            .join(".cursor/skills/design/SKILL.md")
+            .is_file()
+    );
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+    assert_eq!(fixture.locks.discover().unwrap()[0].entries.len(), 2);
+}
+
+#[test]
+fn forced_disappeared_claim_refuses_symlink_entity_and_changed_undo_alias() {
+    let fixture = disappeared_claim_fixture();
+    let root = fixture.home.join(".agents/skills");
+    let original = root.join("design");
+    let saved = fixture.home.join("saved-design");
+    std::fs::rename(&original, &saved).unwrap();
+    std::os::unix::fs::symlink(&saved, &original).unwrap();
+    let transition = service(&fixture, fixture.catalog.clone());
+    assert!(transition.confirm(force_confirmation(&fixture)).is_err());
+    assert_eq!(fixture.locks.discover().unwrap()[0].entries.len(), 2);
+    std::fs::remove_file(&original).unwrap();
+    std::fs::rename(&saved, &original).unwrap();
+    let result = transition.confirm(force_confirmation(&fixture)).unwrap();
+    let alias = fixture.home.join(".cursor/skills/design");
+    std::os::unix::fs::symlink("unrelated-owner", &alias).unwrap();
+    assert!(transition.undo(&result.operation_id).is_err());
+    assert_eq!(
+        std::fs::read_link(alias).unwrap(),
+        PathBuf::from("unrelated-owner")
+    );
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+    assert!(!original.exists());
+}
+
+#[test]
+fn forced_disappeared_claim_recovery_rejects_forged_removal_and_changed_copy() {
+    for tamper_path in [true, false] {
+        let fixture = disappeared_claim_fixture();
+        let transition = service(
+            &fixture,
+            Arc::new(FailOnceSourceStore::new(fixture.catalog.clone(), true)),
+        );
+        assert!(transition.confirm(force_confirmation(&fixture)).is_err());
+        let mut journal = fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .unwrap()
+            .remove(0);
+        if tamper_path {
+            journal.removed_members[0].legacy_path = fixture.home.join(".agents/skills/unrelated");
+            fixture
+                .filesystem
+                .write_source_transition_journal(&fixture.library, &journal)
+                .unwrap();
+        } else {
+            write_file(
+                journal.removed_members[0].isolated_path.as_ref().unwrap(),
+                "SKILL.md",
+                "changed preserved bytes",
+            );
+        }
+        assert!(transition.recover_pending(&fixture.library).is_err());
+        assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+    }
+}
+
+#[test]
+fn replacement_restores_previous_global_use_and_undo_restores_external_directory() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("replace source");
+    let db = open_catalog(&fixture);
+    assert_eq!(
+        count(&db, "activations"),
+        2,
+        "previous target use must become managed Activations"
+    );
+    for name in ["source", "beta"] {
+        let target = std::fs::read_link(root.join(name)).expect("direct activation link");
+        assert!(target.starts_with(namespace_members(&fixture, &result.remote_id)));
+        assert!(target.join("SKILL.md").is_file());
+    }
+    transition
+        .undo(&result.operation_id)
+        .expect("undo replacement");
+    assert_eq!(count(&db, "activations"), 0);
+    for name in ["source", "beta"] {
+        assert!(!root.join(name).is_symlink());
+        assert!(root.join(name).join("SKILL.md").is_file());
+    }
+}
+
+#[test]
+fn replacement_retargets_only_existing_aliases_and_undo_restores_raw_relative_link() {
+    let fixture = fixture();
+    let root = fixture.home.join(".cursor/skills");
+    std::fs::create_dir_all(&root).unwrap();
+    let previous = PathBuf::from("../../.agents/skills/source");
+    std::os::unix::fs::symlink(&previous, root.join("source")).unwrap();
+    configure_target(&fixture, &root, "Cursor");
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).expect("replace");
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 1);
+    assert!(
+        std::fs::read_link(root.join("source"))
+            .unwrap()
+            .starts_with(namespace_members(&fixture, &result.remote_id))
+    );
+    assert!(
+        !root.join("beta").exists(),
+        "unused members must not be enabled"
+    );
+    transition.undo(&result.operation_id).expect("undo aliases");
+    assert_eq!(std::fs::read_link(root.join("source")).unwrap(), previous);
+    assert!(root.join("source/SKILL.md").is_file());
+}
+
+#[test]
+fn replacement_undo_refuses_changed_activation_without_deleting_catalog_or_files() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).unwrap();
+    std::fs::remove_file(root.join("source")).unwrap();
+    write_file(&root.join("source"), "SKILL.md", "Unrelated occupant");
+    assert!(transition.undo(&result.operation_id).is_err());
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 2);
+    assert_eq!(
+        std::fs::read_to_string(root.join("source/SKILL.md")).unwrap(),
+        "Unrelated occupant"
+    );
+    assert!(namespace_members(&fixture, &result.remote_id).is_dir());
+}
+
+#[test]
+fn pre_cas_failure_preserves_previous_use_without_activation_records() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service_with_locks(
+        &fixture,
+        Arc::new(RefusingRelease(fixture.locks.clone())),
+        fixture.catalog.clone(),
+    );
+    assert!(transition.confirm(confirmation(&fixture)).is_err());
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 0);
+    for name in ["source", "beta"] {
+        assert!(!root.join(name).is_symlink());
+        assert!(root.join(name).join("SKILL.md").is_file());
+    }
+}
+
+#[test]
+fn recovery_does_not_reenable_a_removed_committed_activation() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service(&fixture, fixture.catalog.clone());
+    transition.confirm(confirmation(&fixture)).unwrap();
+    std::fs::remove_file(root.join("source")).unwrap();
+    assert!(transition.recover_pending(&fixture.library).is_err());
+    assert!(!root.join("source").exists());
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+}
+
+#[test]
+fn recovery_rejects_mismatched_release_before_recreating_activation() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service(&fixture, fixture.catalog.clone());
+    transition.confirm(confirmation(&fixture)).unwrap();
+    std::fs::remove_file(root.join("source")).unwrap();
+    let mut journal = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap()
+        .remove(0);
+    journal.selected_ref = "different-ref".into();
+    fixture
+        .filesystem
+        .write_source_transition_journal(&fixture.library, &journal)
+        .unwrap();
+    assert!(transition.recover_pending(&fixture.library).is_err());
+    assert!(!root.join("source").exists());
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+}
+
+#[test]
+fn undo_refuses_changed_activation_intent_without_removing_source() {
+    let fixture = fixture();
+    let root = fixture.home.join(".agents/skills");
+    configure_target(&fixture, &root, "General");
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).unwrap();
+    let db = open_catalog(&fixture);
+    db.execute("UPDATE activations SET desired_enabled = 0", [])
+        .unwrap();
+    assert!(transition.undo(&result.operation_id).is_err());
+    assert_eq!(count(&db, "skills"), 2);
+    assert!(root.join("source").is_symlink());
+}
+
+#[test]
+fn undo_rejects_tampered_previous_alias_target_before_any_mutation() {
+    let fixture = fixture();
+    let root = fixture.home.join(".cursor/skills");
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(
+        fixture.home.join(".agents/skills/source"),
+        root.join("source"),
+    )
+    .unwrap();
+    configure_target(&fixture, &root, "Cursor");
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).unwrap();
+    let original_link = std::fs::read_link(root.join("source")).unwrap();
+    let mut journal = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap()
+        .remove(0);
+    let unrelated = fixture.home.join("unrelated/source");
+    write_file(&unrelated, "SKILL.md", "Unrelated Skill");
+    journal.activations[0].previous_target = Some(unrelated);
+    fixture
+        .filesystem
+        .write_source_transition_journal(&fixture.library, &journal)
+        .unwrap();
+    assert!(transition.undo(&result.operation_id).is_err());
+    assert_eq!(
+        std::fs::read_link(root.join("source")).unwrap(),
+        original_link
+    );
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 1);
+}
+
+#[test]
+fn relocated_root_claim_replaces_original_entry_and_recovers_without_fetch() {
+    for fail_commit in [false, true] {
+        let fixture = fixture();
+        configure_target(&fixture, &fixture.home.join(".agents/skills"), "General");
+        let repository = fixture._workspace.path().join("source-repository");
+        let document =
+            "---\nname: source\ndescription: Skill moved from the repository root\n---\nSkill\n";
+        write_file(&repository, "skills/source/SKILL.md", document);
+        write_file(
+            &fixture.home.join(".agents/skills/source"),
+            "SKILL.md",
+            document,
+        );
+        git(&repository, &["add", "-A"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "moved root skill",
+            ],
+        );
+        let lock_path = fixture.home.join(".agents/.skill-lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        lock["skills"]["source"]["skillPath"] = "SKILL.md".into();
+        std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+        let store: Arc<dyn SourceTransitionStore> = Arc::new(FailOnceSourceStore::new(
+            fixture.catalog.clone(),
+            fail_commit,
+        ));
+        let transition = service(&fixture, store.clone());
+        let result = transition.confirm(confirmation(&fixture));
+        if fail_commit {
+            assert!(
+                matches!(result, Err(SourceTransitionError::RecoveryRequired(_))),
+                "{result:?}"
+            );
+        } else {
+            result.expect("old root claim maps to current named member");
+        }
+        let journal = fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            journal.relocated_claim_paths.get("source").unwrap(),
+            "skills/source"
+        );
+        assert_eq!(
+            journal
+                .lock_entries
+                .iter()
+                .find(|e| e.name == "source")
+                .unwrap()
+                .skill_path,
+            "SKILL.md"
+        );
+        if fail_commit {
+            SourceTransitionService::new(
+                fixture.preview.clone(),
+                Arc::new(NoFetchGitSource),
+                fixture.locks.clone(),
+                store,
+                fixture.filesystem.clone(),
+                Arc::new(FixtureClock),
+                fixture.library.clone(),
+                fixture.home.clone(),
+                fixture.write_gate.clone(),
+            )
+            .recover_pending(&fixture.library)
+            .expect("frozen relocation recovery");
+        }
+        let member = journal
+            .members
+            .iter()
+            .find(|m| m.skill_path == "skills/source")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(fixture.home.join(".agents/skills/source")).unwrap(),
+            member.namespace_path
+        );
+        if !fail_commit {
+            let mut tampered = journal.clone();
+            tampered
+                .relocated_claim_paths
+                .insert("source".into(), "skills/beta".into());
+            fixture
+                .filesystem
+                .write_source_transition_journal(&fixture.library, &tampered)
+                .unwrap();
+            assert!(transition.undo(&journal.operation_id).is_err());
+            fixture
+                .filesystem
+                .write_source_transition_journal(&fixture.library, &journal)
+                .unwrap();
+            transition
+                .undo(&journal.operation_id)
+                .expect("restore original lock path and local Skill");
+            assert_eq!(
+                std::fs::read_to_string(fixture.home.join(".agents/skills/source/SKILL.md"))
+                    .unwrap(),
+                document
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&lock_path).unwrap())
+                    .unwrap(),
+                lock
+            );
+        }
+    }
+}
+
+#[test]
+fn installer_names_must_not_alias_the_same_repository_member() {
+    let fixture = fixture();
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    lock["skills"]["beta"]["skillPath"] = "skills/source/SKILL.md".into();
+    let bytes = serde_json::to_vec(&lock).unwrap();
+    std::fs::write(&lock_path, &bytes).unwrap();
+    assert!(matches!(
+        service(&fixture, fixture.catalog.clone()).confirm(confirmation(&fixture)),
+        Err(SourceTransitionError::Validation(_))
+    ));
+    assert_eq!(std::fs::read(&lock_path).unwrap(), bytes);
+    assert!(
+        fixture
+            .home
+            .join(".agents/skills/source/SKILL.md")
+            .is_file()
+    );
+    assert!(fixture.home.join(".agents/skills/beta/SKILL.md").is_file());
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+}
+
+#[test]
+fn installer_entry_name_can_differ_from_repository_directory() {
+    for fail_commit in [false, true] {
+        let fixture = fixture();
+        configure_target(&fixture, &fixture.home.join(".agents/skills"), "General");
+        let lock_path = fixture.home.join(".agents/.skill-lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        let claim = lock["skills"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source")
+            .unwrap();
+        lock["skills"]["mmx-cli"] = claim;
+        std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+        std::fs::rename(
+            fixture.home.join(".agents/skills/source"),
+            fixture.home.join(".agents/skills/mmx-cli"),
+        )
+        .unwrap();
+        let store: Arc<dyn SourceTransitionStore> = Arc::new(FailOnceSourceStore::new(
+            fixture.catalog.clone(),
+            fail_commit,
+        ));
+        let transition =
+            service(&fixture, store.clone()).with_update_store(fixture.catalog.clone());
+        let result = transition.confirm(confirmation(&fixture));
+        let journal = fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .unwrap()
+            .remove(0);
+        if fail_commit {
+            assert!(matches!(
+                result,
+                Err(SourceTransitionError::RecoveryRequired(_))
+            ));
+            SourceTransitionService::new(
+                fixture.preview.clone(),
+                Arc::new(NoFetchGitSource),
+                fixture.locks.clone(),
+                store,
+                fixture.filesystem.clone(),
+                Arc::new(FixtureClock),
+                fixture.library.clone(),
+                fixture.home.clone(),
+                fixture.write_gate.clone(),
+            )
+            .recover_pending(&fixture.library)
+            .expect("recover installer name without refetch");
+        } else {
+            result.expect(
+                "repository path identifies the member independently of installer entry name",
+            );
+        }
+        let member = journal
+            .members
+            .iter()
+            .find(|m| m.skill_path == "skills/source")
+            .unwrap();
+        assert_eq!(member.directory_name, "mmx-cli");
+        assert_eq!(
+            std::fs::read_link(fixture.home.join(".agents/skills/mmx-cli")).unwrap(),
+            member.namespace_path
+        );
+        assert!(!fixture.home.join(".agents/skills/source").exists());
+        if fail_commit {
+            continue;
+        } // Recovery finalizes and archives its journal.
+        let repository = fixture._workspace.path().join("source-repository");
+        write_file(
+            &repository,
+            "skills/source/SKILL.md",
+            "---\nname: Different display label\ndescription: Updated member\n---\nUpdated\n",
+        );
+        git(&repository, &["add", "-A"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "update renamed entry",
+            ],
+        );
+        let request = confirmation(&fixture);
+        let updated = transition
+            .confirm_update(ConfirmSourceUpdateRequest {
+                remote_id: journal.remote_id.clone(),
+                tracking_policy: request.tracking_policy,
+                expected_selected_ref: request.expected_selected_ref,
+                expected_resolved_commit: request.expected_resolved_commit,
+            })
+            .expect("update preserves installer directory identity");
+        let current = fixture
+            .catalog
+            .read_current(&journal.remote_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current
+                .members
+                .iter()
+                .find(|m| m.skill_path == "skills/source")
+                .unwrap()
+                .directory_name,
+            "mmx-cli"
+        );
+        assert_eq!(
+            std::fs::read_link(fixture.home.join(".agents/skills/mmx-cli")).unwrap(),
+            member.namespace_path
+        );
+        transition
+            .undo(&updated.operation_id)
+            .expect("undo update preserves installer name");
+        transition
+            .undo(&journal.operation_id)
+            .expect("undo keeps original installer name");
+        assert!(
+            fixture
+                .home
+                .join(".agents/skills/mmx-cli/SKILL.md")
+                .is_file()
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&lock_path).unwrap())
+                .unwrap(),
+            lock
+        );
+    }
+}
+
+#[test]
+fn document_path_claims_can_transition_and_undo_without_rewriting_claims() {
+    let fixture = fixture();
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    for name in ["source", "beta"] {
+        lock["skills"][name]["skillPath"] = format!("skills/{name}/SKILL.md").into();
+    }
+    std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    let service = service(&fixture, fixture.catalog.clone());
+    let result = service
+        .confirm(confirmation(&fixture))
+        .expect("document-path claims");
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+    service
+        .undo(&result.operation_id)
+        .expect("undo document claims");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(restored, lock);
+}
+
+#[test]
+fn root_document_claim_can_transition_and_undo() {
+    let fixture = fixture();
+    let repository = fixture._workspace.path().join("source-repository");
+    write_file(
+        &repository,
+        "SKILL.md",
+        "---\nname: source\ndescription: Root skill\n---\nRoot skill\n",
+    );
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "root skill"],
+    );
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    lock["skills"].as_object_mut().unwrap().remove("beta");
+    lock["skills"]["source"]["skillPath"] = "SKILL.md".into();
+    std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    let external = fixture.home.join(".agents/skills/source");
+    let old_document = std::fs::read(external.join("SKILL.md")).unwrap();
+    let service = service(&fixture, fixture.catalog.clone());
+    let result = service
+        .confirm(confirmation(&fixture))
+        .expect("root document claim");
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 1);
+    let journals = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap();
+    let root_member = journals[0]
+        .members
+        .iter()
+        .find(|member| member.skill_path.is_empty())
+        .unwrap();
+    assert_eq!(
+        std::fs::read(root_member.namespace_path.join("SKILL.md")).unwrap(),
+        std::fs::read(repository.join("SKILL.md")).unwrap()
+    );
+    service.undo(&result.operation_id).expect("undo root claim");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(restored, lock);
+    assert_eq!(
+        std::fs::read(external.join("SKILL.md")).unwrap(),
+        old_document
+    );
+    assert!(!external.join("skills").exists());
+}
+
 #[test]
 fn partial_claims_refuse_unmatched_paths_before_any_external_change() {
     let fixture = fixture();
@@ -518,6 +1934,7 @@ fn partial_claims_refuse_unmatched_paths_before_any_external_change() {
 #[test]
 fn partial_claims_recover_without_refetching_or_touching_unclaimed_files() {
     let fixture = fixture();
+    configure_target(&fixture, &fixture.home.join(".agents/skills"), "General");
     let lock_path = fixture.home.join(".agents/.skill-lock.json");
     let mut lock: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
@@ -525,12 +1942,28 @@ fn partial_claims_recover_without_refetching_or_touching_unclaimed_files() {
     std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
     let unclaimed = fixture.home.join(".agents/skills/beta/SKILL.md");
     let original = std::fs::read(&unclaimed).unwrap();
+    let old_document = "---\nname: source\n---\nOld local changes\n";
+    write_file(
+        &fixture.home.join(".agents/skills/source"),
+        "SKILL.md",
+        old_document,
+    );
     let flaky: Arc<dyn SourceTransitionStore> =
         Arc::new(FailOnceSourceStore::new(fixture.catalog.clone(), true));
     let error = service(&fixture, flaky.clone())
         .confirm(confirmation(&fixture))
         .expect_err("injected failure");
     assert!(matches!(error, SourceTransitionError::RecoveryRequired(_)));
+    let frozen = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap();
+    let member = frozen[0]
+        .members
+        .iter()
+        .find(|member| member.directory_name == "source")
+        .unwrap();
+    let installed_path = member.namespace_path.clone();
     let recovery = SourceTransitionService::new(
         fixture.preview.clone(),
         Arc::new(NoFetchGitSource),
@@ -547,6 +1980,121 @@ fn partial_claims_recover_without_refetching_or_touching_unclaimed_files() {
         .expect("partial claim recovery");
     assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
     assert_eq!(std::fs::read(&unclaimed).unwrap(), original);
+    assert_ne!(
+        std::fs::read_to_string(installed_path.join("SKILL.md")).unwrap(),
+        old_document
+    );
+    assert_eq!(count(&open_catalog(&fixture), "activations"), 1);
+    assert_eq!(
+        std::fs::read_link(fixture.home.join(".agents/skills/source")).unwrap(),
+        installed_path
+    );
+}
+
+#[test]
+fn replacement_undo_refuses_changed_preservation_copy() {
+    let fixture = fixture();
+    write_file(
+        &fixture.home.join(".agents/skills/source"),
+        "SKILL.md",
+        "Old local content",
+    );
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).unwrap();
+    let journals = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap();
+    let member = journals[0]
+        .members
+        .iter()
+        .find(|member| member.directory_name == "source")
+        .unwrap();
+    write_file(
+        member.isolated_path.as_ref().unwrap(),
+        "SKILL.md",
+        "Concurrent edit",
+    );
+    assert!(transition.undo(&result.operation_id).is_err());
+    assert!(transition.finalize(&result.operation_id).is_err());
+    assert_eq!(
+        std::fs::read_to_string(member.isolated_path.as_ref().unwrap().join("SKILL.md")).unwrap(),
+        "Concurrent edit"
+    );
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 2);
+    assert!(!fixture.home.join(".agents/skills/source").exists());
+}
+
+#[test]
+fn replacement_rolls_back_old_bytes_when_lock_release_fails() {
+    let fixture = fixture();
+    let external = fixture.home.join(".agents/skills/source");
+    write_file(&external, "SKILL.md", "Old local content");
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let original_lock = std::fs::read(&lock_path).unwrap();
+    let transition = service_with_locks(
+        &fixture,
+        Arc::new(RefusingRelease(fixture.locks.clone())),
+        fixture.catalog.clone(),
+    );
+    assert!(transition.confirm(confirmation(&fixture)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(external.join("SKILL.md")).unwrap(),
+        "Old local content"
+    );
+    assert_eq!(std::fs::read(&lock_path).unwrap(), original_lock);
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+    assert!(
+        fixture
+            .filesystem
+            .list_source_transition_journals(&fixture.library)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn older_equal_content_journals_still_undo_without_external_hash() {
+    let fixture = fixture();
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition.confirm(confirmation(&fixture)).unwrap();
+    let mut journals = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap();
+    for member in &mut journals[0].members {
+        member.external_tree_hash = None;
+    }
+    fixture
+        .filesystem
+        .write_source_transition_journal(&fixture.library, &journals[0])
+        .unwrap();
+    transition
+        .undo(&result.operation_id)
+        .expect("legacy equal-content journal");
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
+}
+
+#[test]
+fn replacement_refuses_external_edits_during_staging() {
+    let mut fixture = fixture();
+    let external = fixture.home.join(".agents/skills/source/SKILL.md");
+    let mut git = FixtureGitSource::new(&fixture._workspace.path().join("source-repository"));
+    git.edit_during_stage = Some(external.clone());
+    fixture.source = Arc::new(git);
+    let lock_path = fixture.home.join(".agents/.skill-lock.json");
+    let old_lock = std::fs::read(&lock_path).unwrap();
+    let result = service(&fixture, fixture.catalog.clone()).confirm(confirmation(&fixture));
+    assert!(
+        matches!(result, Err(SourceTransitionError::Validation(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&external).unwrap(),
+        "Concurrent edit during staging"
+    );
+    assert_eq!(std::fs::read(&lock_path).unwrap(), old_lock);
+    assert_eq!(count(&open_catalog(&fixture), "skills"), 0);
 }
 
 #[test]
@@ -555,8 +2103,8 @@ fn partial_claims_install_same_named_members_and_preserve_unclaimed_entities() {
     let repository = fixture._workspace.path().join("source-repository");
     write_file(
         &repository,
-        "plugins/source/SKILL.md",
-        "---\nname: Source Root\ndescription: Another path\n---\n# Other\n",
+        "skills/plugins/source/SKILL.md",
+        "---\nname: Other Source\ndescription: Another path\n---\n# Other\n",
     );
     git(&repository, &["add", "-A"]);
     git(
@@ -757,6 +2305,70 @@ fn confirms_and_undoes_the_complete_source_in_one_release() {
 }
 
 #[test]
+fn plugin_categories_survive_install_and_a_fresh_capability_read() {
+    use skill_man_lib::adapters::git_source_capability::SqliteGitSourceCapabilityReader;
+    use skill_man_lib::core::git_source_capability::GitSourceCapabilityScan;
+    let fixture = fixture();
+    let repository = fixture._workspace.path().join("source-repository");
+    write_file(
+        &repository,
+        ".claude-plugin/plugin.json",
+        r#"{"name":"mattpocock-skills","skills":["./skills/source"]}"#,
+    );
+    git(&repository, &["add", "-A"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "plugin categories",
+        ],
+    );
+    let transition = service(&fixture, fixture.catalog.clone());
+    let request = confirmation(&fixture);
+    let result = transition.confirm(request).unwrap();
+    let read = || {
+        GitSourceCapabilityScan::new(Arc::new(SqliteGitSourceCapabilityReader::new(
+            Arc::new(WriteGate::new(
+                skill_man_lib::core::write_gate::WriteGateState::Open(
+                    skill_man_lib::core::home::BoundHome::test_value(
+                        "category-read",
+                        fixture.library.clone(),
+                    ),
+                ),
+            )),
+            "skill-man.sqlite3",
+            fixture.filesystem.clone(),
+        )))
+        .scan()
+        .unwrap()
+    };
+    let report = read();
+    let members = &report.sources[0].members;
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.skill_path == "skills/source")
+            .unwrap()
+            .plugin_name
+            .as_deref(),
+        Some("mattpocock-skills")
+    );
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.skill_path == "skills/beta")
+            .unwrap()
+            .plugin_name,
+        None
+    );
+    transition.undo(&result.operation_id).unwrap();
+    assert!(read().sources.is_empty());
+}
+
+#[test]
 fn confirms_a_worktree_only_source_without_fabricating_ownership_claims() {
     let fixture = fixture();
     let locks: Arc<dyn InstallerLockStore> = Arc::new(EmptyLocks);
@@ -791,6 +2403,7 @@ fn confirms_a_worktree_only_source_without_fabricating_ownership_claims() {
     assert!(preview.external_ownership_claims.is_empty());
     let result = transition
         .confirm(ConfirmSourceTransitionRequest {
+            expected_removed_claims: Vec::new(),
             source_type: "git".into(),
             source_url: preview.source_url,
             tracking_policy: Some(SourceTrackingOverride {
@@ -850,6 +2463,7 @@ fn refuses_lockless_conversion_when_an_installer_lock_is_faulted() {
     };
     let error = transition
         .confirm(ConfirmSourceTransitionRequest {
+            expected_removed_claims: Vec::new(),
             source_type: "git".into(),
             source_url: preview.source_url,
             tracking_policy: Some(SourceTrackingOverride {
