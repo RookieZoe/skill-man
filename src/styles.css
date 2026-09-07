@@ -4338,19 +4338,36 @@ details[open] > .source-group-summary::before {
 .agent-detection-list {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: stretch;
+  justify-content: space-between;
   gap: var(--space-3);
 }
 
-.agent-detection-card {
-  flex: 1 1 320px;
+.agent-detection-card,
+.agent-detection-slot {
+  flex: 0 0 min(var(--detection-card-width, 400px), 100%);
+  max-width: 400px;
   min-width: 0;
-  display: grid;
+}
+
+.agent-detection-slot {
+  visibility: hidden;
+  height: 0;
+}
+
+.agent-detection-card {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--surface-raised);
+}
+
+.agent-detection-card .agent-detection-configure {
+  align-self: flex-start;
+  margin-top: auto;
 }
 
 .agent-detection-configure {
@@ -4365,14 +4382,14 @@ details[open] > .source-group-summary::before {
   flex-wrap: nowrap;
 }
 .agent-toolbar-slot .agents-navigation-groups button {
-  min-height: 28px;
+  min-height: 32px;
   padding: 0 12px;
   font-size: 11px;
   font-weight: 650;
 }
 .agent-toolbar-slot .agents-new-button {
-  height: 28px;
-  min-height: 28px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 12px;
   font-size: 11px;
   white-space: nowrap;

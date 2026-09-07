@@ -36,7 +36,7 @@ test("agent toolbar and preset actions use compact desktop button dimensions", a
   );
   const newButton = screen.getByRole("button", { name: "New custom agent" });
   const newStyle = getComputedStyle(newButton);
-  expect(newStyle.height).toBe(primaryTab.minHeight);
+  expect(newStyle.height).toBe("32px");
   expect(newStyle.padding).toBe(primaryTab.padding);
   expect(newStyle.fontSize).toBe(primaryTab.fontSize);
   await userEvent.click(

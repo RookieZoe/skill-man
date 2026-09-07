@@ -1,4 +1,5 @@
 import { OperationNotice } from "../../ui/OperationNotice";
+import { DetectionCardList } from "./DetectionCardList";
 import {
   useEffect,
   useMemo,
@@ -791,7 +792,7 @@ function AgentList({
             {t("agents.list.detected_detecting")}
           </div>
         ) : detectedObservations.length > 0 ? (
-          <div className="agent-detection-list">
+          <DetectionCardList>
             {detectedObservations.map((preset) => (
               <article key={preset.presetKey} className="agent-detection-card">
                 <header className="agent-detection-card-heading">
@@ -851,7 +852,7 @@ function AgentList({
                 ) : null}
               </article>
             ))}
-          </div>
+          </DetectionCardList>
         ) : (
           <div className="agents-empty">
             <h3>{t("agents.list.detected_empty_title")}</h3>
