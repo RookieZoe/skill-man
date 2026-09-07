@@ -2,6 +2,10 @@
 
 状态：Accepted
 
+> 当前分发状态统一使用“已分发／未分发／部分分发”，见 [CONTEXT](../../CONTEXT.md#distribution-terminology)。本文 Enable/Disable 等名称保留内部接口语义，不代表 Agent 已加载或执行 Skill。
+
+> Library 临时多选模式和批量入口部分由 [ADR-0022](0022-library-file-manager-selection.md) 取代；目标解析和 Core 提交语义保持有效。
+
 [决策:Enable 操作面与目标选择](https://github.com/RookieZoe/skill-man/issues/72)
 确认：Skill Man 把全局 Enable 与项目级 Enable 分成两个不可混批的操作面。全局操作创建受管、
 Target-scoped Activation；项目级操作只在用户本次选择的项目文件夹内创建不追踪的一次性软链。

@@ -133,8 +133,8 @@ test("global activation changes refresh the Skill list count immediately", async
 test.each([
   ["Local", "local"],
   ["Git", "git"],
-  ["Enabled", "enabled"],
-  ["Not enabled", "disabled"],
+  ["Distributed", "enabled"],
+  ["Not distributed", "disabled"],
 ] as const)(
   "%s filter requests and displays the matching catalog",
   async (label, filter) => {
@@ -414,7 +414,7 @@ test("Chinese detail labels and local source preserve the original path", async 
   await userEvent.click(
     await screen.findByText("来源与技术详情", { selector: "summary" }),
   );
-  for (const label of ["目录名称", "实际路径", "来源版本", "启用状态"]) {
+  for (const label of ["目录名称", "实际路径", "来源版本", "分发状态"]) {
     expect(screen.getByText(label)).toBeInTheDocument();
   }
   expect(
@@ -515,7 +515,7 @@ test("opens the Library Desk with a selected Skill and Target-scoped placeholder
     screen.getByRole("main", { name: "Skill detail" }),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("complementary", { name: "Activation Target Groups" }),
+    screen.getByRole("complementary", { name: "Skill distribution" }),
   ).toBeInTheDocument();
   expect(
     await screen.findByRole("heading", { name: "skill-authoring" }),
@@ -543,13 +543,15 @@ test("selects another Skill from the Library without leaving the three-column co
   ).toBeInTheDocument();
 });
 
-test("filters the Library by health and selects the first remaining Skill", async () => {
+test("filters the Library by health and waits for an explicit Skill selection", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
 
   await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
   await user.click(screen.getByRole("button", { name: "Broken" }));
-
+  await screen.findByRole("heading", { name: "Select a skill" });
+  await user.click(await screen.findByRole("button", { name: "legacy-audit" }));
   expect(
     await screen.findByRole("heading", { name: "legacy-audit" }),
   ).toBeInTheDocument();
@@ -1586,8 +1588,10 @@ test("onboarding saves a configuration only after reviewing and confirming its r
 test("Broken Link detail offers Relocate and restores health after preview confirm", async () => {
   const user = userEvent.setup();
   render(<App client={createFixtureCatalogClient()} />);
-
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await expandLibrary();
   await user.click(screen.getByRole("button", { name: "Broken" }));
+  await user.click(await screen.findByRole("button", { name: "legacy-audit" }));
   await screen.findByRole("heading", { name: "legacy-audit" });
   expect(screen.getByText("Source unavailable")).toBeInTheDocument();
 

@@ -130,7 +130,7 @@ test("removed external members require explicit force confirmation and new membe
   expect(screen.getByText("design")).toBeVisible();
   expect(screen.getByText("ui")).toBeVisible();
   expect(
-    screen.getByText(/new Skills will not be enabled automatically/i),
+    screen.getByText(/new Skills will not be distributed automatically/i),
   ).toBeVisible();
   expect(
     screen.queryByRole("button", { name: "Use latest remote release" }),

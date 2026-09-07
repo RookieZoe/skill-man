@@ -10,7 +10,7 @@ describe("EvidenceRail", () => {
         directoryIdentity="my-skill"
         canonicalEntity="/Users/test/skills/my-skill"
         sourceRelease="v1.2.0 (commit abc1234)"
-        activationEvidence="Enabled in 2 target groups"
+        activationEvidence="Distributed to 2 target groups"
         health="healthy"
       />,
     );
@@ -24,8 +24,10 @@ describe("EvidenceRail", () => {
     expect(screen.getByText("/Users/test/skills/my-skill")).toBeInTheDocument();
     expect(screen.getByText("Source release")).toBeInTheDocument();
     expect(screen.getByText("v1.2.0 (commit abc1234)")).toBeInTheDocument();
-    expect(screen.getByText("Activation evidence")).toBeInTheDocument();
-    expect(screen.getByText("Enabled in 2 target groups")).toBeInTheDocument();
+    expect(screen.getByText("Distribution status")).toBeInTheDocument();
+    expect(
+      screen.getByText("Distributed to 2 target groups"),
+    ).toBeInTheDocument();
   });
 
   it("applies warning tone for source_snapshot_mismatch", () => {
@@ -34,7 +36,7 @@ describe("EvidenceRail", () => {
         directoryIdentity="mismatched-skill"
         canonicalEntity="/Users/test/skills/mismatched-skill"
         sourceRelease="main (commit def5678)"
-        activationEvidence="Enabled in 1 target group"
+        activationEvidence="Distributed to 1 target group"
         health="source_snapshot_mismatch"
       />,
     );
@@ -50,7 +52,7 @@ describe("EvidenceRail", () => {
         directoryIdentity="broken-skill"
         canonicalEntity="/Users/test/skills/broken-skill"
         sourceRelease="main"
-        activationEvidence="Enabled in 1 target group"
+        activationEvidence="Distributed to 1 target group"
         health="broken"
       />,
     );
@@ -66,7 +68,7 @@ describe("EvidenceRail", () => {
         directoryIdentity="read-only-skill"
         canonicalEntity="/Users/test/skills/read-only-skill"
         sourceRelease="v2.0.0"
-        activationEvidence="Not enabled in any target"
+        activationEvidence="Not distributed"
         health="healthy"
       />,
     );

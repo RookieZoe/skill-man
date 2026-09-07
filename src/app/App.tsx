@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { listen } from "@tauri-apps/api/event";
 
@@ -104,7 +104,13 @@ function AppContent({ client }: AppProps) {
     diagnostic: string | null;
   } | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const selectedId = selectedSkillIds.length === 1 ? selectedSkillIds[0] : null;
+  const setSelectedId = useCallback(
+    (id: string | null) => setSelectedSkillIds(id ? [id] : []),
+    [],
+  );
+  const initialSelectionPending = useRef(true);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -240,7 +246,7 @@ function AppContent({ client }: AppProps) {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [setSelectedId]);
 
   useEffect(() => {
     if (preferences?.checkAppUpdates !== true) return;
@@ -277,11 +283,16 @@ function AppContent({ client }: AppProps) {
       .then((snapshot) => {
         if (!current) return;
         setSkills(snapshot.items);
-        setSelectedId((selected) =>
-          snapshot.items.some(({ id }) => id === selected)
-            ? selected
-            : (snapshot.items[0]?.id ?? null),
-        );
+        const selectFirst = initialSelectionPending.current;
+        initialSelectionPending.current = false;
+        setSelectedSkillIds((selected) => {
+          const retained = selected.filter((id) =>
+            snapshot.items.some((item) => item.id === id),
+          );
+          return selectFirst && retained.length === 0 && snapshot.items[0]
+            ? [snapshot.items[0].id]
+            : retained;
+        });
         if (snapshot.items.length === 0) {
           setDetail(null);
         }
@@ -753,10 +764,8 @@ function AppContent({ client }: AppProps) {
     ]);
     if (runId !== sourceGroupRunId.current) return;
     setSkills(snapshot.items);
-    setSelectedId((selected) =>
-      snapshot.items.some(({ id }) => id === selected)
-        ? selected
-        : (snapshot.items[0]?.id ?? null),
+    setSelectedSkillIds((selected) =>
+      selected.filter((id) => snapshot.items.some((item) => item.id === id)),
     );
     setDetail(nextDetail);
     setGitSourceCapability(capability.report);
@@ -1286,7 +1295,9 @@ function AppContent({ client }: AppProps) {
         onCatalogChanged={refreshAfterAdopt}
         libraryEmpty={libraryLoaded && skills.length === 0}
         selectedId={selectedId}
-        detail={detail}
+        selectedSkillIds={selectedSkillIds}
+        onSelectionChange={setSelectedSkillIds}
+        detail={detail?.id === selectedId ? detail : null}
         error={listError ?? detailError ?? error}
         gitSourceCapability={gitSourceCapability}
         gitSourceCapabilityFailure={gitSourceCapabilityFailure}

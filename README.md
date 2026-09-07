@@ -17,6 +17,10 @@ The MVP implementation covers the Library, Import, Activation, maintenance, Pref
 - a protected tag-to-Draft release workflow for Apple Silicon DMG, notarization, updater metadata, and checksums;
 - local CI gates for formatting, lint, typechecking, tests, capability boundaries, and builds.
 
+## Skill distribution
+
+Skill distribution states are **Distributed**, **Not distributed**, and **Partially distributed** (已分发、未分发、部分分发). They describe managed global distribution records, not whether an Agent has loaded or executed a Skill. Project distribution is one-shot and has no persistent status. See [the terminology contract](CONTEXT.md#distribution-terminology) for aggregation and existing API-name mappings.
+
 ## Develop
 
 Requirements: Node.js 22.20+, Rust 1.85+, Xcode, and an Apple Silicon Mac running macOS 13 or newer.

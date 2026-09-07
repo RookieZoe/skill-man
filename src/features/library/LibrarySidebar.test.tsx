@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 import type {
@@ -33,27 +34,24 @@ const report: GitSourceCapabilityReport = {
 const defaults = {
   filter: "all" as const,
   skills,
-  selectedId: "one",
-  isSelectMode: false,
   selectedSkillIds: [],
-  onToggleSkillSelection: vi.fn(),
+  onSelectionChange: vi.fn(),
   onFilter: vi.fn(),
-  onSelect: vi.fn(),
   gitSourceCapability: report,
 };
 
 test("groups by repository identity and expands without selecting a Skill", async () => {
   const user = userEvent.setup();
   const onSelect = vi.fn();
-  render(<LibrarySidebar {...defaults} onSelect={onSelect} />);
+  render(<LibrarySidebar {...defaults} onSelectionChange={onSelect} />);
   expect(
     [...document.querySelectorAll(".filter-chip")].map(
       (button) => button.textContent,
     ),
   ).toEqual([
     "All",
-    "Enabled",
-    "Not enabled",
+    "Distributed",
+    "Not distributed",
     "Broken",
     "Modified",
     "Local",
@@ -72,7 +70,7 @@ test("groups by repository identity and expands without selecting a Skill", asyn
   await user.click(group);
   expect(onSelect).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "two" }));
-  expect(onSelect).toHaveBeenCalledWith("two");
+  expect(onSelect).toHaveBeenCalledWith(["two"]);
   await user.click(group);
   expect(screen.queryByRole("button", { name: "two" })).not.toBeInTheDocument();
 });
@@ -80,7 +78,7 @@ test("groups by repository identity and expands without selecting a Skill", asyn
 test("keeps collapse state across filtering and retains selection behavior", async () => {
   const user = userEvent.setup();
   const onToggleSkillSelection = vi.fn();
-  const props = { ...defaults, isSelectMode: true, onToggleSkillSelection };
+  const props = { ...defaults, onSelectionChange: onToggleSkillSelection };
   const view = render(<LibrarySidebar {...props} />);
   await user.click(screen.getByRole("button", { name: "acme/skills 2" }));
   view.rerender(
@@ -91,7 +89,7 @@ test("keeps collapse state across filtering and retains selection behavior", asy
     "true",
   );
   await user.click(screen.getByRole("button", { name: "one" }));
-  expect(onToggleSkillSelection).toHaveBeenCalledWith("one");
+  expect(onToggleSkillSelection).toHaveBeenCalledWith(["one"]);
 });
 
 test("never drops Skills while repository facts are unavailable", async () => {
@@ -124,4 +122,50 @@ test("identical repository names on different hosts remain separate", () => {
   expect(screen.getAllByRole("button", { name: "acme/skills 1" })).toHaveLength(
     2,
   );
+});
+
+test("Shift follows plugin display order and skips collapsed sources", async () => {
+  const onChange = vi.fn();
+  function Sidebar() {
+    const [selected, setSelected] = useState<string[]>([]);
+    return (
+      <LibrarySidebar
+        {...defaults}
+        selectedSkillIds={selected}
+        onSelectionChange={(ids) => {
+          setSelected(ids);
+          onChange(ids);
+        }}
+        gitSourceCapability={{
+          sources: [
+            {
+              ...report.sources[0],
+              members: report.sources[0].members.map((member, index) => ({
+                ...member,
+                pluginName: index === 0 ? "z-last" : "a-first",
+              })),
+            },
+          ],
+        }}
+      />
+    );
+  }
+  render(<Sidebar />);
+  await userEvent.click(screen.getByRole("button", { name: "acme/skills 2" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Local sources 1" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "one" }), {
+    shiftKey: true,
+  });
+  expect(onChange).toHaveBeenLastCalledWith(["two", "one"]);
+  fireEvent.click(screen.getByRole("button", { name: "local" }), {
+    shiftKey: true,
+  });
+  expect(onChange).toHaveBeenLastCalledWith(["two", "one", "local"]);
+  await userEvent.click(screen.getByRole("button", { name: "acme/skills 2" }));
+  fireEvent.click(screen.getByRole("button", { name: "local" }), {
+    shiftKey: true,
+  });
+  expect(onChange).toHaveBeenLastCalledWith(["local"]);
 });

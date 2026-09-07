@@ -178,22 +178,16 @@ test("exact breakpoints: 1060 wide, 1059 mid, 760 mid, 759 narrow", async () => 
   ).toBeInTheDocument();
 });
 
-test("batch selection stays in the Library heading and adds one column to the same rows", async () => {
+test("Library rows select directly without a batch entry or extra checkbox column", async () => {
   await renderWideLibrary();
-  const select = screen.getByRole("button", { name: "Batch actions" });
-  expect(select.closest(".library-sidebar .panel-heading")).not.toBeNull();
   expect(
-    within(toolbar()).queryByRole("button", { name: "Batch actions" }),
+    screen.queryByRole("button", { name: "Batch actions" }),
   ).not.toBeInTheDocument();
   const row = screen.getByRole("button", { name: "skill-authoring" });
   const padding = getComputedStyle(row).padding;
-  await userEvent.click(select);
-  expect(row).toHaveClass("skill-row--selectable");
-  expect(getComputedStyle(row).gridTemplateColumns).toBe(
-    "14px 9px minmax(0, 1fr) auto",
-  );
+  await userEvent.click(row);
+  expect(within(row).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(getComputedStyle(row).padding).toBe(padding);
-  await userEvent.click(within(row).getByRole("checkbox"));
   expect(row).toHaveAttribute("aria-pressed", "true");
 });
 
@@ -229,7 +223,7 @@ test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", a
   expect(document.querySelector(".app-shell > .app-background")).toBeTruthy();
   // The Agent Inspector stays a plain pane (not a dialog) in wide mode.
   expect(
-    screen.getByRole("complementary", { name: "Activation Target Groups" }),
+    screen.getByRole("complementary", { name: "Skill distribution" }),
   ).toBeInTheDocument();
   expect(inspector()).not.toHaveAttribute("role");
   // Library chrome never shrinks or scrolls; only its list owns scrolling.
@@ -263,13 +257,11 @@ test("wide viewport: explicit rows, zero-Notice collapse, pane scroll owners", a
 
 // -- Agent drawer (760–1059) --
 
-test("detail heading, actions and document share one centered reading width", async () => {
+test("detail keeps its reading width and actions live in the distribution panel", async () => {
   await renderWideLibrary();
-  const styles = [
-    ".detail-heading",
-    ".detail-actions",
-    ".document-preview",
-  ].map((selector) => getComputedStyle(document.querySelector(selector)!));
+  const styles = [".detail-heading", ".document-preview"].map((selector) =>
+    getComputedStyle(document.querySelector(selector)!),
+  );
   expect(new Set(styles.map((style) => style.maxWidth)).size).toBe(1);
   for (const style of styles) {
     expect(style.marginInline).toBe("auto");
@@ -320,10 +312,17 @@ test("mid mode opens the Agent Inspector as a modal drawer with inert background
     "inert",
   );
   expect(
-    screen.getByRole("dialog", { name: "Activation Target Groups" }),
+    screen.getByRole("dialog", { name: "Skill distribution" }),
   ).toBeInTheDocument();
   expect(inspector()).toHaveFocus();
   expect(getComputedStyle(inspector()).visibility).toBe("visible");
+  expect(
+    within(inspector()).getByRole("button", { name: "Enable to Project…" }),
+  ).toBeVisible();
+  expect(
+    within(inspector()).getByRole("button", { name: "Remove…" }),
+  ).toBeVisible();
+  expect(document.querySelector(".detail-actions")).toBeNull();
 });
 
 test("drawer Escape and backdrop close and restore focus to the trigger", async () => {
@@ -352,8 +351,8 @@ test("drawer traps Tab focus within its Target-scoped placeholder", async () => 
   await user.click(screen.getByRole("button", { name: "Target groups" }));
   expect(inspector()).toHaveFocus();
 
-  const enableButton = within(inspector()).getByRole("switch", {
-    name: "Claude Code",
+  const enableButton = within(inspector()).getByRole("button", {
+    name: "Enable to Project…",
   });
   await user.tab();
   expect(enableButton).toHaveFocus();

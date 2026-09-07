@@ -1,6 +1,11 @@
 import { OperationNotice } from "../../ui/OperationNotice";
 import appLogo from "../../../src-tauri/icons/icon.svg";
-import { PluginGroups } from "./PluginGroups";
+import { PluginGroups, groupPluginMembers } from "./PluginGroups";
+import {
+  selectLibrarySkill,
+  type SelectionModifiers,
+} from "./library-selection";
+import { SkillSelectionStack } from "./SkillSelectionStack";
 import {
   useEffect,
   useLayoutEffect,
@@ -55,11 +60,7 @@ import {
   type GitSourceCapabilityFailure,
 } from "./GitSourceCapabilityNotice";
 import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
-import { GlobalEnableSheet } from "./GlobalEnableSheet";
 import { ProjectEnableSheet } from "./ProjectEnableSheet";
-import { SelectionShelf } from "./SelectionShelf";
-import { SelectionControls } from "../../ui/SelectionControls";
-import { BatchDisableSheet } from "./BatchDisableSheet";
 import { SkillDocument } from "./SkillDocument";
 import { RepositoryLink } from "../../ui/RepositoryLink";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
@@ -95,6 +96,8 @@ interface LibraryDeskProps {
   onCatalogChanged: () => Promise<void>;
   libraryEmpty: boolean;
   selectedId: string | null;
+  selectedSkillIds: string[];
+  onSelectionChange: (ids: string[]) => void;
   detail: SkillDetail | null;
   error: string | null;
   gitSourceCapability: GitSourceCapabilityReport | null;
@@ -196,6 +199,8 @@ export function LibraryDesk({
   onCatalogChanged,
   libraryEmpty,
   selectedId,
+  selectedSkillIds,
+  onSelectionChange,
   detail,
   error,
   gitSourceCapability,
@@ -316,11 +321,30 @@ export function LibraryDesk({
     };
   }, [client, surface, skills, gitSourceCapability]);
   const [scanExpanded, setScanExpanded] = useState(false);
+  const selectedSkills = useMemo(() => {
+    const byId = new Map(skills.map((skill) => [skill.id, skill]));
+    return selectedSkillIds.flatMap((id) => {
+      const skill = byId.get(id);
+      return skill ? [skill] : [];
+    });
+  }, [skills, selectedSkillIds]);
+  // Keep the last complete presentation while a single Skill is inspected.
+  // Actions below still use the current selection, never this retained view.
+  const presentation = { detail, selectedSkills, selectedSkillIds };
+  const [settledPresentation, setSettledPresentation] = useState(presentation);
+  const detailPending = selectedSkillIds.length === 1 && !detail && !error;
+  if (
+    !detailPending &&
+    (settledPresentation.detail !== detail ||
+      settledPresentation.selectedSkills !== selectedSkills ||
+      settledPresentation.selectedSkillIds !== selectedSkillIds)
+  ) {
+    setSettledPresentation(presentation);
+  }
+  const shown = detailPending ? settledPresentation : presentation;
   const [agentToolbarTarget, setAgentToolbarTarget] =
     useState<HTMLDivElement | null>(null);
   const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
-  const [isBatchGlobalEnableOpen, setIsBatchGlobalEnableOpen] = useState(false);
-  const [isBatchDisableOpen, setIsBatchDisableOpen] = useState(false);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<
     string | null
   >(null);
@@ -333,10 +357,6 @@ export function LibraryDesk({
     skillPath: string;
     opener?: HTMLElement | null;
   } | null>(null);
-  const [isBatchProjectEnableOpen, setIsBatchProjectEnableOpen] =
-    useState(false);
-  const [isSelectMode, setIsSelectMode] = useState(false);
-  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [adoptHandoff, setAdoptHandoff] = useState<{
     directoryName: string;
     entryPath: string;
@@ -351,24 +371,8 @@ export function LibraryDesk({
     null,
   );
 
-  const exitSelectMode = () => {
-    setIsSelectMode(false);
-    setSelectedSkillIds([]);
-  };
-
-  const toggleSkillSelection = (skillId: string) => {
-    setSelectedSkillIds((current) =>
-      current.includes(skillId)
-        ? current.filter((id) => id !== skillId)
-        : [...current, skillId],
-    );
-  };
-
   const hasOtherOverlay =
     brokenSkill !== null ||
-    isBatchGlobalEnableOpen ||
-    isBatchDisableOpen ||
-    isBatchProjectEnableOpen ||
     agentOverlayOpen ||
     isProjectEnableOpen ||
     isLinkImportOpen ||
@@ -382,22 +386,10 @@ export function LibraryDesk({
   const isAgentDrawerModal = layoutMode === "mid" && agentDrawerOpen;
 
   useEffect(() => {
-    if (!isSelectMode || hasOverlay) return;
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        exitSelectMode();
-      }
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isSelectMode, hasOverlay]);
-
-  useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     let current = true;
     let unlisten: (() => void) | null = null;
     listen("menu-open-agents", () => {
-      exitSelectMode();
       setSurface("agents");
       setAgentDrawerOpen(false);
       setActivePane("library");
@@ -542,9 +534,6 @@ export function LibraryDesk({
         surface={surface}
         scanExpanded={scanExpanded}
         onSurfaceChange={(next) => {
-          if (next !== "library") {
-            exitSelectMode();
-          }
           setSurface(next);
           if (next !== surface) setRepositorySkills(null);
           setScanExpanded(false);
@@ -711,48 +700,38 @@ export function LibraryDesk({
               </div>
             ) : null}
             <LibrarySidebar
-              onToggleSelectMode={
-                scanExpanded
-                  ? undefined
-                  : () => {
-                      if (isSelectMode) exitSelectMode();
-                      else {
-                        setIsSelectMode(true);
-                        setSelectedSkillIds([]);
-                      }
-                    }
-              }
               filter={filter}
               skills={skills}
               gitSourceCapability={gitSourceCapability}
-              selectedId={selectedId}
               inert={isAgentDrawerModal}
-              isSelectMode={isSelectMode}
               selectedSkillIds={selectedSkillIds}
-              onSelectionChange={setSelectedSkillIds}
-              onToggleSkillSelection={toggleSkillSelection}
+              onSelectionChange={(ids) => {
+                onSelectionChange(ids);
+                if (ids.length && layoutMode === "narrow")
+                  setActivePane("detail");
+              }}
               onFilter={(nextFilter) => {
-                setSelectedSkillIds([]);
+                onSelectionChange([]);
                 onFilter(nextFilter);
               }}
-              onSelect={(skillId) => {
-                if (layoutMode === "narrow") setActivePane("detail");
-                onSelect(skillId);
-              }}
             />
-            <SkillDetailPanel
-              detail={detail}
-              inert={isAgentDrawerModal}
-              error={error}
-              libraryEmpty={libraryEmpty}
-              relocatePanel={relocatePanel}
-              onOpenRelocate={onOpenRelocate}
-              removePanel={removePanel}
-              onOpenRemove={onOpenRemove}
-              onOpenProjectEnable={() => setIsProjectEnableOpen(true)}
-              gitMemberSkillIds={gitMemberSkillIds}
-              gitSourceCapability={gitSourceCapability}
-            />
+            {shown.selectedSkillIds.length > 1 ? (
+              <SkillSelectionStack
+                skills={shown.selectedSkills}
+                inert={isAgentDrawerModal || detailPending}
+              />
+            ) : (
+              <SkillDetailPanel
+                detail={shown.detail}
+                hasSelection={selectedSkillIds.length === 1}
+                inert={isAgentDrawerModal || detailPending}
+                error={error}
+                libraryEmpty={libraryEmpty}
+                relocatePanel={relocatePanel}
+                onOpenRelocate={onOpenRelocate}
+                gitSourceCapability={gitSourceCapability}
+              />
+            )}
             <div
               className="agent-drawer"
               data-open={isAgentDrawerModal ? "true" : undefined}
@@ -765,12 +744,45 @@ export function LibraryDesk({
                   }
                 }}
               />
-              {detail ? (
+              {selectedSkillIds.length > 0 ? (
                 <GlobalTargetGroupsPanel
+                  skills={
+                    selectedSkills.length > 1
+                      ? selectedSkills.map((skill) => ({
+                          id: skill.id,
+                          name: skill.directoryName,
+                        }))
+                      : undefined
+                  }
+                  actions={
+                    <div className="distribution-actions">
+                      <button
+                        type="button"
+                        className="toolbar-button"
+                        onClick={() => setIsProjectEnableOpen(true)}
+                      >
+                        {t("library.detail.enableToProject")}
+                      </button>
+                      {selectedSkillIds.length === 1 &&
+                      !gitMemberSkillIds.has(selectedSkillIds[0]) ? (
+                        <button
+                          type="button"
+                          className="toolbar-button danger-button"
+                          disabled={
+                            removePanel.isOpen ||
+                            removePanel.activity === "planning"
+                          }
+                          onClick={onOpenRemove}
+                        >
+                          {t("library.detail.remove")}
+                        </button>
+                      ) : null}
+                    </div>
+                  }
                   onCatalogChanged={onCatalogChanged}
                   ref={agentInspectorRef}
                   dialog={isAgentDrawerModal}
-                  skillId={detail.id}
+                  skillId={selectedSkillIds[0]}
                   client={client}
                   onOpenAgentManagement={() => {
                     setAgentDrawerOpen(false);
@@ -813,6 +825,7 @@ export function LibraryDesk({
                 />
               ) : (
                 <ActivationTargetPlaceholder
+                  multiple={selectedSkillIds.length > 1}
                   ref={agentInspectorRef}
                   dialog={isAgentDrawerModal}
                   onOpenAgentManagement={() => {
@@ -829,7 +842,6 @@ export function LibraryDesk({
           client={client}
           expanded={scanExpanded}
           onExpandedChange={(expanded) => {
-            if (expanded) exitSelectMode();
             setScanExpanded(expanded);
           }}
           inert={isAgentDrawerModal}
@@ -839,21 +851,6 @@ export function LibraryDesk({
           onCatalogChanged={onCatalogChanged}
         />
       </div>
-      {surface === "library" && isSelectMode ? (
-        <SelectionShelf
-          selectedCount={selectedSkillIds.length}
-          inert={hasOverlay || isAgentDrawerModal}
-          onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
-          onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
-          canDisable={skills.some(
-            (skill) =>
-              selectedSkillIds.includes(skill.id) &&
-              skill.enabledAgentCount > 0,
-          )}
-          onDisable={() => setIsBatchDisableOpen(true)}
-          onExit={exitSelectMode}
-        />
-      ) : null}
       {brokenSkill !== null ? (
         <BrokenDisableSheet
           client={client}
@@ -863,50 +860,6 @@ export function LibraryDesk({
           onClose={() => {
             setBrokenSkill(null);
             if (selectedId) onSelect(selectedId);
-          }}
-        />
-      ) : null}
-      {isBatchDisableOpen && (
-        <BatchDisableSheet
-          client={client}
-          skills={skills.filter((skill) => selectedSkillIds.includes(skill.id))}
-          onCatalogChanged={onCatalogChanged}
-          onClose={() => setIsBatchDisableOpen(false)}
-        />
-      )}
-      {isBatchGlobalEnableOpen ? (
-        <GlobalEnableSheet
-          onCatalogChanged={onCatalogChanged}
-          client={client}
-          skills={skills
-            .filter((s) => selectedSkillIds.includes(s.id))
-            .map((s) => ({
-              id: s.id,
-              name: s.displayName ?? s.directoryName,
-            }))}
-          onClose={() => {
-            setIsBatchGlobalEnableOpen(false);
-            exitSelectMode();
-          }}
-        />
-      ) : null}
-      {isBatchProjectEnableOpen ? (
-        <ProjectEnableSheet
-          client={client}
-          skills={skills
-            .filter((s) => selectedSkillIds.includes(s.id))
-            .map((s) => ({
-              id: s.id,
-              name: s.displayName ?? s.directoryName,
-            }))}
-          onClose={() => {
-            setIsBatchProjectEnableOpen(false);
-            exitSelectMode();
-          }}
-          onOpenAgentManagement={() => {
-            setIsBatchProjectEnableOpen(false);
-            exitSelectMode();
-            setSurface("agents");
           }}
         />
       ) : null}
@@ -926,11 +879,13 @@ export function LibraryDesk({
           onClose={onCloseRemove}
         />
       ) : null}
-      {isProjectEnableOpen && detail ? (
+      {isProjectEnableOpen && selectedSkills.length > 0 ? (
         <ProjectEnableSheet
           client={client}
-          skillId={detail.id}
-          skillName={detail.displayName ?? detail.directoryName}
+          skills={selectedSkills.map((skill) => ({
+            id: skill.id,
+            name: skill.directoryName,
+          }))}
           onClose={() => setIsProjectEnableOpen(false)}
           onOpenAgentManagement={() => {
             setIsProjectEnableOpen(false);
@@ -1121,36 +1076,27 @@ function Toolbar({
 }
 
 interface LibrarySidebarProps {
-  onToggleSelectMode?: () => void;
   filter: CatalogFilter;
   skills: SkillSummary[];
   gitSourceCapability?: GitSourceCapabilityReport | null;
-  selectedId: string | null;
   inert?: boolean;
-  isSelectMode: boolean;
   selectedSkillIds: string[];
-  onSelectionChange?: (ids: string[]) => void;
-  onToggleSkillSelection: (skillId: string) => void;
+  onSelectionChange: (ids: string[]) => void;
   onFilter: (filter: CatalogFilter) => void;
-  onSelect: (skillId: string) => void;
 }
 
 export function LibrarySidebar({
-  onToggleSelectMode,
   filter,
   skills,
   gitSourceCapability,
-  selectedId,
   inert = false,
-  isSelectMode,
   selectedSkillIds,
   onSelectionChange,
-  onToggleSkillSelection,
   onFilter,
-  onSelect,
 }: LibrarySidebarProps) {
   const { t } = useLocale();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const anchor = useRef<string | null>(null);
   const groups = useMemo(() => {
     const remaining = new Map(skills.map((skill) => [skill.id, skill]));
     const result: {
@@ -1205,6 +1151,26 @@ export function LibrarySidebar({
       });
     return result;
   }, [skills, gitSourceCapability, t]);
+  const visibleIds = groups.flatMap((group) => {
+    if (!expanded[group.id]) return [];
+    const plugins = groupPluginMembers(group.skills, (skill) =>
+      group.plugins?.get(skill.id),
+    );
+    return (
+      plugins ? plugins.flatMap(([, members]) => members) : group.skills
+    ).map((skill) => skill.id);
+  });
+  const select = (id: string, modifiers: SelectionModifiers) => {
+    const next = selectLibrarySkill(
+      selectedSkillIds,
+      anchor.current,
+      id,
+      visibleIds,
+      modifiers,
+    );
+    anchor.current = next.anchor;
+    onSelectionChange(next.ids);
+  };
   return (
     <nav
       className="library-sidebar"
@@ -1225,26 +1191,8 @@ export function LibrarySidebar({
           >
             {skills.length}
           </span>
-          {onToggleSelectMode && (
-            <button
-              id="library-select-trigger"
-              type="button"
-              className="toolbar-button"
-              aria-pressed={isSelectMode}
-              onClick={onToggleSelectMode}
-            >
-              {t("shelf.select")}
-            </button>
-          )}
         </div>
       </div>
-      {isSelectMode && onSelectionChange && (
-        <SelectionControls
-          ids={skills.map((skill) => skill.id)}
-          selected={selectedSkillIds}
-          onChange={onSelectionChange}
-        />
-      )}
       <div
         className="filter-strip"
         aria-label={t("library.sidebar.filter_label")}
@@ -1255,13 +1203,25 @@ export function LibrarySidebar({
             className="filter-chip"
             aria-pressed={filter === item.value}
             key={item.value}
-            onClick={() => onFilter(item.value)}
+            onClick={() => {
+              anchor.current = null;
+              onFilter(item.value);
+            }}
           >
             {t(item.labelKey)}
           </button>
         ))}
       </div>
-      <div className="skill-list">
+      <div
+        className="skill-list"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            anchor.current = null;
+            onSelectionChange([]);
+            event.stopPropagation();
+          }
+        }}
+      >
         {skills.length ? (
           groups.map((group) => (
             <section className="library-source-group" key={group.id}>
@@ -1294,30 +1254,18 @@ export function LibrarySidebar({
                       return (
                         <button
                           type="button"
-                          className={`skill-row${isSelectMode ? " skill-row--selectable" : ""}${isChecked ? " skill-row--selected" : ""}`}
+                          className="skill-row"
                           aria-label={skill.directoryName}
-                          aria-pressed={
-                            isSelectMode ? isChecked : selectedId === skill.id
-                          }
+                          aria-pressed={isChecked}
                           key={skill.id}
-                          onClick={() => {
-                            if (isSelectMode) {
-                              onToggleSkillSelection(skill.id);
-                            } else {
-                              onSelect(skill.id);
+                          onClick={(event) => select(skill.id, event)}
+                          onKeyDown={(event) => {
+                            if (event.key === " " || event.key === "Enter") {
+                              event.preventDefault();
+                              select(skill.id, event);
                             }
                           }}
                         >
-                          {isSelectMode && (
-                            <input
-                              type="checkbox"
-                              className="skill-select-checkbox"
-                              checked={isChecked}
-                              onChange={() => onToggleSkillSelection(skill.id)}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label={skill.directoryName}
-                            />
-                          )}
                           <StatusDot health={skill.health} />
                           <span className="skill-row-copy">
                             <strong>{skill.directoryName}</strong>
@@ -1352,31 +1300,24 @@ export function LibrarySidebar({
 
 function SkillDetailPanel({
   detail,
+  hasSelection,
   inert = false,
   error,
   libraryEmpty,
   relocatePanel,
   onOpenRelocate,
-  removePanel,
-  onOpenRemove,
-  onOpenProjectEnable,
-  gitMemberSkillIds,
   gitSourceCapability,
 }: {
   detail: SkillDetail | null;
+  hasSelection: boolean;
   inert?: boolean;
   error: string | null;
   libraryEmpty: boolean;
   relocatePanel: RelocatePanelState;
   onOpenRelocate: () => void;
-  removePanel: RemovePanelState;
-  onOpenRemove: () => void;
-  onOpenProjectEnable: () => void;
-  gitMemberSkillIds: Set<string>;
   gitSourceCapability: GitSourceCapabilityReport | null;
 }) {
   const { t, locale, tPlural } = useLocale();
-  const isGitMember = detail ? gitMemberSkillIds.has(detail.id) : false;
 
   const gitSource = useMemo(() => {
     if (!detail) return null;
@@ -1437,27 +1378,6 @@ function SkillDetailPanel({
               onOpenRelocate={onOpenRelocate}
             />
           ) : null}
-          <div className="detail-actions">
-            <button
-              type="button"
-              className="toolbar-button"
-              onClick={onOpenProjectEnable}
-            >
-              {t("library.detail.enableToProject")}
-            </button>
-            {!isGitMember ? (
-              <button
-                type="button"
-                className="toolbar-button danger-button"
-                disabled={
-                  removePanel.isOpen || removePanel.activity === "planning"
-                }
-                onClick={onOpenRemove}
-              >
-                {t("library.detail.remove")}
-              </button>
-            ) : null}
-          </div>
           <details className="detail-evidence" key={detail.id}>
             <summary>{t("library.detail.evidence")}</summary>
             <EvidenceRail
@@ -1510,6 +1430,10 @@ function SkillDetailPanel({
           <h2>{t("library.detail.empty")}</h2>
           <p>{t("library.detail.empty_body")}</p>
         </div>
+      ) : !hasSelection ? (
+        <div className="detail-state">
+          <h2>{t("library.selection.empty")}</h2>
+        </div>
       ) : (
         <LoadingPanel label={t("library.detail.loading")} />
       )}
@@ -1520,10 +1444,12 @@ function SkillDetailPanel({
 function ActivationTargetPlaceholder({
   ref,
   dialog,
+  multiple = false,
   onOpenAgentManagement,
 }: {
   ref: Ref<HTMLElement | null>;
   dialog: boolean;
+  multiple?: boolean;
   onOpenAgentManagement: () => void;
 }) {
   const { t } = useLocale();
@@ -1541,25 +1467,30 @@ function ActivationTargetPlaceholder({
     >
       <div className="panel-heading inspector-heading">
         <div>
-          <span className="eyebrow">{t("library.activation.eyebrow")}</span>
           <h2>{t("library.activation.target_groups")}</h2>
         </div>
       </div>
       <p className="inspector-intro">
-        {t("library.activation.no_selection_body")}
+        {t(
+          multiple
+            ? "library.selection.single_for_activation"
+            : "library.activation.no_selection_body",
+        )}
       </p>
-      <div className="activation-target-placeholder">
-        <span aria-hidden="true" />
-        <strong>{t("library.activation.no_selection")}</strong>
-        <small>{t("library.activation.target_groups_hint")}</small>
-        <button
-          type="button"
-          className="toolbar-button"
-          onClick={onOpenAgentManagement}
-        >
-          {t("surface.agents")}
-        </button>
-      </div>
+      {!multiple && (
+        <div className="activation-target-placeholder">
+          <span aria-hidden="true" />
+          <strong>{t("library.activation.no_selection")}</strong>
+          <small>{t("library.activation.target_groups_hint")}</small>
+          <button
+            type="button"
+            className="toolbar-button"
+            onClick={onOpenAgentManagement}
+          >
+            {t("surface.agents")}
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

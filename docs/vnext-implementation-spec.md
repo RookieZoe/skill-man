@@ -2,6 +2,10 @@
 
 > 状态：Ready for implementation
 >
+> 技能分发状态统一为“已分发／未分发／部分分发”，目标组汇总、技能库筛选和项目范围见 [CONTEXT](../CONTEXT.md#distribution-terminology)。历史 Enable/Disable、Activation 名称继续作为内部兼容标识，不作为新的状态文案。
+>
+> Library 选择交互更新：以 [ADR-0022](adr/0022-library-file-manager-selection.md) 为准。本文件历史 selection shelf、临时多选模式及其验收条目不再适用于当前 Library；底层 Enable 提交语义不变。
+>
 > Wayfinder map：[Skill Man 地图：vNext 真实数据可信、Home 首次绑定与中文体验](https://github.com/RookieZoe/skill-man/issues/32)
 >
 > 汇总票：[汇总：vNext 真实数据可信、可配置与中文体验 spec](https://github.com/RookieZoe/skill-man/issues/38)
@@ -848,10 +852,7 @@ Enable 的全部操作面都是上下文保留 sheet（§7.2），以 Agent 为�
   「1 次物理写入」，并呈现下段的目录证据与 §7.5 的占用处置；④ Result——警示「未创建 Project
   记录」，Undo 仅在结果 sheet 关闭前可用。Project 每个 operation 只选一个项目文件夹，但可选多个
   Agent 与 Skill。
-- **批量经 selection shelf 发起**：Library Toolbar 的 `Select` 进入临时多选模式，初始无勾选；
-  选择至少一个 Managed Skill 后，底部 selection shelf（fixed action bar）提供 `Enable Globally…`
-  与 `Enable to Project…`。退出清空 draft，选择不跨操作记忆。Global 与 Project 不混批
-  （§2.1 不变量 17），永不出现在同一 plan。
+- **Library 文件管理器式选择**：普通点击单选，Command/Ctrl 增减选择，Shift 按展开列表的显示顺序选连续区间。多选仅显示轻量堆叠摘要；不再提供 selection shelf 或批量启停入口。单选的全局与项目级操作保持独立（[ADR-0022](adr/0022-library-file-manager-selection.md)）。
 
 项目目录 Preview 同时显示 configured relative path、完整 hop evidence 与 resolved container。
 项目内有意 symlink（例如 `.claude/skills → ../.agents/skills`）可用；每个 hop 与最终容器必须位于

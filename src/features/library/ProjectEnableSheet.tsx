@@ -501,15 +501,14 @@ function FolderStep({
         </section>
       )}
 
-      <div className="folder-input-section">
+      <div className="import-source-field folder-input-section">
         <label htmlFor="project-folder-input">
           {t("enable.project.folderLabel")}
         </label>
-        <div className="folder-input-row">
+        <div className="import-directory-picker">
           <input
             id="project-folder-input"
             type="text"
-            className="text-input"
             placeholder={t("enable.project.folderPlaceholder")}
             value={folder}
             onChange={(e) => onFolderChange(e.currentTarget.value)}

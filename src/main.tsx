@@ -14,11 +14,6 @@ const showLayoutMatrixFrame =
 const root = createRoot(document.getElementById("root")!);
 
 async function renderApplication() {
-  if (import.meta.env.DEV && params.get("fixture") === "batch-disable") {
-    const { BatchDisablePreview } = await import("./dev/BatchDisablePreview");
-    root.render(<BatchDisablePreview />);
-    return;
-  }
   if (
     import.meta.env.DEV &&
     params.has("fixture") &&

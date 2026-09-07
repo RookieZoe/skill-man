@@ -40,6 +40,8 @@ Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
 
 ## Use the glossary's vocabulary
 
+技能分发状态以 `CONTEXT.md` 的 Distribution terminology 为准：已分发、未分发、部分分发。审查代码、国际化与文档时同时检查状态文案；保留 Core 的兼容标识，不能把分发记录写成 Agent 已加载或执行技能的证明。
+
 When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).

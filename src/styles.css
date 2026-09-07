@@ -139,55 +139,6 @@
   opacity: 0.45;
   cursor: default;
 }
-.batch-disable-sheet {
-  max-height: min(680px, 100%);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 0;
-  overflow: hidden;
-}
-.batch-disable-heading {
-  flex: none;
-  padding: var(--space-5);
-  border-bottom: 1px solid var(--divider);
-}
-.batch-disable-heading h2 {
-  margin: 0;
-  font-size: 20px;
-}
-.batch-disable-body {
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-5);
-}
-.batch-disable-body p {
-  line-height: 1.6;
-}
-.batch-disable-body ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.batch-disable-body li {
-  display: grid;
-  gap: 6px;
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--divider);
-}
-.batch-disable-body code {
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.batch-disable-body [role="alert"] {
-  color: var(--danger);
-}
-.batch-disable-sheet > footer {
-  flex: none;
-  margin: 0;
-  padding: var(--space-4);
-}
 @media (max-width: 600px) {
   .app-background > .repository-management {
     grid-template-columns: minmax(0, 1fr);
@@ -242,18 +193,6 @@
   background: var(--broken);
   color: white;
   border-color: var(--broken);
-}
-
-.skill-select-checkbox {
-  margin: 2px 0 0;
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.skill-row--selected {
-  background-color: var(--accent-soft, rgba(59, 130, 246, 0.08));
 }
 
 * {
@@ -833,39 +772,64 @@ button:active:not(:disabled) {
   font-size: 13px;
 }
 
-/* Selection shelf (spec §7.4, fixed action bar at bottom) */
-.selection-shelf {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4, 16px);
-  padding: var(--space-3, 12px) var(--space-6, 24px);
-  background: var(--surface-raised, #fff);
-  border-top: 1px solid var(--divider, #d9d5cc);
-  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
-  z-index: 50;
+.skill-selection-detail {
+  display: grid;
+  place-items: center;
 }
 
-.selection-shelf-info {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2, 8px);
+.skill-selection-stack {
+  position: relative;
+  width: min(100%, 440px);
+  margin: 24px 0;
+  padding-bottom: 24px;
+  isolation: isolate;
 }
 
-.selection-shelf-count {
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--text, #1c1917);
+.skill-stack-front,
+.skill-stack-back {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: 0 4px 16px oklch(20% 0.02 250 / 0.08);
 }
 
-.selection-shelf-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2, 8px);
+.skill-stack-back {
+  position: absolute;
+  inset: 12px 10px 12px;
+  z-index: -1;
+  background: var(--surface-muted);
+}
+
+.skill-stack-back--second {
+  inset: 24px 20px 0;
+  z-index: -2;
+}
+
+.skill-stack-front {
+  padding: var(--space-6);
+  min-height: 220px;
+  overflow-wrap: anywhere;
+}
+
+.skill-stack-front h2 {
+  margin: var(--space-5) 0 var(--space-3);
+  font-size: 22px;
+}
+
+.skill-stack-front .count-badge {
+  display: inline-flex;
+  width: auto;
+  padding: 4px 10px;
+}
+
+.skill-stack-front p {
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
 }
 
 .library-desk {
@@ -1303,8 +1267,9 @@ button:active:not(:disabled) {
     0 1px 2px oklch(35% 0.05 250 / 0.08);
 }
 
-.skill-row--selectable {
-  grid-template-columns: 14px 9px minmax(0, 1fr) auto;
+.skill-row {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .library-heading-actions {
@@ -1784,6 +1749,11 @@ button:active:not(:disabled) {
   opacity: 0.56;
 }
 
+/* Selection refresh locks stale actions without flashing the stable controls. */
+.agent-inspector[aria-busy="true"] .switch-control input:disabled + span {
+  opacity: 1;
+}
+
 .switch-control--interactive input:not(:disabled) {
   cursor: pointer;
 }
@@ -1924,16 +1894,6 @@ button:active:not(:disabled) {
   box-shadow:
     0 24px 70px oklch(20% 0.02 250 / 0.26),
     0 2px 8px oklch(20% 0.02 250 / 0.14);
-}
-
-/* The bounded flex track gives the sheet a definite available height;
-   long lists must not grow the backdrop's grid track beyond the viewport. */
-.activation-sheet-backdrop.batch-disable-backdrop {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-6);
-  overflow: hidden;
 }
 
 .activation-sheet-heading {
@@ -5656,24 +5616,7 @@ details[open] > .source-group-summary::before {
   background: var(--accent);
 }
 .folder-input-section {
-  display: grid;
-  gap: var(--space-2);
-  font-size: 13px;
-  font-weight: 600;
-}
-.folder-input-row {
-  display: flex;
-  gap: var(--space-3);
-}
-.folder-input-row input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-  color: var(--text);
-  font: inherit;
+  padding: 0;
 }
 .project-folder-selection,
 .project-agent-selection,
@@ -5945,4 +5888,18 @@ details[open] > .source-group-summary::before {
 
 .source-force-acknowledgment input {
   flex: 0 0 auto;
+}
+.distribution-actions {
+  display: flex;
+  margin-inline-start: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.inspector-heading:has(.distribution-actions) {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
 }

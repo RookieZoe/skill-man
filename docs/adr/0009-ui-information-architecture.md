@@ -1,5 +1,7 @@
 # 主窗口与菜单栏的信息架构
 
+> Library 选择交互由 [ADR-0022](0022-library-file-manager-selection.md) 更新，不再提供临时多选模式或批量操作栏。
+
 > **部分取代。** Library Desk 的信息架构继续有效；窗口断点、滚动归属与
 > overlay 行为由[窗口自适应布局决策](https://github.com/RookieZoe/skill-man/issues/36)
 > 取代，locale/Preferences 结论由

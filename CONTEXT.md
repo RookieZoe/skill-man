@@ -84,11 +84,25 @@
 | Untracked | Untracked | 未纳管 |
 | Enable / Disable | Enable / Disable | 启用 / 停用 |
 | Activation | Activation | 启用项 |
+| Distribution State: distributed | Distributed | 已分发 |
+| Distribution State: not_distributed | Not distributed | 未分发 |
+| Distribution State: partially_distributed | Partially distributed | 部分分发 |
 | Broken | Broken | 已失效 |
 | Modified | Modified | 已修改 |
 | Conflict | Conflict | 冲突 |
 | Remove | Remove | 移出技能库 |
 | Preferences | Preferences | 设置 |
+
+### Distribution terminology
+
+技能分发状态只使用“已分发”“未分发”“部分分发”，英文分别为 Distributed、Not distributed、Partially distributed。旧的“已启用”“未启用”“部分启用”“已停用”不再作为技能分发状态文案。此规则覆盖技能库筛选、目标组开关、详情证据、操作结果、国际化和文档。
+
+- 单个 Skill 在指定全局 Target 的 `desired=true` 对应“已分发”，`false` 对应“未分发”。
+- 多选按同一 Target 汇总：全部为真是“已分发”，全部为假是“未分发”，有真有假是“部分分发”。仅“已分发”打开开关；空选择不代表“部分分发”。
+- 技能库“已分发”筛选表示至少一个全局 Target 有分发记录，“未分发”表示没有全局分发记录；它不是所有目标均已分发的判定。
+- 分发记录与链接健康分别展示。“已分发”不保证文件存在，也不保证 Agent 已加载、执行或接受该 Skill。Agent 开关、应用偏好和功能可用性不使用这套分发状态。
+- 项目级分发只产生本次操作结果，不保存持续分发状态，不提供项目级撤回、健康检查或自动管理。
+- `Enable/Disable`、`Activation`、`desired`、`enabledAgentCount` 及筛选值 `enabled/disabled` 是现有 Core、DTO、数据库和命令兼容标识。Enable 表示分发，Disable 表示撤回全局分发；保留这些标识不意味着 UI 继续使用旧状态文案。前端显示状态使用 `DistributionState`。
 
 ### Content ownership
 

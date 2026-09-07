@@ -172,7 +172,7 @@ describe("BrokenDisableSheet", () => {
     // Step 3 (Result)
     await waitFor(() => {
       expect(
-        screen.getByText("Broken activations disabled"),
+        screen.getByText("Distribution withdrawn for broken skills"),
       ).toBeInTheDocument();
       expect(
         screen.getByText(

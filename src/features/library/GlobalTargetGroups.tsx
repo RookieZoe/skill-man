@@ -1,5 +1,11 @@
 import { useBackgroundOperations } from "../../ui/BackgroundOperations";
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 import type {
@@ -13,6 +19,10 @@ import { LockIcon } from "../../ui/icons";
 import { errorMessageKey, errorMessageParams } from "../locale/messages";
 import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { GlobalEnableSheet } from "./GlobalEnableSheet";
+import {
+  distributionState,
+  type DistributionState,
+} from "./distribution-state";
 
 /**
  * Agent Inspector Target group cards (spec §7.4): one card per canonical
@@ -25,6 +35,8 @@ export function GlobalTargetGroupsPanel({
   ref,
   dialog,
   skillId,
+  skills,
+  actions,
   client,
   onOpenAgentManagement,
   onOpenAdopt,
@@ -36,6 +48,8 @@ export function GlobalTargetGroupsPanel({
   ref: React.Ref<HTMLElement | null>;
   dialog: boolean;
   skillId: string;
+  skills?: { id: string; name: string }[];
+  actions?: React.ReactNode;
   client: CatalogClient;
   onOpenAgentManagement: () => void;
   onOpenAdopt?: (cell: EnableCell) => void;
@@ -55,6 +69,48 @@ export function GlobalTargetGroupsPanel({
   const [lastGroupId, setLastGroupId] = useState<string | null>(null);
   const [sheetInitial, setSheetInitial] = useState<string[] | null>(null);
   const [sheetOpener, setSheetOpener] = useState<HTMLElement | null>(null);
+  const [batchSnapshots, setBatchSnapshots] = useState<
+    GlobalTargetGroupSnapshot[] | null
+  >(null);
+  const isBatch = !!skills && skills.length > 1;
+  const selectionKey = JSON.stringify(
+    skills?.map((skill) => skill.id) ?? [skillId],
+  );
+  const currentSelection = useRef(selectionKey);
+  const [snapshotSelection, setSnapshotSelection] = useState<string | null>(
+    null,
+  );
+  const [resultSelection, setResultSelection] = useState<string | null>(null);
+  const selectionPending = snapshotSelection !== selectionKey;
+  const [previousSelection, setPreviousSelection] = useState(selectionKey);
+  if (previousSelection !== selectionKey) {
+    setPreviousSelection(selectionKey);
+    setSheetInitial(null);
+    setSheetOpener(null);
+    setError(null);
+  }
+  useLayoutEffect(() => {
+    currentSelection.current = selectionKey;
+    return () => {
+      currentSelection.current = "";
+    };
+  }, [selectionKey]);
+
+  async function readSelection() {
+    const ids = JSON.parse(selectionKey) as string[];
+    return Promise.all(ids.map((id) => client.listTargetGroups(id)));
+  }
+
+  const acceptSnapshots = useCallback(
+    (next: GlobalTargetGroupSnapshot[]) => {
+      if (currentSelection.current !== selectionKey) return;
+      setSnapshotSelection(selectionKey);
+      setSnapshot(next[0] ?? null);
+      setBatchSnapshots(next);
+      setError(null);
+    },
+    [selectionKey],
+  );
 
   useEffect(() => {
     onOverlayChange?.(sheetInitial !== null);
@@ -63,24 +119,24 @@ export function GlobalTargetGroupsPanel({
 
   async function load() {
     try {
-      const next = await client.listTargetGroups(skillId);
-      setSnapshot(next);
-      setError(null);
+      const next = await readSelection();
+      acceptSnapshots(next);
       return true;
     } catch (cause) {
-      setError(targetGroupErrorMessage(cause, t));
+      if (currentSelection.current === selectionKey) {
+        setError(targetGroupErrorMessage(cause, t));
+      }
       return false;
     }
   }
 
   useEffect(() => {
     let current = true;
-    client
-      .listTargetGroups(skillId)
+    const ids = JSON.parse(selectionKey) as string[];
+    Promise.all(ids.map((id) => client.listTargetGroups(id)))
       .then((next) => {
         if (!current) return;
-        setSnapshot(next);
-        setError(null);
+        acceptSnapshots(next);
       })
       .catch((cause) => {
         if (current) setError(targetGroupErrorMessage(cause, t));
@@ -88,17 +144,16 @@ export function GlobalTargetGroupsPanel({
     return () => {
       current = false;
     };
-  }, [client, skillId, t]);
+  }, [client, selectionKey, t, acceptSnapshots]);
 
   useEffect(() => {
     if (refreshToken === undefined || refreshToken === 0) return;
     let current = true;
-    client
-      .listTargetGroups(skillId)
+    const ids = JSON.parse(selectionKey) as string[];
+    Promise.all(ids.map((id) => client.listTargetGroups(id)))
       .then((next) => {
         if (!current) return;
-        setSnapshot(next);
-        setError(null);
+        acceptSnapshots(next);
       })
       .catch((cause) => {
         if (current) setError(targetGroupErrorMessage(cause, t));
@@ -106,7 +161,7 @@ export function GlobalTargetGroupsPanel({
     return () => {
       current = false;
     };
-  }, [client, refreshToken, skillId, t]);
+  }, [client, refreshToken, selectionKey, t, acceptSnapshots]);
 
   useEffect(() => {
     let current = true;
@@ -120,12 +175,11 @@ export function GlobalTargetGroupsPanel({
         ) {
           return;
         }
-        void client
-          .listTargetGroups(skillId)
+        const ids = JSON.parse(selectionKey) as string[];
+        void Promise.all(ids.map((id) => client.listTargetGroups(id)))
           .then((next) => {
             if (!current) return;
-            setSnapshot(next);
-            setError(null);
+            acceptSnapshots(next);
           })
           .catch((cause) => {
             if (current) setError(targetGroupErrorMessage(cause, t));
@@ -140,9 +194,83 @@ export function GlobalTargetGroupsPanel({
       current = false;
       unlisten?.();
     };
-  }, [client, skillId, t]);
+  }, [client, selectionKey, t, acceptSnapshots]);
+
+  async function onBatchToggle(
+    group: GlobalTargetGroup,
+    allDistributed: boolean,
+  ) {
+    if (!skills || busyGroupId || selectionPending) return;
+    if (!allDistributed) {
+      openEnableSheet([group.targetRootId]);
+      return;
+    }
+    // Retain the existing batch-disable lifecycle: replan each cell after
+    // the preceding write, stop on failure, and report partial completion.
+    setBusyGroupId(group.targetRootId);
+    const notice = notifications.begin({
+      title: t("operation.activation.disable_running"),
+      detail: group.consumers.map((consumer) => consumer.agentName).join(", "),
+    });
+    let completed = 0;
+    let failure: string | null = null;
+    try {
+      for (const skill of skills) {
+        const plan = await client.planGlobalLifecycle(
+          skill.id,
+          group.targetRootId,
+          "disable",
+        );
+        const cell = plan.cells[0];
+        if (
+          plan.cells.length !== 1 ||
+          cell.skillId !== skill.id ||
+          cell.targetRootId !== group.targetRootId ||
+          cell.action !== "disable" ||
+          !["ready", "no_op"].includes(cell.eligibility)
+        ) {
+          throw { code: "plan_stale" };
+        }
+        const result = await client.applyGlobalEnable(plan.planToken);
+        const ok =
+          result.cells.length === 1 &&
+          result.cells[0].skillId === skill.id &&
+          result.cells[0].targetRootId === group.targetRootId &&
+          ["succeeded", "no_op"].includes(result.cells[0].outcome);
+        if (ok) completed++;
+        await client.finalizeGlobalEnable(result.operationId);
+        if (!ok) throw { code: "internal" };
+      }
+    } catch (cause) {
+      failure = targetGroupErrorMessage(cause, t);
+    }
+    const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
+      ([loaded]) => loaded,
+      () => false,
+    );
+    notifications.finish(notice, {
+      title: t(
+        completed === skills.length && !failure
+          ? "operation.activation.disable_done"
+          : "operation.background.partial",
+      ),
+      detail: [
+        t("library.distribution.batch_result", {
+          completed,
+          total: skills.length,
+        }),
+        failure,
+        !refreshed ? t("operation.background.refresh_failed") : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      state: completed === skills.length && !failure ? "completed" : "partial",
+    });
+    setBusyGroupId(null);
+  }
 
   async function onToggle(group: GlobalTargetGroup) {
+    if (selectionPending || busyGroupId) return;
     if (group.action !== "none") {
       onOpenAgentManagement();
       return;
@@ -174,6 +302,7 @@ export function GlobalTargetGroupsPanel({
       }
       const applied = await client.applyGlobalEnable(plan.planToken);
       setLastResult(applied);
+      setResultSelection(selectionKey);
       setLastGroupId(group.targetRootId);
       const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
         ([loaded]) => loaded,
@@ -212,6 +341,7 @@ export function GlobalTargetGroupsPanel({
   }
 
   async function onRepair(group: GlobalTargetGroup) {
+    if (selectionPending || busyGroupId) return;
     setBusyGroupId(group.targetRootId);
     setError(null);
     const noticeId = notifications.begin({
@@ -229,6 +359,7 @@ export function GlobalTargetGroupsPanel({
       );
       const applied = await client.applyGlobalEnable(plan.planToken);
       setLastResult(applied);
+      setResultSelection(selectionKey);
       setLastGroupId(group.targetRootId);
       const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
         ([loaded]) => loaded,
@@ -308,6 +439,7 @@ export function GlobalTargetGroupsPanel({
   }
 
   function openEnableSheet(initial: string[]) {
+    if (currentSelection.current !== selectionKey) return;
     setSheetOpener(
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -321,6 +453,7 @@ export function GlobalTargetGroupsPanel({
       ref={ref}
       id={dialog ? "agent-inspector-dialog" : undefined}
       className="agent-inspector"
+      aria-busy={selectionPending}
       aria-label={t("library.activation.target_groups")}
       role={dialog ? "dialog" : undefined}
       aria-modal={dialog ? true : undefined}
@@ -328,13 +461,10 @@ export function GlobalTargetGroupsPanel({
     >
       <div className="panel-heading inspector-heading">
         <div>
-          <span className="eyebrow">{t("library.activation.eyebrow")}</span>
           <h2>{t("library.activation.target_groups")}</h2>
         </div>
+        {actions}
       </div>
-      <p className="inspector-intro">
-        {t("library.activation.target_groups_body")}
-      </p>
 
       {error !== null && (
         <p className="inspector-error" role="alert">
@@ -357,22 +487,46 @@ export function GlobalTargetGroupsPanel({
         </div>
       ) : (
         <ul className="target-group-cards">
-          {snapshot.groups.map((group) => (
-            <TargetGroupCard
-              key={group.targetRootId}
-              group={group}
-              skillHealth={snapshot.skillHealth}
-              busy={busyGroupId === group.targetRootId}
-              onToggle={() => void onToggle(group)}
-              onRepair={() => void onRepair(group)}
-              onOpenAgentManagement={onOpenAgentManagement}
-              onOpenBrokenDisable={onOpenBrokenDisable}
-            />
-          ))}
+          {snapshot.groups.map((group) => {
+            const selectedGroups =
+              batchSnapshots?.map((item) =>
+                item.groups.find(
+                  (candidate) => candidate.targetRootId === group.targetRootId,
+                ),
+              ) ?? [];
+            const state = distributionState(
+              selectedGroups.map((item) => item?.desired ?? false),
+            );
+            const allDistributed = state === "distributed";
+            const unavailable = selectedGroups.some(
+              (item) => !item || item.action !== "none",
+            );
+            return (
+              <TargetGroupCard
+                key={group.targetRootId}
+                group={isBatch ? { ...group, desired: allDistributed } : group}
+                skillHealth={snapshot.skillHealth}
+                batchState={isBatch ? state : undefined}
+                busy={
+                  selectionPending ||
+                  busyGroupId !== null ||
+                  (isBatch && unavailable)
+                }
+                onToggle={() =>
+                  void (isBatch
+                    ? onBatchToggle(group, allDistributed)
+                    : onToggle(group))
+                }
+                onRepair={() => void onRepair(group)}
+                onOpenAgentManagement={onOpenAgentManagement}
+                onOpenBrokenDisable={onOpenBrokenDisable}
+              />
+            );
+          })}
         </ul>
       )}
 
-      {lastResult !== null && (
+      {lastResult !== null && resultSelection === selectionKey && (
         <div className="inspector-result">
           <button
             type="button"
@@ -395,6 +549,7 @@ export function GlobalTargetGroupsPanel({
             <GlobalEnableSheet
               client={client}
               skillId={skillId}
+              skills={skills}
               skillName={snapshot?.skillName ?? skillId}
               initialGroupIds={sheetInitial}
               opener={sheetOpener}
@@ -449,6 +604,7 @@ function TargetGroupCard({
   onRepair,
   onOpenAgentManagement,
   onOpenBrokenDisable,
+  batchState,
 }: {
   group: GlobalTargetGroup;
   skillHealth: GlobalTargetGroupSnapshot["skillHealth"];
@@ -457,6 +613,7 @@ function TargetGroupCard({
   onRepair: () => void;
   onOpenAgentManagement: () => void;
   onOpenBrokenDisable?: (trigger: HTMLButtonElement) => void;
+  batchState?: DistributionState;
 }) {
   const { t } = useLocale();
   const consumersLabel = group.consumers
@@ -505,7 +662,7 @@ function TargetGroupCard({
             {t("inspector.openAgentManagement")}
           </button>
         </div>
-      ) : skillHealth === "broken" ? (
+      ) : !batchState && skillHealth === "broken" ? (
         <div className="target-group-health-blocked">
           <strong>{t("inspector.brokenCardTitle")}</strong>
           <p>{t("inspector.brokenCardBody")}</p>
@@ -520,7 +677,7 @@ function TargetGroupCard({
             </button>
           ) : null}
         </div>
-      ) : skillHealth === "source_snapshot_mismatch" ? (
+      ) : !batchState && skillHealth === "source_snapshot_mismatch" ? (
         <div className="target-group-health-blocked">
           <strong>{t("inspector.mismatchCardTitle")}</strong>
           <p>{t("inspector.mismatchCardBody")}</p>
@@ -549,13 +706,15 @@ function TargetGroupCard({
             <span aria-hidden="true" />
           </label>
           <span className="target-group-state">
-            {group.desired
-              ? t("library.activation.state.enabled", {
-                  state: observedLabel,
-                })
-              : t("library.activation.state.disabled")}
+            {batchState
+              ? t(`library.distribution.${batchState}`)
+              : group.desired
+                ? t("library.activation.state.enabled", {
+                    state: observedLabel,
+                  })
+                : t("library.activation.state.disabled")}
           </span>
-          {group.desired && observedDisplayed(group) && (
+          {!batchState && group.desired && observedDisplayed(group) && (
             <button
               type="button"
               className="toolbar-button"
