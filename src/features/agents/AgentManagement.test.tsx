@@ -97,7 +97,7 @@ test("editing an agent explains a closed write gate", async () => {
   const dialog = screen.getByRole("dialog", { name: "Agent Configuration" });
   await user.click(within(dialog).getByRole("button", { name: "Review" }));
   expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-    "Writes are locked. Check the Home status before trying again.",
+    "Library changes are disabled. Check the Home status first.",
   );
 });
 
@@ -119,8 +119,10 @@ test("fresh Home renders empty configured state and all zero-write presets", asy
   ).toBeInTheDocument();
   expect(within(navigation).getByText("Preset templates")).toBeInTheDocument();
   expect(
-    screen.getByText("Detection never writes the Catalog or creates folders."),
-  ).toBeInTheDocument();
+    screen.queryByText(
+      "Detection never writes the Catalog or creates folders.",
+    ),
+  ).not.toBeInTheDocument();
   expect(screen.queryByRole("switch")).not.toBeInTheDocument();
 
   await userEvent.click(within(navigation).getByText("Preset templates"));
@@ -193,7 +195,9 @@ test("single configuration sheet edits multiple roots with one radio target", as
   );
 
   await user.click(within(dialog).getByRole("button", { name: "Review" }));
-  expect(await within(dialog).findByText("Core review")).toBeInTheDocument();
+  expect(
+    await within(dialog).findByText("Configuration check"),
+  ).toBeInTheDocument();
   await user.click(
     within(dialog).getByRole("button", { name: "Create configuration" }),
   );

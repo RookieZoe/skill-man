@@ -155,7 +155,7 @@ test("renders the complete source group without per-member Include controls", ()
   expect(screen.getByText("Root Skill")).toBeInTheDocument();
   expect(screen.getByText("Nested Skill")).toBeInTheDocument();
   expect(screen.getAllByText("Target tree")).toHaveLength(2);
-  expect(screen.getByText("External Ownership Claims")).toBeInTheDocument();
+  expect(screen.getByText("Existing installation records")).toBeInTheDocument();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: /include/i }),
@@ -250,49 +250,65 @@ test("allows complete installation with partial external ownership claims", asyn
   expect(onConfirm).toHaveBeenCalledOnce();
 });
 
-test("offers only whole-source Undo in the completed result window", async () => {
-  const user = userEvent.setup();
-  const onUndo = vi.fn();
-  render(
-    <SourceGroupPreviewFlow
-      sourceType="github"
-      sourceUrl="https://github.com/acme/repository"
-      policyMode="branch"
-      policyValue="main"
-      outcome={preview}
-      promotionDraft={null}
-      promotionOutcome={null}
-      updateDraft={null}
-      result={{
-        operationId: "source-transition-1",
-        remoteId: "remote-1",
-        releaseId: "source-release-1",
-        resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
-        memberCount: 2,
-        snapshotVersion: 9,
-        undoAvailable: true,
-      }}
-      error={null}
-      activity="idle"
-      onSourceTypeChange={vi.fn()}
-      onSourceUrlChange={vi.fn()}
-      onSourceGroupPolicyChange={vi.fn()}
-      onFetch={vi.fn()}
-      onConfirm={vi.fn()}
-      onConfirmPromotion={vi.fn()}
-      onUndo={onUndo}
-      onClose={vi.fn()}
-    />,
-  );
+test.each([true, false])(
+  "result shows errors and only promises Undo when available: %s",
+  async (undoAvailable) => {
+    const user = userEvent.setup();
+    const onUndo = vi.fn();
+    render(
+      <SourceGroupPreviewFlow
+        sourceType="github"
+        sourceUrl="https://github.com/acme/repository"
+        policyMode="branch"
+        policyValue="main"
+        outcome={preview}
+        promotionDraft={null}
+        promotionOutcome={null}
+        updateDraft={null}
+        result={{
+          operationId: "source-transition-1",
+          remoteId: "remote-1",
+          releaseId: "source-release-1",
+          resolvedCommit: "0123456789abcdef0123456789abcdef01234567",
+          memberCount: 2,
+          snapshotVersion: 9,
+          undoAvailable,
+        }}
+        error="Could not finalize the operation"
+        activity="idle"
+        onSourceTypeChange={vi.fn()}
+        onSourceUrlChange={vi.fn()}
+        onSourceGroupPolicyChange={vi.fn()}
+        onFetch={vi.fn()}
+        onConfirm={vi.fn()}
+        onConfirmPromotion={vi.fn()}
+        onUndo={onUndo}
+        onClose={vi.fn()}
+      />,
+    );
 
-  expect(
-    screen.getByText("Whole Source Release is managed"),
-  ).toBeInTheDocument();
-  expect(screen.getByText("source-release-1")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Source Undo" }));
-  expect(onUndo).toHaveBeenCalledOnce();
-  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-});
+    expect(
+      screen.getByText("Whole Source Release is managed"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("source-release-1")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not finalize the operation",
+    );
+    if (undoAvailable) {
+      expect(screen.getByText(/You can undo this source change/)).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "Source Undo" }));
+      expect(onUndo).toHaveBeenCalledOnce();
+    } else {
+      expect(
+        screen.queryByText(/You can undo this source change/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Source Undo" }),
+      ).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  },
+);
 
 test("Source Update preview exposes confirm and keeps the result undoable", async () => {
   const user = userEvent.setup();

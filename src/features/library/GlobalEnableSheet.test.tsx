@@ -54,7 +54,7 @@ test("three-step flow: select groups, preview matrix, result with undo", async (
   await user.click(
     within(dialog).getByRole("button", { name: "Enable in this Target" }),
   );
-  const result = await within(dialog).findByText(/1 of 1 cells succeeded/);
+  const result = await within(dialog).findByText(/1 \/ 1 actions completed/);
   expect(result).toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Undo this operation" }),
@@ -112,7 +112,7 @@ test("batch flow: multiple skills, batch dialog label, preview cells for all ski
 
   // Result
   expect(
-    await within(dialog).findByText(/cells succeeded/),
+    await within(dialog).findByText(/actions completed/),
   ).toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Undo this operation" }),
@@ -279,5 +279,5 @@ test("Global Enable refuses dismissal while Apply is in flight", async () => {
     cells: [],
     snapshotVersion: 1,
   });
-  await within(dialog).findByText("0 of 0 cells succeeded");
+  await within(dialog).findByText("0 / 0 actions completed");
 });

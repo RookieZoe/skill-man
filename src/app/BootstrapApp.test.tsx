@@ -215,7 +215,7 @@ test("abandoned snapshot renders the wizard with the abandoned notice", async ()
 
   const route = await screen.findByRole("status");
   expect(route).toHaveTextContent("Previous Home Abandoned");
-  expect(route).toHaveTextContent("never rebound");
+  expect(route).toHaveTextContent("Choose another location to start over");
   // The abandoned site is never offered as a candidate: Default is
   // disabled, Choose… starts a brand-new binding.
   expect(screen.getByRole("button", { name: /Use Default/ })).toBeDisabled();

@@ -14,7 +14,16 @@ import {
   type MatrixScenario,
 } from "../dev/layout-matrix/scenario-client";
 import { createFixtureCatalogClient } from "../test-fixtures/catalog";
+import { createGitPreviewClient } from "../test-fixtures/git-preview";
 import { App } from "./App";
+import appLogo from "../../src-tauri/icons/icon.svg";
+
+test("the toolbar reuses the packaged main app logo", async () => {
+  await renderWideLibrary();
+  const mark = toolbar().querySelector("img.product-mark");
+  expect(mark).toHaveAttribute("src", appLogo);
+  expect(mark).toHaveAttribute("alt", "");
+});
 
 function setViewportWidth(width: number) {
   Object.defineProperty(window, "innerWidth", {
@@ -67,6 +76,43 @@ async function renderWideLibrary() {
 
 afterEach(() => {
   setViewportWidth(1280);
+});
+
+test("Git progress remains in a pinned header while confirmation is pending", async () => {
+  const client = createGitPreviewClient(true);
+  client.confirmSourceTransition = () => new Promise(() => {});
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await userEvent.click(screen.getByRole("button", { name: "Import" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Install Git Skills" }),
+  );
+  await userEvent.type(
+    screen.getByRole("textbox", { name: "Repository URL" }),
+    "tw93/Waza",
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Fetch latest preview" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("checkbox", { name: /Remove the listed Skills/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Force remote replacement" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  const header = dialog.querySelector<HTMLElement>(".sheet-progress-header")!;
+  expect(getComputedStyle(header).position).toBe("sticky");
+  expect(getComputedStyle(header).top).toBe("0px");
+  expect(header).toContainElement(
+    within(dialog).getByRole("list", { name: "Import progress" }),
+  );
+  expect(header).toContainElement(within(dialog).getByRole("progressbar"));
+  expect(within(dialog).getAllByRole("progressbar")).toHaveLength(1);
+  expect(
+    screen.queryByRole("region", { name: "Current activity" }),
+  ).not.toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
 });
 
 // -- Viewport breakpoints (759/760, 1059/1060) --
@@ -441,14 +487,12 @@ test("empty Library renders real accessible empty DOM instead of a loading state
     await screen.findByRole("heading", { name: "Empty Library" }),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(
-      "Import or Adopt a Skill to begin; this is not a loading state.",
-    ),
+    screen.getByText("Import or manage a Skill to get started."),
   ).toBeInTheDocument();
   expect(screen.queryByText("Loading Skill detail")).not.toBeInTheDocument();
   expect(screen.getByText("No Skill selected")).toBeInTheDocument();
   expect(
-    screen.getByText("Activation controls stay unavailable."),
+    screen.getByText("Select a Skill to choose where to enable it."),
   ).toBeInTheDocument();
 });
 
@@ -464,7 +508,7 @@ test("Catalog error renders a real error pane with an accessible alert", async (
   ).toBeInTheDocument();
   expect(
     screen.getByText(
-      "The Catalog error is preserved above; this pane is unavailable, not loading.",
+      "Could not load Skill details. Check the error above and retry.",
     ),
   ).toBeInTheDocument();
   expect(screen.queryByText("Loading Skill detail")).not.toBeInTheDocument();

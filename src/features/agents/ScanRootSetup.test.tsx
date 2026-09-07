@@ -93,7 +93,7 @@ test("partial failure preserves saved configurations and retry does not duplicat
     await screen.findByRole("button", { name: "Confirm and save" }),
   );
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Writes are locked",
+    "Library changes are disabled",
   );
   expect(
     (await client.getAgentManagementSnapshot()).configurations,

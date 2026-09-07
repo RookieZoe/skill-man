@@ -665,7 +665,7 @@ function AgentNavigation({
       </div>
       <button
         type="button"
-        className="primary-button agents-new-button"
+        className="toolbar-button primary-button agents-new-button"
         onClick={onNewCustom}
       >
         {t("agents.nav.new_custom_agent")}
@@ -708,11 +708,6 @@ function AgentList({
     <main className="agents-list-pane" aria-label={t("agents.list.label")}>
       <header className="agents-list-heading">
         <h2>{t(`agents.list.${section}_title`)}</h2>
-        <details className="agents-list-help">
-          <summary>{t("bootstrap.technical_details")}</summary>
-          <p>{t(`agents.list.${section}_body`)}</p>
-          <p>{t("agents.nav.zeroWriteHint")}</p>
-        </details>
         {section === "detected" ? (
           <button
             type="button"
@@ -915,7 +910,6 @@ function AgentDetail({
         <header className="agent-detail-heading">
           <span className="eyebrow">{t("agents.detail.preset_eyebrow")}</span>
           <h2>{preset.name}</h2>
-          <p>{t("agents.detail.preset_body")}</p>
         </header>
         <CompatibilityEvidence compatibility={preset.compatibility} />
         <RootEvidenceList
@@ -959,7 +953,6 @@ function AgentDetail({
       <header className="agent-detail-heading">
         <span className="eyebrow">{t("agents.detail.configured_eyebrow")}</span>
         <h2>{configuration.name}</h2>
-        <p>{t("agents.detail.configured_body")}</p>
       </header>
       <CompatibilityEvidence compatibility={configuration.compatibility} />
       <RootEvidenceList roots={configuration.roots} />
@@ -1116,6 +1109,7 @@ function AgentConfigurationSheet({
           <p>{t(`agents.sheet.${state.mode}_body`)}</p>
         </div>
 
+        <OperationNotice busy={busy} />
         <div className="agent-sheet-body">
           {!deleteMode ? (
             <>
@@ -1285,7 +1279,6 @@ function AgentConfigurationSheet({
           ) : null}
         </div>
 
-        <OperationNotice busy={busy} />
         <div className="activation-sheet-actions">
           <button
             ref={

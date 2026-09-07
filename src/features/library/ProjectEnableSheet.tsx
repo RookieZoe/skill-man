@@ -278,6 +278,7 @@ export function ProjectEnableSheet({
           ))}
         </ol>
 
+        <OperationNotice busy={busy} />
         <div className="enable-sheet-body">
           {step === "folder" && (
             <FolderStep
@@ -363,7 +364,6 @@ export function ProjectEnableSheet({
             </p>
           )}
         </div>
-        <OperationNotice busy={busy} />
         <div className="import-actions enable-sheet-actions">
           {step !== "result" && (
             <button

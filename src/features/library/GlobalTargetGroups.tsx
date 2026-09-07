@@ -66,8 +66,10 @@ export function GlobalTargetGroupsPanel({
       const next = await client.listTargetGroups(skillId);
       setSnapshot(next);
       setError(null);
+      return true;
     } catch (cause) {
       setError(targetGroupErrorMessage(cause, t));
+      return false;
     }
   }
 
@@ -147,15 +149,22 @@ export function GlobalTargetGroupsPanel({
     }
     setBusyGroupId(group.targetRootId);
     setError(null);
+    const action = group.desired ? "disable" : "enable";
+    const context = {
+      skill: snapshot?.skillName ?? skillId,
+      target:
+        group.consumers.map((agent) => agent.agentName).join(", ") ||
+        group.configuredPath,
+    };
     const noticeId = notifications.begin({
-      title: t("operation.foreground.working"),
-      detail: t("operation.background.working"),
+      title: t(`operation.activation.${action}_running`),
+      detail: t("operation.activation.context", context),
     });
     try {
       const plan = await client.planGlobalLifecycle(
         skillId,
         group.targetRootId,
-        group.desired ? "disable" : "enable",
+        action,
       );
       const cell = plan.cells[0];
       if (cell.eligibility === "conflict") {
@@ -167,7 +176,7 @@ export function GlobalTargetGroupsPanel({
       setLastResult(applied);
       setLastGroupId(group.targetRootId);
       const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
-        () => true,
+        ([loaded]) => loaded,
         () => false,
       );
       const complete = applied.cells.every(
@@ -176,14 +185,19 @@ export function GlobalTargetGroupsPanel({
       notifications.finish(noticeId, {
         title: t(
           complete
-            ? "operation.background.done"
+            ? `operation.activation.${action}_done`
             : "operation.background.partial",
         ),
-        detail: t(
-          refreshed
-            ? "operation.background.next_library"
-            : "operation.background.refresh_failed",
-        ),
+        detail: [
+          t("operation.activation.context", context),
+          !refreshed
+            ? t("operation.background.refresh_failed")
+            : !complete
+              ? t("operation.activation.partial_next")
+              : action === "disable"
+                ? t("operation.activation.disable_next")
+                : t("operation.activation.enable_next"),
+        ].join(" "),
         state: complete ? "completed" : "partial",
       });
     } catch (cause) {
@@ -201,8 +215,11 @@ export function GlobalTargetGroupsPanel({
     setBusyGroupId(group.targetRootId);
     setError(null);
     const noticeId = notifications.begin({
-      title: t("operation.foreground.working"),
-      detail: t("operation.background.working"),
+      title: t("operation.activation.repair_running"),
+      detail: t("operation.activation.context", {
+        skill: snapshot?.skillName ?? skillId,
+        target: group.configuredPath,
+      }),
     });
     try {
       const plan = await client.planGlobalLifecycle(
@@ -214,7 +231,7 @@ export function GlobalTargetGroupsPanel({
       setLastResult(applied);
       setLastGroupId(group.targetRootId);
       const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
-        () => true,
+        ([loaded]) => loaded,
         () => false,
       );
       const complete = applied.cells.every(
@@ -223,12 +240,14 @@ export function GlobalTargetGroupsPanel({
       notifications.finish(noticeId, {
         title: t(
           complete
-            ? "operation.background.done"
+            ? "operation.activation.repair_done"
             : "operation.background.partial",
         ),
         detail: t(
           refreshed
-            ? "operation.background.next_library"
+            ? complete
+              ? "operation.activation.repair_next"
+              : "operation.activation.partial_next"
             : "operation.background.refresh_failed",
         ),
         state: complete ? "completed" : "partial",
@@ -250,7 +269,7 @@ export function GlobalTargetGroupsPanel({
     }
     setBusyGroupId(lastGroupId);
     const noticeId = notifications.begin({
-      title: t("operation.foreground.working"),
+      title: t("operation.activation.undo_running"),
       detail: t("operation.background.working"),
     });
     try {
@@ -258,19 +277,21 @@ export function GlobalTargetGroupsPanel({
       setLastResult(null);
       setLastGroupId(null);
       const refreshed = await Promise.all([load(), onCatalogChanged?.()]).then(
-        () => true,
+        ([loaded]) => loaded,
         () => false,
       );
       const complete = undone.cells.every((cell) => cell.undone);
       notifications.finish(noticeId, {
         title: t(
           complete
-            ? "operation.background.done"
+            ? "operation.activation.undo_done"
             : "operation.background.partial",
         ),
         detail: t(
           refreshed
-            ? "operation.background.next_library"
+            ? complete
+              ? "operation.activation.undo_next"
+              : "operation.activation.partial_next"
             : "operation.background.refresh_failed",
         ),
         state: complete ? "completed" : "partial",

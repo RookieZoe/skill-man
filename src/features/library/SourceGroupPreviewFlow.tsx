@@ -114,6 +114,7 @@ export function SourceGroupPreviewFlow({
               count: result.memberCount,
             })}
           </p>
+          {result.undoAvailable && <p>{t("library.source_group.undo_hint")}</p>}
         </div>
         {forceRequired && (
           <div className="source-ownership-note" role="status">
@@ -140,6 +141,11 @@ export function SourceGroupPreviewFlow({
             </dd>
           </div>
         </dl>
+        {error && (
+          <p className="activation-error" role="alert">
+            {error}
+          </p>
+        )}
         <div className="activation-sheet-actions">
           <button type="button" disabled={isBusy} onClick={onClose}>
             {t("library.source_group.close")}

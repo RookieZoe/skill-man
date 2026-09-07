@@ -97,7 +97,7 @@ describe("BrokenDisableSheet", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "If the same member (remote_id, skillPath) reappears in a future release, this activation will automatically recover to Healthy.",
+        "Activations recover if the same member path reappears in a later release.",
       ),
     ).toBeInTheDocument();
 
@@ -145,7 +145,7 @@ describe("BrokenDisableSheet", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Disabling will remove the broken activation for the entire shared target group and all of its consumers: Claude Code, Codex.",
+        "Disable this Skill for all of these Agents: Claude Code, Codex.",
       ),
     ).toBeInTheDocument();
 

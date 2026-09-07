@@ -578,9 +578,12 @@ function AppContent({ client }: AppProps) {
         expectedRemovedClaims,
       });
       if (runId !== sourceGroupRunId.current) return;
-      await refreshLibraryAfterSourceAction(runId);
-      if (runId !== sourceGroupRunId.current) return;
       setSourceTransitionResult(result);
+      await refreshLibraryAfterSourceAction(runId).catch(() => {
+        if (runId === sourceGroupRunId.current) {
+          setSourceGroupError(t("operation.background.refresh_failed"));
+        }
+      });
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
         setSourceGroupError(readError(reason, t));
@@ -691,11 +694,15 @@ function AppContent({ client }: AppProps) {
           expectedResolvedCommit: draft.policy.resolvedCommit,
         });
       }
-      await refreshLibraryAfterSourceAction(runId);
       if (runId !== sourceGroupRunId.current) return;
       setSourceUpdateDraft(null);
       setSourcePromotionDraft(null);
       setSourcePromotionResult(result);
+      await refreshLibraryAfterSourceAction(runId).catch(() => {
+        if (runId === sourceGroupRunId.current) {
+          setSourceGroupError(t("operation.background.refresh_failed"));
+        }
+      });
     } catch (reason) {
       if (runId === sourceGroupRunId.current) {
         setSourceGroupError(readError(reason, t));
@@ -793,8 +800,8 @@ function AppContent({ client }: AppProps) {
       await client.restoreCurrentSourceRelease(remoteId);
       refreshBackgroundCatalog();
       notifications.finish(noticeId, {
-        title: t("operation.background.done"),
-        detail: t("operation.background.next_library"),
+        title: t("sourceGroup.restoreSuccess"),
+        detail: t("operation.background.next_repositories"),
       });
     } catch (reason) {
       notifications.finish(noticeId, {
@@ -834,7 +841,7 @@ function AppContent({ client }: AppProps) {
       await client.removeGitSource(remoteId);
       refreshBackgroundCatalog();
       notifications.finish(noticeId, {
-        title: t("operation.background.done"),
+        title: t("library.source_capability.remove_done"),
         detail: t("operation.background.next_repositories"),
       });
     } catch (reason) {

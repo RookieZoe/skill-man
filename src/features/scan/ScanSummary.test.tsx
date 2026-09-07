@@ -324,7 +324,7 @@ test("incomplete report disables destructive eligibility with the Core closed re
   // Destructive move operation is shown blocked with the same closed reason
   // the Core reports; the failed Root diagnostic stays persistently visible.
   await screen.findByText(
-    "Scan incomplete: destructive operations are disabled until every configured root is covered with complete evidence.",
+    "Some directories could not be scanned. Replacement and migration are unavailable. Check the errors and rescan.",
   );
   const localRegion = await screen.findByRole("region", {
     name: "Local sources",

@@ -18,6 +18,34 @@ test("SelectionShelf renders nothing when selectedCount is 0", () => {
   expect(container.firstChild).toBeNull();
 });
 
+test("batch disable becomes available when any selected Skill is enabled", async () => {
+  const user = userEvent.setup();
+  render(<App client={createFixtureCatalogClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("button", { name: "Batch actions" }));
+  await user.click(screen.getByRole("button", { name: "Select all" }));
+  const button = screen.getByRole("button", {
+    name: "Disable globally…",
+  });
+  expect(button).toBeEnabled();
+  await user.click(button);
+  expect(
+    await screen.findByRole("dialog", { name: "Disable globally…" }),
+  ).toBeVisible();
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled(),
+  );
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  await user.click(screen.getByRole("button", { name: "Clear selection" }));
+  expect(
+    screen.queryByRole("region", { name: /skills selected/ }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("checkbox", { name: "legacy-audit" }));
+  expect(
+    screen.getByRole("button", { name: "Disable globally…" }),
+  ).toBeDisabled();
+});
+
 test("SelectionShelf renders count and triggers action callbacks when selectedCount >= 1", async () => {
   const user = userEvent.setup();
   const onEnableGlobally = vi.fn();

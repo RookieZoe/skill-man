@@ -125,7 +125,9 @@ test("Restore probe with a not-applicable reason shows the closed notice", async
   await userEvent.click(
     await screen.findByRole("button", { name: "Restore Bound Home" }),
   );
-  expect(await screen.findByText(/identity mismatch/)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/does not match the original Home/),
+  ).toBeInTheDocument();
 });
 
 test("Restore probe with an eligible result opens the Restore route", async () => {

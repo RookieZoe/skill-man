@@ -14,6 +14,18 @@ const showLayoutMatrixFrame =
 const root = createRoot(document.getElementById("root")!);
 
 async function renderApplication() {
+  if (import.meta.env.DEV && params.get("fixture") === "batch-disable") {
+    const { BatchDisablePreview } = await import("./dev/BatchDisablePreview");
+    root.render(<BatchDisablePreview />);
+    return;
+  }
+  if (
+    import.meta.env.DEV &&
+    params.has("fixture") &&
+    params.get("theme") === "dark"
+  ) {
+    (await import("./dev/preview-theme")).previewDarkTheme();
+  }
   if (showLayoutMatrix) {
     const { LayoutMatrix } = await import("./dev/layout-matrix/LayoutMatrix");
     root.render(

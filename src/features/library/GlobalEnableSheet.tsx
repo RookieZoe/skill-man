@@ -271,6 +271,7 @@ export function GlobalEnableSheet({
           ))}
         </ol>
 
+        <OperationNotice busy={busy} />
         <div className="enable-sheet-body">
           {step === "targets" && (
             <TargetGroupStep
@@ -341,7 +342,6 @@ export function GlobalEnableSheet({
             </p>
           )}
         </div>
-        <OperationNotice busy={busy} />
         <div className="import-actions enable-sheet-actions">
           {step !== "result" && (
             <button

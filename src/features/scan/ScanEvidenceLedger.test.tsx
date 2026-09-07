@@ -74,7 +74,7 @@ test("Rescan explains a closed write gate instead of reporting an internal error
   render(<ScanEvidenceLedger client={client} />);
   await user.click(await screen.findByRole("button", { name: "Rescan" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Writes are locked. Check the Home status before trying again.",
+    "Library changes are disabled. Check the Home status first.",
   );
 });
 

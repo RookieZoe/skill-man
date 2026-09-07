@@ -315,7 +315,6 @@ export function HomeBindingView({
             <li key={fact}>{t(recoveryFactMessageKeys[fact])}</li>
           ))}
         </ul>
-        <p>{t("bootstrap.recovery.confirmation_next")}</p>
         <p>{t("bootstrap.recovery.history_warning")}</p>
         <div className="bootstrap-actions">
           <button

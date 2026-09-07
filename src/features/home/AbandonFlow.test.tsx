@@ -91,7 +91,7 @@ test("a CAS race failure keeps the dialog open with the typed error", async () =
     screen.getByRole("button", { name: "Abandon Home and Start New" }),
   );
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent(/locator changed/);
+  expect(alert).toHaveTextContent(/Home settings changed/);
   expect(onSnapshot).not.toHaveBeenCalled();
   expect(onClose).not.toHaveBeenCalled();
 

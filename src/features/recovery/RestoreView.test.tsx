@@ -54,7 +54,9 @@ test("a not-applicable reason is shown closed", async () => {
     kind: "not_applicable",
     reason: "identity_mismatch",
   }));
-  expect(await screen.findByText(/identity mismatch/)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/does not match the original Home/),
+  ).toBeInTheDocument();
 });
 
 test("the restore flow plans, applies and commits with the same home_id facts", async () => {
@@ -83,7 +85,7 @@ test("the restore flow plans, applies and commits with the same home_id facts", 
   await userEvent.click(screen.getByRole("button", { name: "Start Restore" }));
   await waitFor(() => expect(plan).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(apply).toHaveBeenCalledWith("fr-op-1"));
-  expect(await screen.findByText(/clean Home is prepared/)).toBeInTheDocument();
+  expect(await screen.findByText(/The Home is ready/)).toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "Commit Restore Result" }),
   ).toBeInTheDocument();

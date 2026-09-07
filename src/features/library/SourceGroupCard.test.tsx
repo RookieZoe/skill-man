@@ -152,7 +152,7 @@ describe("SourceGroupCard", () => {
       screen.getByText("Latest tag reachable from default branch"),
     ).toBeInTheDocument();
     expect(screen.getByText("HEAD")).toBeInTheDocument();
-    expect(screen.getByText("Explicit override")).toBeInTheDocument();
+    expect(screen.getByText("Version override")).toBeInTheDocument();
     expect(screen.getByText("None")).toBeInTheDocument();
   });
 
@@ -238,7 +238,7 @@ describe("SourceGroupCard", () => {
 
     // Restore Current Source Release with confirmation
     const restoreBtn = screen.getByRole("button", {
-      name: "Restore Current Source Release",
+      name: "Restore current Source Release",
     });
     await user.click(restoreBtn);
     const confirmRestoreBtn = screen.getByRole("button", {
@@ -319,7 +319,7 @@ describe("SourceGroupCard", () => {
     );
     expect(
       screen.getByText(
-        "Legacy sources must be promoted before source-level operations are available.",
+        "Upgrade the legacy source before managing this repository.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -329,7 +329,7 @@ describe("SourceGroupCard", () => {
     rerender(<SourceGroupCard source={conflictSource} skills={[]} />);
     expect(
       screen.getByText(
-        "Source identity conflict must be resolved before source-level operations are available.",
+        "Repository actions are unavailable because source records conflict.",
       ),
     ).toBeInTheDocument();
     expect(

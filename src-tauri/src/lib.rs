@@ -666,14 +666,13 @@ pub fn run() {
                 .recently_enabled(tray::TRAY_SKILL_LIMIT)
                 .unwrap_or_default();
             let tray_menu = tray::build_tray_menu(app.handle(), &initial_recent, initial_locale)?;
-            let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID).menu(&tray_menu);
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
-            } else {
-                // macOS template icon: black + alpha, adapts to the menu bar.
-                let icon = tauri::image::Image::new(include_bytes!("../icons/tray.rgba"), 18, 18);
-                tray_builder = tray_builder.icon(icon).icon_as_template(true);
-            }
+            // Always use the monochrome template, not the colored app icon.
+            // macOS chooses its tint from the menu bar's effective appearance.
+            let icon = tauri::image::Image::new(include_bytes!("../icons/tray.rgba"), 18, 18);
+            let tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
+                .menu(&tray_menu)
+                .icon(icon)
+                .icon_as_template(true);
             tray_builder
                 .show_menu_on_left_click(true)
                 .on_menu_event(tray::handle_tray_menu_event)

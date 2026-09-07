@@ -144,7 +144,6 @@ export function DefaultHomeRecoveryView({
             <li key={fact}>{t(recoveryFactMessageKeys[fact])}</li>
           ))}
         </ul>
-        <p>{t("bootstrap.recovery.confirmation_next")}</p>
         <div className="bootstrap-actions">
           <button type="button" onClick={() => void confirm(plan.planToken)}>
             {t("bootstrap.recovery.confirm")}

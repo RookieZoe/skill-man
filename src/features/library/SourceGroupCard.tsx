@@ -1,6 +1,7 @@
 import { useBackgroundOperations } from "../../ui/BackgroundOperations";
 import { useEffect, useLayoutEffect, useId, useRef, useState } from "react";
 import { PluginGroups } from "./PluginGroups";
+import { SelectionControls } from "../../ui/SelectionControls";
 import { createPortal } from "react-dom";
 import type {
   GitSourceCapabilitySource,
@@ -12,6 +13,7 @@ import type { SourceActionNotice } from "./GitSourceCapabilityNotice";
 import { defaultCopyDestinationPicker } from "./GitSourceCapabilityNotice";
 
 export interface SourceGroupCardProps {
+  embedded?: boolean;
   defaultCollapsed?: boolean;
   source: GitSourceCapabilitySource;
   skills: SkillSummary[];
@@ -43,6 +45,7 @@ export interface SourceGroupCardProps {
  * - Fail-closed for Legacy and Remote Source Identity Conflict with typed reasons
  */
 export function SourceGroupCard({
+  embedded = false,
   defaultCollapsed = false,
   source,
   skills,
@@ -216,14 +219,23 @@ export function SourceGroupCard({
       ? source.trackingValue || trackingModeLabel(source.trackingMode, t)
       : t("sourceGroup.overrideNone");
 
+  const Container = embedded ? "article" : "details";
+  const Heading = embedded ? "header" : "summary";
   return (
-    <details
-      open={expanded}
-      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    <Container
+      {...(!embedded
+        ? {
+            open: expanded,
+            onToggle: (event: React.SyntheticEvent<HTMLDetailsElement>) =>
+              setExpanded(event.currentTarget.open),
+          }
+        : {})}
       className={`source-group-card${hasMismatch ? " source-group-card--mismatch" : ""}`}
       aria-label={t("sourceGroup.label")}
     >
-      <summary className="source-group-header source-group-summary">
+      <Heading
+        className={`source-group-header${embedded ? "" : " source-group-summary"}`}
+      >
         <div className="source-group-title-row">
           <h3>{source.canonicalUrl}</h3>
           {source.selectedRef ? (
@@ -239,7 +251,7 @@ export function SourceGroupCard({
             })}
           </p>
         ) : null}
-      </summary>
+      </Heading>
 
       {/* Policy cascade and explicit override side-by-side */}
       <section
@@ -376,6 +388,14 @@ export function SourceGroupCard({
         aria-label={t("sourceGroup.membersLabel")}
       >
         <h4>{t("sourceGroup.membersLabel")}</h4>
+        {onCopyMember && (
+          <SelectionControls
+            ids={copyableMembers.map((member) => member.skillId)}
+            selected={selectedIds}
+            onChange={setSelectedIds}
+            disabled={copying || actionActivity}
+          />
+        )}
         {source.members.length === 0 ? (
           <p className="source-group-empty-members">
             {t("sourceGroup.emptyMembers")}
@@ -478,7 +498,7 @@ export function SourceGroupCard({
           </PluginGroups>
         )}
       </section>
-    </details>
+    </Container>
   );
 }
 

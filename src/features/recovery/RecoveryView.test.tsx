@@ -82,9 +82,7 @@ test("a pure preview offers the recovery action and shows the evidence", async (
   expect(
     await screen.findByRole("heading", { name: "Fixture Recovery" }),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText("Exact fixture footprint detected"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("Recoverable test data found")).toBeInTheDocument();
   expect(screen.getByText("skill-authoring hash")).toBeInTheDocument();
   expect(screen.getAllByText("matches the fixture fingerprint")).toHaveLength(
     3,
@@ -172,7 +170,7 @@ test("a mixed footprint locks the Home without recovery controls", async () => {
   render(<RecoveryView client={client} />);
 
   expect(
-    await screen.findByText("Modified fixture footprint detected"),
+    await screen.findByText("Test data has been modified"),
   ).toBeInTheDocument();
   expect(screen.getByText("skill_row_modified:media-xray")).toBeInTheDocument();
   expect(

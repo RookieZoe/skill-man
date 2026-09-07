@@ -43,13 +43,11 @@ test("renders every typed source state without opening source actions by default
     screen.getByText("https://github.com/acme/conflicted"),
   ).toBeInTheDocument();
   expect(
-    screen.getAllByText(
-      "A complete Source Release is recognized. Fetch a fresh complete release before updating this source.",
-    ),
+    screen.getAllByText("Skills in this repository are updated together."),
   ).toHaveLength(1);
   expect(
     screen.getByText(
-      "Reading, Disable, and Remove remain available. Promote this complete Legacy Source after reviewing a fresh Source Group Draft.",
+      "Upgrade this source to repository management first. You can still view, disable, or remove its Skills.",
     ),
   ).toBeInTheDocument();
 });
@@ -119,7 +117,7 @@ test("Restore removes the whole-source bytes only after an inline confirm", asyn
   expect(onRestore).not.toHaveBeenCalled();
   await user.click(
     screen.getByRole("button", {
-      name: "Restore the current Source Release bytes?",
+      name: "Restore Skill files from the current Source Release? Local changes will be overwritten.",
     }),
   );
   expect(onRestore).toHaveBeenCalledWith("current-source");
@@ -142,13 +140,13 @@ test("Remove Source requires an explicit inline confirm and can be cancelled", a
   expect(onRemove).not.toHaveBeenCalled();
   expect(
     screen.queryByRole("button", {
-      name: "Remove the whole Git Repository Source? Member snapshots, tombstones and Activations are deleted.",
+      name: "Remove this repository, its Skills, and their activations? This cannot be undone.",
     }),
   ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Remove Source" }));
   await user.click(
     screen.getByRole("button", {
-      name: "Remove the whole Git Repository Source? Member snapshots, tombstones and Activations are deleted.",
+      name: "Remove this repository, its Skills, and their activations? This cannot be undone.",
     }),
   );
   expect(onRemove).toHaveBeenCalledWith("current-source");

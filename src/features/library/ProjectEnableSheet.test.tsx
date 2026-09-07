@@ -55,10 +55,10 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
 
   // Step 3: Preview
   expect(
-    (await within(dialog).findAllByText(/Resolved target group/)).length,
+    (await within(dialog).findAllByText(/Actual activation directory/)).length,
   ).toBeGreaterThan(0);
   expect(
-    within(dialog).getAllByText(/1 physical write/).length,
+    within(dialog).getAllByText(/Enable once for all of them/).length,
   ).toBeGreaterThan(0);
   expect(within(dialog).getAllByText("Ready").length).toBeGreaterThan(0);
 
@@ -71,10 +71,10 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   // Step 4: Result
   expect(
     await within(dialog).findByText(
-      "No Project record was created. Project links are not tracked or monitored.",
+      "Project links are not tracked or health-monitored by Skill Man.",
     ),
   ).toBeInTheDocument();
-  expect(within(dialog).getByText(/cells succeeded/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/actions completed/)).toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Undo this operation" }),
   ).toBeInTheDocument();
@@ -143,10 +143,10 @@ test("batch project enable flow with multiple skills", async () => {
   // Step 4: Result
   expect(
     await within(dialog).findByText(
-      "No Project record was created. Project links are not tracked or monitored.",
+      "Project links are not tracked or health-monitored by Skill Man.",
     ),
   ).toBeInTheDocument();
-  expect(within(dialog).getByText(/cells succeeded/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/actions completed/)).toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Undo this operation" }),
   ).toBeInTheDocument();
@@ -263,7 +263,7 @@ test("destructive ack required for real directory replacement", async () => {
   // In preview step:
   expect(await within(dialog).findByText("Conflict")).toBeInTheDocument();
   const ackCheckbox = within(dialog).getByRole("checkbox", {
-    name: "I understand that replacing this real directory will move its contents to backup.",
+    name: "I confirm that the existing directory contents will be moved to a backup.",
   });
   expect(ackCheckbox).not.toBeChecked();
 

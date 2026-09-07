@@ -227,10 +227,12 @@ test("legacy detected explains the one-time transition and binds in place", asyn
   );
 
   expect(
-    await screen.findByText(/A Legacy Home was found/),
+    await screen.findByText(/Use Default to keep the existing Home here/),
   ).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /Use Default/ }));
-  expect(await screen.findByText(/bound in place/)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/without moving or deleting files/),
+  ).toBeInTheDocument();
 });
 
 test("pending candidate routes to Continue and Cancel", async () => {

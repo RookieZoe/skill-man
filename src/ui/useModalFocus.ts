@@ -52,8 +52,14 @@ export function useModalFocus<T extends HTMLElement>({
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
+    root.scrollTop = 0;
+    root.scrollLeft = 0;
+    root.querySelectorAll<HTMLElement>(".enable-sheet-body").forEach((body) => {
+      body.scrollTop = 0;
+      body.scrollLeft = 0;
+    });
     const [first] = focusableElements(root);
-    (first ?? root).focus();
+    (first ?? root).focus({ preventScroll: true });
   }, [focusKey]);
 
   useEffect(() => {

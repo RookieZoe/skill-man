@@ -121,20 +121,23 @@ export function BrokenDisableSheet({
         tabIndex={-1}
         aria-label={t("enable.broken.dialogLabel")}
       >
-        <ol
-          className="import-progress"
-          aria-label={t("enable.broken.progressLabel")}
-        >
-          <li aria-current={step === "evidence" ? "step" : undefined}>
-            {t("enable.broken.stepEvidence")}
-          </li>
-          <li aria-current={step === "confirm" ? "step" : undefined}>
-            {t("enable.broken.stepConfirm")}
-          </li>
-          <li aria-current={step === "result" ? "step" : undefined}>
-            {t("enable.broken.stepResult")}
-          </li>
-        </ol>
+        <div className="sheet-progress-header">
+          <OperationNotice busy={isBusy} />
+          <ol
+            className="import-progress"
+            aria-label={t("enable.broken.progressLabel")}
+          >
+            <li aria-current={step === "evidence" ? "step" : undefined}>
+              {t("enable.broken.stepEvidence")}
+            </li>
+            <li aria-current={step === "confirm" ? "step" : undefined}>
+              {t("enable.broken.stepConfirm")}
+            </li>
+            <li aria-current={step === "result" ? "step" : undefined}>
+              {t("enable.broken.stepResult")}
+            </li>
+          </ol>
+        </div>
 
         {error ? (
           <p className="activation-error" role="alert">
@@ -217,7 +220,6 @@ export function BrokenDisableSheet({
               })}
             </div>
 
-            <OperationNotice busy={isBusy} />
             <div className="activation-sheet-actions">
               <button
                 type="button"

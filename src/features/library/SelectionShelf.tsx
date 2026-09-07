@@ -12,12 +12,16 @@ export function SelectionShelf({
   onEnableGlobally,
   onEnableToProject,
   onExit,
+  canDisable = false,
+  onDisable,
   inert = false,
 }: {
   selectedCount: number;
   onEnableGlobally: () => void;
   onEnableToProject: () => void;
   onExit: () => void;
+  canDisable?: boolean;
+  onDisable?: () => void;
   inert?: boolean;
 }) {
   const { t, tPlural } = useLocale();
@@ -39,6 +43,16 @@ export function SelectionShelf({
         </span>
       </div>
       <div className="selection-shelf-actions">
+        {onDisable && (
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={!canDisable}
+            onClick={onDisable}
+          >
+            {t("shelf.disable")}
+          </button>
+        )}
         <button
           type="button"
           className="toolbar-button primary"

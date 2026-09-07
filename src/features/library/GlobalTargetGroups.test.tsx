@@ -8,6 +8,7 @@ import type {
   ObservationAndScanSnapshot,
 } from "../../app/catalog-client";
 import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
+import { BackgroundOperations } from "../../ui/BackgroundOperations";
 
 function renderPanel({
   skillId = "skill-authoring",
@@ -17,13 +18,15 @@ function renderPanel({
   client?: ReturnType<typeof createFixtureCatalogClient>;
 } = {}) {
   return render(
-    <GlobalTargetGroupsPanel
-      ref={(element) => void element}
-      dialog={false}
-      skillId={skillId}
-      client={client}
-      onOpenAgentManagement={() => {}}
-    />,
+    <BackgroundOperations>
+      <GlobalTargetGroupsPanel
+        ref={(element) => void element}
+        dialog={false}
+        skillId={skillId}
+        client={client}
+        onOpenAgentManagement={() => {}}
+      />
+    </BackgroundOperations>,
   );
 }
 
@@ -43,7 +46,7 @@ test("group cards merge consumers and show one desired state per Target", async 
     within(panel).getByRole("switch", { name: "Workbench" }),
   ).not.toBeChecked();
   expect(
-    within(panel).getByText(/Project-level links are independent/),
+    within(panel).getByText(/Manage project-level links separately/),
   ).toBeInTheDocument();
 });
 
@@ -66,6 +69,16 @@ test("toggling an off group enables it and the result window offers Undo", async
   expect(
     within(panel).getByRole("switch", { name: "Workbench" }),
   ).toBeChecked();
+  const notices = await screen.findByRole("region", {
+    name: "Current activity",
+  });
+  expect(within(notices).getByText("Enabled")).toBeVisible();
+  expect(notices).toHaveTextContent("Skill authoring");
+  expect(notices).toHaveTextContent("Workbench");
+  expect(notices).not.toHaveTextContent("review and enable");
+  await user.click(workbenchSwitch);
+  expect(await within(notices).findByText("Disabled")).toBeVisible();
+  expect(notices).toHaveTextContent("The Skill remains in your Library.");
 });
 
 test("refreshes target groups when an observation event arrives", async () => {

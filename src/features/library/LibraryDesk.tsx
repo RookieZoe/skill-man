@@ -1,4 +1,5 @@
 import { OperationNotice } from "../../ui/OperationNotice";
+import appLogo from "../../../src-tauri/icons/icon.svg";
 import { PluginGroups } from "./PluginGroups";
 import {
   useEffect,
@@ -44,7 +45,7 @@ import { useLocale, type LocaleContextValue } from "../locale/LocaleProvider";
 import { LanguageControl } from "../locale/LanguageControl";
 import type { MessageKey } from "../locale/messages";
 import { formatByteSize, formatDateTime } from "../locale/messages";
-import { LockIcon, SettingsIcon } from "../../ui/icons";
+import { SettingsIcon } from "../../ui/icons";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { BrokenDisableSheet } from "./BrokenDisableSheet";
 import { EvidenceRail } from "./EvidenceRail";
@@ -57,6 +58,8 @@ import { GlobalTargetGroupsPanel } from "./GlobalTargetGroups";
 import { GlobalEnableSheet } from "./GlobalEnableSheet";
 import { ProjectEnableSheet } from "./ProjectEnableSheet";
 import { SelectionShelf } from "./SelectionShelf";
+import { SelectionControls } from "../../ui/SelectionControls";
+import { BatchDisableSheet } from "./BatchDisableSheet";
 import { SourceGroupPreviewFlow } from "./SourceGroupPreviewFlow";
 import { ScanEvidenceLedger } from "../scan/ScanEvidenceLedger";
 
@@ -269,7 +272,7 @@ export function LibraryDesk({
   onAdvanceOnboarding,
   onOpenScanSetup,
 }: LibraryDeskProps) {
-  const { t } = useLocale();
+  const { t, tPlural } = useLocale();
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() =>
     layoutModeForWidth(window.innerWidth),
   );
@@ -311,6 +314,14 @@ export function LibraryDesk({
   const [scanExpanded, setScanExpanded] = useState(false);
   const [isProjectEnableOpen, setIsProjectEnableOpen] = useState(false);
   const [isBatchGlobalEnableOpen, setIsBatchGlobalEnableOpen] = useState(false);
+  const [isBatchDisableOpen, setIsBatchDisableOpen] = useState(false);
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState<
+    string | null
+  >(null);
+  const repositories = gitSourceCapability?.sources ?? [];
+  const selectedRepository =
+    repositories.find((source) => source.remoteId === selectedRepositoryId) ??
+    repositories[0];
   const [brokenSkill, setBrokenSkill] = useState<{
     skillId: string;
     skillPath: string;
@@ -350,6 +361,7 @@ export function LibraryDesk({
   const hasOtherOverlay =
     brokenSkill !== null ||
     isBatchGlobalEnableOpen ||
+    isBatchDisableOpen ||
     isBatchProjectEnableOpen ||
     agentOverlayOpen ||
     isProjectEnableOpen ||
@@ -570,8 +582,33 @@ export function LibraryDesk({
               <h1 id="repository-management-title">
                 {t("library.source_management")}
               </h1>
-              <p>{t("repositories.description")}</p>
             </header>
+            <nav
+              className="repository-list"
+              aria-label={t("repositories.list")}
+            >
+              {repositories.map((source) => (
+                <button
+                  type="button"
+                  key={source.remoteId}
+                  aria-current={
+                    selectedRepository?.remoteId === source.remoteId
+                      ? "page"
+                      : undefined
+                  }
+                  onClick={() => setSelectedRepositoryId(source.remoteId)}
+                >
+                  <strong>
+                    {source.canonicalUrl
+                      .replace(/^https:\/\/github\.com\//, "")
+                      .replace(/\.git$/, "")}
+                  </strong>
+                  <span>
+                    {tPlural("repositories.members", source.members.length)}
+                  </span>
+                </button>
+              ))}
+            </nav>
             <div className="repository-management-content">
               {repositorySkills === null ? (
                 <p role="status">{t("repositories.loading")}</p>
@@ -580,10 +617,14 @@ export function LibraryDesk({
               ) : (
                 <>
                   {gitSourceCapability?.sources
-                    .filter((s) => s.kind === "git_repository_source")
+                    .filter(
+                      (s) =>
+                        s.kind === "git_repository_source" &&
+                        s.remoteId === selectedRepository?.remoteId,
+                    )
                     .map((source) => (
                       <SourceGroupCard
-                        defaultCollapsed
+                        embedded
                         key={source.remoteId}
                         source={source}
                         skills={repositorySkills ?? []}
@@ -612,7 +653,9 @@ export function LibraryDesk({
                   gitSourceCapability
                     ? {
                         sources: gitSourceCapability.sources.filter(
-                          (s) => s.kind !== "git_repository_source",
+                          (s) =>
+                            s.kind !== "git_repository_source" &&
+                            s.remoteId === selectedRepository?.remoteId,
                         ),
                       }
                     : null
@@ -684,8 +727,12 @@ export function LibraryDesk({
               inert={isAgentDrawerModal}
               isSelectMode={isSelectMode}
               selectedSkillIds={selectedSkillIds}
+              onSelectionChange={setSelectedSkillIds}
               onToggleSkillSelection={toggleSkillSelection}
-              onFilter={onFilter}
+              onFilter={(nextFilter) => {
+                setSelectedSkillIds([]);
+                onFilter(nextFilter);
+              }}
               onSelect={(skillId) => {
                 if (layoutMode === "narrow") setActivePane("detail");
                 onSelect(skillId);
@@ -795,6 +842,12 @@ export function LibraryDesk({
           inert={hasOverlay || isAgentDrawerModal}
           onEnableGlobally={() => setIsBatchGlobalEnableOpen(true)}
           onEnableToProject={() => setIsBatchProjectEnableOpen(true)}
+          canDisable={skills.some(
+            (skill) =>
+              selectedSkillIds.includes(skill.id) &&
+              skill.enabledAgentCount > 0,
+          )}
+          onDisable={() => setIsBatchDisableOpen(true)}
           onExit={exitSelectMode}
         />
       ) : null}
@@ -810,6 +863,14 @@ export function LibraryDesk({
           }}
         />
       ) : null}
+      {isBatchDisableOpen && (
+        <BatchDisableSheet
+          client={client}
+          skills={skills.filter((skill) => selectedSkillIds.includes(skill.id))}
+          onCatalogChanged={onCatalogChanged}
+          onClose={() => setIsBatchDisableOpen(false)}
+        />
+      )}
       {isBatchGlobalEnableOpen ? (
         <GlobalEnableSheet
           onCatalogChanged={onCatalogChanged}
@@ -977,11 +1038,13 @@ function Toolbar({
   const { t } = useLocale();
   return (
     <header className="toolbar" inert={inert ? true : undefined}>
-      <div className="product-mark" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
+      <img
+        className="product-mark"
+        src={appLogo}
+        width={30}
+        height={30}
+        alt=""
+      />
       <div className="toolbar-title">
         <strong>{t("library.toolbar.brand")}</strong>
         <span>
@@ -1065,6 +1128,7 @@ interface LibrarySidebarProps {
   inert?: boolean;
   isSelectMode: boolean;
   selectedSkillIds: string[];
+  onSelectionChange?: (ids: string[]) => void;
   onToggleSkillSelection: (skillId: string) => void;
   onFilter: (filter: CatalogFilter) => void;
   onSelect: (skillId: string) => void;
@@ -1079,6 +1143,7 @@ export function LibrarySidebar({
   inert = false,
   isSelectMode,
   selectedSkillIds,
+  onSelectionChange,
   onToggleSkillSelection,
   onFilter,
   onSelect,
@@ -1161,6 +1226,13 @@ export function LibrarySidebar({
           )}
         </div>
       </div>
+      {isSelectMode && onSelectionChange && (
+        <SelectionControls
+          ids={skills.map((skill) => skill.id)}
+          selected={selectedSkillIds}
+          onChange={onSelectionChange}
+        />
+      )}
       <div
         className="filter-strip"
         aria-label={t("library.sidebar.filter_label")}
@@ -1473,10 +1545,6 @@ function ActivationTargetPlaceholder({
           {t("surface.agents")}
         </button>
       </div>
-      <div className="inspector-footnote">
-        <LockIcon />
-        <span>{t("library.activation.footnote")}</span>
-      </div>
     </aside>
   );
 }
@@ -1609,9 +1677,9 @@ function LinkImportSheet({
       sourcePromotionActive ||
       sourceGroupOutcome?.kind === "preview"
     ) {
-      primaryButton.current?.focus();
+      primaryButton.current?.focus({ preventScroll: true });
     } else {
-      sourceInput.current?.focus();
+      sourceInput.current?.focus({ preventScroll: true });
     }
   }, [
     preview,
@@ -1637,6 +1705,7 @@ function LinkImportSheet({
     >
       <section
         ref={modalRef}
+        key={isGit ? currentStep : "local"}
         className="activation-sheet import-sheet"
         role="dialog"
         aria-modal="true"
@@ -1649,27 +1718,31 @@ function LinkImportSheet({
               : t("library.import.dialog_link_import")
         }
       >
-        <OperationNotice
-          busy={isRunning && !isPickingDirectory}
-          cancelHint={
-            isDiscovering ? t("operation.foreground.cancel_preview") : undefined
-          }
-        />
-        <ol
-          className="import-progress"
-          aria-label={t("library.import.progress_label")}
-        >
-          {(["source", "discover", "preview", "result"] as const).map(
-            (step) => (
-              <li
-                key={step}
-                aria-current={currentStep === step ? "step" : undefined}
-              >
-                {t(`library.import.step.${step}` as MessageKey)}
-              </li>
-            ),
-          )}
-        </ol>
+        <div className="sheet-progress-header">
+          <OperationNotice
+            busy={isRunning && !isPickingDirectory}
+            cancelHint={
+              isDiscovering
+                ? t("operation.foreground.cancel_preview")
+                : undefined
+            }
+          />
+          <ol
+            className="import-progress"
+            aria-label={t("library.import.progress_label")}
+          >
+            {(["source", "discover", "preview", "result"] as const).map(
+              (step) => (
+                <li
+                  key={step}
+                  aria-current={currentStep === step ? "step" : undefined}
+                >
+                  {t(`library.import.step.${step}` as MessageKey)}
+                </li>
+              ),
+            )}
+          </ol>
+        </div>
         {showSourceKindSwitch ? (
           <SourceKindSwitch kind={kind} onKindChange={onKindChange} />
         ) : null}
@@ -1983,18 +2056,23 @@ function OnboardingSheet({
         tabIndex={-1}
         aria-label={t("library.onboarding.welcome")}
       >
-        <div
-          className="onboarding-progress"
-          aria-label={t("library.onboarding.progress")}
-        >
-          {onboardingSteps.map((item, index) => (
-            <span
-              key={item.titleKey}
-              className={index <= step ? "onboarding-progress-dot--active" : ""}
-            >
-              {index + 1}
-            </span>
-          ))}
+        <div className="sheet-progress-header">
+          <div
+            className="onboarding-progress"
+            aria-label={t("library.onboarding.progress")}
+          >
+            {onboardingSteps.map((item, index) => (
+              <span
+                key={item.titleKey}
+                className={
+                  index <= step ? "onboarding-progress-dot--active" : ""
+                }
+              >
+                {index + 1}
+              </span>
+            ))}
+          </div>
+          <OperationNotice busy={isBusy} label={progressLabel} />
         </div>
         <div className="activation-sheet-heading">
           <span className="eyebrow">
@@ -2011,7 +2089,6 @@ function OnboardingSheet({
             </div>
           </dl>
         ) : null}
-        <OperationNotice busy={isBusy} label={progressLabel} />
         {step === 1 && activity === "idle" ? (
           <ScanRootSetup
             client={client}
@@ -2152,7 +2229,6 @@ function PreferencesSheet({
         <div className="activation-sheet-heading">
           <span className="eyebrow">{t("library.preferences.eyebrow")}</span>
           <h2>{t("library.preferences.title")}</h2>
-          <p>{t("library.preferences.body")}</p>
         </div>
         <LanguageControl />
         <div className="preference-list">
@@ -2181,7 +2257,6 @@ function PreferencesSheet({
         <div className="app-update-check">
           <span>
             <strong>{t("library.preferences.app_updates")}</strong>
-            <small>{t("library.preferences.app_updates_note")}</small>
           </span>
           <button
             id="app-update-check-trigger"
@@ -2288,6 +2363,17 @@ function AppUpdateSheet({
         aria-modal="true"
         aria-label={t("library.app_update.dialog")}
       >
+        <OperationNotice
+          busy={panel.activity === "downloading" || blocksDismissal}
+          cancellable={panel.activity === "downloading"}
+          label={t(
+            isInstalling
+              ? "library.app_update.installing"
+              : isCancelling
+                ? "library.app_update.cancelling"
+                : "library.app_update.downloading",
+          )}
+        />
         <div className="activation-sheet-heading">
           <span className="eyebrow">{t("library.app_update.eyebrow")}</span>
           <h2>
@@ -2309,17 +2395,6 @@ function AppUpdateSheet({
             <dd>{update.releaseNotes || t("library.app_update.no_notes")}</dd>
           </div>
         </dl>
-        <OperationNotice
-          busy={panel.activity === "downloading" || blocksDismissal}
-          cancellable={panel.activity === "downloading"}
-          label={t(
-            isInstalling
-              ? "library.app_update.installing"
-              : isCancelling
-                ? "library.app_update.cancelling"
-                : "library.app_update.downloading",
-          )}
-        />
         {isReady ? (
           <div className="app-update-ready" role="status">
             {t("library.app_update.ready")}
@@ -2605,20 +2680,22 @@ function RelocateSheet({
         tabIndex={-1}
         aria-label={t("library.relocate.dialog")}
       >
-        <OperationNotice busy={isBusy} />
-        <ol
-          className="import-progress"
-          aria-label={t("library.relocate.progress")}
-        >
-          {(["source", "preview", "result"] as const).map((stepName) => (
-            <li
-              key={stepName}
-              aria-current={step === stepName ? "step" : undefined}
-            >
-              {t(`library.relocate.step.${stepName}` as MessageKey)}
-            </li>
-          ))}
-        </ol>
+        <div className="sheet-progress-header">
+          <OperationNotice busy={isBusy} />
+          <ol
+            className="import-progress"
+            aria-label={t("library.relocate.progress")}
+          >
+            {(["source", "preview", "result"] as const).map((stepName) => (
+              <li
+                key={stepName}
+                aria-current={step === stepName ? "step" : undefined}
+              >
+                {t(`library.relocate.step.${stepName}` as MessageKey)}
+              </li>
+            ))}
+          </ol>
+        </div>
         {panel.result ? (
           <>
             <div className="activation-sheet-heading">
