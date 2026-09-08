@@ -34,3 +34,5 @@
 - 验收 `.app` 与 CI 原生可执行文件 SHA-256 一致：`80205c33eb7b74eeebdf207d05eb6c0a200af45d94b59980fd0d8fb91e251830`。
 
 中英文同名来源交互与各中断恢复路径通过自动行为测试验证。此记录不代表签名 Release、推送或 issue 关闭。
+
+后续已补充 [项目移动读取与原生重启恢复验收](project-relocation-restart-verification.md)：整体移动后隔离原 Home 仍可读取，以及批量提交后强制退出、连续两次启动的恢复与 finalize 均通过；具体中断窗口及验收边界见该记录。
