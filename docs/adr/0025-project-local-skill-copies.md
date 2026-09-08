@@ -1,6 +1,6 @@
 # 项目级分发使用项目内副本
 
-状态：Accepted（设计已确认；#101 已实现，#102–#104 待实现；原生人工验收待完成）
+状态：Accepted（设计已确认；#101–#102 已实现，#103–#104 待实现；原生验收状态见验证记录）
 
 项目级分发将 Skill 复制到项目内必须存在的 `.agents/skills/<Directory Identity>/`，并为可选的其他 Agent 创建指向该副本的逐 Skill 相对软链。这样项目移动或分享后不依赖原 Skill Man Home 或外部 Local Source；代价是项目副本与 Library 来源分离，不再随来源变化。
 
@@ -29,6 +29,8 @@
 ## 实现状态
 
 - [#101：项目副本交付与复用](https://github.com/RookieZoe/skill-man/issues/101) 已在代码提交 `511012d` 实现单 Skill、零附加 Agent 的完整流程：零写入 Preview、新建或保留复用副本、内部链接转换与自包含校验、安全 Undo、finalize 和启动恢复。即使没有 General Agent 配置也可交付副本。
-- 当前入口对多 Skill 或附加 Agent 请求明确阻止，不再沿用旧项目直链流程。后续范围分别由 [#102：多个 Agent 相对链接](https://github.com/RookieZoe/skill-man/issues/102)、[#103：确认覆盖与安全撤销](https://github.com/RookieZoe/skill-man/issues/103)、[#104：批量分发与同名来源选择](https://github.com/RookieZoe/skill-man/issues/104) 交付。
+- [#102：多个 Agent 相对链接](https://github.com/RookieZoe/skill-man/issues/102) 扩展同一 Enable operation：必需副本优先，可选 Agent 按解析后的物理目录去重，共用项目内相对链接；计划披露所有受影响的已配置 Agent。正确链接 NoOp，其它占用保留并报告冲突。结果逐项展示，重试重新 Preview。
+- 依赖链接 journal 不参与 Activation；Undo 与正式启动恢复先处理链接，依赖无法安全撤销时保留副本。链接写入后、身份尚未持久化时若中断，恢复保留数据并报告 Recovery Required。
+- 当前入口仍阻止多 Skill；确认覆盖与批量分发分别由 [#103](https://github.com/RookieZoe/skill-man/issues/103)、[#104](https://github.com/RookieZoe/skill-man/issues/104) 交付。不会回退到旧项目外直链。验证及原生验收状态见 [#102 验证记录](../project-links-verification.md)。
 - 当前安全快照有 128 MiB 的常规文件内容总量上限，超限时拒绝处理，不截断内容；这属于当前实现限制，不代表完整规格已经验收。
 - #101 的针对性测试、完整本地 CI 与代码审查已通过；原生人工验收尚未完成。Issue 关闭及应用发布分别跟踪，不以本记录或代码推送代替验收。

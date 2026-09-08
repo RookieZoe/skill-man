@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   AgentConfiguration,
   CatalogClient,
-  CellResolution,
   EnableCell,
   EnablePlan,
   EnableResult,
@@ -55,12 +54,6 @@ export function ProjectEnableSheet({
   const [agents, setAgents] = useState<AgentConfiguration[]>([]);
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [plan, setPlan] = useState<EnablePlan | null>(null);
-  const [resolutions, setResolutions] = useState<Map<string, CellResolution>>(
-    new Map(),
-  );
-  const [destructiveAcks, setDestructiveAcks] = useState<Set<string>>(
-    new Set(),
-  );
   const [result, setResult] = useState<EnableResult | null>(null);
   const [undoFinished, setUndoFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,15 +105,7 @@ export function ProjectEnableSheet({
     }
     let current = true;
     client
-      .planProjectEnable(
-        skillIds,
-        folder.trim(),
-        selectedAgentIds,
-        [...resolutions.entries()].map(([cellKey, resolution]) => ({
-          cellKey,
-          resolution,
-        })),
-      )
+      .planProjectEnable(skillIds, folder.trim(), selectedAgentIds, [])
       .then((nextPlan) => {
         if (!current) return;
         setPlan(nextPlan);
@@ -134,36 +119,18 @@ export function ProjectEnableSheet({
     return () => {
       current = false;
     };
-  }, [client, skillIds, folder, selectedAgentIds, resolutions, step, t]);
+  }, [client, skillIds, folder, selectedAgentIds, step, t]);
 
   const applyableCells = useMemo(
     () =>
       (plan?.cells ?? []).filter(
-        (cell) =>
-          cell.eligibility === "ready" ||
-          cell.eligibility === "no_op" ||
-          (cell.eligibility === "conflict" && cell.resolution === "replace"),
+        (cell) => cell.eligibility === "ready" || cell.eligibility === "no_op",
       ),
     [plan],
   );
 
-  // Check whether any real directory replace is missing its destructive ack
-  const missingDestructiveAck = useMemo(() => {
-    for (const cell of plan?.cells ?? []) {
-      if (
-        cell.eligibility === "conflict" &&
-        cell.resolution === "replace" &&
-        cell.destructive !== null &&
-        !destructiveAcks.has(cell.cellKey)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }, [plan, destructiveAcks]);
-
   async function onApply() {
-    if (!plan || missingDestructiveAck) return;
+    if (!plan) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -295,7 +262,7 @@ export function ProjectEnableSheet({
           <p className="enable-sheet-hint">
             {t("enable.project.requiredCopy")}
           </p>
-          {(isBatch || selectedAgentIds.length > 0) && (
+          {isBatch && (
             <p role="status">{t("enable.project.copyScopeNotReady")}</p>
           )}
           {step === "folder" && (
@@ -331,50 +298,13 @@ export function ProjectEnableSheet({
           )}
 
           {step === "preview" && plan !== null && (
-            <ProjectPreviewStep
-              plan={plan}
-              resolutions={resolutions}
-              destructiveAcks={destructiveAcks}
-              onResolutionChange={(cellKey, resolution) => {
-                setResolutions((curr) => {
-                  const next = new Map(curr);
-                  next.set(cellKey, resolution);
-                  if (resolution === "replace") {
-                    const changedCell = plan.cells.find(
-                      (c) => c.cellKey === cellKey,
-                    );
-                    if (changedCell) {
-                      for (const other of plan.cells) {
-                        if (
-                          other.cellKey !== cellKey &&
-                          other.targetRootId === changedCell.targetRootId &&
-                          other.entryPath === changedCell.entryPath
-                        ) {
-                          next.set(other.cellKey, "skip");
-                        }
-                      }
-                    }
-                  }
-                  return next;
-                });
-              }}
-              onToggleDestructiveAck={(cellKey) => {
-                setDestructiveAcks((curr) => {
-                  const next = new Set(curr);
-                  if (next.has(cellKey)) {
-                    next.delete(cellKey);
-                  } else {
-                    next.add(cellKey);
-                  }
-                  return next;
-                });
-              }}
-            />
+            <ProjectPreviewStep plan={plan} />
           )}
 
           {step === "result" && result !== null && (
             <ProjectResultStep
               result={result}
+              plan={plan}
               onUndo={() => void onUndo()}
               undoDisabled={busy || undoFinished}
               onRetry={() => void onRetry()}
@@ -422,11 +352,9 @@ export function ProjectEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={selectedAgentIds.length > 0 || isBatch}
+                disabled={isBatch}
                 onClick={() => {
                   setPlan(null);
-                  setResolutions(new Map());
-                  setDestructiveAcks(new Set());
                   setStep("preview");
                 }}
               >
@@ -448,9 +376,7 @@ export function ProjectEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={
-                  applyableCells.length === 0 || missingDestructiveAck || busy
-                }
+                disabled={applyableCells.length === 0 || busy}
                 onClick={() => void onApply()}
               >
                 {t("enable.project.applyPlan")}
@@ -654,48 +580,17 @@ function AgentSelectionStep({
   );
 }
 
-function ProjectPreviewStep({
-  plan,
-  resolutions,
-  destructiveAcks,
-  onResolutionChange,
-  onToggleDestructiveAck,
-}: {
-  plan: EnablePlan;
-  resolutions: Map<string, CellResolution>;
-  destructiveAcks: Set<string>;
-  onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
-  onToggleDestructiveAck: (cellKey: string) => void;
-}) {
+function ProjectPreviewStep({ plan }: { plan: EnablePlan }) {
   return (
     <div className="project-preview-matrix">
       {plan.cells.map((cell) => (
-        <ProjectPreviewCell
-          key={cell.cellKey}
-          cell={cell}
-          resolution={resolutions.get(cell.cellKey) ?? cell.resolution}
-          hasDestructiveAck={destructiveAcks.has(cell.cellKey)}
-          onResolutionChange={onResolutionChange}
-          onToggleDestructiveAck={onToggleDestructiveAck}
-        />
+        <ProjectPreviewCell key={cell.cellKey} cell={cell} />
       ))}
     </div>
   );
 }
 
-function ProjectPreviewCell({
-  cell,
-  resolution,
-  hasDestructiveAck,
-  onResolutionChange,
-  onToggleDestructiveAck,
-}: {
-  cell: EnableCell;
-  resolution: CellResolution;
-  hasDestructiveAck: boolean;
-  onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
-  onToggleDestructiveAck: (cellKey: string) => void;
-}) {
+function ProjectPreviewCell({ cell }: { cell: EnableCell }) {
   const { t } = useLocale();
 
   const eligibilityLabel =
@@ -717,18 +612,24 @@ function ProjectPreviewCell({
         <div className="resolved-group-info">
           <h4>
             {cell.skillName} →{" "}
-            {t(
-              cell.projectCopy === "reuse"
-                ? "enable.project.reuseCopy"
-                : "enable.project.createCopy",
-            )}
+            {cell.dependsOnCopy
+              ? t("enable.project.linkAgents", {
+                  agents: cell.affectedAgentNames.join(", "),
+                })
+              : t(
+                  cell.projectCopy === "reuse"
+                    ? "enable.project.reuseCopy"
+                    : "enable.project.createCopy",
+                )}
           </h4>
           <p className="one-physical-write">
-            {t(
-              cell.projectCopy === "reuse"
-                ? "enable.project.reuseCopyDetail"
-                : "enable.project.createCopyDetail",
-            )}
+            {cell.dependsOnCopy
+              ? t("enable.project.linkDetail", { path: cell.finalEntityPath })
+              : t(
+                  cell.projectCopy === "reuse"
+                    ? "enable.project.reuseCopyDetail"
+                    : "enable.project.createCopyDetail",
+                )}
           </p>
         </div>
         <span
@@ -782,46 +683,15 @@ function ProjectPreviewCell({
       </div>
 
       {cell.eligibility === "conflict" && (
-        <div className="project-conflict-resolution">
-          <select
-            className="enable-resolution-select"
-            value={resolution}
-            onChange={(e) =>
-              onResolutionChange(
-                cell.cellKey,
-                e.currentTarget.value as CellResolution,
-              )
-            }
-          >
-            <option value="replace">
-              {t("enable.global.resolutionReplace")}
-            </option>
-            <option value="skip">{t("enable.global.resolutionCancel")}</option>
-          </select>
-
-          {cell.destructive && (
-            <div className="destructive-warning-box">
-              <small className="destructive-count">
-                {t("enable.global.destructive", {
-                  files: cell.destructive.files,
-                  directories: cell.destructive.directories,
-                })}
-              </small>
-              {resolution === "replace" && (
-                <label className="destructive-ack-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={hasDestructiveAck}
-                    onChange={() => onToggleDestructiveAck(cell.cellKey)}
-                  />
-                  <span>{t("enable.project.destructiveAck")}</span>
-                </label>
-              )}
-            </div>
-          )}
-        </div>
+        <p>{t("enable.project.conflictPreserved")}</p>
       )}
-
+      {!cell.dependsOnCopy && cell.affectedAgentNames.length > 0 && (
+        <p>
+          {t("enable.project.sharedAgents", {
+            agents: cell.affectedAgentNames.join(", "),
+          })}
+        </p>
+      )}
       {cell.detail !== null && (
         <p className="enable-matrix-note error-note">{cell.detail}</p>
       )}
@@ -834,12 +704,14 @@ function ProjectPreviewCell({
 
 function ProjectResultStep({
   result,
+  plan,
   onUndo,
   undoDisabled,
   onRetry,
   busy,
 }: {
   result: EnableResult;
+  plan: EnablePlan | null;
   onUndo: () => void;
   undoDisabled: boolean;
   onRetry: () => void;
@@ -868,16 +740,38 @@ function ProjectResultStep({
         {result.cells.map((c) => (
           <li key={c.cellKey} className="result-cell-item">
             <span className="result-cell-key">
-              {t(
-                c.projectCopy === "reuse"
-                  ? "enable.project.reuseCopy"
-                  : "enable.project.copyResult",
-              )}
+              {c.dependsOnCopy
+                ? t("enable.project.linkAgents", {
+                    agents:
+                      plan?.cells
+                        .find((p) => p.cellKey === c.cellKey)
+                        ?.affectedAgentNames.join(", ") ?? c.targetRootId,
+                  })
+                : t(
+                    c.projectCopy === "reuse"
+                      ? "enable.project.reuseCopy"
+                      : "enable.project.copyResult",
+                  )}
             </span>
-            {c.diagnostic && <small>{c.diagnostic}</small>}
             <span className={`result-outcome outcome-${c.outcome}`}>
               {outcomeLabel(c.outcome, t)}
             </span>
+            {c.diagnostic === "project_copy_not_ready" ? (
+              <p className="result-diagnostic">
+                {t("enable.project.copyNotReady")}
+              </p>
+            ) : c.diagnostic === "write_gate_closed" ? (
+              <p className="result-diagnostic">
+                {t("enable.project.writeGateClosed")}
+              </p>
+            ) : (
+              c.diagnostic && (
+                <details className="result-diagnostic">
+                  <summary>{t("enable.project.technicalDetails")}</summary>
+                  <small>{c.diagnostic}</small>
+                </details>
+              )
+            )}
           </li>
         ))}
       </ul>

@@ -342,6 +342,7 @@ fn startup_recovers_copy_phases_without_catalog_activation_or_current_source() {
         fs.write_enable_journal(
             &home.library_root,
             &EnableJournal {
+                project_links: vec![],
                 project_copy: Some(copy.clone()),
                 version: 1,
                 operation_id: "enable-copy-interrupted".into(),
@@ -465,6 +466,7 @@ fn reserved_partial_stage_is_cleaned_by_formal_startup() {
     fs.write_enable_journal(
         &home.library_root,
         &EnableJournal {
+            project_links: vec![],
             project_copy: Some(copy.clone()),
             version: 1,
             operation_id: "enable-partial-copy".into(),
@@ -675,6 +677,7 @@ fn startup_distinguishes_unvalidated_quarantine_from_authorized_partial_cleanup(
         fs.write_enable_journal(
             &home.library_root,
             &EnableJournal {
+                project_links: vec![],
                 version: 1,
                 operation_id: "enable-quarantine-crash".into(),
                 project_copy: Some(copy.clone()),
@@ -706,5 +709,475 @@ fn startup_distinguishes_unvalidated_quarantine_from_authorized_partial_cleanup(
             }
         }
         assert!(!copy.entry_path.exists());
+    }
+}
+
+#[test]
+fn multiple_agents_share_a_portable_project_copy_and_undo_links_first() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let preview = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec!["claude-code".into(), "codex".into()],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert!(!project.path().join(".agents").exists());
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert!(
+        result.cells.iter().all(
+            |c| serde_json::to_value(c).unwrap()["outcome"] == "succeeded"
+                || serde_json::to_value(c).unwrap()["outcome"] == "no_op"
+        )
+    );
+    let copy = project.path().join(".agents/skills/skill-authoring");
+    let link = project.path().join(".claude/skills/skill-authoring");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::Path::new("../../.agents/skills/skill-authoring")
+    );
+    assert_eq!(
+        std::fs::read(link.join("SKILL.md")).unwrap(),
+        std::fs::read(copy.join("SKILL.md")).unwrap()
+    );
+    let undone = api
+        .undo_project_enable(
+            skill_man_lib::tauri_adapter::dto::EnableOperationRequestDto {
+                operation_id: result.operation_id,
+            },
+        )
+        .unwrap();
+    assert!(undone.cells.iter().all(|c| c.undone));
+    assert!(!copy.exists());
+    assert!(std::fs::symlink_metadata(link).is_err());
+}
+
+fn configure_project_agent(home: &BoundTestHome, id: &str, directory: &str) {
+    use skill_man_lib::core::agent_configuration::{
+        AgentConfigurationDraft, AgentConfigurationService, AgentRootDraft, PresetRegistry,
+    };
+    let service = AgentConfigurationService::new(
+        home.runtime.clone(),
+        Arc::new(MacOsAgentConfigurationFileSystem::new(home.path().into())),
+        home.write_gate.clone(),
+        PresetRegistry::system(),
+    );
+    let config = service
+        .snapshot()
+        .unwrap()
+        .configurations
+        .into_iter()
+        .find(|a| a.agent_id == id)
+        .unwrap();
+    let plan = service
+        .plan_edit(
+            id,
+            AgentConfigurationDraft {
+                preset_key: config.preset_key,
+                name: config.name,
+                project_skills_dir: Some(directory.into()),
+                roots: config
+                    .roots
+                    .into_iter()
+                    .map(|r| AgentRootDraft {
+                        configured_path: r.configured_path,
+                        role: r.role,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    service.apply(&plan.plan_token).unwrap();
+}
+
+fn plan_agents(
+    api: &EnableApi,
+    project: &tempfile::TempDir,
+    ids: &[&str],
+) -> skill_man_lib::tauri_adapter::dto::EnablePlanDto {
+    api.plan_project_enable(PlanProjectEnableRequestDto {
+        skill_ids: vec!["skill-authoring".into()],
+        project_folder: project.path().to_string_lossy().into_owned(),
+        agent_ids: ids.iter().map(|s| (*s).into()).collect(),
+        cell_resolutions: vec![],
+    })
+    .unwrap()
+}
+
+#[test]
+fn reused_copy_shared_aliases_and_correct_links_are_no_ops_after_project_move() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let copy = project.path().join(".agents/skills/skill-authoring");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), "# Project edition").unwrap();
+    std::fs::create_dir(project.path().join(".claude")).unwrap();
+    std::fs::create_dir(project.path().join("shared")).unwrap();
+    std::os::unix::fs::symlink("../shared", project.path().join(".claude/skills")).unwrap();
+    std::os::unix::fs::symlink("shared", project.path().join(".codex")).unwrap();
+    // Both configured aliases resolve to one physical skills container.
+    configure_project_agent(&home, "codex", ".codex");
+    let preview = plan_agents(&api, &project, &["claude-code"]);
+    assert_eq!(preview.cells.len(), 2);
+    assert_eq!(preview.cells[1].affected_agent_ids.len(), 2);
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert_eq!(api.list_recent_project_folders().unwrap().len(), 1);
+    let link = project.path().join("shared/skill-authoring");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::Path::new("../.agents/skills/skill-authoring")
+    );
+    let second = plan_agents(&api, &project, &["claude-code", "codex"]);
+    assert!(
+        second
+            .cells
+            .iter()
+            .all(|c| serde_json::to_value(c).unwrap()["eligibility"] == "no_op")
+    );
+    api.finalize_project_enable(
+        skill_man_lib::tauri_adapter::dto::EnableOperationRequestDto {
+            operation_id: result.operation_id,
+        },
+    )
+    .unwrap();
+    let moved = tempfile::tempdir().unwrap();
+    std::fs::rename(project.path(), moved.path().join("project")).unwrap();
+    std::fs::remove_dir_all(home.path().join("Projects/skill-authoring")).unwrap();
+    for entry in [".claude/skills", ".codex"] {
+        assert_eq!(
+            std::fs::read_to_string(
+                moved
+                    .path()
+                    .join("project")
+                    .join(entry)
+                    .join("skill-authoring/SKILL.md")
+            )
+            .unwrap(),
+            "# Project edition"
+        );
+    }
+}
+
+#[test]
+fn conflicts_are_preserved_and_changed_dependency_retains_copy_during_partial_undo() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let preview = plan_agents(&api, &project, &["claude-code", "codex"]);
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    let changed = project.path().join(".claude/skills/skill-authoring");
+    std::fs::remove_file(&changed).unwrap();
+    std::fs::write(&changed, "external content").unwrap();
+    let undone = api
+        .undo_project_enable(
+            skill_man_lib::tauri_adapter::dto::EnableOperationRequestDto {
+                operation_id: result.operation_id,
+            },
+        )
+        .unwrap();
+    assert!(undone.cells.iter().any(|c| c.undone));
+    assert_eq!(undone.cells.iter().filter(|c| !c.undone).count(), 2);
+    assert!(
+        project
+            .path()
+            .join(".agents/skills/skill-authoring/SKILL.md")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(changed).unwrap(),
+        "external content"
+    );
+    assert!(
+        std::fs::symlink_metadata(project.path().join(".codex/skills/skill-authoring")).is_err()
+    );
+    let retry = plan_agents(&api, &project, &["claude-code", "codex"]);
+    assert!(
+        retry
+            .cells
+            .iter()
+            .any(|c| serde_json::to_value(c).unwrap()["eligibility"] == "conflict")
+    );
+    let retry = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: retry.plan_token,
+        })
+        .unwrap();
+    assert!(
+        retry
+            .cells
+            .iter()
+            .any(|c| serde_json::to_value(c).unwrap()["outcome"] == "skipped")
+    );
+    assert!(
+        retry
+            .cells
+            .iter()
+            .any(|c| serde_json::to_value(c).unwrap()["outcome"] == "succeeded")
+    );
+}
+
+#[test]
+fn unsafe_aliases_and_overlapping_artifacts_are_blocked_without_touching_occupants() {
+    for alias in ["absolute", "outside", "cycle", "overlap", "base"] {
+        let (home, api) = harness();
+        let project = tempfile::tempdir().unwrap();
+        configure_project_agent(
+            &home,
+            "claude-code",
+            if alias == "overlap" {
+                ".agents/skills/skill-authoring/nested"
+            } else {
+                ".claude/skills"
+            },
+        );
+        std::fs::create_dir(project.path().join(".claude")).unwrap();
+        match alias {
+            "absolute" => {
+                std::fs::create_dir(project.path().join("inner")).unwrap();
+                std::os::unix::fs::symlink(
+                    project.path().join("inner"),
+                    project.path().join(".claude/skills"),
+                )
+                .unwrap();
+            }
+            "outside" => {
+                std::os::unix::fs::symlink("../../outside", project.path().join(".claude/skills"))
+                    .unwrap();
+            }
+            "cycle" => {
+                std::os::unix::fs::symlink("skills", project.path().join(".claude/skills"))
+                    .unwrap();
+            }
+            "base" => {
+                std::fs::create_dir_all(project.path().join(".agents/skills")).unwrap();
+                std::os::unix::fs::symlink(
+                    "../.agents/skills",
+                    project.path().join(".claude/skills"),
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+        let preview = plan_agents(&api, &project, &["claude-code"]);
+        if alias == "base" {
+            assert_eq!(preview.cells.len(), 1);
+            assert_eq!(preview.cells[0].affected_agent_ids, vec!["claude-code"]);
+        } else {
+            assert_eq!(
+                serde_json::to_value(&preview.cells[1]).unwrap()["eligibility"],
+                "blocked"
+            );
+        }
+        let result = api
+            .apply_project_enable(ApplyGlobalEnableRequestDto {
+                plan_token: preview.plan_token,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&result.cells[0]).unwrap()["outcome"],
+            "succeeded"
+        );
+        assert!(
+            !project
+                .path()
+                .join(".agents/skills/skill-authoring/nested")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn a_runtime_agent_failure_keeps_copy_and_successful_sibling_and_retry_repreviews() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let readonly = project.path().join(".claude/skills");
+    std::fs::create_dir_all(&readonly).unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let preview = plan_agents(&api, &project, &["claude-code", "codex"]);
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        result
+            .cells
+            .iter()
+            .filter(|c| serde_json::to_value(c).unwrap()["outcome"] == "succeeded")
+            .count(),
+        2
+    );
+    assert_eq!(
+        result
+            .cells
+            .iter()
+            .filter(|c| serde_json::to_value(c).unwrap()["outcome"] == "failed")
+            .count(),
+        1
+    );
+    let preview = plan_agents(&api, &project, &["claude-code", "codex"]);
+    let retried = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert!(retried.cells.iter().all(|c| matches!(
+        serde_json::to_value(c).unwrap()["outcome"].as_str(),
+        Some("succeeded" | "no_op")
+    )));
+}
+
+#[test]
+fn unavailable_copy_marks_every_dependency_not_attempted() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    let project = tempfile::tempdir().unwrap();
+    let base = project.path().join(".agents");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let preview = plan_agents(&api, &project, &["claude-code"]);
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        serde_json::to_value(&result.cells[0]).unwrap()["outcome"],
+        "failed"
+    );
+    assert_eq!(
+        serde_json::to_value(&result.cells[1]).unwrap()["outcome"],
+        "not_attempted"
+    );
+    assert!(!project.path().join(".claude").exists());
+}
+
+#[test]
+fn formal_startup_preserves_committed_siblings_and_resumes_dependency_undo() {
+    use skill_man_lib::core::maintenance::MaintenanceService;
+    use skill_man_lib::seams::filesystem::{ActivationReplacePhase as Phase, EnableJournal};
+    use skill_man_lib::tauri_adapter::health_api::HealthApi;
+    for scenario in [
+        "committed",
+        "before_second_link",
+        "uncaptured_link",
+        "undo",
+        "undo_one_removed",
+        "undo_changed",
+    ] {
+        let (home, api) = harness();
+        configure_project_agent(&home, "claude-code", ".claude/skills");
+        configure_project_agent(&home, "codex", ".codex/skills");
+        let project = tempfile::tempdir().unwrap();
+        let preview = plan_agents(&api, &project, &["claude-code", "codex"]);
+        let result = api
+            .apply_project_enable(ApplyGlobalEnableRequestDto {
+                plan_token: preview.plan_token,
+            })
+            .unwrap();
+        // Inject the durable state at a process interruption, then enter through formal startup.
+        let path = home
+            .library_root
+            .join("operations")
+            .join(&result.operation_id)
+            .join("enable-journal.json");
+        let mut journal: EnableJournal =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if scenario == "before_second_link" {
+            std::fs::remove_file(&journal.project_links[1].entry_path).unwrap();
+            journal.project_links[1].phase = Phase::Applying;
+            journal.project_links[1].occupant = None;
+        } else if scenario == "uncaptured_link" {
+            journal.project_links[1].phase = Phase::Applying;
+            journal.project_links[1].occupant = None;
+        } else if scenario.starts_with("undo") {
+            journal.phase = Phase::Undoing;
+            for link in &mut journal.project_links {
+                link.phase = Phase::Undoing;
+            }
+            if scenario == "undo_one_removed" {
+                std::fs::remove_file(&journal.project_links[0].entry_path).unwrap();
+            }
+            if scenario == "undo_changed" {
+                std::fs::remove_file(&journal.project_links[0].entry_path).unwrap();
+                std::fs::write(&journal.project_links[0].entry_path, "external").unwrap();
+            }
+        }
+        home.filesystem
+            .write_enable_journal(&home.library_root, &journal)
+            .unwrap();
+        std::fs::remove_dir_all(home.path().join("Projects/skill-authoring")).unwrap();
+        for _ in 0..2 {
+            let health = HealthApi::new(
+                MaintenanceService::for_tests(
+                    home.runtime.clone(),
+                    home.filesystem.clone(),
+                    home.write_gate.clone(),
+                )
+                .with_library_root(home.library_root.clone())
+                .begin_startup(),
+            );
+            let recovered = health.run_activation_health_check();
+            if scenario == "uncaptured_link" {
+                assert!(recovered.is_err());
+            } else {
+                recovered.unwrap();
+            }
+        }
+        if scenario == "uncaptured_link" {
+            assert!(
+                journal
+                    .project_links
+                    .iter()
+                    .all(|link| link.entry_path.join("SKILL.md").is_file())
+            );
+        }
+        let copy = project.path().join(".agents/skills/skill-authoring");
+        assert_eq!(
+            copy.exists(),
+            !matches!(scenario, "undo" | "undo_one_removed")
+        );
+        if scenario == "committed" || scenario == "before_second_link" {
+            assert!(
+                journal.project_links[0]
+                    .entry_path
+                    .join("SKILL.md")
+                    .is_file()
+            );
+        }
+        if scenario.starts_with("undo") {
+            assert!(std::fs::symlink_metadata(&journal.project_links[1].entry_path).is_err());
+        }
+        if scenario == "undo_changed" {
+            assert_eq!(
+                std::fs::read_to_string(&journal.project_links[0].entry_path).unwrap(),
+                "external"
+            );
+        }
     }
 }

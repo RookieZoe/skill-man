@@ -5029,6 +5029,7 @@ pub struct DestructiveCountsDto {
 pub struct EnableCellDto {
     #[serde(default)]
     pub project_copy: Option<crate::core::enable::ProjectCopyAction>,
+    pub depends_on_copy: Option<String>,
     #[serde(rename = "cellKey")]
     pub cell_key: String,
     #[serde(rename = "skillId")]
@@ -5189,6 +5190,7 @@ pub enum CellOutcomeDto {
 #[serde(rename_all = "camelCase")]
 pub struct EnableCellResultDto {
     pub project_copy: Option<crate::core::enable::ProjectCopyAction>,
+    pub depends_on_copy: Option<String>,
     pub copy_ready: Option<bool>,
     #[serde(rename = "cellKey")]
     pub cell_key: String,
@@ -5349,6 +5351,7 @@ impl From<EnableCell> for EnableCellDto {
     fn from(value: EnableCell) -> Self {
         Self {
             project_copy: value.project_copy,
+            depends_on_copy: value.depends_on_copy,
             cell_key: value.cell_key,
             skill_id: value.skill_id.0,
             skill_name: value.skill_name,
@@ -5453,6 +5456,7 @@ impl From<EnableCellResult> for EnableCellResultDto {
     fn from(value: EnableCellResult) -> Self {
         Self {
             project_copy: value.project_copy,
+            depends_on_copy: value.depends_on_copy,
             copy_ready: value.copy_ready,
             cell_key: value.cell_key,
             skill_id: value.skill_id.0,

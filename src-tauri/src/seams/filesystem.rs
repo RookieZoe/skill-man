@@ -129,6 +129,8 @@ pub struct EnableJournalCell {
 #[serde(rename_all = "snake_case")]
 pub struct EnableJournal {
     #[serde(default)]
+    pub project_links: Vec<ProjectLinkJournal>,
+    #[serde(default)]
     pub project_copy: Option<ProjectCopyJournal>,
     pub version: u32,
     pub operation_id: String,
@@ -1478,7 +1480,39 @@ pub struct ProjectCopyJournal {
     pub phase: ActivationReplacePhase,
 }
 
+/// Dependency actions never participate in the global Activation catalog.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectLinkJournal {
+    pub undone: bool,
+    pub cell_key: String,
+    pub project_root: DirectoryFingerprint,
+    pub configured_relative_path: PathBuf,
+    pub resolution: ProjectTargetResolution,
+    pub parent: DirectoryFingerprint,
+    pub entry_path: PathBuf,
+    pub link_text: PathBuf,
+    pub occupant: Option<OccupantSnapshot>,
+    pub phase: ActivationReplacePhase,
+}
+
 pub trait FileSystem: Send + Sync {
+    fn prepare_project_link_parent(
+        &self,
+        root: &DirectoryFingerprint,
+        configured: &Path,
+        resolution: &ProjectTargetResolution,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = (root, configured);
+        Err(FileSystemError::PlanStale {
+            path: resolution.resolved_container.clone(),
+        })
+    }
+    fn undo_project_link(&self, link: &ProjectLinkJournal) -> Result<(), FileSystemError> {
+        Err(FileSystemError::PlanStale {
+            path: link.entry_path.clone(),
+        })
+    }
+
     fn project_copy_unchanged(&self, journal: &ProjectCopyJournal) -> bool {
         let _ = journal;
         false

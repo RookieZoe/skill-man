@@ -217,9 +217,15 @@ pub(super) fn prepare(
     root: &DirectoryFingerprint,
     resolution: &ProjectTargetResolution,
 ) -> Result<DirectoryFingerprint, FileSystemError> {
+    prepare_directory(root, Path::new(".agents/skills"), resolution)
+}
+pub(super) fn prepare_directory(
+    root: &DirectoryFingerprint,
+    configured: &Path,
+    resolution: &ProjectTargetResolution,
+) -> Result<DirectoryFingerprint, FileSystemError> {
     let fd = pinned_root(root)?;
-    if resolve_project_skills_dir(&root.canonical_path, Path::new(".agents/skills")) != *resolution
-    {
+    if resolve_project_skills_dir(&root.canonical_path, configured) != *resolution {
         return Err(stale_tree_entry(&resolution.resolved_container));
     }
     if resolution.fault.is_some() {

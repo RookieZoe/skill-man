@@ -237,6 +237,7 @@ pub enum ProjectCopyAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableCell {
     pub project_copy: Option<ProjectCopyAction>,
+    pub depends_on_copy: Option<String>,
     /// Stable `"<skill_id>|<target_root_id>"` key (spec §4.9 cell identity).
     pub cell_key: String,
     pub skill_id: SkillId,
@@ -288,6 +289,7 @@ pub enum CellOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableCellResult {
     pub project_copy: Option<ProjectCopyAction>,
+    pub depends_on_copy: Option<String>,
     pub copy_ready: Option<bool>,
     pub cell_key: String,
     pub skill_id: SkillId,
@@ -412,7 +414,7 @@ pub struct EnableService {
     plans: Mutex<HashMap<String, PlannedBatch>>,
     applied: Mutex<HashMap<String, PlannedBatch>>,
     closed_copy_operations: Mutex<std::collections::HashSet<String>>,
-    copy_journals: Mutex<HashMap<String, crate::seams::filesystem::ProjectCopyJournal>>,
+    copy_journals: Mutex<HashMap<String, EnableJournal>>,
     next_plan_id: AtomicU64,
     plan_ttl: Duration,
     write_gate: Arc<WriteGate>,
@@ -910,6 +912,7 @@ impl EnableService {
             .collect();
 
         let cell = EnableCell {
+            depends_on_copy: None,
             project_copy: None,
             cell_key,
             skill_id: skill_id.clone(),
@@ -1230,6 +1233,7 @@ impl EnableService {
     ) -> EnableCellResult {
         EnableCellResult {
             project_copy: planned.cell.project_copy,
+            depends_on_copy: planned.cell.depends_on_copy.clone(),
             copy_ready: planned
                 .cell
                 .project_copy
@@ -1280,6 +1284,7 @@ impl EnableService {
             })
             .collect();
         EnableJournal {
+            project_links: vec![],
             project_copy: None,
             version: JOURNAL_VERSION,
             operation_id: batch.operation_id.clone(),
@@ -1383,6 +1388,12 @@ impl EnableService {
                     {
                         return Err(EnableError::PlanStale);
                     }
+                }
+                if cell.depends_on_copy.is_some()
+                    && cell.eligibility == CellEligibility::Blocked
+                    && planned.frozen_entry.is_none()
+                {
+                    continue;
                 }
                 match (
                     &planned.frozen_entry,

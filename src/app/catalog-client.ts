@@ -513,6 +513,7 @@ export interface DestructiveCounts {
 
 export interface EnableCell {
   projectCopy?: "create" | "reuse" | null;
+  dependsOnCopy?: string | null;
   /** `"<skill_id>|<target_root_id>"` cell identity. */
   cellKey: string;
   skillId: string;
@@ -560,6 +561,7 @@ export type CellOutcome =
 
 export interface EnableCellResult {
   projectCopy?: "create" | "reuse" | null;
+  dependsOnCopy?: string | null;
   copyReady?: boolean | null;
   cellKey: string;
   skillId: string;

@@ -661,6 +661,60 @@ fn normalize_lexically_macos(path: &Path) -> PathBuf {
 }
 
 impl FileSystem for MacOsFileSystem {
+    fn prepare_project_link_parent(
+        &self,
+        root: &DirectoryFingerprint,
+        configured: &Path,
+        resolution: &ProjectTargetResolution,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        project_copy::prepare_directory(root, configured, resolution)
+    }
+    fn undo_project_link(
+        &self,
+        link: &crate::seams::filesystem::ProjectLinkJournal,
+    ) -> Result<(), FileSystemError> {
+        if self.directory_fingerprint(&link.project_root.canonical_path)? != link.project_root
+            || self.resolve_project_target(
+                &link.project_root.canonical_path,
+                &link.configured_relative_path,
+            )? != link.resolution
+            || self.directory_fingerprint(&link.parent.canonical_path)? != link.parent
+        {
+            return Err(stale_tree_entry(&link.entry_path));
+        }
+        if self.activation_snapshot(&link.entry_path)? == ActivationEntrySnapshot::Missing {
+            return Ok(());
+        }
+        if link.occupant.as_ref() != Some(&self.occupant_snapshot(&link.entry_path)?) {
+            return Err(stale_tree_entry(&link.entry_path));
+        }
+        let operation = "undo project dependency link";
+        let (parent, metadata) =
+            open_absolute_directory_chain_nofollow(&link.parent.canonical_path, operation)?;
+        if metadata.st_dev as u64 != link.parent.device || metadata.st_ino != link.parent.inode {
+            return Err(stale_tree_entry(&link.entry_path));
+        }
+        let name =
+            cstring_path_component(link.entry_path.file_name(), &link.entry_path, operation)?;
+        if link.occupant.as_ref()
+            != Some(&occupant_snapshot_at_descriptor(
+                &parent,
+                &name,
+                &link.entry_path,
+                operation,
+            )?)
+        {
+            return Err(stale_tree_entry(&link.entry_path));
+        }
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(FileSystemError::Io {
+                operation,
+                path: link.entry_path.clone(),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        sync_descriptor(&parent, &link.parent.canonical_path, operation)
+    }
     fn project_copy_unchanged(
         &self,
         journal: &crate::seams::filesystem::ProjectCopyJournal,
@@ -3113,7 +3167,36 @@ impl FileSystem for MacOsFileSystem {
                 });
             }
             let mut journal = journal;
-            if let Some(copy) = journal.project_copy.clone() {
+            let mut dependencies_safe = true;
+            for index in 0..journal.project_links.len() {
+                let link = &journal.project_links[index];
+                if link.undone {
+                    continue;
+                }
+                if journal.phase == ActivationReplacePhase::Undoing {
+                    if self.undo_project_link(link).is_ok() {
+                        journal.project_links[index].undone = true;
+                        self.write_enable_journal(&library_root, &journal)?;
+                    } else {
+                        dependencies_safe = false;
+                    }
+                } else if link.phase == ActivationReplacePhase::Applying {
+                    // A crash before capturing the entry identity is ambiguous; retain all data.
+                    if self.activation_snapshot(&link.entry_path)?
+                        != ActivationEntrySnapshot::Missing
+                    {
+                        return Err(stale_tree_entry(&link.entry_path));
+                    }
+                }
+            }
+            if let Some(mut copy) = journal.project_copy.clone() {
+                if journal.phase == ActivationReplacePhase::Undoing {
+                    copy.phase = if dependencies_safe {
+                        ActivationReplacePhase::Undoing
+                    } else {
+                        ActivationReplacePhase::Committed
+                    };
+                }
                 self.recover_project_copy(&copy, &mut |updated| {
                     journal.project_copy = Some(updated.clone());
                     self.write_enable_journal(&library_root, &journal)

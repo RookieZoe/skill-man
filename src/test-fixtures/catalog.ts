@@ -91,6 +91,7 @@ export function createFixtureCatalogClient(
     }
   >();
   const fixtureOperations = new Map<string, string>();
+  const projectOperations = new Map<string, { cells: EnableCell[] }>();
   const recentProjectFolders: RecentProjectFolder[] =
     options.recentProjectFolders ? [...options.recentProjectFolders] : [];
   let firstRunCompleted = true;
@@ -792,8 +793,7 @@ export function createFixtureCatalogClient(
       );
 
       const groupsMap = new Map<string, typeof selectedConfigs>();
-      if (agentIds.length === 0)
-        groupsMap.set(`${projectFolder}/.agents/skills`, []);
+      groupsMap.set(`${projectFolder}/.agents/skills`, []);
       for (const config of selectedConfigs) {
         if (!config.projectSkillsDir) continue;
         const dir = config.projectSkillsDir;
@@ -832,7 +832,12 @@ export function createFixtureCatalogClient(
             skill?.displayName ??
             (skillId.includes("::") ? skillId.split("::")[0] : skillId);
           cells.push({
-            projectCopy: "create",
+            projectCopy:
+              container === `${projectFolder}/.agents/skills` ? "create" : null,
+            dependsOnCopy:
+              container === `${projectFolder}/.agents/skills`
+                ? null
+                : `${skillId}|project:${projectFolder}/.agents/skills`,
             cellKey,
             skillId,
             skillName: displayName,
@@ -841,7 +846,7 @@ export function createFixtureCatalogClient(
             targetRootId,
             targetPath: container,
             entryPath: `${container}/${directoryName}`,
-            finalEntityPath: skill?.finalEntityPath ?? "",
+            finalEntityPath: `${projectFolder}/.agents/skills/${directoryName}`,
             action: "enable",
             affectedAgentIds: configs.map((c) => c.agentId),
             affectedAgentNames: configs.map((c) => c.name),
@@ -927,13 +932,50 @@ export function createFixtureCatalogClient(
       return plan;
     },
     async applyProjectEnable(planToken) {
-      return this.applyGlobalEnable(planToken);
+      const plan = pendingEnablePlans.get(planToken);
+      if (!plan) throw new Error("Project plan not found");
+      pendingEnablePlans.delete(planToken);
+      const operationId = `fixture-project-operation-${nextPlanId++}`;
+      projectOperations.set(operationId, plan);
+      return {
+        operationId,
+        snapshotVersion,
+        cells: plan.cells.map((cell) => ({
+          cellKey: cell.cellKey,
+          skillId: cell.skillId,
+          targetRootId: cell.targetRootId,
+          projectCopy: cell.projectCopy,
+          dependsOnCopy: cell.dependsOnCopy,
+          copyReady: cell.projectCopy
+            ? ["ready", "no_op"].includes(cell.eligibility)
+            : null,
+          outcome:
+            cell.eligibility === "ready"
+              ? ("succeeded" as const)
+              : cell.eligibility === "no_op"
+                ? ("no_op" as const)
+                : ("skipped" as const),
+          diagnostic: null,
+        })),
+      };
     },
     async undoProjectEnable(operationId) {
-      return this.undoGlobalEnable(operationId);
+      const plan = projectOperations.get(operationId);
+      projectOperations.delete(operationId);
+      return {
+        operationId,
+        snapshotVersion,
+        cells: (plan?.cells ?? [])
+          .filter((cell) => cell.eligibility === "ready")
+          .map((cell) => ({
+            cellKey: cell.cellKey,
+            undone: true,
+            diagnostic: null,
+          })),
+      };
     },
     async finalizeProjectEnable(operationId) {
-      return this.finalizeGlobalEnable(operationId);
+      projectOperations.delete(operationId);
     },
     async getObservationSnapshot() {
       return observationSnapshot();

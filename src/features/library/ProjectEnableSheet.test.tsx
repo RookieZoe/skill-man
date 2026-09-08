@@ -66,7 +66,9 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
       "Project copies are managed by the project; Skill Man does not track or health-monitor them.",
     ),
   ).toBeInTheDocument();
-  expect(within(dialog).getByText(/actions completed/)).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("1 / 1 actions completed"),
+  ).toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Undo this operation" }),
   ).toBeInTheDocument();
@@ -96,9 +98,7 @@ test("batch project copy scope is explicitly unavailable", async () => {
   );
   await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
   expect(
-    screen.getByText(
-      /Multiple Skills and additional Agent links are not available yet/,
-    ),
+    screen.getByText(/Multiple Skills are not available yet/),
   ).toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "Review the plan" }),
@@ -151,7 +151,7 @@ test("recent project folders candidate selection and clear", async () => {
   });
 });
 
-test("destructive ack required for real directory replacement", async () => {
+test("occupied entries cannot be replaced before overwrite support", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
 
@@ -208,21 +208,13 @@ test("destructive ack required for real directory replacement", async () => {
 
   // In preview step:
   expect(await within(dialog).findByText("Conflict")).toBeInTheDocument();
-  const ackCheckbox = within(dialog).getByRole("checkbox", {
-    name: "I confirm that the existing directory contents will be moved to a backup.",
-  });
-  expect(ackCheckbox).not.toBeChecked();
-
-  // Enable button must be disabled until ack is checked
-  const applyBtn = within(dialog).getByRole("button", {
-    name: "Enable in Project",
-  });
-  expect(applyBtn).toBeDisabled();
-
-  // Check the ack
-  await user.click(ackCheckbox);
-  expect(ackCheckbox).toBeChecked();
-  expect(applyBtn).not.toBeDisabled();
+  expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
+  expect(
+    within(dialog).getByText(/This entry is occupied and will be preserved/),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("button", { name: "Enable in Project" }),
+  ).toBeDisabled();
 });
 
 test("zero additional Agents can preview without General configuration", async () => {
@@ -308,18 +300,78 @@ test("Chinese copy-only preview explains reuse and remains executable", async ()
   expect(screen.getByRole("button", { name: applyText })).not.toBeDisabled();
 });
 
-test("additional Agent selection explains unavailable scope instead of submitting old links", async () => {
+test("multiple Agents preview a required copy and dependent links", async () => {
   const user = userEvent.setup();
   renderSheet();
   await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
   await user.click(screen.getByRole("button", { name: "Review the plan" }));
   await user.click(await screen.findByRole("button", { name: "Select all" }));
+  expect(screen.getByRole("button", { name: "Review the plan" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
   expect(
-    screen.getByText(
-      /Multiple Skills and additional Agent links are not available yet/,
-    ),
+    await screen.findByText(/Skill authoring → Copy from Library/),
+  ).toBeInTheDocument();
+  expect(screen.getAllByText(/Share project copy with/).length).toBeGreaterThan(
+    0,
+  );
+});
+
+test("partial results identify each Agent, retain Undo feedback, and retry via a fresh preview", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const originalPlan = client.planProjectEnable;
+  let previews = 0;
+  let captured: Awaited<ReturnType<typeof originalPlan>> | undefined;
+  client.planProjectEnable = async (...args) => {
+    previews += 1;
+    captured = await originalPlan(...args);
+    return captured;
+  };
+  client.applyProjectEnable = async () => ({
+    operationId: "partial-operation",
+    snapshotVersion: 1,
+    cells: captured!.cells.map((cell) => ({
+      projectCopy: cell.projectCopy,
+      dependsOnCopy: cell.dependsOnCopy,
+      cellKey: cell.cellKey,
+      skillId: cell.skillId,
+      targetRootId: cell.targetRootId,
+      outcome: cell.dependsOnCopy ? "failed" : "succeeded",
+      diagnostic: null,
+    })),
+  });
+  client.undoProjectEnable = async () => ({
+    operationId: "partial-operation",
+    snapshotVersion: 1,
+    cells: [
+      {
+        cellKey: captured!.cells[0].cellKey,
+        undone: false,
+        diagnostic: "preserved",
+      },
+    ],
+  });
+  renderSheet(client);
+  await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await user.click(await screen.findByRole("button", { name: "Select all" }));
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Enable in Project" }),
+  );
+  expect(
+    await screen.findByText("1 / 2 actions completed"),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Review the plan" }),
-  ).toBeDisabled();
+    screen.getByText("Share project copy with Claude Code"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Failed")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Undo this operation" }));
+  expect(await screen.findByText(/Undo was partial/)).toBeInTheDocument();
+  await user.click(
+    screen.getByRole("button", { name: "Create a new preview" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await screen.findByRole("button", { name: "Enable in Project" });
+  expect(previews).toBe(2);
 });
