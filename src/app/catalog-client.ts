@@ -472,6 +472,8 @@ export type CellResolution = "switch" | "replace" | "adopt" | "skip";
 export type CellEligibility =
   "ready" | "no_op" | "skipped" | "conflict" | "blocked";
 export type CellBlockedReason =
+  | "project_source_choice"
+  | "project_source_not_selected"
   | "invalid_project_copy"
   | "invalid_copy_payload"
   | "non_portable_project_alias"

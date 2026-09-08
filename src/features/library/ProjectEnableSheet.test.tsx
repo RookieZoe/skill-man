@@ -84,7 +84,7 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   });
 });
 
-test("batch project copy scope is explicitly unavailable", async () => {
+test("batch project copy proceeds through one plan and result", async () => {
   const user = userEvent.setup();
   render(
     <ProjectEnableSheet
@@ -97,12 +97,14 @@ test("batch project copy scope is explicitly unavailable", async () => {
     />,
   );
   await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await screen.findByText("No agent selected");
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await screen.findByRole("button", { name: "Enable in Project" });
+  await user.click(screen.getByRole("button", { name: "Enable in Project" }));
   expect(
-    screen.getByText(/Multiple Skills are not available yet/),
+    await screen.findByText("2 / 2 actions completed"),
   ).toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "Review the plan" }),
-  ).toBeDisabled();
 });
 
 test("folder step renders browse button and input", async () => {
@@ -362,7 +364,7 @@ test("partial results identify each Agent, retain Undo feedback, and retry via a
     await screen.findByText("1 / 2 actions completed"),
   ).toBeInTheDocument();
   expect(
-    screen.getByText("Share project copy with Claude Code"),
+    screen.getByText("skill-authoring → Share project copy with Claude Code"),
   ).toBeInTheDocument();
   expect(screen.getByText("Failed")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Undo this operation" }));
@@ -489,5 +491,107 @@ test.each(["en", "zh-Hans"] as const)(
     expect(
       screen.getByText(messages["enable.project.undoRestored"]),
     ).toBeInTheDocument();
+  },
+);
+
+test.each(["en", "zh-Hans"] as const)(
+  "%s elects one batch source and clears replacement confirmation on a new preview",
+  async (locale) => {
+    const { LocaleProvider } = await import("../locale/LocaleProvider");
+    const messages = (await import(`../../../resources/locales/${locale}.json`))
+      .default;
+    const user = userEvent.setup();
+    const client = createFixtureCatalogClient();
+    await client.setLocaleSelection(locale);
+    const original = client.planProjectEnable;
+    let captured: Awaited<ReturnType<typeof original>>;
+    let winner = "";
+    let applied = false;
+    client.planProjectEnable = async (...args) => {
+      const plan = await original(...args);
+      winner = args[3][0]?.cellKey ?? "";
+      captured = {
+        ...plan,
+        cells: plan.cells.map((cell) => ({
+          ...cell,
+          directoryIdentityKey: "shared",
+          finalEntityPath: `/sources/${cell.skillId}/shared`,
+          eligibility:
+            cell.cellKey === winner ? "ready" : winner ? "skipped" : "conflict",
+          blockedReason:
+            cell.cellKey === winner
+              ? null
+              : winner
+                ? "project_source_not_selected"
+                : "project_source_choice",
+        })),
+      };
+      if (winner)
+        captured.cells.push({
+          ...captured.cells[0],
+          cellKey: "agent-entry",
+          projectCopy: null,
+          dependsOnCopy: winner,
+          entryPath: "/project/.claude/skills/shared",
+          affectedAgentNames: ["Claude"],
+          eligibility: "conflict",
+          blockedReason: "entry_occupied",
+        });
+      return captured;
+    };
+    client.applyProjectEnable = async (token, confirmations) => {
+      expect(token).toBe(captured.planToken);
+      expect(winner).toContain("b|");
+      expect(confirmations).toEqual([]);
+      applied = true;
+      return {
+        operationId: "batch",
+        snapshotVersion: 1,
+        cells: captured.cells.map((c) => ({
+          ...c,
+          outcome: c.cellKey === winner ? "succeeded" : "skipped",
+          diagnostic: null,
+        })),
+      };
+    };
+    render(
+      <LocaleProvider client={client}>
+        <ProjectEnableSheet
+          client={client}
+          skills={[
+            { id: "a", name: "A" },
+            { id: "b", name: "B" },
+          ]}
+          onClose={() => {}}
+        />
+      </LocaleProvider>,
+    );
+    await screen.findByText(messages["enable.project.requiredCopy"]);
+    await user.type(
+      screen.getByPlaceholderText("/path/to/project"),
+      "/project",
+    );
+    await user.click(
+      screen.getByRole("button", { name: messages["enable.project.continue"] }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: messages["enable.project.continue"] }),
+    );
+    await user.click(
+      await screen.findByRole("radio", { name: /a.*\/sources\/a\/shared/ }),
+    );
+    const confirmation = await screen.findByRole("checkbox");
+    await user.click(confirmation);
+    expect(confirmation).toBeChecked();
+    await user.click(
+      screen.getByRole("radio", { name: /b.*\/sources\/b\/shared/ }),
+    );
+    expect(await screen.findByRole("checkbox")).not.toBeChecked();
+    await user.click(
+      screen.getByRole("button", {
+        name: messages["enable.project.applyPlan"],
+      }),
+    );
+    expect(applied).toBe(true);
   },
 );

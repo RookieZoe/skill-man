@@ -129,6 +129,8 @@ pub struct EnableJournalCell {
 #[serde(rename_all = "snake_case")]
 pub struct EnableJournal {
     #[serde(default)]
+    pub project_copies: std::collections::BTreeMap<String, ProjectCopyJournal>,
+    #[serde(default)]
     pub project_links: Vec<ProjectLinkJournal>,
     #[serde(default)]
     pub project_copy: Option<ProjectCopyJournal>,
@@ -1492,6 +1494,8 @@ pub struct ProjectReplacementJournal {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectLinkJournal {
+    #[serde(default)]
+    pub depends_on_copy: Option<String>,
     #[serde(default)]
     pub replacement: Option<ProjectReplacementJournal>,
     pub undone: bool,

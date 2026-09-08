@@ -56,6 +56,9 @@ export function ProjectEnableSheet({
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [plan, setPlan] = useState<EnablePlan | null>(null);
   const [result, setResult] = useState<EnableResult | null>(null);
+  const [sourceChoices, setSourceChoices] = useState<Record<string, string>>(
+    {},
+  );
   const [confirmedKeys, setConfirmedKeys] = useState<string[]>([]);
   const [undoResult, setUndoResult] = useState<EnableUndoResult | null>(null);
   const [undoFinished, setUndoFinished] = useState(false);
@@ -108,7 +111,14 @@ export function ProjectEnableSheet({
     }
     let current = true;
     client
-      .planProjectEnable(skillIds, folder.trim(), selectedAgentIds, [])
+      .planProjectEnable(
+        skillIds,
+        folder.trim(),
+        selectedAgentIds,
+        Object.values(sourceChoices)
+          .filter(Boolean)
+          .map((cellKey) => ({ cellKey, resolution: "replace" as const })),
+      )
       .then((nextPlan) => {
         if (!current) return;
         setConfirmedKeys([]);
@@ -123,15 +133,7 @@ export function ProjectEnableSheet({
     return () => {
       current = false;
     };
-  }, [client, skillIds, folder, selectedAgentIds, step, t]);
-
-  const applyableCells = useMemo(
-    () =>
-      (plan?.cells ?? []).filter(
-        (cell) => cell.eligibility === "ready" || cell.eligibility === "no_op",
-      ),
-    [plan],
-  );
+  }, [client, skillIds, folder, selectedAgentIds, sourceChoices, step, t]);
 
   async function onApply() {
     if (!plan) return;
@@ -206,6 +208,8 @@ export function ProjectEnableSheet({
       setPlan(null);
       setError(null);
       setUndoFinished(false);
+      setSourceChoices({});
+      setConfirmedKeys([]);
       setStep("agents");
     } catch (cause) {
       setError(commandErrorMessage(cause, t));
@@ -277,9 +281,6 @@ export function ProjectEnableSheet({
           <p className="enable-sheet-hint">
             {t("enable.project.requiredCopy")}
           </p>
-          {isBatch && (
-            <p role="status">{t("enable.project.copyScopeNotReady")}</p>
-          )}
           {step === "folder" && (
             <FolderStep
               folder={folder}
@@ -315,6 +316,15 @@ export function ProjectEnableSheet({
           {step === "preview" && plan !== null && (
             <ProjectPreviewStep
               plan={plan}
+              onChooseSource={(identity, key) => {
+                setPlan(null);
+                setError(null);
+                setConfirmedKeys([]);
+                setSourceChoices((choices) => ({
+                  ...choices,
+                  [identity]: key,
+                }));
+              }}
               confirmedKeys={confirmedKeys}
               disabled={busy}
               onToggle={(key) =>
@@ -360,7 +370,7 @@ export function ProjectEnableSheet({
             <button
               type="button"
               className="toolbar-button primary"
-              disabled={folder.trim().length === 0 || isBatch}
+              disabled={folder.trim().length === 0}
               onClick={() => setStep("agents")}
             >
               {t("enable.project.continue")}
@@ -379,7 +389,7 @@ export function ProjectEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={isBatch}
+                disabled={busy}
                 onClick={() => {
                   setPlan(null);
                   setStep("preview");
@@ -403,7 +413,14 @@ export function ProjectEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={applyableCells.length === 0 || busy}
+                disabled={
+                  !plan?.cells.some(
+                    (cell) =>
+                      cell.eligibility === "ready" ||
+                      cell.eligibility === "no_op" ||
+                      cell.blockedReason === "project_source_choice",
+                  ) || busy
+                }
                 onClick={() => void onApply()}
               >
                 {t("enable.project.applyPlan")}
@@ -609,17 +626,55 @@ function AgentSelectionStep({
 
 function ProjectPreviewStep({
   plan,
+  onChooseSource,
   confirmedKeys,
   disabled,
   onToggle,
 }: {
   plan: EnablePlan;
+  onChooseSource: (identity: string, key: string) => void;
   confirmedKeys: string[];
   disabled: boolean;
   onToggle: (key: string) => void;
 }) {
+  const { t } = useLocale();
+  const sourceGroups = Map.groupBy(
+    plan.cells.filter((cell) => cell.projectCopy === "create"),
+    (cell) => cell.directoryIdentityKey,
+  );
   return (
     <div className="project-preview-matrix">
+      {[...sourceGroups]
+        .filter(([, cells]) => cells.length > 1)
+        .map(([identity, cells]) => (
+          <fieldset key={identity} disabled={disabled}>
+            <legend>
+              {t("enable.project.chooseSource", { name: identity })}
+            </legend>
+            <p>{t("enable.project.chooseSourceDetail")}</p>
+            <label>
+              <input
+                type="radio"
+                name={`source-${identity}`}
+                checked={!cells.some((cell) => cell.eligibility === "ready")}
+                onChange={() => onChooseSource(identity, "")}
+              />
+              {t("enable.project.skipSource")}
+            </label>
+            {cells.map((cell) => (
+              <label key={cell.cellKey} className="evidence-line">
+                <input
+                  type="radio"
+                  name={`source-${identity}`}
+                  checked={cell.eligibility === "ready"}
+                  disabled={cell.eligibility === "blocked"}
+                  onChange={() => onChooseSource(identity, cell.cellKey)}
+                />
+                {cell.skillName} <code>{cell.finalEntityPath}</code>
+              </label>
+            ))}
+          </fieldset>
+        ))}
       {plan.cells.map((cell) => (
         <ProjectPreviewCell
           key={cell.cellKey}
@@ -693,6 +748,11 @@ function ProjectPreviewCell({
       </div>
 
       <div className="project-evidence-box">
+        {!cell.dependsOnCopy && cell.projectCopy === "create" && (
+          <p>
+            <code>{cell.finalEntityPath}</code>
+          </p>
+        )}
         <div className="evidence-line">
           {t("enable.project.resolvedContainerLabel", {
             path: cell.entryPath,
@@ -832,6 +892,9 @@ function ProjectResultStep({
         {result.cells.map((c) => (
           <li key={c.cellKey} className="result-cell-item">
             <span className="result-cell-key">
+              {plan?.cells.find((p) => p.cellKey === c.cellKey)
+                ?.directoryName ?? c.skillId}
+              {" → "}
               {c.dependsOnCopy
                 ? t("enable.project.linkAgents", {
                     agents:
@@ -921,6 +984,10 @@ function blockedReasonLabel(
   t: (key: MessageKey, params?: Record<string, string | number>) => string,
 ): string | null {
   switch (cell.blockedReason) {
+    case "project_source_choice":
+      return t("enable.project.chooseSourceDetail");
+    case "project_source_not_selected":
+      return t("enable.project.sourceNotSelected");
     case "invalid_project_copy":
       return t("enable.project.invalidCopy");
     case "invalid_copy_payload":

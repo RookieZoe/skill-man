@@ -1424,5 +1424,9 @@
   "enable.project.undoResults": "撤销结果",
   "enable.project.undoRestored": "已安全撤销",
   "enable.project.undoPreserved": "已保留，无法安全完成撤销",
-  "enable.project.originalRecoveryRequired": "部分原条目无法安全恢复。其备份及依赖的项目副本已保留，需要恢复处理；关闭结果不会删除这些备份。"
+  "enable.project.originalRecoveryRequired": "部分原条目无法安全恢复。其备份及依赖的项目副本已保留，需要恢复处理；关闭结果不会删除这些备份。",
+  "enable.project.chooseSource": "为 {name} 选择来源",
+  "enable.project.chooseSourceDetail": "所有依赖的智能体共用此项目副本。不选择来源则跳过此名字，其他技能可以继续。",
+  "enable.project.skipSource": "跳过此名字",
+  "enable.project.sourceNotSelected": "此项目副本已选择另一来源。"
 }

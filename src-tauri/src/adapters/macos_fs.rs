@@ -3239,6 +3239,27 @@ impl FileSystem for MacOsFileSystem {
                     self.write_enable_journal(&library_root, &journal)
                 })?;
             }
+            for (key, mut copy) in journal.project_copies.clone() {
+                if journal.phase == ActivationReplacePhase::Undoing {
+                    let safe = journal
+                        .project_links
+                        .iter()
+                        .filter(|l| l.depends_on_copy.as_ref() == Some(&key))
+                        .all(|l| l.undone);
+                    copy.phase = if safe
+                        && (copy.phase == ActivationReplacePhase::Undoing
+                            || self.project_copy_unchanged(&copy))
+                    {
+                        ActivationReplacePhase::Undoing
+                    } else {
+                        ActivationReplacePhase::Committed
+                    };
+                }
+                self.recover_project_copy(&copy, &mut |updated| {
+                    journal.project_copies.insert(key.clone(), updated.clone());
+                    self.write_enable_journal(&library_root, &journal)
+                })?;
+            }
             if replacement_unresolved {
                 return Err(FileSystemError::RecoveryRequired {
                     operation: "recover project originals",

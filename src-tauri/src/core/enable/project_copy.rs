@@ -1,6 +1,7 @@
 //! Project-owned copy actions within the Enable Module (ADR-0025, #101).
 use super::*;
 use crate::seams::filesystem::{EvidenceChainHopKind, ProjectCopyJournal, ProjectLinkJournal};
+use std::collections::HashSet;
 
 impl EnableService {
     pub fn plan_project_enable(
@@ -8,13 +9,11 @@ impl EnableService {
         skill_ids: &[SkillId],
         project_folder: &Path,
         agent_ids: &[String],
-        _resolutions: &[(String, CellResolution)],
+        resolutions: &[(String, CellResolution)],
     ) -> Result<EnablePlan, EnableError> {
         let context = self.capture_write_context()?;
-        if skill_ids.len() != 1 {
-            return Err(EnableError::Validation(
-                "project_copy_scope_not_ready".into(),
-            ));
+        if skill_ids.is_empty() {
+            return Err(EnableError::Validation("select at least one Skill".into()));
         }
         let catalog_generation = self.store.catalog_generation()?;
         let agent_generation = self
@@ -23,15 +22,49 @@ impl EnableService {
             .snapshot_version;
         let root = self.filesystem.canonical_directory(project_folder)?;
         let root_before = self.filesystem.directory_fingerprint(&root)?;
-        let skill =
-            self.catalog
-                .inspect(&skill_ids[0])?
-                .ok_or_else(|| EnableError::SkillNotFound {
-                    skill_id: skill_ids[0].0.clone(),
-                })?;
+        let mut cells = Vec::new();
+        let mut seen = HashSet::new();
+        for skill_id in skill_ids {
+            if !seen.insert(skill_id.clone()) {
+                continue;
+            }
+            let mut group = vec![self.plan_project_copy(&root, skill_id)?];
+            self.plan_copy_links(&root, agent_ids, &mut group)?;
+            cells.extend(group);
+        }
+        if self.store.catalog_generation()? != catalog_generation
+            || self
+                .agent_store
+                .agent_configuration_snapshot()?
+                .snapshot_version
+                != agent_generation
+            || self.filesystem.directory_fingerprint(&root)? != root_before
+        {
+            return Err(EnableError::PlanStale);
+        }
+        resolve_project_sources(&mut cells, resolutions);
+        block_batch_overlaps(&mut cells);
+        let hops = cells
+            .iter()
+            .flat_map(|p| p.cell.hop_evidence.clone())
+            .collect();
+        self.build_project_plan(root, hops, cells, context)
+    }
+
+    fn plan_project_copy(
+        &self,
+        root: &Path,
+        skill_id: &SkillId,
+    ) -> Result<PlannedCell, EnableError> {
+        let skill = self
+            .catalog
+            .inspect(skill_id)?
+            .ok_or_else(|| EnableError::SkillNotFound {
+                skill_id: skill_id.0.clone(),
+            })?;
         let source = PathBuf::from(&skill.final_entity_path);
         let configured = PathBuf::from(".agents/skills");
-        let resolution = self.filesystem.resolve_project_target(&root, &configured)?;
+        let resolution = self.filesystem.resolve_project_target(root, &configured)?;
         let target = resolution.resolved_container.clone();
         let mut entry = target.join(&skill.summary.directory_name);
         let mut reason = None;
@@ -65,9 +98,9 @@ impl EnableService {
             let observed_path = if reuse {
                 frozen_entry = Some(self.filesystem.occupant_snapshot(&entry)?);
                 let relative = entry
-                    .strip_prefix(&root)
+                    .strip_prefix(root)
                     .map_err(|_| EnableError::PlanStale)?;
-                let existing = self.filesystem.resolve_project_target(&root, relative)?;
+                let existing = self.filesystem.resolve_project_target(root, relative)?;
                 if existing.fault.is_some() || !existing.create_steps.is_empty() || existing.hops.iter().any(|hop| matches!(&hop.kind, EvidenceChainHopKind::Symlink { target } if target.is_absolute())) {
                     reason = Some(CellBlockedReason::InvalidProjectCopy);
                     detail = Some("existing copy is not a portable project directory".into());
@@ -99,7 +132,7 @@ impl EnableService {
             });
         }
         if let Some(service) = &self.source_update {
-            if let Err(error) = service.ensure_new_enable_allowed(&skill_ids[0]) {
+            if let Err(error) = service.ensure_new_enable_allowed(skill_id) {
                 reason = Some(CellBlockedReason::SourceSnapshotMismatch);
                 detail = Some(error.to_string());
             }
@@ -119,8 +152,8 @@ impl EnableService {
             } else {
                 ProjectCopyAction::Create
             }),
-            cell_key: format!("{}|{target_id}", skill_ids[0].0),
-            skill_id: skill_ids[0].clone(),
+            cell_key: format!("{}|{target_id}", skill_id.0),
+            skill_id: skill_id.clone(),
             skill_name: skill.summary.display_name,
             directory_name: skill.summary.directory_name.clone(),
             directory_identity_key: crate::core::domain::skill_identity_key(
@@ -128,8 +161,8 @@ impl EnableService {
             ),
             target_root_id: target_id,
             target_path: target.clone(),
-            entry_path: entry,
-            final_entity_path: source.clone(),
+            entry_path: entry.clone(),
+            final_entity_path: if reuse { entry.clone() } else { source.clone() },
             action: EnableAction::Enable,
             affected_agent_ids: vec![],
             affected_agent_names: vec![],
@@ -149,7 +182,7 @@ impl EnableService {
             create_steps: resolution.create_steps.clone(),
             hop_evidence: vec![],
         };
-        let planned = PlannedCell {
+        Ok(PlannedCell {
             cell,
             frozen_entry,
             project_original_hash: None,
@@ -169,24 +202,7 @@ impl EnableService {
                 resolution,
             }],
             before_desired: false,
-        };
-        if self.store.catalog_generation()? != catalog_generation
-            || self
-                .agent_store
-                .agent_configuration_snapshot()?
-                .snapshot_version
-                != agent_generation
-            || self.filesystem.directory_fingerprint(&root)? != root_before
-        {
-            return Err(EnableError::PlanStale);
-        }
-        let mut cells = vec![planned];
-        self.plan_copy_links(&root, agent_ids, &mut cells)?;
-        let hops = cells
-            .iter()
-            .flat_map(|p| p.cell.hop_evidence.clone())
-            .collect();
-        self.build_project_plan(root, hops, cells, context)
+        })
     }
 
     fn plan_copy_links(
@@ -403,13 +419,11 @@ impl EnableService {
         // Refuse ancestors and descendants of any planned artifact, including a reused physical copy.
         for i in 1..cells.len() {
             let entry = &cells[i].cell.entry_path;
-            let overlap = entry.starts_with(&copy_path)
-                || copy_path.starts_with(entry)
-                || cells.iter().enumerate().any(|(j, p)| {
-                    j != i
-                        && (entry.starts_with(&p.cell.entry_path)
-                            || p.cell.entry_path.starts_with(entry))
-                });
+            let overlap = project_paths_overlap(entry, &copy_path)
+                || cells
+                    .iter()
+                    .enumerate()
+                    .any(|(j, p)| j != i && project_paths_overlap(entry, &p.cell.entry_path));
             if overlap {
                 cells[i].cell.eligibility = CellEligibility::Blocked;
                 cells[i].cell.blocked_reason = Some(CellBlockedReason::EntryOccupied);
@@ -423,154 +437,46 @@ impl EnableService {
         batch: PlannedBatch,
         library: &Path,
     ) -> Result<EnableResult, EnableError> {
-        let planned = &batch.cells[0];
         let version = self.store.catalog_generation()?;
-        let mut outcome = match planned.cell.eligibility {
-            CellEligibility::NoOp => CellOutcome::NoOp,
-            CellEligibility::Ready => CellOutcome::Succeeded,
-            _ => CellOutcome::Skipped,
-        };
-        let mut diagnostic = None;
         let mut operation = self.build_journal(&batch, library);
         operation.cells.clear();
-        if outcome == CellOutcome::Succeeded {
-            'copy: {
-                let root = batch
-                    .project_root_identity
-                    .as_ref()
-                    .ok_or(EnableError::PlanStale)?;
-                let parent = match self.filesystem.prepare_project_copy_parent(
-                    root,
-                    &planned.frozen_project_targets[0].resolution,
-                ) {
-                    Ok(parent) => parent,
-                    Err(error) => {
-                        outcome = CellOutcome::Failed;
-                        diagnostic = Some(error.to_string());
-                        break 'copy;
-                    }
-                };
-                let mut copy = ProjectCopyJournal {
-                    cleanup_authorized: false,
-                    target_resolution: self.filesystem.resolve_project_target(
-                        &root.canonical_path,
-                        Path::new(".agents/skills"),
-                    )?,
-                    project_root: root.clone(),
-                    parent,
-                    entry_path: planned.cell.entry_path.clone(),
-                    staging_path: planned
-                        .cell
-                        .target_path
-                        .join(format!(".skillman-{}", batch.operation_id)),
-                    staged_identity: None,
-                    content_hash: None,
-                    phase: ActivationReplacePhase::Applying,
-                };
-                let mut journal = self.build_journal(&batch, library);
-                journal.cells.clear();
-                journal.project_copy = Some(copy.clone());
-                self.filesystem.write_enable_journal(library, &journal)?;
-                let applied = (|| -> Result<(), EnableError> {
-                    copy.staged_identity = Some(self.filesystem.reserve_project_copy(&copy)?);
-                    journal.project_copy = Some(copy.clone());
-                    self.filesystem.write_enable_journal(library, &journal)?;
-                    self.filesystem.stage_project_copy(
-                        &copy,
-                        planned
-                            .project_copy_payload
-                            .as_ref()
-                            .ok_or(EnableError::PlanStale)?,
-                    )?;
-                    copy.content_hash =
-                        Some(self.filesystem.project_copy_hash(&copy.staging_path)?);
-                    journal.project_copy = Some(copy.clone());
-                    self.filesystem.write_enable_journal(library, &journal)?;
-                    self.filesystem.publish_project_copy(&copy)?;
-                    copy.phase = ActivationReplacePhase::Committed;
-                    journal.project_copy = Some(copy.clone());
-                    journal.phase = ActivationReplacePhase::Committed;
-                    self.filesystem
-                        .write_enable_journal(library, &journal)
-                        .map_err(|e| {
-                            self.block_for_recovery("persist committed project copy", e)
-                        })?;
-                    Ok(())
-                })();
-                if let Err(error) = applied {
-                    if matches!(error, EnableError::RecoveryRequired(_)) {
-                        return Err(error);
-                    }
-                    // Recovery consumes only the journal's frozen artifact evidence.
-                    self.recover_copy_artifacts(&copy, library, &batch.operation_id)
-                        .map_err(|e| self.block_for_recovery("recover failed project copy", e))?;
-                    self.filesystem
-                        .finish_enable_journal(library, &batch.operation_id)?;
-                    outcome = CellOutcome::Failed;
-                    diagnostic = Some(error.to_string());
-                } else {
-                    self.copy_journals
-                        .lock()
-                        .map_err(|_| EnableError::Internal("copy journal lock".into()))?
-                        .insert(batch.operation_id.clone(), journal.clone());
-                    operation = journal;
-                }
-            }
-        }
-        let ready = matches!(outcome, CellOutcome::Succeeded | CellOutcome::NoOp);
-        let mut results = vec![self.result_for(planned, outcome, diagnostic)];
-        let mut gate_closed = false;
-        for link in batch.cells.iter().skip(1) {
-            let copy_still_ready = ready
-                && !gate_closed
-                && match &operation.project_copy {
-                    Some(copy) => self.filesystem.project_copy_unchanged(copy),
-                    None => planned
-                        .project_copy_payload
-                        .as_ref()
-                        .is_some_and(|payload| {
-                            self.filesystem
-                                .project_copy_payload(&payload.root.canonical_path, true)
-                                .as_ref()
-                                .ok()
-                                == Some(payload)
-                        }),
-                };
-            let (outcome, diagnostic) = if !copy_still_ready {
-                (
-                    CellOutcome::NotAttempted,
-                    Some("project_copy_not_ready".into()),
-                )
-            } else if link.cell.eligibility == CellEligibility::NoOp {
-                (CellOutcome::NoOp, None)
-            } else if link.cell.eligibility != CellEligibility::Ready
-                && !(link.cell.eligibility == CellEligibility::Conflict
-                    && link.cell.resolution == CellResolution::Replace)
+        let mut results = vec![];
+        for planned in batch.cells.iter().filter(|p| p.cell.project_copy.is_some()) {
+            if self
+                .write_gate
+                .validate_open_context(&batch.write_context)
+                .is_err()
             {
-                (CellOutcome::Skipped, None)
-            } else {
-                match self.apply_copy_link(&batch, link, &mut operation, library) {
-                    Ok(()) => (CellOutcome::Succeeded, None),
-                    Err(error @ EnableError::RecoveryRequired(_)) => return Err(error),
-                    Err(EnableError::WriteGateClosed) => {
-                        gate_closed = true;
-                        (CellOutcome::NotAttempted, Some("write_gate_closed".into()))
-                    }
-                    Err(error) => (CellOutcome::Failed, Some(error.to_string())),
+                results.push(self.result_for(
+                    planned,
+                    CellOutcome::NotAttempted,
+                    Some("write_gate_closed".into()),
+                ));
+                for link in batch
+                    .cells
+                    .iter()
+                    .filter(|p| p.cell.depends_on_copy.as_ref() == Some(&planned.cell.cell_key))
+                {
+                    results.push(self.result_for(
+                        link,
+                        CellOutcome::NotAttempted,
+                        Some("write_gate_closed".into()),
+                    ));
                 }
-            };
-            results.push(self.result_for(link, outcome, diagnostic));
+                continue;
+            }
+            results.extend(self.apply_project_copy_group(
+                &batch,
+                planned,
+                &mut operation,
+                library,
+            )?);
         }
-        if results
-            .iter()
-            .any(|cell| cell.outcome == CellOutcome::Succeeded)
-        {
+        if results.iter().any(|c| c.outcome == CellOutcome::Succeeded) {
             let path = batch
-                .project_root_identity
-                .as_ref()
-                .ok_or(EnableError::PlanStale)?
-                .canonical_path
-                .clone();
+                .canonical_project_root
+                .clone()
+                .ok_or(EnableError::PlanStale)?;
             if let Err(error) = self
                 .agent_store
                 .record_recent_project_folder(RecentProjectFolder {
@@ -598,6 +504,182 @@ impl EnableService {
             .map_err(|_| EnableError::Internal("Enable applied lock".into()))?
             .insert(batch.operation_id.clone(), batch);
         Ok(result)
+    }
+
+    fn apply_project_copy_group(
+        &self,
+        batch: &PlannedBatch,
+        planned: &PlannedCell,
+        operation: &mut EnableJournal,
+        library: &Path,
+    ) -> Result<Vec<EnableCellResult>, EnableError> {
+        let mut outcome = match planned.cell.eligibility {
+            CellEligibility::NoOp => CellOutcome::NoOp,
+            CellEligibility::Ready => CellOutcome::Succeeded,
+            _ => CellOutcome::Skipped,
+        };
+        let mut diagnostic = None;
+        if outcome == CellOutcome::Succeeded {
+            'copy: {
+                let root = batch
+                    .project_root_identity
+                    .as_ref()
+                    .ok_or(EnableError::PlanStale)?;
+                let prepare_parent = || -> Result<_, EnableError> {
+                    let current = self.filesystem.resolve_project_target(
+                        &root.canonical_path,
+                        Path::new(".agents/skills"),
+                    )?;
+                    let frozen = &planned.frozen_project_targets[0].resolution;
+                    if current.resolved_container != frozen.resolved_container
+                        || !frozen.hops.iter().all(|hop| current.hops.contains(hop))
+                    {
+                        return Err(EnableError::PlanStale);
+                    }
+                    Ok(self
+                        .filesystem
+                        .prepare_project_copy_parent(root, &current)?)
+                };
+                let parent = match prepare_parent() {
+                    Ok(parent) => parent,
+                    Err(error) => {
+                        outcome = CellOutcome::Failed;
+                        diagnostic = Some(error.to_string());
+                        break 'copy;
+                    }
+                };
+                let mut copy = ProjectCopyJournal {
+                    cleanup_authorized: false,
+                    target_resolution: self.filesystem.resolve_project_target(
+                        &root.canonical_path,
+                        Path::new(".agents/skills"),
+                    )?,
+                    project_root: root.clone(),
+                    parent,
+                    entry_path: planned.cell.entry_path.clone(),
+                    staging_path: planned.cell.target_path.join(format!(
+                        ".skillman-{}-{}",
+                        batch.operation_id,
+                        operation.project_copies.len()
+                    )),
+                    staged_identity: None,
+                    content_hash: None,
+                    phase: ActivationReplacePhase::Applying,
+                };
+                let journal = &mut *operation;
+                journal
+                    .project_copies
+                    .insert(planned.cell.cell_key.clone(), copy.clone());
+                self.filesystem.write_enable_journal(library, journal)?;
+                let applied = (|| -> Result<(), EnableError> {
+                    copy.staged_identity = Some(self.filesystem.reserve_project_copy(&copy)?);
+                    journal
+                        .project_copies
+                        .insert(planned.cell.cell_key.clone(), copy.clone());
+                    self.filesystem.write_enable_journal(library, journal)?;
+                    self.filesystem.stage_project_copy(
+                        &copy,
+                        planned
+                            .project_copy_payload
+                            .as_ref()
+                            .ok_or(EnableError::PlanStale)?,
+                    )?;
+                    copy.content_hash =
+                        Some(self.filesystem.project_copy_hash(&copy.staging_path)?);
+                    journal
+                        .project_copies
+                        .insert(planned.cell.cell_key.clone(), copy.clone());
+                    self.filesystem.write_enable_journal(library, journal)?;
+                    self.filesystem.publish_project_copy(&copy)?;
+                    copy.phase = ActivationReplacePhase::Committed;
+                    journal
+                        .project_copies
+                        .insert(planned.cell.cell_key.clone(), copy.clone());
+                    journal.phase = ActivationReplacePhase::Committed;
+                    self.filesystem
+                        .write_enable_journal(library, journal)
+                        .map_err(|e| {
+                            self.block_for_recovery("persist committed project copy", e)
+                        })?;
+                    Ok(())
+                })();
+                if let Err(error) = applied {
+                    if matches!(error, EnableError::RecoveryRequired(_)) {
+                        return Err(error);
+                    }
+                    // Recovery consumes only the journal's frozen artifact evidence.
+                    self.filesystem
+                        .recover_project_copy(&copy, &mut |updated| {
+                            journal
+                                .project_copies
+                                .insert(planned.cell.cell_key.clone(), updated.clone());
+                            self.filesystem.write_enable_journal(library, journal)
+                        })
+                        .map_err(|e| self.block_for_recovery("recover failed project copy", e))?;
+                    journal.project_copies.remove(&planned.cell.cell_key);
+                    self.filesystem.write_enable_journal(library, journal)?;
+                    outcome = CellOutcome::Failed;
+                    diagnostic = Some(error.to_string());
+                }
+            }
+        }
+        let ready = matches!(outcome, CellOutcome::Succeeded | CellOutcome::NoOp);
+        let mut results = vec![self.result_for(planned, outcome, diagnostic)];
+        let mut gate_closed = false;
+        for link in batch
+            .cells
+            .iter()
+            .filter(|p| p.cell.depends_on_copy.as_ref() == Some(&planned.cell.cell_key))
+        {
+            let copy_still_ready = ready
+                && !gate_closed
+                && match operation.project_copies.get(&planned.cell.cell_key) {
+                    Some(copy) => self.filesystem.project_copy_unchanged(copy),
+                    None => planned
+                        .project_copy_payload
+                        .as_ref()
+                        .is_some_and(|payload| {
+                            self.filesystem
+                                .project_copy_payload(&payload.root.canonical_path, true)
+                                .as_ref()
+                                .ok()
+                                == Some(payload)
+                        }),
+                };
+            let (outcome, diagnostic) = if matches!(
+                planned.cell.blocked_reason,
+                Some(
+                    CellBlockedReason::ProjectSourceChoice
+                        | CellBlockedReason::ProjectSourceNotSelected
+                )
+            ) {
+                (CellOutcome::Skipped, None)
+            } else if !copy_still_ready {
+                (
+                    CellOutcome::NotAttempted,
+                    Some("project_copy_not_ready".into()),
+                )
+            } else if link.cell.eligibility == CellEligibility::NoOp {
+                (CellOutcome::NoOp, None)
+            } else if link.cell.eligibility != CellEligibility::Ready
+                && !(link.cell.eligibility == CellEligibility::Conflict
+                    && link.cell.resolution == CellResolution::Replace)
+            {
+                (CellOutcome::Skipped, None)
+            } else {
+                match self.apply_copy_link(batch, link, operation, library) {
+                    Ok(()) => (CellOutcome::Succeeded, None),
+                    Err(error @ EnableError::RecoveryRequired(_)) => return Err(error),
+                    Err(EnableError::WriteGateClosed) => {
+                        gate_closed = true;
+                        (CellOutcome::NotAttempted, Some("write_gate_closed".into()))
+                    }
+                    Err(error) => (CellOutcome::Failed, Some(error.to_string())),
+                }
+            };
+            results.push(self.result_for(link, outcome, diagnostic));
+        }
+        Ok(results)
     }
 
     fn apply_copy_link(
@@ -647,6 +729,7 @@ impl EnableService {
             .resolve_project_target(&root.canonical_path, &frozen.configured_relative_path)?;
         let link_text = relative_path(&parent.canonical_path, &planned.cell.final_entity_path);
         let mut link = ProjectLinkJournal {
+            depends_on_copy: planned.cell.depends_on_copy.clone(),
             replacement: if planned.cell.resolution == CellResolution::Replace {
                 Some(crate::seams::filesystem::ProjectReplacementJournal {
                     original: planned.frozen_entry.clone().ok_or(EnableError::PlanStale)?,
@@ -736,27 +819,6 @@ impl EnableService {
         Ok(())
     }
 
-    fn recover_copy_artifacts(
-        &self,
-        copy: &ProjectCopyJournal,
-        library: &Path,
-        operation_id: &str,
-    ) -> Result<(), FileSystemError> {
-        self.filesystem.recover_project_copy(copy, &mut |updated| {
-            self.filesystem.write_enable_journal(
-                library,
-                &EnableJournal {
-                    project_links: vec![],
-                    version: JOURNAL_VERSION,
-                    operation_id: operation_id.into(),
-                    phase: updated.phase,
-                    project_copy: Some(updated.clone()),
-                    cells: vec![],
-                },
-            )
-        })
-    }
-
     pub(super) fn undo_project_copy(
         &self,
         batch: &PlannedBatch,
@@ -770,7 +832,7 @@ impl EnableService {
             return Err(EnableError::PlanNotFound);
         };
         let mut cells = vec![];
-        let mut safe = true;
+
         // Persist the dependency phase before touching any entry or copy.
         journal.phase = ActivationReplacePhase::Undoing;
         for link in &mut journal.project_links {
@@ -788,7 +850,7 @@ impl EnableService {
             }
             let result = self.filesystem.undo_project_link(link);
             let undone = result.is_ok();
-            safe &= undone;
+
             cells.push(EnableUndoCellResult {
                 cell_key: link.cell_key.clone(),
                 undone,
@@ -799,23 +861,28 @@ impl EnableService {
                 .write_enable_journal(library, journal)
                 .map_err(|e| self.block_for_recovery("persist dependency Undo result", e))?;
         }
-        if let Some(mut copy) = journal.project_copy.clone() {
+        for (key, mut copy) in journal.project_copies.clone() {
+            let safe = journal
+                .project_links
+                .iter()
+                .filter(|l| l.depends_on_copy.as_ref() == Some(&key))
+                .all(|l| l.undone);
             let unchanged = safe && self.filesystem.project_copy_unchanged(&copy);
             if unchanged {
                 copy.phase = ActivationReplacePhase::Undoing;
-                journal.project_copy = Some(copy.clone());
+                journal.project_copies.insert(key.clone(), copy.clone());
                 self.filesystem
                     .write_enable_journal(library, journal)
                     .map_err(|e| self.block_for_recovery("persist project copy Undo", e))?;
                 self.filesystem
                     .recover_project_copy(&copy, &mut |updated| {
-                        journal.project_copy = Some(updated.clone());
+                        journal.project_copies.insert(key.clone(), updated.clone());
                         self.filesystem.write_enable_journal(library, journal)
                     })
                     .map_err(|e| self.block_for_recovery("finish project copy Undo", e))?;
             }
             cells.push(EnableUndoCellResult {
-                cell_key: batch.cells[0].cell.cell_key.clone(),
+                cell_key: key,
                 undone: unchanged,
                 diagnostic: if unchanged {
                     None
@@ -857,4 +924,149 @@ fn relative_path(from: &Path, to: &Path) -> PathBuf {
         result.push(item.as_os_str());
     }
     result
+}
+
+/// Project source decisions apply to a copy, never to individual Agent targets.
+fn resolve_project_sources(cells: &mut Vec<PlannedCell>, resolutions: &[(String, CellResolution)]) {
+    let mut groups = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, p) in cells
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.cell.project_copy.is_some())
+    {
+        groups
+            .entry(p.cell.directory_identity_key.clone())
+            .or_default()
+            .push(index);
+    }
+    let mut remove = HashSet::new();
+    for indices in groups.values().filter(|v| v.len() > 1) {
+        // Reuse is a project fact, not a source election. Keep one representative
+        // action and its links; the source path shown is the existing copy.
+        if indices
+            .iter()
+            .any(|i| cells[*i].cell.project_copy == Some(ProjectCopyAction::Reuse))
+        {
+            let keep = *indices
+                .iter()
+                .min_by_key(|i| {
+                    (
+                        cells[**i].cell.eligibility != CellEligibility::NoOp,
+                        &cells[**i].cell.skill_id.0,
+                    )
+                })
+                .unwrap();
+            for i in indices.iter().filter(|i| **i != keep) {
+                remove.insert(cells[*i].cell.cell_key.clone());
+            }
+            continue;
+        }
+        let winners: Vec<_> = resolutions
+            .iter()
+            .filter(|(key, decision)| {
+                *decision == CellResolution::Replace
+                    && indices.iter().any(|i| cells[*i].cell.cell_key == *key)
+            })
+            .collect();
+        let winner = if winners.len() == 1 {
+            Some(&winners[0].0)
+        } else {
+            None
+        };
+        for i in indices {
+            let p = &mut cells[*i];
+            if p.cell.eligibility == CellEligibility::Blocked {
+                continue;
+            }
+            if winner == Some(&p.cell.cell_key) {
+                p.cell.resolution = CellResolution::Replace;
+            } else {
+                p.cell.eligibility = if winner.is_some() {
+                    CellEligibility::Skipped
+                } else {
+                    CellEligibility::Conflict
+                };
+                p.cell.blocked_reason = Some(if winner.is_some() {
+                    CellBlockedReason::ProjectSourceNotSelected
+                } else {
+                    CellBlockedReason::ProjectSourceChoice
+                });
+                // Unchosen sources cannot invalidate the selected source's plan.
+                p.project_copy_payload = None;
+            }
+        }
+    }
+    cells.retain(|p| {
+        !remove.contains(&p.cell.cell_key)
+            && !p
+                .cell
+                .depends_on_copy
+                .as_ref()
+                .is_some_and(|k| remove.contains(k))
+    });
+    let skipped: HashMap<_, _> = cells
+        .iter()
+        .filter(|p| {
+            p.cell.project_copy.is_some()
+                && matches!(
+                    p.cell.blocked_reason,
+                    Some(
+                        CellBlockedReason::ProjectSourceChoice
+                            | CellBlockedReason::ProjectSourceNotSelected
+                    )
+                )
+        })
+        .map(|p| (p.cell.cell_key.clone(), p.cell.blocked_reason))
+        .collect();
+    for p in cells.iter_mut() {
+        if let Some(reason) = p.cell.depends_on_copy.as_ref().and_then(|k| skipped.get(k)) {
+            p.cell.eligibility = CellEligibility::Skipped;
+            p.cell.blocked_reason = *reason;
+        }
+    }
+}
+
+fn block_batch_overlaps(cells: &mut [PlannedCell]) {
+    let blocked: Vec<_> = cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            p.cell.depends_on_copy.as_ref()?;
+            let entry = &p.cell.entry_path;
+            cells
+                .iter()
+                .enumerate()
+                .any(|(j, other)| {
+                    if i == j || p.cell.directory_identity_key == other.cell.directory_identity_key
+                    {
+                        return false;
+                    }
+                    let physical = other
+                        .copy_alias
+                        .as_ref()
+                        .map(|(_, r)| &r.resolved_container)
+                        .unwrap_or(&other.cell.entry_path);
+                    project_paths_overlap(entry, physical)
+                        || project_paths_overlap(entry, &other.cell.entry_path)
+                })
+                .then_some(i)
+        })
+        .collect();
+    for i in blocked {
+        cells[i].cell.eligibility = CellEligibility::Blocked;
+        cells[i].cell.blocked_reason = Some(CellBlockedReason::EntryOccupied);
+    }
+}
+
+/// Missing path suffixes have no canonical spelling yet. Compare components
+/// using Directory Identity so a future case/Unicode alias cannot evade protection.
+fn project_paths_overlap(a: &Path, b: &Path) -> bool {
+    let identity = |path: &Path| {
+        PathBuf::from(crate::core::domain::skill_identity_key(
+            &path.to_string_lossy(),
+        ))
+    };
+    let a = identity(a);
+    let b = identity(b);
+    a.starts_with(&b) || b.starts_with(&a)
 }

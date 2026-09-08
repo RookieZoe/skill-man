@@ -342,6 +342,7 @@ fn startup_recovers_copy_phases_without_catalog_activation_or_current_source() {
         fs.write_enable_journal(
             &home.library_root,
             &EnableJournal {
+                project_copies: Default::default(),
                 project_links: vec![],
                 project_copy: Some(copy.clone()),
                 version: 1,
@@ -466,6 +467,7 @@ fn reserved_partial_stage_is_cleaned_by_formal_startup() {
     fs.write_enable_journal(
         &home.library_root,
         &EnableJournal {
+            project_copies: Default::default(),
             project_links: vec![],
             project_copy: Some(copy.clone()),
             version: 1,
@@ -580,7 +582,7 @@ fn undo_removes_only_the_unchanged_new_copy_and_scope_never_falls_back_to_direct
     );
     for (skills, agents) in [
         (vec!["skill-authoring".into()], vec!["claude-code".into()]),
-        (vec!["skill-authoring".into(), "media-xray".into()], vec![]),
+        (vec![], vec![]),
     ] {
         assert!(
             api.plan_project_enable(PlanProjectEnableRequestDto {
@@ -677,6 +679,7 @@ fn startup_distinguishes_unvalidated_quarantine_from_authorized_partial_cleanup(
         fs.write_enable_journal(
             &home.library_root,
             &EnableJournal {
+                project_copies: Default::default(),
                 project_links: vec![],
                 version: 1,
                 operation_id: "enable-quarantine-crash".into(),
@@ -1626,5 +1629,558 @@ fn global_finalize_closes_the_undo_window() {
         home.claude_root()
             .join("skill-authoring/SKILL.md")
             .is_file()
+    );
+}
+
+#[test]
+fn batch_copy_only_is_one_operation_and_undo_removes_both_copies() {
+    use skill_man_lib::tauri_adapter::dto::EnableOperationRequestDto;
+    let (_home, api) = harness();
+    let project = tempfile::tempdir().unwrap();
+    let plan = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec![],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert_eq!(plan.cells.len(), 2);
+    assert!(!project.path().join(".agents").exists());
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: plan.plan_token,
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_value(&result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["outcome"] == "succeeded"),
+        "{}",
+        serde_json::to_value(&result).unwrap()
+    );
+    for name in ["skill-authoring", "legacy-audit"] {
+        assert!(
+            project
+                .path()
+                .join(".agents/skills")
+                .join(name)
+                .join("SKILL.md")
+                .is_file()
+        );
+    }
+    let undo = api
+        .undo_project_enable(EnableOperationRequestDto {
+            operation_id: result.operation_id,
+        })
+        .unwrap();
+    assert_eq!(undo.cells.len(), 2);
+    assert!(undo.cells.iter().all(|c| c.undone));
+    for name in ["skill-authoring", "legacy-audit"] {
+        assert!(!project.path().join(".agents/skills").join(name).exists());
+    }
+}
+
+#[test]
+fn batch_equivalent_names_require_one_copy_source_for_all_agents() {
+    use skill_man_lib::tauri_adapter::dto::{CellResolutionDto, CellResolutionRequestDto};
+    let (home, api) = harness();
+    home.with_sql("equivalent Directory Identity fixture", |c| { c.execute("UPDATE skills SET directory_name = 'SKILL-AUTHORING', directory_identity_key = 'skill-authoring' WHERE id = 'legacy-audit'", []).unwrap(); });
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let mut request = PlanProjectEnableRequestDto {
+        skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+        project_folder: project.path().to_string_lossy().into_owned(),
+        agent_ids: vec!["claude-code".into(), "codex".into()],
+        cell_resolutions: vec![],
+    };
+    let preview = api.plan_project_enable(request.clone()).unwrap();
+    let json = serde_json::to_value(&preview).unwrap();
+    assert!(
+        json["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| !c["projectCopy"].is_null())
+            .all(|c| c["eligibility"] == "conflict")
+    );
+    let skipped = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_value(&skipped).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["outcome"] == "skipped")
+    );
+    assert!(!project.path().join(".agents").exists());
+    assert!(api.list_recent_project_folders().unwrap().is_empty());
+    let winner = preview
+        .cells
+        .iter()
+        .find(|c| c.skill_id == "legacy-audit" && c.project_copy.is_some())
+        .unwrap();
+    request.cell_resolutions = vec![CellResolutionRequestDto {
+        cell_key: winner.cell_key.clone(),
+        resolution: CellResolutionDto::Replace,
+    }];
+    let selected = api.plan_project_enable(request).unwrap();
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: selected.plan_token,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["outcome"] == "succeeded")
+            .count(),
+        3
+    );
+    for dir in [".agents", ".claude", ".codex"] {
+        assert_eq!(
+            std::fs::read_to_string(
+                project
+                    .path()
+                    .join(dir)
+                    .join("skills/SKILL-AUTHORING/SKILL.md")
+            )
+            .unwrap(),
+            std::fs::read_to_string(home.path().join("Projects/legacy-audit/SKILL.md")).unwrap()
+        );
+    }
+}
+
+#[test]
+fn batch_unicode_contenders_reject_multiple_winners_and_reuse_existing_copy_without_election() {
+    use skill_man_lib::tauri_adapter::dto::{CellResolutionDto, CellResolutionRequestDto};
+    use std::os::unix::fs::PermissionsExt;
+    for (a, b) in [("Café", "Cafe\u{301}"), ("Straße", "STRASSE")] {
+        let (home, api) = harness();
+        home.with_sql("equivalent source names", |c| {
+            for (id, name) in [("skill-authoring", a), ("legacy-audit", b)] {
+                c.execute(
+                    "UPDATE skills SET directory_name=?1, directory_identity_key=?2 WHERE id=?3",
+                    rusqlite::params![
+                        name,
+                        skill_man_lib::core::domain::skill_identity_key(name),
+                        id
+                    ],
+                )
+                .unwrap();
+            }
+        });
+        let project = tempfile::tempdir().unwrap();
+        let mut request = PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec![],
+            cell_resolutions: vec![],
+        };
+        let preview = api.plan_project_enable(request.clone()).unwrap();
+        request.cell_resolutions = preview
+            .cells
+            .iter()
+            .map(|c| CellResolutionRequestDto {
+                cell_key: c.cell_key.clone(),
+                resolution: CellResolutionDto::Replace,
+            })
+            .collect();
+        let invalid = api.plan_project_enable(request.clone()).unwrap();
+        let result = api
+            .apply_project_enable(ApplyGlobalEnableRequestDto {
+                plan_token: invalid.plan_token,
+            })
+            .unwrap();
+        assert!(
+            serde_json::to_value(result).unwrap()["cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["outcome"] == "skipped")
+        );
+        assert!(!project.path().join(".agents").exists());
+        let copy = project.path().join(".agents/skills").join(a);
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("SKILL.md"), "# Project edits\n").unwrap();
+        std::fs::set_permissions(
+            copy.join("SKILL.md"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        request.cell_resolutions.clear();
+        let reused = api.plan_project_enable(request).unwrap();
+        assert_eq!(reused.cells.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&reused).unwrap()["cells"][0]["projectCopy"],
+            "reuse"
+        );
+        let result = api
+            .apply_project_enable(ApplyGlobalEnableRequestDto {
+                plan_token: reused.plan_token,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["cells"][0]["outcome"],
+            "no_op"
+        );
+        assert_eq!(
+            std::fs::read_to_string(copy.join("SKILL.md")).unwrap(),
+            "# Project edits\n"
+        );
+        assert_eq!(
+            std::fs::metadata(copy.join("SKILL.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+        assert!(api.list_recent_project_folders().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn batch_never_replaces_another_copys_ancestor_and_independent_copies_continue() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".agents/skills/legacy-audit/nested");
+    let project = tempfile::tempdir().unwrap();
+    let preview = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec!["claude-code".into()],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_value(&preview).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| !c["dependsOnCopy"].is_null())
+            .all(|c| c["eligibility"] == "blocked")
+    );
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["outcome"] == "succeeded")
+            .count(),
+        2
+    );
+    assert!(
+        !project
+            .path()
+            .join(".agents/skills/legacy-audit/nested")
+            .exists()
+    );
+}
+
+#[test]
+fn batch_partial_undo_preserves_only_the_copy_with_an_unremoved_dependency() {
+    use skill_man_lib::tauri_adapter::dto::EnableOperationRequestDto;
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".claude/skills");
+    let project = tempfile::tempdir().unwrap();
+    let preview = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec![
+                "skill-authoring".into(),
+                "legacy-audit".into(),
+                "skill-authoring".into(),
+            ],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec!["claude-code".into(), "codex".into()],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert_eq!(preview.cells.len(), 4);
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    let changed = project.path().join(".claude/skills/skill-authoring");
+    std::fs::remove_file(&changed).unwrap();
+    std::fs::write(&changed, "external edit").unwrap();
+    let undo = api
+        .undo_project_enable(EnableOperationRequestDto {
+            operation_id: result.operation_id,
+        })
+        .unwrap();
+    assert_eq!(undo.cells.iter().filter(|c| c.undone).count(), 2);
+    assert!(
+        project
+            .path()
+            .join(".agents/skills/skill-authoring/SKILL.md")
+            .exists()
+    );
+    assert_eq!(std::fs::read_to_string(changed).unwrap(), "external edit");
+    assert!(!project.path().join(".agents/skills/legacy-audit").exists());
+    assert!(!project.path().join(".claude/skills/legacy-audit").exists());
+}
+
+#[test]
+fn batch_formal_startup_resumes_safe_groups_without_touching_modified_dependency() {
+    use skill_man_lib::core::maintenance::MaintenanceService;
+    use skill_man_lib::seams::filesystem::{ActivationReplacePhase as Phase, EnableJournal};
+    use skill_man_lib::tauri_adapter::health_api::HealthApi;
+    for undoing in [false, true] {
+        let (home, api) = harness();
+        configure_project_agent(&home, "claude-code", ".claude/skills");
+        let project = tempfile::tempdir().unwrap();
+        let preview = api
+            .plan_project_enable(PlanProjectEnableRequestDto {
+                skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+                project_folder: project.path().to_string_lossy().into_owned(),
+                agent_ids: vec!["claude-code".into()],
+                cell_resolutions: vec![],
+            })
+            .unwrap();
+        let result = api
+            .apply_project_enable(ApplyGlobalEnableRequestDto {
+                plan_token: preview.plan_token,
+            })
+            .unwrap();
+        let path = home
+            .library_root
+            .join("operations")
+            .join(&result.operation_id)
+            .join("enable-journal.json");
+        let mut journal: EnableJournal =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(journal.project_copies.len(), 2);
+        if undoing {
+            journal.phase = Phase::Undoing;
+        }
+        home.filesystem
+            .write_enable_journal(&home.library_root, &journal)
+            .unwrap();
+        let changed = project.path().join(".claude/skills/skill-authoring");
+        std::fs::remove_file(&changed).unwrap();
+        std::fs::write(&changed, "external").unwrap();
+        for _ in 0..2 {
+            HealthApi::new(
+                MaintenanceService::for_tests(
+                    home.runtime.clone(),
+                    home.filesystem.clone(),
+                    home.write_gate.clone(),
+                )
+                .with_library_root(home.library_root.clone())
+                .begin_startup(),
+            )
+            .run_activation_health_check()
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(changed).unwrap(), "external");
+        assert!(
+            project
+                .path()
+                .join(".agents/skills/skill-authoring/SKILL.md")
+                .is_file()
+        );
+        assert_eq!(
+            project
+                .path()
+                .join(".agents/skills/legacy-audit/SKILL.md")
+                .is_file(),
+            !undoing
+        );
+        assert_eq!(
+            project
+                .path()
+                .join(".claude/skills/legacy-audit/SKILL.md")
+                .is_file(),
+            !undoing
+        );
+    }
+}
+
+#[test]
+fn batch_mixed_agent_failure_skip_and_success_keeps_independent_groups_and_retry_is_fresh() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".claude/skills");
+    configure_project_agent(&home, "codex", ".codex/skills");
+    let project = tempfile::tempdir().unwrap();
+    let readonly = project.path().join(".codex");
+    std::fs::create_dir(&readonly).unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let request = PlanProjectEnableRequestDto {
+        skill_ids: vec![
+            "skill-authoring".into(),
+            "media-xray".into(),
+            "legacy-audit".into(),
+        ],
+        project_folder: project.path().to_string_lossy().into_owned(),
+        agent_ids: vec!["claude-code".into(), "codex".into()],
+        cell_resolutions: vec![],
+    };
+    let preview = api.plan_project_enable(request.clone()).unwrap();
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cells = serde_json::to_value(result).unwrap()["cells"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        cells.iter().filter(|c| c["outcome"] == "succeeded").count(),
+        4
+    );
+    assert_eq!(cells.iter().filter(|c| c["outcome"] == "failed").count(), 2);
+    assert_eq!(
+        cells.iter().filter(|c| c["outcome"] == "skipped").count(),
+        1
+    );
+    assert_eq!(
+        cells
+            .iter()
+            .filter(|c| c["outcome"] == "not_attempted")
+            .count(),
+        2
+    );
+    assert!(!project.path().join(".agents/skills/media-xray").exists());
+    let retried = api.plan_project_enable(request).unwrap();
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: retried.plan_token,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["outcome"] == "succeeded")
+            .count(),
+        2
+    );
+    assert_eq!(api.list_recent_project_folders().unwrap().len(), 1);
+}
+
+#[test]
+fn batch_existing_copy_reuse_is_not_blocked_by_an_unselected_unhealthy_source() {
+    let (home, api) = harness();
+    home.with_sql("same name with unrelated unhealthy contender", |c| {
+        c.execute("UPDATE skills SET directory_name='skill-authoring', directory_identity_key='skill-authoring' WHERE id='media-xray'", []).unwrap();
+    });
+    let project = tempfile::tempdir().unwrap();
+    let copy = project.path().join(".agents/skills/skill-authoring");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md"), "project version").unwrap();
+    let plan = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["media-xray".into(), "skill-authoring".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec![],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert_eq!(plan.cells.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&plan).unwrap()["cells"][0]["eligibility"],
+        "no_op"
+    );
+}
+
+#[test]
+fn batch_case_equivalent_future_copy_ancestors_are_also_protected() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".agents/skills/LEGACY-AUDIT/nested");
+    let project = tempfile::tempdir().unwrap();
+    let preview = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec!["claude-code".into()],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_value(&preview).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| !c["dependsOnCopy"].is_null())
+            .all(|c| c["eligibility"] == "blocked")
+    );
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: preview.plan_token,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["outcome"] == "succeeded")
+            .count(),
+        2
+    );
+    assert!(
+        !project
+            .path()
+            .join(".agents/skills/LEGACY-AUDIT/nested")
+            .exists()
+    );
+}
+
+#[test]
+fn batch_ambiguous_future_agent_containers_are_blocked_without_claiming_shared_success() {
+    let (home, api) = harness();
+    configure_project_agent(&home, "claude-code", ".shared/skills");
+    configure_project_agent(&home, "codex", ".SHARED/skills");
+    let project = tempfile::tempdir().unwrap();
+    let plan = api
+        .plan_project_enable(PlanProjectEnableRequestDto {
+            skill_ids: vec!["skill-authoring".into(), "legacy-audit".into()],
+            project_folder: project.path().to_string_lossy().into_owned(),
+            agent_ids: vec!["claude-code".into(), "codex".into()],
+            cell_resolutions: vec![],
+        })
+        .unwrap();
+    assert_eq!(plan.cells.len(), 6);
+    assert!(
+        serde_json::to_value(&plan).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| !c["dependsOnCopy"].is_null())
+            .all(|c| c["eligibility"] == "blocked")
+    );
+    let result = api
+        .apply_project_enable(ApplyGlobalEnableRequestDto {
+            plan_token: plan.plan_token,
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_value(result).unwrap()["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["outcome"] == "succeeded")
+            .count()
+            == 2
     );
 }

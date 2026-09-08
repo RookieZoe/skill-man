@@ -1424,5 +1424,9 @@
   "enable.project.undoResults": "Undo results",
   "enable.project.undoRestored": "Undone safely",
   "enable.project.undoPreserved": "Preserved; safe Undo could not be completed",
-  "enable.project.originalRecoveryRequired": "Some original entries could not be safely restored. Their backups and dependent project copies have been preserved and require recovery. Closing this result will not discard those backups."
+  "enable.project.originalRecoveryRequired": "Some original entries could not be safely restored. Their backups and dependent project copies have been preserved and require recovery. Closing this result will not discard those backups.",
+  "enable.project.chooseSource": "Choose a source for {name}",
+  "enable.project.chooseSourceDetail": "All dependent agents use this project copy. Without a source choice, this name is skipped; other skills can continue.",
+  "enable.project.skipSource": "Skip this name",
+  "enable.project.sourceNotSelected": "Another source was selected for this project copy."
 }

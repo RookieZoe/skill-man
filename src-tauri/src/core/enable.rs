@@ -179,6 +179,8 @@ pub enum CellEligibility {
 /// Typed closed reasons (presentation maps these to message keys).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellBlockedReason {
+    ProjectSourceChoice,
+    ProjectSourceNotSelected,
     InvalidProjectCopy,
     InvalidCopyPayload,
     NonPortableProjectAlias,
@@ -1317,6 +1319,7 @@ impl EnableService {
             })
             .collect();
         EnableJournal {
+            project_copies: Default::default(),
             project_links: vec![],
             project_copy: None,
             version: JOURNAL_VERSION,

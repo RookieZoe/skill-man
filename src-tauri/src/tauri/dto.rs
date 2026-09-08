@@ -4984,6 +4984,8 @@ pub enum CellEligibilityDto {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellBlockedReasonDto {
+    ProjectSourceChoice,
+    ProjectSourceNotSelected,
     InvalidProjectCopy,
     InvalidCopyPayload,
     NonPortableProjectAlias,
@@ -5427,6 +5429,10 @@ impl From<EnableCell> for EnableCellDto {
                 CellEligibility::Blocked => CellEligibilityDto::Blocked,
             },
             blocked_reason: value.blocked_reason.map(|reason| match reason {
+                CellBlockedReason::ProjectSourceChoice => CellBlockedReasonDto::ProjectSourceChoice,
+                CellBlockedReason::ProjectSourceNotSelected => {
+                    CellBlockedReasonDto::ProjectSourceNotSelected
+                }
                 CellBlockedReason::InvalidProjectCopy => CellBlockedReasonDto::InvalidProjectCopy,
                 CellBlockedReason::InvalidCopyPayload => CellBlockedReasonDto::InvalidCopyPayload,
                 CellBlockedReason::NonPortableProjectAlias => {
