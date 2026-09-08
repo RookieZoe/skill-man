@@ -2,6 +2,8 @@
 
 状态：Accepted
 
+> 项目条目直指来源实体等分发规则由 [ADR-0025](0025-project-local-skill-copies.md) 的已确认设计取代；其中 #101 已实现单 Skill、零附加 Agent 的副本交付与复用，附加 Agent 与批量分发待 #102–#104。本文其余项目自管边界继续有效。
+
 Skill Man 支持把 Managed Skill Enable 到项目文件夹内解析后的 Agent skills 目录（如 `.claude/skills`、`.omp/skills`、`.agents/skills`），但项目级目录不进入扫描、Adopt、Import、健康检查与生命周期管理：Skill Man 不注册 Project 实体，不记录项目级链接，不做优先级管控与反向 Adopt。这取代 [ADR-0005](0005-adopt-existing-skills.md)「项目级 Skill 需要 Project/Profile 模型、留待后续」的排除条款——结论不是延期，而是显式不做。决议过程见 [决策:Project 领域模型与项目级 Activation](https://github.com/RookieZoe/skill-man/issues/70)，操作面与批量语义见 [ADR-0019](0019-enable-surfaces-target-resolution-and-batch-semantics.md)。
 
 ## 背景与理由

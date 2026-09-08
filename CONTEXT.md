@@ -484,11 +484,15 @@ _Avoid_: Activation truth, Agent Detection, Project Activation
 一次项目级 Enable 中,由用户所选文件夹与 Agent 的项目级目录约定解析出的项目内最终 skills 容器;它只存在于本次操作计划,不是 Project 实体或 Agent Activation Target。
 _Avoid_: Project, Project Activation Target
 
+**Project Skill Copy（项目技能副本）**:
+项目级分发交付到项目内、由项目自行管理的 Skill 内容副本，与 Library 来源后续的更新或删除独立；它不是受管 Activation。对应设计见 [ADR-0025](docs/adr/0025-project-local-skill-copies.md)。#101 已实现单 Skill、零附加 Agent 的副本交付与复用；附加 Agent 与批量分发待 #102–#104。
+_Avoid_: Project Activation, Local Source
+
 **Enable / Disable**:
-把一个 Managed Skill 向选定 Agent 分发(Enable)或从受管全局 Target 撤回(Disable)的动词对。全局操作解析到 Activation Target Group;项目级 Enable 在 Resolved Project Skills Directory 创建不追踪的一次性软链,没有对应的项目级 Disable。
+把一个 Managed Skill 分发(Enable)或从受管全局 Target 撤回(Disable)的动词对。全局操作解析到 Activation Target Group；项目级 Enable 交付或复用 Project Skill Copy，并可向所选 Agent 分发该副本，没有对应的项目级 Disable（当前已实现单 Skill、零附加 Agent 的副本流程；附加 Agent 与批量分发待 #102–#104）。
 _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:
 名词：Agent Activation Target 中的受管符号链接实体，身份由 Managed Skill 与 Target 共同确定，entry name 使用 Directory Identity，并**直指 Catalog 解析出的 Skill 最终实体**（Git Source Member → `<Home>/skills/git/<remote_id>/<skill_id>/`；其它 Install → Home 实体；Local Source → canonical 外部路径），不经过 Library 指针条目串联。
-Activation 仅指受 Skill Man 管理且有 Catalog 记录的全局启用项；Enable 到项目级 Agent skills 目录产生的一次性软链不作 Activation 追踪、健康检查或修复(见 ADR-0015)。
+Activation 仅指受 Skill Man 管理且有 Catalog 记录的全局启用项；项目级分发产物不作 Activation 追踪、健康检查或修复（见 ADR-0015、ADR-0025）。
 _Avoid_: Link, 启用链接

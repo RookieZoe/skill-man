@@ -2,6 +2,8 @@
 
 状态：Accepted
 
+> 项目分发的副本、可选 Agent、同名选择和提交依赖规则由 [ADR-0025](0025-project-local-skill-copies.md) 的已确认设计取代；#101 已实现单 Skill、零附加 Agent 的副本流程，附加 Agent、覆盖确认与批量分发待 #102–#104。全局分发规则不变。
+
 > 当前分发状态统一使用“已分发／未分发／部分分发”，见 [CONTEXT](../../CONTEXT.md#distribution-terminology)。本文 Enable/Disable 等名称保留内部接口语义，不代表 Agent 已加载或执行 Skill。
 
 > Library 临时多选模式和批量入口部分由 [ADR-0022](0022-library-file-manager-selection.md) 取代；目标解析和 Core 提交语义保持有效。

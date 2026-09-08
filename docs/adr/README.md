@@ -11,6 +11,8 @@ ADR 保留历史决策；后续 ADR 只取代明确列出的范围，不按编�
 
 ## 相关既有决策
 
+- 已确认、部分实现：[ADR-0025：项目级分发使用项目内副本](0025-project-local-skill-copies.md)。项目内副本、附加 Agent 相对链接、保留与覆盖规则，以及部分成功和撤销依赖。#101 已实现单 Skill、零附加 Agent 的副本流程；#102–#104 待实现。
+
 - 基础技术与实体：[ADR-0002](0002-tauri-v2-react-stack.md)、[ADR-0001](0001-activation-points-to-entity.md)、[ADR-0003](0003-symlink-strategy.md)。
 - 界面语言与 Home：[ADR-0011](0011-interface-locale-and-message-ownership.md)、[ADR-0012](0012-skill-man-home-binding-and-unavailability.md)。
 - Git 来源与版本：[ADR-0014](0014-git-repository-source-releases-and-transitions.md)、[ADR-0018](0018-git-source-namespaces-and-immutable-members.md)。
