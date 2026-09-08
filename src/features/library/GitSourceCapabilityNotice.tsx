@@ -258,7 +258,7 @@ function GitRepositorySourceActions({
               >
                 {copyableMembers.map((member) => (
                   <option key={member.skillId} value={member.skillId}>
-                    {member.skillPath}
+                    {member.skillPath || t("library.import.repo_root")}
                   </option>
                 ))}
               </select>

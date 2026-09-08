@@ -154,6 +154,30 @@ fn complete_repository_release_and_member_facts_enable_source_writes() {
 }
 
 #[test]
+fn root_member_does_not_make_empty_duplicate_or_mismatched_members_complete() {
+    for paths in [vec![], vec!["", ""], vec!["skills/networking"]] {
+        let mut source = repository_source_fact("parent-1");
+        let repository = source.repository.as_mut().unwrap();
+        repository.current_members[0].skill_path = "".into();
+        repository.current_release.as_mut().unwrap().member_paths =
+            paths.into_iter().map(String::from).collect();
+        let report = GitSourceCapabilityScan::new(Arc::new(StaticReader {
+            facts: GitSourceCapabilityFacts {
+                catalog_structure: supported_structure(),
+                sources: vec![source],
+            },
+        }))
+        .scan()
+        .expect("incomplete membership remains readable");
+        assert_eq!(
+            report.sources[0].kind,
+            GitSourceCapabilityKind::LegacyPerSkillGitState
+        );
+        assert!(!report.sources[0].allows_source_writes());
+    }
+}
+
+#[test]
 fn missing_or_unreadable_manifest_keeps_an_otherwise_complete_source_legacy() {
     for manifest in [
         GitSourceManifestFact::Missing,
@@ -270,6 +294,15 @@ fn manifest_conflict_closes_only_the_affected_source() {
 
 #[test]
 fn sqlite_scan_recognizes_only_a_complete_repository_source() {
+    assert_sqlite_source_capability("skills/networking");
+}
+
+#[test]
+fn sqlite_scan_recognizes_a_repository_root_skill_without_promotion() {
+    assert_sqlite_source_capability("");
+}
+
+fn assert_sqlite_source_capability(skill_path: &str) {
     let home = BoundTestHome::new();
     home.seed_install_skill(
         "networking",
@@ -281,7 +314,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
     home.with_sql("seed current Git Repository Source", |connection| {
         connection
             .execute_batch(
-                "INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
+                &"INSERT INTO remote_source_parents (remote_id, canonical_url, created_at)
                  VALUES ('parent-1', 'https://github.com/acme/skills', '2026-08-01T00:00:00Z');
                  INSERT INTO git_source_releases (
                     release_id, remote_id, selection_kind, selected_ref, resolved_commit,
@@ -316,7 +349,8 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                  -- The scan must inspect the actual structure and facts,
                  -- rather than inferring eligibility from either version.
                  UPDATE catalog_meta SET schema_version = 1;
-                 PRAGMA user_version = 42;",
+                 PRAGMA user_version = 42;"
+                    .replace("skills/networking", skill_path),
             )
             .expect("seed source tables and rows");
     });
@@ -358,7 +392,7 @@ fn sqlite_scan_recognizes_only_a_complete_repository_source() {
                     skill_man_lib::core::git_source_capability::GitSourceCapabilityMember {
                         plugin_name: None,
                         skill_id: "networking".into(),
-                        skill_path: "skills/networking".into(),
+                        skill_path: skill_path.into(),
                         presence: true,
                     },
                 ],

@@ -379,7 +379,7 @@ _Avoid_: Startup migration, inferred source release
 _Avoid_: Schema version gate, automatic source repair
 
 **Source Member**:
-Git Repository Source 中由 `(remote_id, repository-relative skillPath)` 识别、并关联稳定 `skill_id` 的 Managed Skill 成员。它从 Source Release 取得成员资格和版本，当前字节是 `<Home>/skills/git/<remote_id>/<skill_id>/` 的不可变快照；路径变化是删除加新增，同一路径重现则恢复原成员。
+Git Repository Source 中由 `(remote_id, repository-relative skillPath)` 识别、并关联稳定 `skill_id` 的 Managed Skill 成员。它从 Source Release 取得成员资格和版本，当前字节是 `<Home>/skills/git/<remote_id>/<skill_id>/` 的不可变快照；路径变化是删除加新增，同一路径重现则恢复原成员。根目录中的 Skill 同样是 Source Member，与子目录成员遵循相同的来源版本和仓库级操作语义；其路径展示为“仓库根目录”。
 _Avoid_: Independent Git source, per-Skill release, Editable install
 
 **Repository Ref Conflict**:

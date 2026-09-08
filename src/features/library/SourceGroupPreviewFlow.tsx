@@ -721,7 +721,9 @@ function PromotionManifest({ draft }: { draft: SourcePromotionDraft }) {
             <li key={member.skillId}>
               <div className="source-group-member-copy">
                 <strong>{member.directoryName}</strong>
-                <span className="candidate-path">{member.skillPath}</span>
+                <span className="candidate-path">
+                  {member.skillPath || t("library.import.repo_root")}
+                </span>
                 <span className="source-group-member-action">
                   {t("library.source_group.promotion_member_removed")}
                 </span>

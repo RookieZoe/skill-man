@@ -54,6 +54,34 @@ const skills: SkillSummary[] = [
 ];
 
 describe("SourceGroupCard", () => {
+  it("shows and copies a repository root member using its skill directory name", async () => {
+    const user = userEvent.setup();
+    const onCopyMember = vi.fn().mockResolvedValue(true);
+    render(
+      <BackgroundOperations>
+        <SourceGroupCard
+          source={{
+            ...healthySource,
+            members: [{ ...healthySource.members[0], skillPath: "" }],
+          }}
+          skills={skills}
+          onCopyMember={onCopyMember}
+          pickDirectory={async () => "/Users/test/copies"}
+        />
+      </BackgroundOperations>,
+    );
+    expect(screen.getByText("repo root")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "repo root" }));
+    await user.click(screen.getByRole("button", { name: "Create local copy" }));
+    await waitFor(() =>
+      expect(onCopyMember).toHaveBeenCalledExactlyOnceWith(
+        "source-1",
+        "skill-1",
+        "/Users/test/copies/alpha",
+      ),
+    );
+  });
+
   it("uses a dismissible confirmation popover and only removes after explicit confirmation", async () => {
     const user = userEvent.setup();
     const remove = vi.fn();

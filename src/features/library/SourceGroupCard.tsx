@@ -167,8 +167,17 @@ export function SourceGroupCard({
       });
       // Once confirmed, the batch belongs to the workspace, not this card's mount.
       for (const member of selectedMembers) {
-        const name = member.skillPath.split("/").at(-1);
-        if (!name || name === "." || name === ".." || name.includes("\\"))
+        const name =
+          member.skillPath === ""
+            ? skills.find((skill) => skill.id === member.skillId)?.directoryName
+            : member.skillPath.split("/").at(-1);
+        if (
+          !name ||
+          name === "." ||
+          name === ".." ||
+          name.includes("/") ||
+          name.includes("\\")
+        )
           throw new Error();
         const ok = await onCopyMember(
           source.remoteId,
@@ -429,7 +438,9 @@ export function SourceGroupCard({
                         <input
                           type="checkbox"
                           className="source-member-checkbox"
-                          aria-label={member.skillPath}
+                          aria-label={
+                            member.skillPath || t("library.import.repo_root")
+                          }
                           checked={
                             member.presence &&
                             selectedIds.includes(member.skillId)
@@ -447,8 +458,13 @@ export function SourceGroupCard({
                         />
                       )}
                       <div className="member-path-column">
+                        {member.skillPath === "" && skill ? (
+                          <div>
+                            <strong>{skill.directoryName}</strong>
+                          </div>
+                        ) : null}
                         <span className="member-skill-path">
-                          {member.skillPath}
+                          {member.skillPath || t("library.import.repo_root")}
                         </span>
                         {!member.presence ? (
                           <div className="member-tombstone-info">

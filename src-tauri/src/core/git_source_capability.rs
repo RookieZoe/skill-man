@@ -356,9 +356,8 @@ fn same_non_empty_member_set(left: &[String], right: &[String]) -> bool {
     if left.is_empty() || right.is_empty() || left.len() != right.len() {
         return false;
     }
-    if left.iter().any(|path| path.is_empty()) || right.iter().any(|path| path.is_empty()) {
-        return false;
-    }
+    // The set must be non-empty, but an empty member path denotes the
+    // repository-root Skill, as emitted by repository discovery.
     let left_len = left.len();
     let right_len = right.len();
     let mut left = left.to_vec();

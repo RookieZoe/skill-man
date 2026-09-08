@@ -150,7 +150,11 @@ export function BrokenDisableSheet({
             <div className="activation-sheet-heading">
               <span className="eyebrow">{t("enable.broken.dialogLabel")}</span>
               <h2>{t("enable.broken.evidenceTitle")}</h2>
-              <p>{t("enable.broken.evidenceIntro", { path: skillPath })}</p>
+              <p>
+                {t("enable.broken.evidenceIntro", {
+                  path: skillPath || t("library.import.repo_root"),
+                })}
+              </p>
             </div>
 
             <div className="broken-notice" role="status">
