@@ -128,7 +128,7 @@ test("Git progress remains in a pinned header while confirmation is pending", as
   );
   await userEvent.type(
     screen.getByRole("textbox", { name: "Repository URL" }),
-    "tw93/Waza",
+    "RookieZoe/skill-man",
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Fetch latest preview" }),

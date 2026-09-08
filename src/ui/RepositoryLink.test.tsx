@@ -12,11 +12,13 @@ test("opens the repository with the system browser without toggling its parent",
   const parent = vi.fn();
   render(
     <div onClick={parent}>
-      <RepositoryLink url="https://github.com/tw93/kami" />
+      <RepositoryLink url="https://github.com/RookieZoe/skill-man" />
     </div>,
   );
   await userEvent.click(screen.getByRole("link"));
-  expect(openUrl).toHaveBeenCalledWith("https://github.com/tw93/kami");
+  expect(openUrl).toHaveBeenCalledWith(
+    "https://github.com/RookieZoe/skill-man",
+  );
   expect(parent).not.toHaveBeenCalled();
 });
 
@@ -32,7 +34,7 @@ test.each([
 
 test("reports browser launch failure", async () => {
   vi.mocked(openUrl).mockRejectedValueOnce(new Error("unavailable"));
-  render(<RepositoryLink url="https://github.com/tw93/kami" />);
+  render(<RepositoryLink url="https://github.com/RookieZoe/skill-man" />);
   await userEvent.click(screen.getByRole("link"));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Could not open the browser",

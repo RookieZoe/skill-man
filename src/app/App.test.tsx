@@ -26,7 +26,7 @@ test.each([false, true])(
         kind: "preview",
         preview: {
           provider: "github",
-          sourceUrl: "https://github.com/tw93/Waza",
+          sourceUrl: "https://github.com/RookieZoe/skill-man",
           aliases: [],
           policy: {
             mode: "head",
@@ -59,7 +59,7 @@ test.each([false, true])(
     });
     client.confirmSourceTransition = vi.fn(async () => ({
       operationId: "force",
-      remoteId: "waza",
+      remoteId: "skill-man",
       releaseId: "release",
       resolvedCommit: "a".repeat(40),
       memberCount: 1,
@@ -74,7 +74,7 @@ test.each([false, true])(
     );
     await user.type(
       screen.getByRole("textbox", { name: "Repository URL" }),
-      "tw93/Waza",
+      "RookieZoe/skill-man",
     );
     await user.click(
       screen.getByRole("button", { name: "Fetch latest preview" }),
@@ -96,7 +96,7 @@ test.each([false, true])(
     await user.click(force);
     expect(client.confirmSourceTransition).toHaveBeenCalledExactlyOnceWith({
       sourceType: "github",
-      sourceUrl: "https://github.com/tw93/Waza",
+      sourceUrl: "https://github.com/RookieZoe/skill-man",
       trackingPolicy: { mode: "head", value: null },
       expectedSelectedRef: "HEAD",
       expectedResolvedCommit: "a".repeat(40),
@@ -325,7 +325,7 @@ test("repository selection shows only the chosen source details", async () => {
   const second = {
     ...report.sources[0],
     remoteId: "second-repository",
-    canonicalUrl: "https://github.com/tw93/kami",
+    canonicalUrl: "https://github.com/RookieZoe/skill-man",
   };
   client.getGitSourceCapability = async () => ({
     sources: [...report.sources, second],
@@ -335,7 +335,7 @@ test("repository selection shows only the chosen source details", async () => {
   await userEvent.click(screen.getByRole("tab", { name: "Repositories" }));
   const list = await screen.findByRole("navigation", { name: "Repositories" });
   await userEvent.click(
-    within(list).getByRole("button", { name: /tw93\/kami/ }),
+    within(list).getByRole("button", { name: /RookieZoe\/skill-man/ }),
   );
   expect(
     await screen.findByRole("heading", { name: second.canonicalUrl }),

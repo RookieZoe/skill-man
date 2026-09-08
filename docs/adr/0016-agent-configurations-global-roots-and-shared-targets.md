@@ -35,7 +35,7 @@ Bound Home Catalog 中的 **Agent Configuration** 才决定扫描、Adopt 与分
 默认扫描只覆盖用户级 native、compatibility、shared 与 legacy Root。builtin、system/admin、
 plugin/extension cache 和 cloud-only Root 不进入默认 Adopt 扫描；用户可在 Agent 管理中显式添加
 安全的 scan-only Root。路径和软链能力证据来自
-[主流 Agent 项目级 Skill 目录约定与软链行为调研](https://github.com/RookieZoe/skill-man/blob/research/agent-project-skill-dirs/docs/research/2026-08-28-agent-project-skill-dirs.md)。
+[主流 Agent 项目级 Skill 目录约定与软链行为调研](https://github.com/RookieZoe/skill-man/blob/4fd51c73a9a6a9d2d9e83be91d7e3cd2b449bdb6/docs/research/2026-08-28-agent-project-skill-dirs.md)。
 
 Agent Detection 是零写入 Observation：
 

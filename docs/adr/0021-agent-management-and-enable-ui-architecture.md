@@ -2,11 +2,13 @@
 
 状态：Accepted
 
+当前覆盖关系：[ADR-0023](0023-implemented-desktop-workspace-and-distribution.md) 取代相冲突的工作区布局、兼容性提示、阅读和面板刷新约定。Root/Target authority 与操作确认边界不因此改变。
+
 > Library selection shelf 与批量入口部分由 [ADR-0022](0022-library-file-manager-selection.md) 取代。
 
 > 编号说明：本 ADR 原编号 0020，与[启动观察与手动 Rescan](0020-startup-observations-and-manual-rescan.md)撞号，改为 0021；决议内容不变。
 
-[原型:Agent 配置、项目作用域与 Enable 操作面 UI](https://github.com/RookieZoe/skill-man/issues/75)的 A/B/C 原型评审选定 **A — Calm desk** 作为新能力的 UI 基线：[ADR-0009](0009-ui-information-architecture.md) 的 Library Desk 三栏骨架继续有效，Agent Management 作为独立顶层表面以「状态分组导航 + 配置列表 + 配置详情」三栏呈现，全部目标选择、冲突处置、扫描汇总与来源管理沿用上下文保留 sheet。评审依据为 [throwaway 原型分支 `prototype/wayfinder-75-agent-enable-ui`](https://github.com/RookieZoe/skill-man/tree/prototype/wayfinder-75-agent-enable-ui)（commit 3dd9e9e）与分支内 19 张截图；原型代码不合入 `main`。
+[原型:Agent 配置、项目作用域与 Enable 操作面 UI](https://github.com/RookieZoe/skill-man/issues/75)的 A/B/C 原型评审选定 **A — Calm desk** 作为新能力的 UI 基线：[ADR-0009](0009-ui-information-architecture.md) 的 Library Desk 三栏骨架继续有效，Agent Management 作为独立顶层表面以「状态分组导航 + 配置列表 + 配置详情」三栏呈现，全部目标选择、冲突处置、扫描汇总与来源管理沿用上下文保留 sheet。评审依据为[历史原型提交 3dd9e9e](https://github.com/RookieZoe/skill-man/tree/3dd9e9e2f075e40470435fa09358c6bcdec2fff7)与其中 19 张截图；原型代码不合入 `main`。
 
 ## 决议
 

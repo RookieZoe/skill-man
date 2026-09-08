@@ -85,8 +85,10 @@ function renderFlow(
 }
 
 test("GitHub shorthand is valid in the native input and enables fetching", () => {
-  renderFlow(null, "idle", "tw93/kami");
-  const input = screen.getByDisplayValue("tw93/kami") as HTMLInputElement;
+  renderFlow(null, "idle", "RookieZoe/skill-man");
+  const input = screen.getByDisplayValue(
+    "RookieZoe/skill-man",
+  ) as HTMLInputElement;
   expect(input).toHaveAttribute("type", "text");
   expect(input.checkValidity()).toBe(true);
   expect(input).toHaveAttribute("aria-invalid", "false");

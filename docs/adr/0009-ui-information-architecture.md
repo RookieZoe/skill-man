@@ -1,5 +1,7 @@
 # 主窗口与菜单栏的信息架构
 
+> 当前工作区、阅读、分发面板与桌面布局由 [ADR-0023](0023-implemented-desktop-workspace-and-distribution.md) 补充并取代相冲突的视觉约定。以下保留原始决策背景。
+
 > Library 选择交互由 [ADR-0022](0022-library-file-manager-selection.md) 更新，不再提供临时多选模式或批量操作栏。
 
 > **部分取代。** Library Desk 的信息架构继续有效；窗口断点、滚动归属与
@@ -29,4 +31,4 @@ Skill Man 的主窗口采用 **Library Desk**：以 Library 中的 Managed Skill
 
 ## Consequences
 
-正式 spec 和实现应以 A 的三栏关系为骨架，而不是把 B 的 Agent-first 三列或 C 的行动收件箱并列为主窗口；相关能力被吸收到 Agent 检查器、筛选、sheet 和菜单栏提醒中。代价是用户若只想为某个 Agent 配置环境，需要先从 Skill 进入，而不是以 Agent 为主页；这也明确强化了 Library 作为单一可信源的心智模型。[原型:主窗口 + 菜单栏 UI](https://github.com/RookieZoe/skill-man/issues/6) 的 [throwaway 原型分支](https://github.com/RookieZoe/skill-man/tree/prototype/wayfinder-6-ui-variants) 与截图保留为评审依据，但原型代码不得直接合入 `main`。
+正式 spec 和实现应以 A 的三栏关系为骨架，而不是把 B 的 Agent-first 三列或 C 的行动收件箱并列为主窗口；相关能力被吸收到 Agent 检查器、筛选、sheet 和菜单栏提醒中。代价是用户若只想为某个 Agent 配置环境，需要先从 Skill 进入，而不是以 Agent 为主页；这也明确强化了 Library 作为单一可信源的心智模型。[原型:主窗口 + 菜单栏 UI](https://github.com/RookieZoe/skill-man/issues/6) 中的评审结论与截图保留为历史依据，原型代码不得直接合入 `main`。

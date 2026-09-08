@@ -2,6 +2,8 @@
 
 状态：Accepted
 
+当前实现补充：[ADR-0024](0024-local-skill-observation-and-migration.md) 细化依赖观察排除、候选忽略、单项迁移弹窗与操作后的局部报告投影；本文的 canonical 聚合、来源归属和 coverage 权限边界继续有效。
+
 [决策:扫描去重、来源分类与汇总呈现](https://github.com/RookieZoe/skill-man/issues/77)确认：Rescan 只消费已配置 Agent 的 canonical Global Skills Root union，先按物理 Root 去重，再在一次 scan generation 内按最终文件系统对象身份聚合 canonical Skill Entity。来源类型表达 ownership 与纳管方式，不由 `.git` 单独决定；用户拥有的外部开发工作区即使位于 Git repository 中也仍是 Local Source。这个边界避免多 Agent/多 Root 重复候选、dotfiles repository 误判和旧 installer lock 冒充当前 Git Source Release，同时允许单个 Root 失败时保留可解释、受操作影响约束的部分结果。
 
 本 ADR 取代 [ADR-0005](0005-adopt-existing-skills.md) 中按 path 粗略聚合、固定扫描源、safe 候选默认勾选和 Root 失败语义；取代 [ADR-0013](0013-adopt-provenance-and-remote-source-parents.md) 中“Git 来源只能从 lock 进入”的扫描入口。Git Repository Source、完整 Source Release、External Ownership Claim 与 Source Transition 的来源事实仍以 [ADR-0014](0014-git-repository-source-releases-and-transitions.md) 为准；Agent Configuration 与 Root union 以 [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md) 为准。

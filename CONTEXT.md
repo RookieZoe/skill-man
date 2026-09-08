@@ -422,7 +422,7 @@ Skill Man 内置的已知 Agent 配置模板,提供稳定 preset key、默认名
 _Avoid_: Built-in Agent, 内置 Agent(需要强调预填配置时用 Agent Preset)
 
 **Custom Agent**:
-用户在 Agent 管理中创建的 Agent Configuration,包含稳定身份、显示名、Global Skills Root、Agent Activation Target 与可空的项目级目录约定。Custom Agent 与由 Preset 创建的配置共同决定扫描、Adopt 与分发范围,兼容性保持 unknown。
+用户在 Agent 管理中创建的 Agent Configuration,包含稳定身份、显示名、Global Skills Root、Agent Activation Target 与可空的项目级目录约定。Custom Agent 与由 Preset 创建的配置共同决定扫描、Adopt 与分发范围。持久化兼容性证据可保持 unknown，但 UI 不显示“兼容性未知”警告，也不以此阻止配置或分发；路径、权限与冲突校验不变，见 ADR-0023。
 _Avoid_: Custom Adapter, scan profile
 
 **Global Skills Root**:
@@ -450,7 +450,7 @@ generation-bound 的只读扫描结果,包含 Scan Coverage、Canonical Skill En
 _Avoid_: Catalog snapshot, Adopt plan
 
 **Scan Exclusion**:
-用户从当前 Scan Report 显式忽略的 Local 候选。按 Bound Home 与 canonical entity path 持久化到 Home 的 `scan-exclusions.json`，不写入可清理的扫描缓存，不按名称匹配其他路径。后续 Scan Report 将它归入“已排除 · 已忽略”，不提供 Adopt 操作；仍保留 Root coverage 与安全检查，且已纳管实体优先按 Catalog 归类。忽略不删除文件，也不修改已有启用项。保存会使旧 Report 的操作证据失效，UI 随后发起完整 Rescan。
+用户从当前 Scan Report 显式忽略的 Local 候选。按 Bound Home 与 canonical entity path 持久化到 Home 的 `scan-exclusions.json`，不写入可清理的扫描缓存，不按名称匹配其他路径。后续 Scan Report 将它归入“已排除 · 已忽略”，不提供 Adopt 操作；仍保留 Root coverage 与安全检查，且已纳管实体优先按 Catalog 归类。忽略不删除文件，也不修改已有启用项。保存只更新忽略名单与当前报告的局部结果投影，不使其它候选仅因此失效，也不自动 Rescan；计划与执行重查忽略名单，阻止使用旧计划纳管已忽略实体。它不同于 Skill 内依赖子树的观察排除规则，见 ADR-0024。
 
 **Scan Incomplete**:
 至少一个 configured canonical Global Skills Root 未成功覆盖的 Scan Report 状态。健康 Root 的非破坏操作可以继续;可能移动、删除、替换实体或释放 external ownership 的操作须等待完整 Scan Coverage。

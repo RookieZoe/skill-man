@@ -6,7 +6,7 @@ Skill Man 支持把 Managed Skill Enable 到项目文件夹内解析后的 Agent
 
 ## 背景与理由
 
-[2026-08-28 主流 Agent 调研](https://github.com/RookieZoe/skill-man/blob/research/agent-project-skill-dirs/docs/research/2026-08-28-agent-project-skill-dirs.md)表明：项目级与全局的优先级规则因 Agent 而异且互斥（Zed 项目覆盖全局、Claude Code personal 覆盖 project、Gemini workspace 最高、Codex 同名并存、opencode 扫描序敏感），Skill Man 发明统一层级必然与某家相悖；Gemini/Zed/Claude 的信任门无法从外部代办；项目内同名占位可能是用户自己的内容。因此项目级只保留一个动作面：Enable 时选定一个项目文件夹与一个或多个 Agent，沿完全受项目根 containment 约束的目录软链解析最终 skills 容器，再建直指最终实体的条目级软链（[ADR-0001](0001-activation-points-to-entity.md) 不变）。
+[2026-08-28 主流 Agent 调研](https://github.com/RookieZoe/skill-man/blob/4fd51c73a9a6a9d2d9e83be91d7e3cd2b449bdb6/docs/research/2026-08-28-agent-project-skill-dirs.md)表明：项目级与全局的优先级规则因 Agent 而异且互斥（Zed 项目覆盖全局、Claude Code personal 覆盖 project、Gemini workspace 最高、Codex 同名并存、opencode 扫描序敏感），Skill Man 发明统一层级必然与某家相悖；Gemini/Zed/Claude 的信任门无法从外部代办；项目内同名占位可能是用户自己的内容。因此项目级只保留一个动作面：Enable 时选定一个项目文件夹与一个或多个 Agent，沿完全受项目根 containment 约束的目录软链解析最终 skills 容器，再建直指最终实体的条目级软链（[ADR-0001](0001-activation-points-to-entity.md) 不变）。
 
 项目目录的每个 symlink hop 与最终容器都必须留在 canonical 项目根内；安全的项目内 dangling 目标可经 Preview 创建，越界、cycle、不可读或无法唯一解析时对应 cell fail closed。多个 Agent 解析到同一容器时，本次 plan 去重为一次写入并披露全部受影响 Agent，但不持久化 Target group。精确同目标软链为 no-op；其它同名占用经确认后 Replace，真实目录先移入临时备份并明示目录/文件数量，结果关闭前可 Undo。
 

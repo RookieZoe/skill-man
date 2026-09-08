@@ -2,6 +2,8 @@
 
 状态：Accepted
 
+当前实现补充：[ADR-0024](0024-local-skill-observation-and-migration.md) 规定逻辑观察的依赖排除及忽略名单的 freshness 边界；操作后的局部 UI 投影不构成重扫或证据续期。本文的显式完整 Rescan、generation、磁盘证据与恢复约束继续有效。
+
 [决策:启动 Agent Detection 与全局 Rescan 调度和性能预算](https://github.com/RookieZoe/skill-man/issues/78)确认：首个可交互 Library Desk 不等待 Agent Detection、Startup Probe、Activation Health Observation 或完整 Rescan；常态启动不自动执行完整 Rescan。Skill Man 不替 Agent 限制 Skill、Root 或内容规模，完整扫描因此使用可取消、流式、磁盘型的 Scan Run，而不是把外部目录规模变成启动门槛或单个内存 DTO。
 
 本 ADR 衔接 [ADR-0016](0016-agent-configurations-global-roots-and-shared-targets.md) 的 Agent Configuration/Root/Target authority 与 [ADR-0017](0017-canonical-scan-aggregation-and-source-attribution.md) 的 Scan Report contract。它取代 [ADR-0007](0007-first-run-and-settings.md) 的“启动时轻量 Untracked 扫描”，并取代 vNext 旧启动顺序中“Detection、Rescan、health 全部完成后才呈现 Library Desk”的结论。
