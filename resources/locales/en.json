@@ -752,6 +752,7 @@
   "library.preferences.check_app_updates_note": "At most once per day; installation always asks first.",
   "library.preferences.check_skill_updates": "Check for Skill updates",
   "library.preferences.check_skill_updates_note": "Check tracked Git Skills. Installing updates requires confirmation.",
+  "library.preferences.manual_app_updates": "This build uses manual updates. Download new versions from GitHub Releases.",
   "library.preferences.app_updates": "App updates",
   "library.preferences.checking": "Checking…",
   "library.preferences.check_now": "Check now",

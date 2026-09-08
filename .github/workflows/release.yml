@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,6 +17,7 @@ env:
 
 jobs:
   verify:
+    if: startsWith(github.ref, 'refs/tags/v')
     name: Verify tagged source
     runs-on: macos-15
     timeout-minutes: 45

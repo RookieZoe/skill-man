@@ -752,6 +752,7 @@
   "library.preferences.check_app_updates_note": "每天最多一次；安装前总是先询问。",
   "library.preferences.check_skill_updates": "检查技能更新",
   "library.preferences.check_skill_updates_note": "检查已跟踪的 Git 技能，安装更新前需确认。",
+  "library.preferences.manual_app_updates": "此版本使用手动更新，请到 GitHub Releases 下载新版本。",
   "library.preferences.app_updates": "应用更新",
   "library.preferences.checking": "正在检查…",
   "library.preferences.check_now": "立即检查",

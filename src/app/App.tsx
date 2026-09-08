@@ -1,3 +1,4 @@
+import { appUpdatesAvailable } from "./app-update-availability";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { listen } from "@tauri-apps/api/event";
@@ -249,7 +250,7 @@ function AppContent({ client }: AppProps) {
   }, [setSelectedId]);
 
   useEffect(() => {
-    if (preferences?.checkAppUpdates !== true) return;
+    if (!appUpdatesAvailable() || preferences?.checkAppUpdates !== true) return;
     let current = true;
     const runId = ++appUpdateCheckRunId.current;
     client
@@ -1049,6 +1050,7 @@ function AppContent({ client }: AppProps) {
   }
 
   async function checkAppUpdate() {
+    if (!appUpdatesAvailable()) return;
     const noticeId = notifications.begin({
       title: t("library.preferences.checking"),
       detail: t("operation.background.working"),

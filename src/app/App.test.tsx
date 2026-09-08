@@ -1,3 +1,4 @@
+import * as updateAvailability from "./app-update-availability";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
@@ -2052,3 +2053,40 @@ test("repository removal stays completed when refreshing the library fails", asy
   expect(client.removeGitSource).toHaveBeenCalledTimes(1);
 });
 import { expandLibrary } from "../test-fixtures/expand-library";
+
+test("manual-update builds ignore persisted update checks and show the release link", async () => {
+  const availability = vi
+    .spyOn(updateAvailability, "appUpdatesAvailable")
+    .mockReturnValue(false);
+  try {
+    const client = createFixtureCatalogClient();
+    client.checkAppUpdate = vi.fn();
+    const user = userEvent.setup();
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Preferences" }),
+    );
+    expect(
+      screen.queryByRole("switch", { name: "Check for app updates" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Check now" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This build uses manual updates. Download new versions from GitHub Releases.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", {
+        name: "https://github.com/RookieZoe/skill-man/releases",
+      }),
+    ).toHaveAttribute(
+      "href",
+      "https://github.com/RookieZoe/skill-man/releases",
+    );
+    expect(client.checkAppUpdate).not.toHaveBeenCalled();
+  } finally {
+    availability.mockRestore();
+  }
+});

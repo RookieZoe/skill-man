@@ -1,18 +1,32 @@
 # macOS 签名、公证、发布与应用更新策略
 
-Skill Man 通过 **GitHub Releases** 直接分发签名、公证后的 macOS 应用，并使用 Tauri v2 官方 updater 完成应用内更新。首个公开测试版前开源，采用 **MIT** 许可证。永久 Bundle Identifier 为 `io.github.rookiezoe.skillman`。
+Skill Man 通过 **GitHub Releases** 分发 macOS 应用。社区测试版采用 Ad-hoc 签名和手动更新；Developer ID 签名、公证版本使用 Tauri v2 官方 updater。首个公开测试版前开源，采用 **MIT** 许可证。永久 Bundle Identifier 为 `io.github.rookiezoe.skillman`。
+
+## 社区测试版通道（2026-09-08 修订）
+
+维护者尚无 Apple Developer 账号或 Developer ID Application 证书时，允许公开发布 Ad-hoc 签名、未经 Apple 公证的社区测试版。该决定替代本 ADR 原先对公开测试版也强制要求 Apple 凭据的限制。
+
+- 只发布 Apple Silicon / macOS 13+ DMG 和 SHA256SUMS，不发布 updater 包或 latest.json。
+- 使用 GitHub Pre-release，不设为 Latest；应用版本仍使用 X.Y.Z。
+- GitHub Actions 的 Community Pre-release 工作流由维护者手动触发，先验证选定 main commit 与已有 tag 完全一致，跑完整 CI，再构建并创建 Draft。
+- 核对 Actions 结果、下载附件并验证校验和与包内应用后，可以发布为 Pre-release；发布说明必须列明未公证、手动更新，以及仍待人工完成的干净用户首次启动验收。
+- 原生应用在公钥缺失或为 sentinel 时不自动检查应用更新，设置显示手动下载入口；生产 updater adapter 同时阻止网络检查。浏览器 fixture 可以继续演示更新流程。
+- 已保存的更新偏好不被修改，未来配置真实公钥后恢复原有偏好。公钥必须保存在基础 Tauri 配置中，与前端构建使用同一来源。
+- GitHub 托管构建仅用于明确触发的发布；日常 CI 仍使用本地 ci:local。
+
+下文的 Developer ID、公证和真实 updater 升级门禁继续适用于普通 Release，社区测试版不能作为这些门禁已通过的证据。
 
 ## 平台与产物
 
-首版只支持 **Apple Silicon（aarch64）与 macOS 13+**。首次安装产物是签名、公证并 stapled 的 `.dmg`；updater 产物是 Tauri 生成并独立签名的 `.app.tar.gz` 与 `latest.json`。Intel、macOS 11/12、universal binary 不进入本次 MVP。
+支持范围只包括 **Apple Silicon（aarch64）与 macOS 13+**。普通 Release 的首次安装产物是签名、公证并 stapled 的 `.dmg`；updater 产物是 Tauri 生成并独立签名的 `.app.tar.gz` 与 `latest.json`。Intel、macOS 11/12、universal binary 不进入本次 MVP。
 
 GitHub Releases 是唯一权威发布源。所有 updater 可接收的 0.x 公开测试版都发布为普通 GitHub Release，而不是 GitHub Prerelease；0.x 版本号、release notes 与应用内文案负责表达“测试版”。这样单一更新通道可使用 `releases/latest/download/latest.json`。稳定版后再增加 Homebrew Cask；官网、自建 CDN 与 Stable/Beta 双通道不进入 MVP。
 
 ## Apple 身份与 Release Gate
 
-当前维护者尚未加入 Apple Developer Program。开发阶段不因此受阻：本地使用未签名或 ad-hoc 构建，普通 CI 只运行测试和非发布构建，且不得把这些产物作为公开下载发布。
+当前维护者尚未加入 Apple Developer Program。开发阶段不因此受阻：本地使用未签名或 ad-hoc 构建，普通 CI 只运行测试和非发布构建；公开社区测试版须经过上述专用通道。
 
-**首个公开测试版的 Release Gate** 是：
+**首个普通 Release 的 Release Gate** 是：
 
 1. Apple Developer Program 会员已激活（当前官方费用为 $99/年）；
 2. 创建 `Developer ID Application` 证书并导出带私钥的 `.p12`；
@@ -20,7 +34,7 @@ GitHub Releases 是唯一权威发布源。所有 updater 可接收的 0.x 公�
 4. 把证书、密码、Issuer ID、Key ID 与 `.p8` 配置到受保护的 GitHub release Environment Secrets；
 5. 完成一次签名、公证、staple、Gatekeeper 验证与 updater 安装演练。
 
-Release Gate 未全部通过时，release workflow 必须失败并且不能产生公开 Release。公开分发不提供未签名/未公证的降级路径。Apple 官方要求见 [Developer Program](https://developer.apple.com/programs/)、[Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 与 [Notarizing macOS software](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
+Release Gate 未全部通过时，release workflow 必须失败并且不能产生公开 Release。普通 Release 不提供未签名/未公证的降级路径；社区测试版使用上述独立通道。Apple 官方要求见 [Developer Program](https://developer.apple.com/programs/)、[Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 与 [Notarizing macOS software](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
 
 ## 签名、公证与密钥
 
@@ -32,7 +46,7 @@ PR workflow 不接触任何发布 Secrets。Release workflow 使用最小 GitHub
 
 ## 发布流程
 
-发布者先在 `main` 更新 Cargo、package 与 Tauri 配置中的版本，再创建 `vX.Y.Z` tag。Tag 触发 release workflow，依次：
+发布者先在 `main` 更新 Cargo、package 与 Tauri 配置中的版本，再创建 `vX.Y.Z` tag。在该 tag 上手动触发 release workflow，依次：
 
 1. 校验 tag 与各处版本完全一致；
 2. 运行测试和静态检查；
@@ -47,6 +61,6 @@ PR workflow 不接触任何发布 Secrets。Release workflow 使用最小 GitHub
 
 ## 应用更新体验
 
-MVP 只有一个应用更新通道。应用启动后按 24 小时冷却后台检查；失败或离线不打扰用户。有新版时展示版本号、release notes 和下载大小，只有用户确认后才下载；下载完成后再次确认重启安装。设置中提供“检查更新”。不做后台自动下载、强制更新或 delta 更新。
+配置真实公钥的普通 Release 只有一个应用更新通道。应用启动后按 24 小时冷却后台检查；失败或离线不打扰用户。有新版时展示版本号、release notes 和下载大小，只有用户确认后才下载；下载完成后再次确认重启安装。设置中提供“检查更新”。不做后台自动下载、强制更新或 delta 更新。
 
 本 ADR 只定义 Skill Man App 自身更新；Library 中 Skill 内容的更新遵循 ADR-0004。

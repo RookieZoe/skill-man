@@ -1,6 +1,29 @@
 # Skill Man 发布手册
 
-本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md)：Skill Man 只发布 Apple Silicon / macOS 13+ 版本；tag 触发受保护的发布工作流，工作流只创建 Draft Release，最终 Publish 始终由维护者人工执行。
+本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md)：Skill Man 只发布 Apple Silicon / macOS 13+ 版本。两条工作流都由维护者手动触发，只创建 Draft；核对后才发布。
+
+## 无 Apple 凭据的社区 Pre-release
+
+此通道不需要 Apple 或 updater secrets。先公开仓库、检查提交历史中的敏感内容，确认 README、MIT LICENSE、截图和 `docs/releases/vX.Y.Z.md` 已提交。基础 Tauri 配置必须保留 `signingIdentity: "-"`、`createUpdaterArtifacts: false` 和 updater 公钥 sentinel，原生应用使用手动更新。
+
+1. 在 Apple Silicon Mac 上运行 `npm run ci:local`，确认通过并提交发布改动。
+2. 同步 main 后，在该 commit 创建并推送严格的 `vX.Y.Z` tag。版本字段必须与 tag 一致。
+3. 从 main 手动触发 Community Pre-release：
+
+   ```sh
+   gh workflow run prerelease.yml --ref main -f tag=v0.1.0
+   ```
+
+4. 工作流在 macOS runner 上跑完整验证、构建 Ad-hoc app 和 DMG、验证签名完整性和 arm64 架构，挂载 DMG 比对包内可执行文件，生成校验和，再创建 Draft Pre-release。
+5. 下载 Draft 的 DMG 和 SHA256SUMS，执行 `shasum -a 256 -c SHA256SUMS`，确认包内版本与签名正确。工作流不会自动覆盖已有 Release；失败后先检查现有 Draft 的资产状态。
+6. 核对发布说明中的未公证、手动更新和人工验收限制，发布为 Pre-release，保持非 Latest。只能有 DMG 和 SHA256SUMS 两个附件，不上传 latest.json 或 updater 包。
+7. 未登录 GitHub 下载公开附件并再次校验。干净 macOS 用户或 VM 的浏览器下载、首次启动、手动放行与基本功能验收由维护者完成并记录；未完成时必须在 Release notes 明示，不能宣称已通过普通 Release 门禁。
+
+用户首次打开可能需要在「系统设置 → 隐私与安全性」中选择「仍要打开」，见 [Apple 官方说明](https://support.apple.com/en-us/102445)。不建议关闭整个 Gatekeeper。公司管理的 Mac 可能禁止手动放行。
+
+## 普通 Release：签名与公证
+
+以下门禁适用于未来具有 Developer ID 签名、公证和 updater 的普通 Release，社区测试版不替代这些证据。
 
 ## 一次性准备
 
@@ -34,14 +57,14 @@
 - `src-tauri/Cargo.toml`；
 - `src-tauri/tauri.conf.json`。
 
-提交并确认 `main` 的普通 CI 通过后，在该 commit 创建并推送严格的 `vX.Y.Z` tag：
+提交并确认 `main` 的本地 CI 通过后，在该 commit 创建并推送严格的 `vX.Y.Z` tag：
 
 ```bash
 git tag -s v0.1.0 -m "Skill Man v0.1.0"
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` 会按顺序执行：
+在该 tag 上手动运行 `gh workflow run release.yml --ref v0.1.0`。`.github/workflows/release.yml` 会按顺序执行：
 
 1. 确认 tag 指向 `main` 上的 commit，并在构建前校验 tag 与四处版本完全一致；
 2. 在不接触发布 secrets 的 `verify` job 跑完整格式、边界、lint、typecheck、前后端测试和构建门禁；
@@ -72,7 +95,7 @@ git push origin v0.1.0
 https://github.com/RookieZoe/skill-man/releases/latest/download/latest.json
 ```
 
-GitHub 的 `latest` 不包含 Draft 或 Prerelease。因此所有 0.x 公开测试版也必须发布为普通 Release，不能勾选 “This is a pre-release”。
+GitHub 的 `latest` 不包含 Draft 或 Prerelease。因此需要接入 updater 的 0.x 签名测试版必须发布为普通 Release，不能勾选 “This is a pre-release”；社区测试版不接入该通道。
 
 ## 人工 Publish Gate
 

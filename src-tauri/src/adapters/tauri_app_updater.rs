@@ -41,6 +41,20 @@ impl TauriAppUpdater {
 impl AppUpdater for TauriAppUpdater {
     fn check(&self) -> AppUpdaterFuture<'_, Option<AppUpdateOffer>> {
         Box::pin(async move {
+            let config = self.app.config();
+            let key = config
+                .plugins
+                .0
+                .get("updater")
+                .and_then(|updater| updater.get("pubkey"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if key.is_empty() || key == "UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE" {
+                return Err(AppUpdaterError::SourceUnavailable(
+                    "This build uses manual updates from GitHub Releases".into(),
+                ));
+            }
             let update = self
                 .app
                 .updater()

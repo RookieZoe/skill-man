@@ -1,0 +1,121 @@
+name: Community Pre-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag on the selected main commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-prerelease
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+  RELEASE_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - name: Check out selected main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+        with:
+          targets: aarch64-apple-darwin
+          components: rustfmt, clippy
+
+      - name: Validate community release scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/prepare-release.mjs --repo-root . --tag "$RELEASE_TAG" --check-version-only
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
+          test "$(gh api "repos/$RELEASE_REPOSITORY" --jq .visibility)" = public
+          test -s LICENSE
+          test -s "docs/releases/$RELEASE_TAG.md"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          if (config.bundle.macOS.signingIdentity !== '-' || config.bundle.createUpdaterArtifacts !== false) {
+            throw new Error('Community builds require ad-hoc signing and no updater artifacts');
+          }
+          if (config.plugins.updater.pubkey !== 'UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE') {
+            throw new Error('Community builds require manual updates');
+          }
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run full verification
+        run: npm run ci:local
+
+      - name: Build ad-hoc Apple Silicon app and DMG
+        run: npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Verify packaged application and prepare checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          app="$bundle/macos/Skill Man.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
+          dmg_files=("$bundle/dmg/"*.dmg)
+          test "${#dmg_files[@]}" = 1
+          test -f "${dmg_files[0]}"
+          hdiutil verify "${dmg_files[0]}"
+          mount_point="$(mktemp -d "$RUNNER_TEMP/skill-man-dmg.XXXXXX")"
+          trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach "${dmg_files[0]}" -nobrowse -readonly -mountpoint "$mount_point"
+          mounted_app="$mount_point/Skill Man.app"
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          cmp "$app/Contents/MacOS/$executable" "$mounted_app/Contents/MacOS/$executable"
+          hdiutil detach "$mount_point"
+          trap - EXIT
+          mkdir -p "$RUNNER_TEMP/community-release"
+          cp "${dmg_files[0]}" "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg"
+          cd "$RUNNER_TEMP/community-release"
+          shasum -a 256 ./*.dmg > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+
+      - name: Create draft Pre-release for artifact review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
+            "$RUNNER_TEMP/community-release/SHA256SUMS" \
+            --repo "$RELEASE_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
+            --title "Skill Man $RELEASE_TAG · 社区测试版" \
+            --notes-file "docs/releases/$RELEASE_TAG.md"
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
+            --json isDraft,isPrerelease,assets \
+            --jq 'if .isDraft and .isPrerelease and (.assets | length == 2) then . else error("Unexpected release state") end'

@@ -1,3 +1,4 @@
+import { appUpdatesAvailable } from "../../app/app-update-availability";
 import { OperationNotice } from "../../ui/OperationNotice";
 import appLogo from "../../../src-tauri/icons/icon.svg";
 import { PluginGroups, groupPluginMembers } from "./PluginGroups";
@@ -2178,40 +2179,51 @@ function PreferencesSheet({
         </div>
         <LanguageControl />
         <div className="preference-list">
-          {preferenceRows.map((row) => (
-            <label className="preference-row" key={row.key}>
-              <span>
-                <strong>{t(row.titleKey)}</strong>
-                <small>{t(row.noteKey)}</small>
-              </span>
-              <span className="switch-control switch-control--interactive">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  aria-label={t(row.titleKey)}
-                  checked={preferences?.[row.key] ?? false}
-                  disabled={preferences === null}
-                  onChange={(event) =>
-                    onToggle({ [row.key]: event.currentTarget.checked })
-                  }
-                />
-                <span aria-hidden="true" />
-              </span>
-            </label>
-          ))}
+          {preferenceRows
+            .filter(
+              (row) => row.key !== "checkAppUpdates" || appUpdatesAvailable(),
+            )
+            .map((row) => (
+              <label className="preference-row" key={row.key}>
+                <span>
+                  <strong>{t(row.titleKey)}</strong>
+                  <small>{t(row.noteKey)}</small>
+                </span>
+                <span className="switch-control switch-control--interactive">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label={t(row.titleKey)}
+                    checked={preferences?.[row.key] ?? false}
+                    disabled={preferences === null}
+                    onChange={(event) =>
+                      onToggle({ [row.key]: event.currentTarget.checked })
+                    }
+                  />
+                  <span aria-hidden="true" />
+                </span>
+              </label>
+            ))}
         </div>
         <div className="app-update-check">
           <span>
             <strong>{t("library.preferences.app_updates")}</strong>
           </span>
-          <button
-            id="app-update-check-trigger"
-            type="button"
-            disabled={appUpdatePanel.activity === "checking"}
-            onClick={onCheckAppUpdate}
-          >
-            {t("library.preferences.check_now")}
-          </button>
+          {appUpdatesAvailable() ? (
+            <button
+              id="app-update-check-trigger"
+              type="button"
+              disabled={appUpdatePanel.activity === "checking"}
+              onClick={onCheckAppUpdate}
+            >
+              {t("library.preferences.check_now")}
+            </button>
+          ) : (
+            <div>
+              <p>{t("library.preferences.manual_app_updates")}</p>
+              <RepositoryLink url="https://github.com/RookieZoe/skill-man/releases" />
+            </div>
+          )}
         </div>
         {warning ? (
           <div className="activation-warning" role="status">
