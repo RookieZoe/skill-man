@@ -1,3 +1,4 @@
+mod project_copy;
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString, OsString};
 use std::fs;
@@ -660,6 +661,60 @@ fn normalize_lexically_macos(path: &Path) -> PathBuf {
 }
 
 impl FileSystem for MacOsFileSystem {
+    fn project_copy_unchanged(
+        &self,
+        journal: &crate::seams::filesystem::ProjectCopyJournal,
+    ) -> bool {
+        project_copy::unchanged(journal)
+    }
+
+    fn project_copy_hash(&self, path: &Path) -> Result<String, FileSystemError> {
+        project_copy::artifact_hash(path)
+    }
+    fn reserve_project_copy(
+        &self,
+        journal: &crate::seams::filesystem::ProjectCopyJournal,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        project_copy::reserve(journal)
+    }
+
+    fn project_copy_payload(
+        &self,
+        path: &Path,
+        reuse: bool,
+    ) -> Result<crate::seams::filesystem::ProjectCopyPayload, FileSystemError> {
+        project_copy::payload(&self.normalize_configured_path(path)?, reuse)
+    }
+    fn prepare_project_copy_parent(
+        &self,
+        root: &DirectoryFingerprint,
+        resolution: &ProjectTargetResolution,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        project_copy::prepare(root, resolution)
+    }
+    fn stage_project_copy(
+        &self,
+        journal: &crate::seams::filesystem::ProjectCopyJournal,
+        payload: &crate::seams::filesystem::ProjectCopyPayload,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        project_copy::stage(journal, payload)
+    }
+    fn publish_project_copy(
+        &self,
+        journal: &crate::seams::filesystem::ProjectCopyJournal,
+    ) -> Result<(), FileSystemError> {
+        project_copy::publish(journal)
+    }
+    fn recover_project_copy(
+        &self,
+        journal: &crate::seams::filesystem::ProjectCopyJournal,
+        persist_cleanup: &mut dyn FnMut(
+            &crate::seams::filesystem::ProjectCopyJournal,
+        ) -> Result<(), FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        project_copy::recover(journal, persist_cleanup)
+    }
+
     fn ensure_directory_tree(&self, path: &Path) -> Result<(), FileSystemError> {
         let path = self.normalize_configured_path(path)?;
         if fs::symlink_metadata(&path).is_ok() {
@@ -3058,6 +3113,12 @@ impl FileSystem for MacOsFileSystem {
                 });
             }
             let mut journal = journal;
+            if let Some(copy) = journal.project_copy.clone() {
+                self.recover_project_copy(&copy, &mut |updated| {
+                    journal.project_copy = Some(updated.clone());
+                    self.write_enable_journal(&library_root, &journal)
+                })?;
+            }
             for cell in &mut journal.cells {
                 recover_enable_cell(cell, facts, &library_root)?;
             }

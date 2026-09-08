@@ -15,17 +15,8 @@ import { useLocale } from "../locale/LocaleProvider";
 import { commandErrorMessage, type MessageKey } from "../locale/messages";
 import { useModalFocus } from "../../ui/useModalFocus";
 
-/**
- * Project Enable four-step sheet (spec §7.4; ADR-0015; ADR-0019; ADR-0021; #89):
- * ① Select project folder (MRU candidates + manual path; MRU candidate only,
- *    not auto-selected)
- * ② Select Agent(s) with safe `project_skills_dir` (disabled if none, with
- *    action to Agent Management; selection starts empty, draft cleared on close)
- * ③ Preview (hop evidence, resolved-target group deduplication to "1 physical
- *    write", occupancy handling, per-cell destructive ack for real directories,
- *    no Replace-all)
- * ④ Result (warning "no Project record created", cell outcomes, Undo window
- *    open until sheet closed; closing finalizes).
+/** Project-owned Skill copy: select folder, review the required destination,
+ * apply, and safely undo/finalize during the result window (ADR-0025).
  */
 export function ProjectEnableSheet({
   client,
@@ -71,9 +62,10 @@ export function ProjectEnableSheet({
     new Set(),
   );
   const [result, setResult] = useState<EnableResult | null>(null);
+  const [undoFinished, setUndoFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const planning = step === "preview" && plan === null;
+  const planning = step === "preview" && plan === null && error === null;
   const busy = planning || submitting;
   const modalRef = useModalFocus<HTMLElement>({
     opener,
@@ -115,12 +107,7 @@ export function ProjectEnableSheet({
 
   // Plan project enable whenever preview step is active and inputs change
   useEffect(() => {
-    if (
-      step !== "preview" ||
-      selectedAgentIds.length === 0 ||
-      !folder.trim() ||
-      skillIds.length === 0
-    ) {
+    if (step !== "preview" || !folder.trim() || skillIds.length === 0) {
       return;
     }
     let current = true;
@@ -154,6 +141,7 @@ export function ProjectEnableSheet({
       (plan?.cells ?? []).filter(
         (cell) =>
           cell.eligibility === "ready" ||
+          cell.eligibility === "no_op" ||
           (cell.eligibility === "conflict" && cell.resolution === "replace"),
       ),
     [plan],
@@ -181,6 +169,7 @@ export function ProjectEnableSheet({
     try {
       const enableResult = await client.applyProjectEnable(plan.planToken);
       setResult(enableResult);
+      setUndoFinished(false);
       setStep("result");
     } catch (cause) {
       setError(commandErrorMessage(cause, t));
@@ -194,7 +183,12 @@ export function ProjectEnableSheet({
     setSubmitting(true);
     setError(null);
     try {
-      await client.undoProjectEnable(result.operationId);
+      const undone = await client.undoProjectEnable(result.operationId);
+      setUndoFinished(true);
+      if (undone.cells.some((cell) => !cell.undone)) {
+        setError(t("enable.project.copyUndoPreserved"));
+        return;
+      }
       setResult(null);
       setPlan(null);
       setStep("folder");
@@ -211,13 +205,31 @@ export function ProjectEnableSheet({
       setSubmitting(true);
       try {
         await client.finalizeProjectEnable(result.operationId);
-      } catch {
-        // Finalization is best effort
+      } catch (cause) {
+        setError(commandErrorMessage(cause, t));
+        return;
       } finally {
         setSubmitting(false);
       }
     }
     onClose();
+  }
+
+  async function onRetry() {
+    if (!result || busy) return;
+    setSubmitting(true);
+    try {
+      await client.finalizeProjectEnable(result.operationId);
+      setResult(null);
+      setPlan(null);
+      setError(null);
+      setUndoFinished(false);
+      setStep("agents");
+    } catch (cause) {
+      setError(commandErrorMessage(cause, t));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function onClearRecent() {
@@ -280,6 +292,12 @@ export function ProjectEnableSheet({
 
         <OperationNotice busy={busy} />
         <div className="enable-sheet-body">
+          <p className="enable-sheet-hint">
+            {t("enable.project.requiredCopy")}
+          </p>
+          {(isBatch || selectedAgentIds.length > 0) && (
+            <p role="status">{t("enable.project.copyScopeNotReady")}</p>
+          )}
           {step === "folder" && (
             <FolderStep
               folder={folder}
@@ -355,7 +373,13 @@ export function ProjectEnableSheet({
           )}
 
           {step === "result" && result !== null && (
-            <ProjectResultStep result={result} onUndo={() => void onUndo()} />
+            <ProjectResultStep
+              result={result}
+              onUndo={() => void onUndo()}
+              undoDisabled={busy || undoFinished}
+              onRetry={() => void onRetry()}
+              busy={busy}
+            />
           )}
 
           {error !== null && (
@@ -379,7 +403,7 @@ export function ProjectEnableSheet({
             <button
               type="button"
               className="toolbar-button primary"
-              disabled={folder.trim().length === 0}
+              disabled={folder.trim().length === 0 || isBatch}
               onClick={() => setStep("agents")}
             >
               {t("enable.project.continue")}
@@ -398,7 +422,7 @@ export function ProjectEnableSheet({
               <button
                 type="button"
                 className="toolbar-button primary"
-                disabled={selectedAgentIds.length === 0}
+                disabled={selectedAgentIds.length > 0 || isBatch}
                 onClick={() => {
                   setPlan(null);
                   setResolutions(new Map());
@@ -643,8 +667,6 @@ function ProjectPreviewStep({
   onResolutionChange: (cellKey: string, resolution: CellResolution) => void;
   onToggleDestructiveAck: (cellKey: string) => void;
 }) {
-  const { t } = useLocale();
-
   return (
     <div className="project-preview-matrix">
       {plan.cells.map((cell) => (
@@ -657,7 +679,6 @@ function ProjectPreviewStep({
           onToggleDestructiveAck={onToggleDestructiveAck}
         />
       ))}
-      <p className="enable-sheet-hint">{t("enable.global.conflictHint")}</p>
     </div>
   );
 }
@@ -695,15 +716,19 @@ function ProjectPreviewCell({
       <div className="project-cell-header">
         <div className="resolved-group-info">
           <h4>
-            {cell.skillName} → {t("enable.project.resolvedGroupDisclosure")}
+            {cell.skillName} →{" "}
+            {t(
+              cell.projectCopy === "reuse"
+                ? "enable.project.reuseCopy"
+                : "enable.project.createCopy",
+            )}
           </h4>
           <p className="one-physical-write">
-            {t("enable.project.onePhysicalWrite", {
-              count: cell.affectedAgentIds.length,
-            })}
-            {" ("}
-            {cell.affectedAgentNames.join(", ")}
-            {")"}
+            {t(
+              cell.projectCopy === "reuse"
+                ? "enable.project.reuseCopyDetail"
+                : "enable.project.createCopyDetail",
+            )}
           </p>
         </div>
         <span
@@ -716,7 +741,7 @@ function ProjectPreviewCell({
       <div className="project-evidence-box">
         <div className="evidence-line">
           {t("enable.project.resolvedContainerLabel", {
-            path: cell.targetPath,
+            path: cell.entryPath,
           })}
         </div>
 
@@ -810,14 +835,20 @@ function ProjectPreviewCell({
 function ProjectResultStep({
   result,
   onUndo,
+  undoDisabled,
+  onRetry,
+  busy,
 }: {
   result: EnableResult;
   onUndo: () => void;
+  undoDisabled: boolean;
+  onRetry: () => void;
+  busy: boolean;
 }) {
   const { t } = useLocale();
 
   const succeededCount = result.cells.filter(
-    (cell) => cell.outcome === "succeeded",
+    (cell) => cell.outcome === "succeeded" || cell.outcome === "no_op",
   ).length;
 
   return (
@@ -836,7 +867,14 @@ function ProjectResultStep({
       <ul className="result-cell-list">
         {result.cells.map((c) => (
           <li key={c.cellKey} className="result-cell-item">
-            <span className="result-cell-key">{c.cellKey}</span>
+            <span className="result-cell-key">
+              {t(
+                c.projectCopy === "reuse"
+                  ? "enable.project.reuseCopy"
+                  : "enable.project.copyResult",
+              )}
+            </span>
+            {c.diagnostic && <small>{c.diagnostic}</small>}
             <span className={`result-outcome outcome-${c.outcome}`}>
               {outcomeLabel(c.outcome, t)}
             </span>
@@ -845,8 +883,21 @@ function ProjectResultStep({
       </ul>
 
       <div className="result-undo-section">
-        <button type="button" className="toolbar-button" onClick={onUndo}>
+        <button
+          type="button"
+          className="toolbar-button"
+          onClick={onUndo}
+          disabled={undoDisabled}
+        >
           {t("enable.project.undoOperation")}
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          onClick={onRetry}
+          disabled={busy}
+        >
+          {t("enable.project.retryCopy")}
         </button>
       </div>
     </div>
@@ -858,6 +909,12 @@ function blockedReasonLabel(
   t: (key: MessageKey, params?: Record<string, string | number>) => string,
 ): string | null {
   switch (cell.blockedReason) {
+    case "invalid_project_copy":
+      return t("enable.project.invalidCopy");
+    case "invalid_copy_payload":
+      return t("enable.project.invalidPayload");
+    case "non_portable_project_alias":
+      return t("enable.project.nonPortableAlias");
     case "target_absent":
       return t("enable.global.blockedTargetAbsent");
     case "target_unavailable":

@@ -26,8 +26,8 @@
 //!   restart cleans identity-verified committed backups and ends the Undo
 //!   window.
 //!
-//! Project Enable (#89) reuses the same journal machinery; this module owns
-//! the Global surface.
+//! Project copy delivery (ADR-0025, #101) extends the same public Enable
+//! surface and durable journal with project-owned copy actions.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,8 +59,10 @@ use crate::seams::clock::Clock;
 use crate::seams::filesystem::{
     ActivationEntrySnapshot, ActivationReplacePhase, DirectoryFingerprint, EnableCellAction,
     EnableJournal, EnableJournalCell, EvidenceChainHop, FileSystem, FileSystemError, OccupantKind,
-    OccupantSnapshot, ProjectTargetFault, ProjectTargetResolution, StagedEntryKind,
+    OccupantSnapshot, ProjectTargetResolution, StagedEntryKind,
 };
+
+mod project_copy;
 
 const DEFAULT_PLAN_TTL: Duration = Duration::from_secs(5 * 60);
 const JOURNAL_VERSION: u32 = 1;
@@ -177,6 +179,9 @@ pub enum CellEligibility {
 /// Typed closed reasons (presentation maps these to message keys).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellBlockedReason {
+    InvalidProjectCopy,
+    InvalidCopyPayload,
+    NonPortableProjectAlias,
     TargetAbsent,
     TargetUnavailable,
     SourceSnapshotMismatch,
@@ -220,10 +225,18 @@ pub struct ProjectHopEvidence {
     pub hops: Vec<EvidenceChainHop>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCopyAction {
+    Create,
+    Reuse,
+}
+
 /// One plan cell: the `(Skill, Target, Directory Identity)` identity plus
 /// its observed occupancy, eligibility and the user's resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableCell {
+    pub project_copy: Option<ProjectCopyAction>,
     /// Stable `"<skill_id>|<target_root_id>"` key (spec §4.9 cell identity).
     pub cell_key: String,
     pub skill_id: SkillId,
@@ -274,6 +287,8 @@ pub enum CellOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableCellResult {
+    pub project_copy: Option<ProjectCopyAction>,
+    pub copy_ready: Option<bool>,
     pub cell_key: String,
     pub skill_id: SkillId,
     pub target_root_id: String,
@@ -349,6 +364,8 @@ struct PlannedCell {
     cell: EnableCell,
     /// Entry condition at plan time (identity of the occupier, if any).
     frozen_entry: Option<OccupantSnapshot>,
+    project_copy_payload: Option<crate::seams::filesystem::ProjectCopyPayload>,
+    copy_alias: Option<(PathBuf, ProjectTargetResolution)>,
     frozen_health: Health,
     frozen_source_kind: SourceKind,
     frozen_final_entity: PathBuf,
@@ -394,6 +411,8 @@ pub struct EnableService {
     configured_library_root: PathBuf,
     plans: Mutex<HashMap<String, PlannedBatch>>,
     applied: Mutex<HashMap<String, PlannedBatch>>,
+    closed_copy_operations: Mutex<std::collections::HashSet<String>>,
+    copy_journals: Mutex<HashMap<String, crate::seams::filesystem::ProjectCopyJournal>>,
     next_plan_id: AtomicU64,
     plan_ttl: Duration,
     write_gate: Arc<WriteGate>,
@@ -423,6 +442,8 @@ impl EnableService {
             configured_library_root: library_root,
             plans: Mutex::new(HashMap::new()),
             applied: Mutex::new(HashMap::new()),
+            closed_copy_operations: Mutex::new(std::collections::HashSet::new()),
+            copy_journals: Mutex::new(HashMap::new()),
             next_plan_id: AtomicU64::new(1),
             plan_ttl: DEFAULT_PLAN_TTL,
             write_gate,
@@ -648,381 +669,6 @@ impl EnableService {
 
     /// Plan a Project Enable for one or more Skills in one project folder
     /// across one or more Agents (spec §4.9; ADR-0015; ADR-0019; #89).
-    pub fn plan_project_enable(
-        &self,
-        skill_ids: &[SkillId],
-        project_folder: &Path,
-        agent_ids: &[String],
-        cell_resolutions: &[(String, CellResolution)],
-    ) -> Result<EnablePlan, EnableError> {
-        let write_context = self.capture_write_context()?;
-        if skill_ids.is_empty() {
-            return Err(EnableError::Validation(
-                "at least one Skill is required for Project Enable".into(),
-            ));
-        }
-        if agent_ids.is_empty() {
-            return Err(EnableError::Validation(
-                "at least one Agent is required for Project Enable".into(),
-            ));
-        }
-        let canonical_project_root = match self.filesystem.canonical_directory(project_folder) {
-            Ok(path) => path,
-            Err(error) => {
-                return Err(EnableError::Validation(format!(
-                    "the project folder '{}' cannot be canonicalized: {error}",
-                    project_folder.display()
-                )));
-            }
-        };
-
-        let snapshot = self.agent_store.agent_configuration_snapshot()?;
-
-        struct AgentResolution {
-            agent_id: String,
-            agent_name: String,
-            configured_dir: PathBuf,
-            resolution: ProjectTargetResolution,
-            resolved_container: PathBuf,
-            hops: Vec<EvidenceChainHop>,
-            create_steps: Vec<PathBuf>,
-            fault: Option<CellBlockedReason>,
-            detail: Option<String>,
-        }
-
-        let mut resolved_agents = Vec::new();
-        for agent_id in agent_ids {
-            let agent = snapshot
-                .configurations
-                .iter()
-                .find(|cfg| &cfg.agent_id == agent_id)
-                .ok_or_else(|| {
-                    EnableError::Validation(format!(
-                        "Agent Configuration '{agent_id}' was not found"
-                    ))
-                })?;
-            let configured_dir = match &agent.project_skills_dir {
-                Some(dir) => dir.clone(),
-                None => {
-                    return Err(EnableError::Validation(format!(
-                        "Agent '{}' has no project_skills_dir configured",
-                        agent.name
-                    )));
-                }
-            };
-            let walked = self
-                .filesystem
-                .resolve_project_target(&canonical_project_root, &configured_dir)?;
-            let (fault, detail) = match walked.fault.as_ref() {
-                Some(ProjectTargetFault::OutsideProjectRoot) => {
-                    (Some(CellBlockedReason::OutsideProjectRoot), None)
-                }
-                Some(ProjectTargetFault::SymlinkCycle) => {
-                    (Some(CellBlockedReason::SymlinkCycle), None)
-                }
-                Some(ProjectTargetFault::HopLimitExceeded) => {
-                    (Some(CellBlockedReason::HopLimitExceeded), None)
-                }
-                Some(ProjectTargetFault::TargetNotDirectory) => {
-                    (Some(CellBlockedReason::TargetNotDirectory), None)
-                }
-                Some(ProjectTargetFault::TargetUnavailable { diagnostic }) => (
-                    Some(CellBlockedReason::TargetUnavailable),
-                    Some(diagnostic.clone()),
-                ),
-                None => (None, None),
-            };
-            resolved_agents.push(AgentResolution {
-                agent_id: agent.agent_id.clone(),
-                agent_name: agent.name.clone(),
-                configured_dir,
-                resolution: walked.clone(),
-                resolved_container: walked.resolved_container,
-                hops: walked.hops,
-                create_steps: walked.create_steps,
-                fault,
-                detail,
-            });
-        }
-
-        struct ResolvedGroup {
-            target_root_id: String,
-            resolved_container: PathBuf,
-            affected_agent_ids: Vec<String>,
-            affected_agent_names: Vec<String>,
-            create_steps: Vec<PathBuf>,
-            hop_evidences: Vec<ProjectHopEvidence>,
-            target_resolutions: Vec<FrozenProjectTarget>,
-            target_identity: Option<DirectoryFingerprint>,
-            fault: Option<CellBlockedReason>,
-            detail: Option<String>,
-        }
-
-        let mut groups: Vec<ResolvedGroup> = Vec::new();
-        for resolved in resolved_agents {
-            let hop_evidence = ProjectHopEvidence {
-                agent_id: resolved.agent_id.clone(),
-                agent_name: resolved.agent_name.clone(),
-                configured_relative_path: resolved.configured_dir.clone(),
-                resolved_container: resolved.resolved_container.clone(),
-                hops: resolved.hops,
-            };
-
-            if let Some(existing) = groups
-                .iter_mut()
-                .find(|g| g.resolved_container == resolved.resolved_container)
-            {
-                existing.affected_agent_ids.push(resolved.agent_id);
-                existing.affected_agent_names.push(resolved.agent_name);
-                existing.hop_evidences.push(hop_evidence);
-                existing.target_resolutions.push(FrozenProjectTarget {
-                    configured_relative_path: resolved.configured_dir,
-                    resolution: resolved.resolution,
-                });
-                for step in resolved.create_steps {
-                    if !existing.create_steps.contains(&step) {
-                        existing.create_steps.push(step);
-                    }
-                }
-                if existing.fault.is_none() && resolved.fault.is_some() {
-                    existing.fault = resolved.fault;
-                    existing.detail = resolved.detail;
-                }
-            } else {
-                let target_root_id =
-                    format!("project:{}", resolved.resolved_container.to_string_lossy());
-                groups.push(ResolvedGroup {
-                    target_root_id,
-                    resolved_container: resolved.resolved_container,
-                    affected_agent_ids: vec![resolved.agent_id],
-                    affected_agent_names: vec![resolved.agent_name],
-                    create_steps: resolved.create_steps,
-                    hop_evidences: vec![hop_evidence],
-                    target_resolutions: vec![FrozenProjectTarget {
-                        configured_relative_path: resolved.configured_dir,
-                        resolution: resolved.resolution,
-                    }],
-                    target_identity: None,
-                    fault: resolved.fault,
-                    detail: resolved.detail,
-                });
-            }
-        }
-
-        // A resolved project container is physically visible to every
-        // configured Agent that points at it, not only to the Agents the
-        // user selected for this operation. Keep the selected Agents as the
-        // write intent, then add the remaining configured consumers to the
-        // group so Preview accurately discloses the read surface and the
-        // apply-time walk remains frozen for every consumer.
-        for configuration in &snapshot.configurations {
-            if agent_ids
-                .iter()
-                .any(|agent_id| agent_id == &configuration.agent_id)
-            {
-                continue;
-            }
-            let Some(configured_dir) = configuration.project_skills_dir.clone() else {
-                continue;
-            };
-            let Ok(resolution) = self
-                .filesystem
-                .resolve_project_target(&canonical_project_root, &configured_dir)
-            else {
-                continue;
-            };
-            if resolution.fault.is_some() {
-                continue;
-            }
-            let Some(group) = groups
-                .iter_mut()
-                .find(|group| group.resolved_container == resolution.resolved_container)
-            else {
-                continue;
-            };
-            if group.fault.is_some() {
-                continue;
-            }
-            let hop_evidence = ProjectHopEvidence {
-                agent_id: configuration.agent_id.clone(),
-                agent_name: configuration.name.clone(),
-                configured_relative_path: configured_dir.clone(),
-                resolved_container: resolution.resolved_container.clone(),
-                hops: resolution.hops.clone(),
-            };
-            group
-                .affected_agent_ids
-                .push(configuration.agent_id.clone());
-            group.affected_agent_names.push(configuration.name.clone());
-            group.hop_evidences.push(hop_evidence);
-            group.target_resolutions.push(FrozenProjectTarget {
-                configured_relative_path: configured_dir,
-                resolution: resolution.clone(),
-            });
-            for step in resolution.create_steps {
-                if !group.create_steps.contains(&step) {
-                    group.create_steps.push(step);
-                }
-            }
-        }
-
-        for group in &mut groups {
-            if group.fault.is_none() && group.create_steps.is_empty() {
-                group.target_identity = Some(
-                    self.filesystem
-                        .directory_fingerprint(&group.resolved_container)
-                        .map_err(|error| {
-                            EnableError::Validation(format!(
-                                "failed to fingerprint resolved project target '{}': {error}",
-                                group.resolved_container.display()
-                            ))
-                        })?,
-                );
-            }
-        }
-
-        let mut cells = Vec::new();
-        for group in &groups {
-            for skill_id in skill_ids {
-                let skill =
-                    self.catalog
-                        .inspect(skill_id)?
-                        .ok_or_else(|| EnableError::SkillNotFound {
-                            skill_id: skill_id.0.clone(),
-                        })?;
-                let directory_identity_key = self
-                    .catalog
-                    .skill_directory_identity_key(skill_id)?
-                    .ok_or(EnableError::PlanStale)?;
-                let final_entity = PathBuf::from(skill.final_entity_path.clone());
-                let entry_path = group.resolved_container.join(&skill.summary.directory_name);
-                let cell_key = format!("{}|{}", skill_id.0, group.target_root_id);
-
-                let source_gate = self
-                    .source_update
-                    .as_ref()
-                    .map(|service| map_gate_code(service.ensure_new_enable_allowed(skill_id)))
-                    .unwrap_or(GateCode::Ok);
-
-                let (
-                    frozen_entry,
-                    occupier,
-                    exact_direct,
-                    destructive,
-                    eligibility,
-                    blocked_reason,
-                    resolution,
-                    detail,
-                ) = if let Some(fault) = group.fault {
-                    (
-                        None,
-                        Occupier::Empty,
-                        false,
-                        None,
-                        CellEligibility::Blocked,
-                        Some(fault),
-                        CellResolution::Skip,
-                        group.detail.clone(),
-                    )
-                } else {
-                    let (frozen_entry, occupier, exact_direct, destructive) =
-                        self.observe_entry(&entry_path, &final_entity)?;
-
-                    let (eligibility, blocked_reason, resolution, detail) =
-                        if source_gate == GateCode::Mismatch {
-                            (
-                                CellEligibility::Blocked,
-                                Some(CellBlockedReason::SourceSnapshotMismatch),
-                                CellResolution::Skip,
-                                None,
-                            )
-                        } else if source_gate == GateCode::Tombstoned {
-                            (
-                                CellEligibility::Blocked,
-                                Some(CellBlockedReason::TombstonedMember),
-                                CellResolution::Skip,
-                                None,
-                            )
-                        } else if skill.summary.health == Health::Broken {
-                            (
-                                CellEligibility::Blocked,
-                                Some(CellBlockedReason::EntityBroken),
-                                CellResolution::Skip,
-                                None,
-                            )
-                        } else if exact_direct {
-                            (CellEligibility::NoOp, None, CellResolution::Skip, None)
-                        } else if occupier == Occupier::Empty {
-                            (CellEligibility::Ready, None, CellResolution::Replace, None)
-                        } else {
-                            let user_res = cell_resolutions
-                                .iter()
-                                .find(|(k, _)| k == &cell_key)
-                                .map(|(_, r)| *r);
-                            let res = match user_res {
-                                Some(CellResolution::Replace) => CellResolution::Replace,
-                                _ => CellResolution::Skip,
-                            };
-                            (CellEligibility::Conflict, None, res, None)
-                        };
-                    (
-                        frozen_entry,
-                        occupier,
-                        exact_direct,
-                        destructive,
-                        eligibility,
-                        blocked_reason,
-                        resolution,
-                        detail,
-                    )
-                };
-
-                let cell = EnableCell {
-                    cell_key,
-                    skill_id: skill_id.clone(),
-                    skill_name: skill.summary.display_name.clone(),
-                    directory_name: skill.summary.directory_name.clone(),
-                    directory_identity_key,
-                    target_root_id: group.target_root_id.clone(),
-                    target_path: group.resolved_container.clone(),
-                    entry_path,
-                    final_entity_path: final_entity.clone(),
-                    action: EnableAction::Enable,
-                    affected_agent_ids: group.affected_agent_ids.clone(),
-                    affected_agent_names: group.affected_agent_names.clone(),
-                    occupancy: occupier,
-                    occ_exact_direct: exact_direct,
-                    destructive,
-                    eligibility,
-                    blocked_reason,
-                    resolution,
-                    detail,
-                    create_steps: group.create_steps.clone(),
-                    hop_evidence: group.hop_evidences.clone(),
-                };
-
-                cells.push(PlannedCell {
-                    cell,
-                    frozen_entry,
-                    frozen_health: skill.summary.health,
-                    frozen_source_kind: skill.summary.source_kind,
-                    frozen_final_entity: final_entity,
-                    frozen_availability: TargetGroupAvailability::Available,
-                    frozen_target: group.target_identity.clone(),
-                    frozen_project_targets: group.target_resolutions.clone(),
-                    before_desired: false,
-                });
-            }
-        }
-
-        resolve_batch_contention(&mut cells, cell_resolutions);
-        let hop_evidence = groups
-            .iter()
-            .flat_map(|group| group.hop_evidences.clone())
-            .collect::<Vec<_>>();
-        self.build_project_plan(canonical_project_root, hop_evidence, cells, write_context)
-    }
-
     fn build_project_plan(
         &self,
         canonical_project_root: PathBuf,
@@ -1264,6 +910,7 @@ impl EnableService {
             .collect();
 
         let cell = EnableCell {
+            project_copy: None,
             cell_key,
             skill_id: skill_id.clone(),
             skill_name: skill.summary.display_name.clone(),
@@ -1287,6 +934,8 @@ impl EnableService {
             hop_evidence: Vec::new(),
         };
         Ok(PlannedCell {
+            project_copy_payload: None,
+            copy_alias: None,
             frozen_entry,
             frozen_health: skill.summary.health,
             frozen_source_kind: skill.summary.source_kind,
@@ -1421,6 +1070,9 @@ impl EnableService {
         let library_root = self.library_root_for_context(&batch.write_context)?;
         let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         self.verify_plan(&batch)?;
+        if batch.cells.iter().any(|c| c.cell.project_copy.is_some()) {
+            return self.apply_project_copy(batch, &library_root);
+        }
         let mut journal = self.build_journal(&batch, &library_root);
         let has_runnable = journal
             .cells
@@ -1577,6 +1229,11 @@ impl EnableService {
         diagnostic: Option<String>,
     ) -> EnableCellResult {
         EnableCellResult {
+            project_copy: planned.cell.project_copy,
+            copy_ready: planned
+                .cell
+                .project_copy
+                .map(|_| matches!(outcome, CellOutcome::Succeeded | CellOutcome::NoOp)),
             cell_key: planned.cell.cell_key.clone(),
             skill_id: planned.cell.skill_id.clone(),
             target_root_id: planned.cell.target_root_id.clone(),
@@ -1623,6 +1280,7 @@ impl EnableService {
             })
             .collect();
         EnableJournal {
+            project_copy: None,
             version: JOURNAL_VERSION,
             operation_id: batch.operation_id.clone(),
             phase: ActivationReplacePhase::Applying,
@@ -1699,6 +1357,32 @@ impl EnableService {
                     && service.ensure_new_enable_allowed(&cell.skill_id).is_err()
                 {
                     return Err(EnableError::PlanStale);
+                }
+                if let Some((relative, expected)) = &planned.copy_alias {
+                    if self
+                        .filesystem
+                        .resolve_project_target(canonical_root, relative)?
+                        != *expected
+                    {
+                        return Err(EnableError::PlanStale);
+                    }
+                }
+                if let Some(payload) = &planned.project_copy_payload {
+                    let reuse = planned.cell.eligibility == CellEligibility::NoOp;
+                    let path = if reuse {
+                        &payload.root.canonical_path
+                    } else {
+                        &planned.frozen_final_entity
+                    };
+                    if self
+                        .filesystem
+                        .project_copy_payload(path, reuse)
+                        .as_ref()
+                        .ok()
+                        != Some(payload)
+                    {
+                        return Err(EnableError::PlanStale);
+                    }
                 }
                 match (
                     &planned.frozen_entry,
@@ -2164,6 +1848,9 @@ impl EnableService {
             .ok_or(EnableError::PlanNotFound)?;
         let library_root = self.library_root_for_context(&batch.write_context)?;
         let _write_guard = self.acquire_write_guard(&batch.write_context)?;
+        if batch.cells.iter().any(|c| c.cell.project_copy.is_some()) {
+            return self.undo_project_copy(&batch, &library_root);
+        }
         let mut journal = self.build_journal(&batch, &library_root);
         let succeeded = batch
             .cells
@@ -2555,6 +2242,14 @@ impl EnableService {
     /// (RecoveryRequired), never force-deleted.
     pub fn finalize(&self, operation_id: &str) -> Result<(), EnableError> {
         self.ensure_writes_ready()?;
+        if self
+            .closed_copy_operations
+            .lock()
+            .map_err(|_| EnableError::Internal("closed copy lock".into()))?
+            .contains(operation_id)
+        {
+            return Ok(());
+        }
         let batch = self
             .applied
             .lock()
@@ -2563,6 +2258,19 @@ impl EnableService {
             .ok_or(EnableError::PlanNotFound)?;
         let library_root = self.library_root_for_context(&batch.write_context)?;
         let _write_guard = self.acquire_write_guard(&batch.write_context)?;
+        if batch.cells.iter().any(|c| c.cell.project_copy.is_some()) {
+            self.filesystem
+                .finish_enable_journal(&library_root, operation_id)?;
+            self.copy_journals
+                .lock()
+                .map_err(|_| EnableError::Internal("copy journal lock".into()))?
+                .remove(operation_id);
+            self.closed_copy_operations
+                .lock()
+                .map_err(|_| EnableError::Internal("closed copy lock".into()))?
+                .insert(operation_id.into());
+            return Ok(());
+        }
         let journal = self.build_journal(&batch, &library_root);
         for cell in &journal.cells {
             if let (Some(backup_path), Some(occupant)) = (&cell.backup_path, &cell.occupant) {

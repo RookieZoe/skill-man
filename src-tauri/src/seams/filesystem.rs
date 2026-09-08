@@ -128,6 +128,8 @@ pub struct EnableJournalCell {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EnableJournal {
+    #[serde(default)]
+    pub project_copy: Option<ProjectCopyJournal>,
     pub version: u32,
     pub operation_id: String,
     pub phase: ActivationReplacePhase,
@@ -1339,7 +1341,7 @@ pub struct ScannedSkillEntry {
 /// One step of a bounded evidence chain walk (spec §8.1). The walk records
 /// every hop with its raw symlink target and entry identity; a failure stops
 /// at the exact hop without guessing a final entity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EvidenceChainHopKind {
     /// A real directory component on the path to the entity.
     Directory,
@@ -1348,7 +1350,7 @@ pub enum EvidenceChainHopKind {
     Symlink { target: PathBuf },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EvidenceChainHop {
     pub path: PathBuf,
     pub kind: EvidenceChainHopKind,
@@ -1391,7 +1393,7 @@ pub struct EvidenceChain {
 }
 
 /// Faults from bounded project symlink resolution (spec §4.9; ADR-0015; #89).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ProjectTargetFault {
     OutsideProjectRoot,
     SymlinkCycle,
@@ -1400,7 +1402,7 @@ pub enum ProjectTargetFault {
     TargetUnavailable { diagnostic: String },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectTargetResolution {
     pub resolved_container: PathBuf,
     pub hops: Vec<EvidenceChainHop>,
@@ -1441,7 +1443,103 @@ pub enum FileSystemError {
     },
 }
 
+/// Frozen, portable payload. Bytes are held only by the transient plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCopyPayload {
+    pub root_mode: u32,
+    pub root: DirectoryFingerprint,
+    pub entries: Vec<ProjectCopyEntry>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCopyEntry {
+    pub device: u64,
+    pub inode: u64,
+    pub path: PathBuf,
+    pub mode: u32,
+    pub kind: ProjectCopyEntryKind,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectCopyEntryKind {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectCopyJournal {
+    #[serde(default)]
+    pub cleanup_authorized: bool,
+    pub target_resolution: ProjectTargetResolution,
+    pub project_root: DirectoryFingerprint,
+    pub parent: DirectoryFingerprint,
+    pub entry_path: PathBuf,
+    pub staging_path: PathBuf,
+    pub staged_identity: Option<DirectoryFingerprint>,
+    pub content_hash: Option<String>,
+    pub phase: ActivationReplacePhase,
+}
+
 pub trait FileSystem: Send + Sync {
+    fn project_copy_unchanged(&self, journal: &ProjectCopyJournal) -> bool {
+        let _ = journal;
+        false
+    }
+
+    fn project_copy_hash(&self, path: &Path) -> Result<String, FileSystemError> {
+        self.tree_hash(path)
+    }
+    fn reserve_project_copy(
+        &self,
+        journal: &ProjectCopyJournal,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        Err(FileSystemError::PlanStale {
+            path: journal.staging_path.clone(),
+        })
+    }
+
+    fn project_copy_payload(
+        &self,
+        path: &Path,
+        reuse: bool,
+    ) -> Result<ProjectCopyPayload, FileSystemError> {
+        let _ = reuse;
+        Err(FileSystemError::NotDirectory { path: path.into() })
+    }
+    fn prepare_project_copy_parent(
+        &self,
+        root: &DirectoryFingerprint,
+        resolution: &ProjectTargetResolution,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = resolution;
+        Err(FileSystemError::PlanStale {
+            path: root.canonical_path.clone(),
+        })
+    }
+    fn stage_project_copy(
+        &self,
+        journal: &ProjectCopyJournal,
+        payload: &ProjectCopyPayload,
+    ) -> Result<DirectoryFingerprint, FileSystemError> {
+        let _ = payload;
+        Err(FileSystemError::PlanStale {
+            path: journal.entry_path.clone(),
+        })
+    }
+    fn publish_project_copy(&self, journal: &ProjectCopyJournal) -> Result<(), FileSystemError> {
+        Err(FileSystemError::PlanStale {
+            path: journal.entry_path.clone(),
+        })
+    }
+    fn recover_project_copy(
+        &self,
+        journal: &ProjectCopyJournal,
+        persist_cleanup: &mut dyn FnMut(&ProjectCopyJournal) -> Result<(), FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        let _ = persist_cleanup;
+        Err(FileSystemError::PlanStale {
+            path: journal.entry_path.clone(),
+        })
+    }
+
     /// Fill `buffer` with OS entropy (e.g. `/dev/urandom`): the randomness
     /// source for generated identities. Behind the seam so Core never
     /// touches the filesystem directly (core-boundary contract).

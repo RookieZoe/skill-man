@@ -4984,6 +4984,9 @@ pub enum CellEligibilityDto {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellBlockedReasonDto {
+    InvalidProjectCopy,
+    InvalidCopyPayload,
+    NonPortableProjectAlias,
     #[serde(rename = "target_absent")]
     TargetAbsent,
     #[serde(rename = "target_unavailable")]
@@ -5024,6 +5027,8 @@ pub struct DestructiveCountsDto {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnableCellDto {
+    #[serde(default)]
+    pub project_copy: Option<crate::core::enable::ProjectCopyAction>,
     #[serde(rename = "cellKey")]
     pub cell_key: String,
     #[serde(rename = "skillId")]
@@ -5183,6 +5188,8 @@ pub enum CellOutcomeDto {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnableCellResultDto {
+    pub project_copy: Option<crate::core::enable::ProjectCopyAction>,
+    pub copy_ready: Option<bool>,
     #[serde(rename = "cellKey")]
     pub cell_key: String,
     #[serde(rename = "skillId")]
@@ -5341,6 +5348,7 @@ impl From<EnablePlan> for EnablePlanDto {
 impl From<EnableCell> for EnableCellDto {
     fn from(value: EnableCell) -> Self {
         Self {
+            project_copy: value.project_copy,
             cell_key: value.cell_key,
             skill_id: value.skill_id.0,
             skill_name: value.skill_name,
@@ -5396,6 +5404,11 @@ impl From<EnableCell> for EnableCellDto {
                 CellEligibility::Blocked => CellEligibilityDto::Blocked,
             },
             blocked_reason: value.blocked_reason.map(|reason| match reason {
+                CellBlockedReason::InvalidProjectCopy => CellBlockedReasonDto::InvalidProjectCopy,
+                CellBlockedReason::InvalidCopyPayload => CellBlockedReasonDto::InvalidCopyPayload,
+                CellBlockedReason::NonPortableProjectAlias => {
+                    CellBlockedReasonDto::NonPortableProjectAlias
+                }
                 CellBlockedReason::TargetAbsent => CellBlockedReasonDto::TargetAbsent,
                 CellBlockedReason::TargetUnavailable => CellBlockedReasonDto::TargetUnavailable,
                 CellBlockedReason::SourceSnapshotMismatch => {
@@ -5439,6 +5452,8 @@ impl From<EnableResult> for EnableResultDto {
 impl From<EnableCellResult> for EnableCellResultDto {
     fn from(value: EnableCellResult) -> Self {
         Self {
+            project_copy: value.project_copy,
+            copy_ready: value.copy_ready,
             cell_key: value.cell_key,
             skill_id: value.skill_id.0,
             target_root_id: value.target_root_id,

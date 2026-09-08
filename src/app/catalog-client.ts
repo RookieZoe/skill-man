@@ -472,6 +472,9 @@ export type CellResolution = "switch" | "replace" | "adopt" | "skip";
 export type CellEligibility =
   "ready" | "no_op" | "skipped" | "conflict" | "blocked";
 export type CellBlockedReason =
+  | "invalid_project_copy"
+  | "invalid_copy_payload"
+  | "non_portable_project_alias"
   | "target_absent"
   | "target_unavailable"
   | "source_snapshot_mismatch"
@@ -509,6 +512,7 @@ export interface DestructiveCounts {
 }
 
 export interface EnableCell {
+  projectCopy?: "create" | "reuse" | null;
   /** `"<skill_id>|<target_root_id>"` cell identity. */
   cellKey: string;
   skillId: string;
@@ -555,6 +559,8 @@ export type CellOutcome =
   "succeeded" | "no_op" | "skipped" | "failed" | "not_attempted";
 
 export interface EnableCellResult {
+  projectCopy?: "create" | "reuse" | null;
+  copyReady?: boolean | null;
   cellKey: string;
   skillId: string;
   targetRootId: string;

@@ -815,6 +815,7 @@ fn interrupted_enable_rolls_forward_when_catalog_committed() {
     let target_root_id = harness.home.activation_root_id("claude-code");
     let op = "enable-recover-fwd";
     let journal = EnableJournal {
+        project_copy: None,
         version: 1,
         operation_id: op.to_owned(),
         phase: ActivationReplacePhase::Applying,
@@ -874,6 +875,7 @@ fn interrupted_enable_rolls_back_when_catalog_not_committed() {
     let target_root_id = harness.home.activation_root_id("claude-code");
     let op = "enable-recover-back";
     let journal = EnableJournal {
+        project_copy: None,
         version: 1,
         operation_id: op.to_owned(),
         phase: ActivationReplacePhase::Applying,
@@ -930,6 +932,7 @@ fn interrupted_disable_rolls_forward_when_catalog_committed() {
     let target_root_id = harness.home.activation_root_id("claude-code");
     let op = "enable-recover-disable-fwd";
     let journal = EnableJournal {
+        project_copy: None,
         version: 1,
         operation_id: op.to_owned(),
         phase: ActivationReplacePhase::Applying,
@@ -996,6 +999,7 @@ fn interrupted_replace_rolls_back_restoring_occupant() {
         .join("backup")
         .join("cell-0");
     let journal = EnableJournal {
+        project_copy: None,
         version: 1,
         operation_id: op.to_owned(),
         phase: ActivationReplacePhase::Applying,

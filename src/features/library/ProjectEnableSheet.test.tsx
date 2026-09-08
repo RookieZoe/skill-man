@@ -40,14 +40,6 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   expect(
     await within(dialog).findByText("No agent selected"),
   ).toBeInTheDocument();
-  const selectAllBtn = within(dialog).getByRole("button", {
-    name: "Select all",
-  });
-  await user.click(selectAllBtn);
-  expect(
-    within(dialog).queryByText("No agent selected"),
-  ).not.toBeInTheDocument();
-
   const reviewBtn = within(dialog).getByRole("button", {
     name: "Review the plan",
   });
@@ -55,10 +47,10 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
 
   // Step 3: Preview
   expect(
-    (await within(dialog).findAllByText(/Actual activation directory/)).length,
+    (await within(dialog).findAllByText(/skill-authoring/)).length,
   ).toBeGreaterThan(0);
   expect(
-    within(dialog).getAllByText(/Enable once for all of them/).length,
+    within(dialog).getAllByText(/The project owns this copy/).length,
   ).toBeGreaterThan(0);
   expect(within(dialog).getAllByText("Ready").length).toBeGreaterThan(0);
 
@@ -71,7 +63,7 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   // Step 4: Result
   expect(
     await within(dialog).findByText(
-      "Project links are not tracked or health-monitored by Skill Man.",
+      "Project copies are managed by the project; Skill Man does not track or health-monitor them.",
     ),
   ).toBeInTheDocument();
   expect(within(dialog).getByText(/actions completed/)).toBeInTheDocument();
@@ -90,70 +82,27 @@ test("four-step flow: folder -> agents -> preview -> result with undo", async ()
   });
 });
 
-test("batch project enable flow with multiple skills", async () => {
+test("batch project copy scope is explicitly unavailable", async () => {
   const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
   render(
     <ProjectEnableSheet
-      client={client}
+      client={createFixtureCatalogClient()}
       skills={[
-        { id: "skill-authoring", name: "Skill authoring" },
-        { id: "media-xray", name: "Media X-ray" },
+        { id: "a", name: "A" },
+        { id: "b", name: "B" },
       ]}
       onClose={() => {}}
     />,
   );
-
-  const dialog = await screen.findByRole("dialog", {
-    name: "Enable 2 skills to Project",
-  });
-  expect(dialog).toBeInTheDocument();
-
-  // Step 1: Folder
-  const folderInput = within(dialog).getByPlaceholderText("/path/to/project");
-  await user.type(folderInput, "/my/batch-project");
-  const continueBtn = within(dialog).getByRole("button", {
-    name: "Review the plan",
-  });
-  await user.click(continueBtn);
-
-  // Step 2: Agents
-  const selectAllBtn = within(dialog).getByRole("button", {
-    name: "Select all",
-  });
-  await user.click(selectAllBtn);
-  const reviewBtn = within(dialog).getByRole("button", {
-    name: "Review the plan",
-  });
-  await user.click(reviewBtn);
-
-  // Step 3: Preview shows both skills
-  const authoringMatches =
-    await within(dialog).findAllByText(/Skill authoring/);
-  expect(authoringMatches.length).toBeGreaterThan(0);
-  const mediaMatches = within(dialog).getAllByText(/Media X-ray/);
-  expect(mediaMatches.length).toBeGreaterThan(0);
-
-  const applyBtn = within(dialog).getByRole("button", {
-    name: "Enable in Project",
-  });
-  expect(applyBtn).not.toBeDisabled();
-  await user.click(applyBtn);
-
-  // Step 4: Result
+  await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
   expect(
-    await within(dialog).findByText(
-      "Project links are not tracked or health-monitored by Skill Man.",
+    screen.getByText(
+      /Multiple Skills and additional Agent links are not available yet/,
     ),
   ).toBeInTheDocument();
-  expect(within(dialog).getByText(/actions completed/)).toBeInTheDocument();
   expect(
-    within(dialog).getByRole("button", { name: "Undo this operation" }),
-  ).toBeInTheDocument();
-
-  await user.click(
-    within(dialog).getByRole("button", { name: "Undo this operation" }),
-  );
+    screen.getByRole("button", { name: "Review the plan" }),
+  ).toBeDisabled();
 });
 
 test("folder step renders browse button and input", async () => {
@@ -254,9 +203,6 @@ test("destructive ack required for real directory replacement", async () => {
     within(dialog).getByRole("button", { name: "Review the plan" }),
   );
   await user.click(
-    await within(dialog).findByRole("button", { name: "Select all" }),
-  );
-  await user.click(
     within(dialog).getByRole("button", { name: "Review the plan" }),
   );
 
@@ -277,4 +223,103 @@ test("destructive ack required for real directory replacement", async () => {
   await user.click(ackCheckbox);
   expect(ackCheckbox).toBeChecked();
   expect(applyBtn).not.toBeDisabled();
+});
+
+test("zero additional Agents can preview without General configuration", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const original = client.getAgentManagementSnapshot;
+  client.getAgentManagementSnapshot = async () => ({
+    ...(await original()),
+    configurations: [],
+  });
+  client.planProjectEnable = async (ids, folder, agents) => {
+    expect(ids).toEqual(["skill-authoring"]);
+    expect(agents).toEqual([]);
+    return {
+      planToken: "copy-plan",
+      scope: "project",
+      writeGateGeneration: 0,
+      catalogGeneration: 0,
+      agentGeneration: 0,
+      projectRoot: null,
+      cells: [],
+    };
+  };
+  renderSheet(client);
+  await user.type(
+    screen.getByPlaceholderText("/path/to/project"),
+    "/my/project",
+  );
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  expect(
+    await screen.findByText(/Required base directory/),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  expect(
+    await screen.findByRole("button", { name: "Enable in Project" }),
+  ).toBeInTheDocument();
+});
+
+test("Chinese copy-only preview explains reuse and remains executable", async () => {
+  const { LocaleProvider } = await import("../locale/LocaleProvider");
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  await client.setLocaleSelection("zh-Hans");
+  const original = client.planProjectEnable;
+  client.planProjectEnable = async (...args) => {
+    const plan = await original(...args);
+    return {
+      ...plan,
+      cells: plan.cells.map((cell) => ({
+        ...cell,
+        projectCopy: "reuse" as const,
+        eligibility: "no_op" as const,
+        createSteps: [],
+      })),
+    };
+  };
+  render(
+    <LocaleProvider client={client}>
+      <ProjectEnableSheet
+        client={client}
+        skillId="skill-authoring"
+        skillName="Skill authoring"
+        onClose={() => {}}
+      />
+    </LocaleProvider>,
+  );
+  await screen.findByText(/必须的基础目录/);
+  await user.type(
+    screen.getByPlaceholderText("/path/to/project"),
+    "/my/project",
+  );
+  const continueText = (await import("../../../resources/locales/zh-Hans.json"))
+    .default["enable.project.continue"];
+  await user.click(screen.getByRole("button", { name: continueText }));
+  await user.click(screen.getByRole("button", { name: continueText }));
+  expect(
+    await screen.findByText(
+      "使用项目已有内容，不复制 Library 内容，也不覆盖项目副本。",
+    ),
+  ).toBeInTheDocument();
+  const applyText = (await import("../../../resources/locales/zh-Hans.json"))
+    .default["enable.project.applyPlan"];
+  expect(screen.getByRole("button", { name: applyText })).not.toBeDisabled();
+});
+
+test("additional Agent selection explains unavailable scope instead of submitting old links", async () => {
+  const user = userEvent.setup();
+  renderSheet();
+  await user.type(screen.getByPlaceholderText("/path/to/project"), "/project");
+  await user.click(screen.getByRole("button", { name: "Review the plan" }));
+  await user.click(await screen.findByRole("button", { name: "Select all" }));
+  expect(
+    screen.getByText(
+      /Multiple Skills and additional Agent links are not available yet/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Review the plan" }),
+  ).toBeDisabled();
 });

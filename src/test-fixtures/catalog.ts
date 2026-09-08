@@ -792,6 +792,8 @@ export function createFixtureCatalogClient(
       );
 
       const groupsMap = new Map<string, typeof selectedConfigs>();
+      if (agentIds.length === 0)
+        groupsMap.set(`${projectFolder}/.agents/skills`, []);
       for (const config of selectedConfigs) {
         if (!config.projectSkillsDir) continue;
         const dir = config.projectSkillsDir;
@@ -830,6 +832,7 @@ export function createFixtureCatalogClient(
             skill?.displayName ??
             (skillId.includes("::") ? skillId.split("::")[0] : skillId);
           cells.push({
+            projectCopy: "create",
             cellKey,
             skillId,
             skillName: displayName,
