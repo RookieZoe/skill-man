@@ -1413,8 +1413,16 @@
   "enable.project.linkAgents": "与 {agents} 共用项目副本",
   "enable.project.linkDetail": "链接到项目内容：{path}。",
   "enable.project.sharedAgents": "此目录由 {agents} 共用。",
-  "enable.project.conflictPreserved": "此位置已被占用，将保留原物。暂不支持替换。",
+  "enable.project.conflictPreserved": "未勾选的条目将跳过并保留原内容。确认替换后会备份此条目，以便安全撤销。",
   "enable.project.copyNotReady": "项目副本未就绪，因此未尝试此操作。",
   "enable.project.technicalDetails": "技术详情",
-  "enable.project.writeGateClosed": "当前不可写入，因此未尝试此操作。恢复后请重新预览。"
+  "enable.project.writeGateClosed": "当前不可写入，因此未尝试此操作。恢复后请重新预览。",
+  "enable.project.confirmReplace": "确认替换 {path}",
+  "enable.project.originalDirectory": "原占用类型：真实目录",
+  "enable.project.originalFile": "原占用类型：普通文件",
+  "enable.project.originalLink": "原占用类型：软链",
+  "enable.project.undoResults": "撤销结果",
+  "enable.project.undoRestored": "已安全撤销",
+  "enable.project.undoPreserved": "已保留，无法安全完成撤销",
+  "enable.project.originalRecoveryRequired": "部分原条目无法安全恢复。其备份及依赖的项目副本已保留，需要恢复处理；关闭结果不会删除这些备份。"
 }

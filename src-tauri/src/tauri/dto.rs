@@ -5224,6 +5224,8 @@ pub struct EnableUndoCellResultDto {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnableUndoResultDto {
+    #[serde(default)]
+    pub recovery_required: bool,
     #[serde(rename = "operationId")]
     pub operation_id: String,
     pub cells: Vec<EnableUndoCellResultDto>,
@@ -5265,6 +5267,24 @@ pub struct PlanGlobalLifecycleRequestDto {
 pub struct ApplyGlobalEnableRequestDto {
     #[serde(rename = "planToken")]
     pub plan_token: String,
+}
+
+/// Confirmation keys refer exclusively to the frozen Preview identified by plan_token.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyProjectEnableRequestDto {
+    pub plan_token: String,
+    #[serde(default)]
+    pub confirmed_cell_keys: Vec<String>,
+}
+
+impl From<ApplyGlobalEnableRequestDto> for ApplyProjectEnableRequestDto {
+    fn from(request: ApplyGlobalEnableRequestDto) -> Self {
+        Self {
+            plan_token: request.plan_token,
+            confirmed_cell_keys: vec![],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -5476,6 +5496,7 @@ impl From<EnableCellResult> for EnableCellResultDto {
 impl From<EnableUndoResult> for EnableUndoResultDto {
     fn from(value: EnableUndoResult) -> Self {
         Self {
+            recovery_required: value.recovery_required,
             operation_id: value.operation_id,
             cells: value.cells.into_iter().map(Into::into).collect(),
             snapshot_version: value.snapshot_version,

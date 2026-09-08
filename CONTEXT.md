@@ -485,11 +485,11 @@ _Avoid_: Activation truth, Agent Detection, Project Activation
 _Avoid_: Project, Project Activation Target
 
 **Project Skill Copy（项目技能副本）**:
-项目级分发交付到项目内、由项目自行管理的 Skill 内容副本，与 Library 来源后续的更新或删除独立；它不是受管 Activation。对应设计见 [ADR-0025](docs/adr/0025-project-local-skill-copies.md)。#101–#102 已实现单 Skill 的副本交付与复用，以及可选附加 Agent 的项目内相对链接；确认覆盖与批量分发待 #103–#104。
+项目级分发交付到项目内、由项目自行管理的 Skill 内容副本，与 Library 来源后续的更新或删除独立；它不是受管 Activation。对应设计见 [ADR-0025](docs/adr/0025-project-local-skill-copies.md)。#101–#103 已实现单 Skill 的副本交付与复用、可选附加 Agent 相对链接，以及逐项确认覆盖和安全 Undo；批量分发待 #104。
 _Avoid_: Project Activation, Local Source
 
 **Enable / Disable**:
-把一个 Managed Skill 分发(Enable)或从受管全局 Target 撤回(Disable)的动词对。全局操作解析到 Activation Target Group；项目级 Enable 交付或复用 Project Skill Copy，并可向所选 Agent 分发该副本，没有对应的项目级 Disable（当前已实现单 Skill 的副本及附加 Agent 相对链接流程；确认覆盖与批量分发待 #103–#104）。
+把一个 Managed Skill 分发(Enable)或从受管全局 Target 撤回(Disable)的动词对。全局操作解析到 Activation Target Group；项目级 Enable 交付或复用 Project Skill Copy，并可向所选 Agent 分发该副本，没有对应的项目级 Disable（当前已实现单 Skill 的副本、附加 Agent 相对链接及确认覆盖流程；批量分发待 #104）。
 _Avoid_: Link / Unlink(Link 已用于入库方式), Mount, 挂载
 
 **Activation**:

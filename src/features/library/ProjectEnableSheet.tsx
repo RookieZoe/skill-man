@@ -7,6 +7,7 @@ import type {
   EnableCell,
   EnablePlan,
   EnableResult,
+  EnableUndoResult,
   RecentProjectFolder,
 } from "../../app/catalog-client";
 import type { EnableSkillItem } from "./GlobalEnableSheet";
@@ -55,6 +56,8 @@ export function ProjectEnableSheet({
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [plan, setPlan] = useState<EnablePlan | null>(null);
   const [result, setResult] = useState<EnableResult | null>(null);
+  const [confirmedKeys, setConfirmedKeys] = useState<string[]>([]);
+  const [undoResult, setUndoResult] = useState<EnableUndoResult | null>(null);
   const [undoFinished, setUndoFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -108,6 +111,7 @@ export function ProjectEnableSheet({
       .planProjectEnable(skillIds, folder.trim(), selectedAgentIds, [])
       .then((nextPlan) => {
         if (!current) return;
+        setConfirmedKeys([]);
         setPlan(nextPlan);
         setError(null);
       })
@@ -134,7 +138,11 @@ export function ProjectEnableSheet({
     setSubmitting(true);
     setError(null);
     try {
-      const enableResult = await client.applyProjectEnable(plan.planToken);
+      const enableResult = await client.applyProjectEnable(
+        plan.planToken,
+        confirmedKeys,
+      );
+      setUndoResult(null);
       setResult(enableResult);
       setUndoFinished(false);
       setStep("result");
@@ -151,9 +159,16 @@ export function ProjectEnableSheet({
     setError(null);
     try {
       const undone = await client.undoProjectEnable(result.operationId);
+      setUndoResult(undone);
       setUndoFinished(true);
       if (undone.cells.some((cell) => !cell.undone)) {
-        setError(t("enable.project.copyUndoPreserved"));
+        setError(
+          t(
+            undone.recoveryRequired
+              ? "enable.project.originalRecoveryRequired"
+              : "enable.project.copyUndoPreserved",
+          ),
+        );
         return;
       }
       setResult(null);
@@ -298,12 +313,24 @@ export function ProjectEnableSheet({
           )}
 
           {step === "preview" && plan !== null && (
-            <ProjectPreviewStep plan={plan} />
+            <ProjectPreviewStep
+              plan={plan}
+              confirmedKeys={confirmedKeys}
+              disabled={busy}
+              onToggle={(key) =>
+                setConfirmedKeys((keys) =>
+                  keys.includes(key)
+                    ? keys.filter((item) => item !== key)
+                    : [...keys, key],
+                )
+              }
+            />
           )}
 
           {step === "result" && result !== null && (
             <ProjectResultStep
               result={result}
+              undoResult={undoResult}
               plan={plan}
               onUndo={() => void onUndo()}
               undoDisabled={busy || undoFinished}
@@ -580,17 +607,43 @@ function AgentSelectionStep({
   );
 }
 
-function ProjectPreviewStep({ plan }: { plan: EnablePlan }) {
+function ProjectPreviewStep({
+  plan,
+  confirmedKeys,
+  disabled,
+  onToggle,
+}: {
+  plan: EnablePlan;
+  confirmedKeys: string[];
+  disabled: boolean;
+  onToggle: (key: string) => void;
+}) {
   return (
     <div className="project-preview-matrix">
       {plan.cells.map((cell) => (
-        <ProjectPreviewCell key={cell.cellKey} cell={cell} />
+        <ProjectPreviewCell
+          key={cell.cellKey}
+          cell={cell}
+          confirmed={confirmedKeys.includes(cell.cellKey)}
+          disabled={disabled}
+          onToggle={() => onToggle(cell.cellKey)}
+        />
       ))}
     </div>
   );
 }
 
-function ProjectPreviewCell({ cell }: { cell: EnableCell }) {
+function ProjectPreviewCell({
+  cell,
+  confirmed,
+  disabled,
+  onToggle,
+}: {
+  cell: EnableCell;
+  confirmed: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
   const { t } = useLocale();
 
   const eligibilityLabel =
@@ -682,8 +735,45 @@ function ProjectPreviewCell({ cell }: { cell: EnableCell }) {
         )}
       </div>
 
-      {cell.eligibility === "conflict" && (
-        <p>{t("enable.project.conflictPreserved")}</p>
+      {cell.eligibility === "conflict" && cell.dependsOnCopy && (
+        <div>
+          {typeof cell.occupier === "object" &&
+            "untracked" in cell.occupier && (
+              <p>
+                {t(
+                  cell.occupier.untracked.kind === "real_directory"
+                    ? "enable.project.originalDirectory"
+                    : cell.occupier.untracked.kind === "file"
+                      ? "enable.project.originalFile"
+                      : "enable.project.originalLink",
+                )}
+                {cell.occupier.untracked.target && (
+                  <>
+                    {" "}
+                    → <code>{cell.occupier.untracked.target}</code>
+                  </>
+                )}
+              </p>
+            )}
+          {cell.destructive && (
+            <p>
+              {t("enable.global.destructive", {
+                files: cell.destructive.files,
+                directories: cell.destructive.directories,
+              })}
+            </p>
+          )}
+          <p>{t("enable.project.conflictPreserved")}</p>
+          <label>
+            <input
+              type="checkbox"
+              checked={confirmed}
+              disabled={disabled}
+              onChange={onToggle}
+            />
+            {t("enable.project.confirmReplace", { path: cell.entryPath })}
+          </label>
+        </div>
       )}
       {!cell.dependsOnCopy && cell.affectedAgentNames.length > 0 && (
         <p>
@@ -704,6 +794,7 @@ function ProjectPreviewCell({ cell }: { cell: EnableCell }) {
 
 function ProjectResultStep({
   result,
+  undoResult,
   plan,
   onUndo,
   undoDisabled,
@@ -711,6 +802,7 @@ function ProjectResultStep({
   busy,
 }: {
   result: EnableResult;
+  undoResult: EnableUndoResult | null;
   plan: EnablePlan | null;
   onUndo: () => void;
   undoDisabled: boolean;
@@ -775,6 +867,32 @@ function ProjectResultStep({
           </li>
         ))}
       </ul>
+
+      {undoResult && (
+        <ul aria-label={t("enable.project.undoResults")}>
+          {undoResult.cells.map((cell) => (
+            <li key={cell.cellKey}>
+              <span>
+                {plan?.cells.find((p) => p.cellKey === cell.cellKey)
+                  ?.entryPath ?? cell.cellKey}
+              </span>{" "}
+              <strong>
+                {t(
+                  cell.undone
+                    ? "enable.project.undoRestored"
+                    : "enable.project.undoPreserved",
+                )}
+              </strong>
+              {cell.diagnostic && (
+                <details>
+                  <summary>{t("enable.project.technicalDetails")}</summary>
+                  {cell.diagnostic}
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="result-undo-section">
         <button

@@ -151,7 +151,7 @@ test("recent project folders candidate selection and clear", async () => {
   });
 });
 
-test("occupied entries cannot be replaced before overwrite support", async () => {
+test("invalid base copies never offer replacement", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
 
@@ -179,8 +179,9 @@ test("occupied entries cannot be replaced before overwrite support", async () =>
         occupier: { untracked: { kind: "real_directory", target: null } },
         occExactDirect: false,
         destructive: { directories: 2, files: 5 },
-        eligibility: "conflict",
-        blockedReason: null,
+        projectCopy: "reuse",
+        eligibility: "blocked",
+        blockedReason: "invalid_project_copy",
         resolution: "replace",
         detail: null,
         createSteps: [],
@@ -207,11 +208,9 @@ test("occupied entries cannot be replaced before overwrite support", async () =>
   );
 
   // In preview step:
-  expect(await within(dialog).findByText("Conflict")).toBeInTheDocument();
+  expect(await within(dialog).findByText("Blocked")).toBeInTheDocument();
   expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
-  expect(
-    within(dialog).getByText(/This entry is occupied and will be preserved/),
-  ).toBeInTheDocument();
+  expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(
     within(dialog).getByRole("button", { name: "Enable in Project" }),
   ).toBeDisabled();
@@ -375,3 +374,120 @@ test("partial results identify each Agent, retain Undo feedback, and retry via a
   await screen.findByRole("button", { name: "Enable in Project" });
   expect(previews).toBe(2);
 });
+
+test.each(["en", "zh-Hans"] as const)(
+  "%s confirms individual originals on the same preview and reports partial Undo",
+  async (locale) => {
+    const { LocaleProvider } = await import("../locale/LocaleProvider");
+    const messages = (await import(`../../../resources/locales/${locale}.json`))
+      .default;
+    const user = userEvent.setup();
+    const client = createFixtureCatalogClient();
+    await client.setLocaleSelection(locale);
+    const original = client.planProjectEnable;
+    let previews = 0;
+    let captured: Awaited<ReturnType<typeof original>>;
+    client.planProjectEnable = async (...args) => {
+      previews++;
+      captured = await original(...args);
+      const base = captured.cells[0];
+      captured = {
+        ...captured,
+        cells: [
+          base,
+          ...["Claude", "Codex"].map((name) => ({
+            ...base,
+            cellKey: name,
+            projectCopy: null,
+            dependsOnCopy: base.cellKey,
+            affectedAgentNames: [name],
+            entryPath: `/project/${name}/skill-authoring`,
+            eligibility: "conflict" as const,
+            occupier: {
+              untracked: { kind: "real_directory" as const, target: null },
+            },
+            destructive: { files: 2, directories: 1 },
+          })),
+        ],
+      };
+      return captured;
+    };
+    client.applyProjectEnable = async (token, confirmations) => {
+      expect(token).toBe(captured.planToken);
+      expect(confirmations).toEqual(["Claude"]);
+      expect(previews).toBe(1);
+      return {
+        operationId: "replace-op",
+        snapshotVersion: 1,
+        cells: captured.cells.map((c) => ({
+          cellKey: c.cellKey,
+          skillId: c.skillId,
+          targetRootId: c.targetRootId,
+          projectCopy: c.projectCopy,
+          dependsOnCopy: c.dependsOnCopy,
+          outcome: c.cellKey === "Codex" ? "skipped" : "succeeded",
+          diagnostic: null,
+        })),
+      };
+    };
+    client.undoProjectEnable = async () => ({
+      operationId: "replace-op",
+      recoveryRequired: true,
+      snapshotVersion: 1,
+      cells: [
+        {
+          cellKey: "Claude",
+          undone: false,
+          diagnostic: "original backup preserved",
+        },
+        { cellKey: "Codex", undone: true, diagnostic: null },
+      ],
+    });
+    render(
+      <LocaleProvider client={client}>
+        <ProjectEnableSheet
+          client={client}
+          skillId="skill-authoring"
+          onClose={() => {}}
+        />
+      </LocaleProvider>,
+    );
+    await screen.findByText(messages["enable.project.requiredCopy"]);
+    await user.type(
+      screen.getByPlaceholderText("/path/to/project"),
+      "/project",
+    );
+    await user.click(
+      screen.getByRole("button", { name: messages["enable.project.continue"] }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: messages["enable.project.continue"] }),
+    );
+    const checks = await screen.findAllByRole("checkbox");
+    expect(checks).toHaveLength(2);
+    expect(checks[0]).not.toBeChecked();
+    expect(checks[1]).not.toBeChecked();
+    await user.click(checks[0]);
+    await user.click(
+      screen.getByRole("button", {
+        name: messages["enable.project.applyPlan"],
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: messages["enable.project.undoOperation"],
+      }),
+    );
+    expect(
+      await screen.findByText(
+        messages["enable.project.originalRecoveryRequired"],
+      ),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(messages["enable.project.undoPreserved"]),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(messages["enable.project.undoRestored"]),
+    ).toBeInTheDocument();
+  },
+);

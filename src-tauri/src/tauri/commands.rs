@@ -1210,7 +1210,7 @@ pub fn plan_project_enable(
 pub fn apply_project_enable(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
-    request: ApplyGlobalEnableRequestDto,
+    request: crate::tauri_adapter::dto::ApplyProjectEnableRequestDto,
 ) -> Result<EnableResultDto, CommandFailureDto> {
     let result = state.apply_project_enable(request);
     if result.is_ok() {

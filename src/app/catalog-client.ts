@@ -583,6 +583,7 @@ export interface EnableUndoCellResult {
 }
 
 export interface EnableUndoResult {
+  recoveryRequired?: boolean;
   operationId: string;
   cells: EnableUndoCellResult[];
   snapshotVersion: number;
@@ -1711,7 +1712,10 @@ export interface CatalogClient {
     agentIds: string[],
     cellResolutions: CellResolutionRequest[],
   ): Promise<EnablePlan>;
-  applyProjectEnable(planToken: string): Promise<EnableResult>;
+  applyProjectEnable(
+    planToken: string,
+    confirmedCellKeys?: string[],
+  ): Promise<EnableResult>;
   undoProjectEnable(operationId: string): Promise<EnableUndoResult>;
   finalizeProjectEnable(operationId: string): Promise<void>;
   getObservationSnapshot(): Promise<ObservationAndScanSnapshot>;
@@ -2045,9 +2049,9 @@ const tauriCatalogClient: CatalogClient = {
       request: { skillIds, projectFolder, agentIds, cellResolutions },
     });
   },
-  applyProjectEnable(planToken) {
+  applyProjectEnable(planToken, confirmedCellKeys = []) {
     return invoke<EnableResult>("apply_project_enable", {
-      request: { planToken },
+      request: { planToken, confirmedCellKeys },
     });
   },
   undoProjectEnable(operationId) {

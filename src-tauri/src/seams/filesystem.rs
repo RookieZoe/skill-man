@@ -1482,7 +1482,18 @@ pub struct ProjectCopyJournal {
 
 /// Dependency actions never participate in the global Activation catalog.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectReplacementJournal {
+    pub original: OccupantSnapshot,
+    pub content_hash: String,
+    pub backup_path: PathBuf,
+    #[serde(default)]
+    pub cleanup_authorized: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectLinkJournal {
+    #[serde(default)]
+    pub replacement: Option<ProjectReplacementJournal>,
     pub undone: bool,
     pub cell_key: String,
     pub project_root: DirectoryFingerprint,
@@ -1496,6 +1507,28 @@ pub struct ProjectLinkJournal {
 }
 
 pub trait FileSystem: Send + Sync {
+    fn project_occupant_hash(&self, path: &Path) -> Result<String, FileSystemError> {
+        Err(FileSystemError::PlanStale { path: path.into() })
+    }
+    fn backup_project_link(&self, link: &ProjectLinkJournal) -> Result<(), FileSystemError> {
+        Err(FileSystemError::PlanStale {
+            path: link.entry_path.clone(),
+        })
+    }
+    fn finalize_project_link(
+        &self,
+        link: &ProjectLinkJournal,
+        persist: &mut dyn FnMut(&ProjectLinkJournal) -> Result<(), FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        let _ = persist;
+        if link.replacement.is_some() {
+            return Err(FileSystemError::PlanStale {
+                path: link.entry_path.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn prepare_project_link_parent(
         &self,
         root: &DirectoryFingerprint,

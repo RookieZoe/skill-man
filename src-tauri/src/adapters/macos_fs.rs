@@ -1,4 +1,5 @@
 mod project_copy;
+mod project_replacement;
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString, OsString};
 use std::fs;
@@ -661,6 +662,25 @@ fn normalize_lexically_macos(path: &Path) -> PathBuf {
 }
 
 impl FileSystem for MacOsFileSystem {
+    fn project_occupant_hash(&self, path: &Path) -> Result<String, FileSystemError> {
+        project_replacement::hash(path)
+    }
+    fn backup_project_link(
+        &self,
+        link: &crate::seams::filesystem::ProjectLinkJournal,
+    ) -> Result<(), FileSystemError> {
+        project_replacement::backup(self, link)
+    }
+    fn finalize_project_link(
+        &self,
+        link: &crate::seams::filesystem::ProjectLinkJournal,
+        persist: &mut dyn FnMut(
+            &crate::seams::filesystem::ProjectLinkJournal,
+        ) -> Result<(), FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        project_replacement::finalize(self, link, persist)
+    }
+
     fn prepare_project_link_parent(
         &self,
         root: &DirectoryFingerprint,
@@ -673,6 +693,9 @@ impl FileSystem for MacOsFileSystem {
         &self,
         link: &crate::seams::filesystem::ProjectLinkJournal,
     ) -> Result<(), FileSystemError> {
+        if link.replacement.is_some() {
+            return project_replacement::undo(self, link);
+        }
         if self.directory_fingerprint(&link.project_root.canonical_path)? != link.project_root
             || self.resolve_project_target(
                 &link.project_root.canonical_path,
@@ -3168,25 +3191,39 @@ impl FileSystem for MacOsFileSystem {
             }
             let mut journal = journal;
             let mut dependencies_safe = true;
+            let mut replacement_unresolved = false;
             for index in 0..journal.project_links.len() {
-                let link = &journal.project_links[index];
+                let link = journal.project_links[index].clone();
                 if link.undone {
                     continue;
                 }
-                if journal.phase == ActivationReplacePhase::Undoing {
-                    if self.undo_project_link(link).is_ok() {
+                if journal.phase == ActivationReplacePhase::Undoing
+                    || link.phase == ActivationReplacePhase::Undoing
+                    || (link.phase == ActivationReplacePhase::Applying
+                        && link.replacement.is_some())
+                {
+                    // Freeze rollback intent before restoring an original. A later failure must
+                    // never reinterpret this backup as discardable committed content.
+                    journal.project_links[index].phase = ActivationReplacePhase::Undoing;
+                    self.write_enable_journal(&library_root, &journal)?;
+                    if self.undo_project_link(&link).is_ok() {
                         journal.project_links[index].undone = true;
                         self.write_enable_journal(&library_root, &journal)?;
                     } else {
                         dependencies_safe = false;
+                        replacement_unresolved |= link.replacement.is_some();
                     }
                 } else if link.phase == ActivationReplacePhase::Applying {
-                    // A crash before capturing the entry identity is ambiguous; retain all data.
                     if self.activation_snapshot(&link.entry_path)?
                         != ActivationEntrySnapshot::Missing
                     {
                         return Err(stale_tree_entry(&link.entry_path));
                     }
+                } else {
+                    self.finalize_project_link(&link, &mut |updated| {
+                        journal.project_links[index] = updated.clone();
+                        self.write_enable_journal(&library_root, &journal)
+                    })?;
                 }
             }
             if let Some(mut copy) = journal.project_copy.clone() {
@@ -3201,6 +3238,13 @@ impl FileSystem for MacOsFileSystem {
                     journal.project_copy = Some(updated.clone());
                     self.write_enable_journal(&library_root, &journal)
                 })?;
+            }
+            if replacement_unresolved {
+                return Err(FileSystemError::RecoveryRequired {
+                    operation: "recover project originals",
+                    path: operation_root.clone(),
+                    message: "project original backup requires recovery".into(),
+                });
             }
             for cell in &mut journal.cells {
                 recover_enable_cell(cell, facts, &library_root)?;

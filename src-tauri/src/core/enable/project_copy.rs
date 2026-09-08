@@ -152,6 +152,7 @@ impl EnableService {
         let planned = PlannedCell {
             cell,
             frozen_entry,
+            project_original_hash: None,
             project_copy_payload: payload,
             copy_alias,
             frozen_health: skill.summary.health,
@@ -365,6 +366,31 @@ impl EnableService {
                             }
                         },
                     };
+                    if !correct {
+                        let evidence = (|| -> Result<_, EnableError> {
+                            let hash = self
+                                .filesystem
+                                .project_occupant_hash(&link.cell.entry_path)?;
+                            let counts = if occupant.kind == OccupantKind::RealDirectory {
+                                Some(self.staged_directory_counts(&link.cell.entry_path)?)
+                            } else {
+                                None
+                            };
+                            Ok((hash, counts))
+                        })();
+                        match evidence {
+                            Ok((hash, counts)) => {
+                                link.project_original_hash = Some(hash);
+                                link.cell.destructive = counts;
+                            }
+                            Err(error) => {
+                                link.cell.eligibility = CellEligibility::Blocked;
+                                link.cell.blocked_reason =
+                                    Some(CellBlockedReason::TargetUnavailable);
+                                link.cell.detail = Some(error.to_string());
+                            }
+                        }
+                    }
                     link.frozen_entry = Some(occupant);
                 }
             }
@@ -517,7 +543,10 @@ impl EnableService {
                 )
             } else if link.cell.eligibility == CellEligibility::NoOp {
                 (CellOutcome::NoOp, None)
-            } else if link.cell.eligibility != CellEligibility::Ready {
+            } else if link.cell.eligibility != CellEligibility::Ready
+                && !(link.cell.eligibility == CellEligibility::Conflict
+                    && link.cell.resolution == CellResolution::Replace)
+            {
                 (CellOutcome::Skipped, None)
             } else {
                 match self.apply_copy_link(&batch, link, &mut operation, library) {
@@ -618,6 +647,23 @@ impl EnableService {
             .resolve_project_target(&root.canonical_path, &frozen.configured_relative_path)?;
         let link_text = relative_path(&parent.canonical_path, &planned.cell.final_entity_path);
         let mut link = ProjectLinkJournal {
+            replacement: if planned.cell.resolution == CellResolution::Replace {
+                Some(crate::seams::filesystem::ProjectReplacementJournal {
+                    original: planned.frozen_entry.clone().ok_or(EnableError::PlanStale)?,
+                    content_hash: planned
+                        .project_original_hash
+                        .clone()
+                        .ok_or(EnableError::PlanStale)?,
+                    backup_path: planned.cell.target_path.join(format!(
+                        ".skillman-{}-{}-backup",
+                        batch.operation_id,
+                        journal.project_links.len()
+                    )),
+                    cleanup_authorized: false,
+                })
+            } else {
+                None
+            },
             cell_key: planned.cell.cell_key.clone(),
             project_root: root.clone(),
             configured_relative_path: frozen.configured_relative_path.clone(),
@@ -634,11 +680,33 @@ impl EnableService {
         self.filesystem
             .write_enable_journal(library, journal)
             .map_err(|e| self.block_for_recovery("persist project link intent", e))?;
+        if link.replacement.is_some() {
+            if let Err(error) = self.filesystem.backup_project_link(&link) {
+                self.filesystem
+                    .undo_project_link(&link)
+                    .map_err(|e| self.block_for_recovery("restore failed project backup", e))?;
+                journal.project_links[index].undone = true;
+                self.filesystem
+                    .write_enable_journal(library, journal)
+                    .map_err(|e| self.block_for_recovery("persist restored project original", e))?;
+                return Err(error.into());
+            }
+        }
         if let Err(error) = self.filesystem.create_activation_nofollow(
             &link.link_text,
             &link.entry_path,
             &link.parent,
         ) {
+            if link.replacement.is_some() {
+                self.filesystem.undo_project_link(&link).map_err(|e| {
+                    self.block_for_recovery("restore failed project replacement", e)
+                })?;
+                journal.project_links[index].undone = true;
+                self.filesystem
+                    .write_enable_journal(library, journal)
+                    .map_err(|e| self.block_for_recovery("persist restored project original", e))?;
+                return Err(error.into());
+            }
             // No operation-owned identity is known; never remove a possible external occupant.
             let occupied = self.filesystem.activation_snapshot(&link.entry_path)?
                 != ActivationEntrySnapshot::Missing;
@@ -756,13 +824,20 @@ impl EnableService {
                 },
             });
         }
-        self.filesystem
-            .finish_enable_journal(library, &batch.operation_id)?;
-        self.closed_copy_operations
-            .lock()
-            .map_err(|_| EnableError::Internal("closed copy lock".into()))?
-            .insert(batch.operation_id.clone());
+        let unresolved_original = journal
+            .project_links
+            .iter()
+            .any(|link| link.replacement.is_some() && !link.undone);
+        if !unresolved_original {
+            self.filesystem
+                .finish_enable_journal(library, &batch.operation_id)?;
+            self.closed_copy_operations
+                .lock()
+                .map_err(|_| EnableError::Internal("closed copy lock".into()))?
+                .insert(batch.operation_id.clone());
+        }
         Ok(EnableUndoResult {
+            recovery_required: unresolved_original,
             operation_id: batch.operation_id.clone(),
             cells,
             snapshot_version: self.store.catalog_generation()?,

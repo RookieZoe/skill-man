@@ -1413,8 +1413,16 @@
   "enable.project.linkAgents": "Share project copy with {agents}",
   "enable.project.linkDetail": "Links to project content at {path}.",
   "enable.project.sharedAgents": "This directory is shared by {agents}.",
-  "enable.project.conflictPreserved": "This entry is occupied and will be preserved. Replacement is not available yet.",
+  "enable.project.conflictPreserved": "Unchecked entries are skipped and their original content is preserved. Replacement backs up this entry for safe Undo.",
   "enable.project.copyNotReady": "Not attempted because the project copy is not ready.",
   "enable.project.technicalDetails": "Technical details",
-  "enable.project.writeGateClosed": "Not attempted because writes are unavailable. Create a new preview after recovery."
+  "enable.project.writeGateClosed": "Not attempted because writes are unavailable. Create a new preview after recovery.",
+  "enable.project.confirmReplace": "Confirm replacement of {path}",
+  "enable.project.originalDirectory": "Original entry: directory",
+  "enable.project.originalFile": "Original entry: file",
+  "enable.project.originalLink": "Original entry: symbolic link",
+  "enable.project.undoResults": "Undo results",
+  "enable.project.undoRestored": "Undone safely",
+  "enable.project.undoPreserved": "Preserved; safe Undo could not be completed",
+  "enable.project.originalRecoveryRequired": "Some original entries could not be safely restored. Their backups and dependent project copies have been preserved and require recovery. Closing this result will not discard those backups."
 }

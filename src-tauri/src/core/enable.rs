@@ -316,6 +316,7 @@ pub struct EnableUndoCellResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableUndoResult {
+    pub recovery_required: bool,
     pub operation_id: String,
     pub cells: Vec<EnableUndoCellResult>,
     pub snapshot_version: u64,
@@ -366,6 +367,7 @@ struct PlannedCell {
     cell: EnableCell,
     /// Entry condition at plan time (identity of the occupier, if any).
     frozen_entry: Option<OccupantSnapshot>,
+    project_original_hash: Option<String>,
     project_copy_payload: Option<crate::seams::filesystem::ProjectCopyPayload>,
     copy_alias: Option<(PathBuf, ProjectTargetResolution)>,
     frozen_health: Health,
@@ -937,6 +939,7 @@ impl EnableService {
             hop_evidence: Vec::new(),
         };
         Ok(PlannedCell {
+            project_original_hash: None,
             project_copy_payload: None,
             copy_alias: None,
             frozen_entry,
@@ -1042,12 +1045,42 @@ impl EnableService {
     /// selection order. Ordinary cell failures are isolated; a WriteGate /
     /// Home-identity break marks the rest `not_attempted` and stops.
     pub fn apply(&self, plan_token: &str) -> Result<EnableResult, EnableError> {
+        self.apply_confirmed(plan_token, &[])
+    }
+
+    pub fn apply_project_confirmed(
+        &self,
+        plan_token: &str,
+        confirmed: &[String],
+    ) -> Result<EnableResult, EnableError> {
+        self.apply_confirmed(plan_token, confirmed)
+    }
+
+    fn apply_confirmed(
+        &self,
+        plan_token: &str,
+        confirmed: &[String],
+    ) -> Result<EnableResult, EnableError> {
         self.ensure_writes_ready()?;
         let mut plans = self
             .plans
             .lock()
             .map_err(|_| EnableError::Internal("Enable plan lock poisoned".into()))?;
-        let batch = plans.remove(plan_token).ok_or(EnableError::PlanNotFound)?;
+        let mut batch = plans.remove(plan_token).ok_or(EnableError::PlanNotFound)?;
+        for key in confirmed {
+            let planned = batch
+                .cells
+                .iter_mut()
+                .find(|p| &p.cell.cell_key == key)
+                .ok_or_else(|| EnableError::Validation("unknown confirmation key".into()))?;
+            if batch.scope != "project"
+                || planned.cell.depends_on_copy.is_none()
+                || planned.cell.eligibility != CellEligibility::Conflict
+            {
+                return Err(EnableError::Validation("cell cannot be replaced".into()));
+            }
+            planned.cell.resolution = CellResolution::Replace;
+        }
         if self.write_gate.check_plan(PlanTicket {
             generation: batch.gate_generation,
         }) == PlanCheck::Stale
@@ -1394,6 +1427,17 @@ impl EnableService {
                     && planned.frozen_entry.is_none()
                 {
                     continue;
+                }
+                if let Some(expected) = &planned.project_original_hash {
+                    if self
+                        .filesystem
+                        .project_occupant_hash(&cell.entry_path)
+                        .as_ref()
+                        .ok()
+                        != Some(expected)
+                    {
+                        return Err(EnableError::PlanStale);
+                    }
                 }
                 match (
                     &planned.frozen_entry,
@@ -1860,7 +1904,17 @@ impl EnableService {
         let library_root = self.library_root_for_context(&batch.write_context)?;
         let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         if batch.cells.iter().any(|c| c.cell.project_copy.is_some()) {
-            return self.undo_project_copy(&batch, &library_root);
+            let result = self.undo_project_copy(&batch, &library_root);
+            if result
+                .as_ref()
+                .map_or(true, |result| result.recovery_required)
+            {
+                self.applied
+                    .lock()
+                    .map_err(|_| EnableError::Internal("Enable applied lock".into()))?
+                    .insert(operation_id.into(), batch);
+            }
+            return result;
         }
         let mut journal = self.build_journal(&batch, &library_root);
         let succeeded = batch
@@ -1936,6 +1990,7 @@ impl EnableService {
             return Err(self.block_for_recovery("archive empty Enable Undo", error));
         }
         Ok(EnableUndoResult {
+            recovery_required: false,
             operation_id: operation_id.to_owned(),
             cells: results,
             snapshot_version,
@@ -2265,11 +2320,29 @@ impl EnableService {
             .applied
             .lock()
             .map_err(|_| EnableError::Internal("Enable applied lock poisoned".into()))?
-            .remove(operation_id)
+            .get(operation_id)
+            .cloned()
             .ok_or(EnableError::PlanNotFound)?;
         let library_root = self.library_root_for_context(&batch.write_context)?;
         let _write_guard = self.acquire_write_guard(&batch.write_context)?;
         if batch.cells.iter().any(|c| c.cell.project_copy.is_some()) {
+            let mut journals = self
+                .copy_journals
+                .lock()
+                .map_err(|_| EnableError::Internal("copy journal lock".into()))?;
+            let journal = journals
+                .get_mut(operation_id)
+                .ok_or(EnableError::PlanNotFound)?;
+            for index in 0..journal.project_links.len() {
+                let link = journal.project_links[index].clone();
+                self.filesystem
+                    .finalize_project_link(&link, &mut |updated| {
+                        journal.project_links[index] = updated.clone();
+                        self.filesystem.write_enable_journal(&library_root, journal)
+                    })
+                    .map_err(|e| self.block_for_recovery("finalize project original backup", e))?;
+            }
+            drop(journals);
             self.filesystem
                 .finish_enable_journal(&library_root, operation_id)?;
             self.copy_journals
@@ -2280,6 +2353,10 @@ impl EnableService {
                 .lock()
                 .map_err(|_| EnableError::Internal("closed copy lock".into()))?
                 .insert(operation_id.into());
+            self.applied
+                .lock()
+                .map_err(|_| EnableError::Internal("Enable applied lock".into()))?
+                .remove(operation_id);
             return Ok(());
         }
         let journal = self.build_journal(&batch, &library_root);
@@ -2295,6 +2372,10 @@ impl EnableService {
         {
             return Err(self.block_for_recovery("finalize Enable operation", error));
         }
+        self.applied
+            .lock()
+            .map_err(|_| EnableError::Internal("Enable applied lock".into()))?
+            .remove(operation_id);
         Ok(())
     }
 

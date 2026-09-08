@@ -5,11 +5,11 @@
 use crate::core::domain::SkillId;
 use crate::core::enable::{CellResolution, EnableAction, EnableError, EnableService};
 use crate::tauri_adapter::dto::{
-    ApplyGlobalEnableRequestDto, CellResolutionDto, CellResolutionRequestDto, CommandFailureDto,
-    DiagnosticDto, EnableActionDto, EnableOperationRequestDto, EnablePlanDto, EnableResultDto,
-    EnableUndoResultDto, GlobalTargetGroupSnapshotDto, PlanGlobalEnableRequestDto,
-    PlanGlobalLifecycleRequestDto, PlanProjectEnableRequestDto, PublicErrorDto,
-    RecentProjectFolderDto,
+    ApplyGlobalEnableRequestDto, ApplyProjectEnableRequestDto, CellResolutionDto,
+    CellResolutionRequestDto, CommandFailureDto, DiagnosticDto, EnableActionDto,
+    EnableOperationRequestDto, EnablePlanDto, EnableResultDto, EnableUndoResultDto,
+    GlobalTargetGroupSnapshotDto, PlanGlobalEnableRequestDto, PlanGlobalLifecycleRequestDto,
+    PlanProjectEnableRequestDto, PublicErrorDto, RecentProjectFolderDto,
 };
 
 pub struct EnableApi {
@@ -149,10 +149,11 @@ impl EnableApi {
 
     pub fn apply_project_enable(
         &self,
-        request: ApplyGlobalEnableRequestDto,
+        request: impl Into<ApplyProjectEnableRequestDto>,
     ) -> Result<EnableResultDto, CommandFailureDto> {
+        let request = request.into();
         self.service
-            .apply(&request.plan_token)
+            .apply_project_confirmed(&request.plan_token, &request.confirmed_cell_keys)
             .map(Into::into)
             .map_err(command_error)
     }
