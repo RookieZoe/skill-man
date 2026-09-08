@@ -6,3 +6,4 @@ src-tauri/gen/
 *.log
 *.tsbuildinfo
 .pi-subagents/
+/.scratch/
