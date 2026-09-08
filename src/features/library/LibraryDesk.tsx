@@ -1,3 +1,5 @@
+import { AppearanceControl } from "../appearance/AppearanceProvider";
+import { CommunityUpdateControl } from "./CommunityUpdateControl";
 import { appUpdatesAvailable } from "../../app/app-update-availability";
 import { OperationNotice } from "../../ui/OperationNotice";
 import appLogo from "../../../src-tauri/icons/icon.svg";
@@ -949,6 +951,7 @@ export function LibraryDesk({
       ) : null}
       {isPreferencesOpen ? (
         <PreferencesSheet
+          client={client}
           preferences={preferences}
           warning={preferencesWarning}
           error={preferencesError}
@@ -1747,16 +1750,17 @@ function LinkImportSheet({
               </div>
             </dl>
             <div className="activation-sheet-actions import-result-actions">
-              <button type="button" disabled={isApplying} onClick={onClose}>
-                {t("library.import.close")}
+              <button type="button" onClick={onOpenImportedSkill}>
+                {t("library.import.view_in_library")}
               </button>
               <button
                 ref={primaryButton}
                 type="button"
                 className="activation-confirm-button"
-                onClick={onOpenImportedSkill}
+                disabled={isApplying}
+                onClick={onClose}
               >
-                {t("library.import.view_in_library")}
+                {t("library.preferences.done")}
               </button>
             </div>
           </>
@@ -2123,6 +2127,7 @@ const preferenceRows: Array<{
 ];
 
 function PreferencesSheet({
+  client,
   preferences,
   warning,
   error,
@@ -2132,6 +2137,7 @@ function PreferencesSheet({
   onCheckAppUpdate,
   onClose,
 }: {
+  client: CatalogClient;
   preferences: AppPreferences | null;
   warning: PreferencesWarning | null;
   error: string | null;
@@ -2160,7 +2166,7 @@ function PreferencesSheet({
 
   return (
     <div
-      className="activation-sheet-backdrop"
+      className="activation-sheet-backdrop preferences-backdrop"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) handleClose();
       }}
@@ -2178,6 +2184,7 @@ function PreferencesSheet({
           <h2>{t("library.preferences.title")}</h2>
         </div>
         <LanguageControl />
+        <AppearanceControl />
         <div className="preference-list">
           {preferenceRows
             .filter(
@@ -2205,11 +2212,11 @@ function PreferencesSheet({
               </label>
             ))}
         </div>
-        <div className="app-update-check">
-          <span>
-            <strong>{t("library.preferences.app_updates")}</strong>
-          </span>
-          {appUpdatesAvailable() ? (
+        {appUpdatesAvailable() ? (
+          <div className="app-update-check">
+            <span>
+              <strong>{t("library.preferences.app_updates")}</strong>
+            </span>
             <button
               id="app-update-check-trigger"
               type="button"
@@ -2218,13 +2225,10 @@ function PreferencesSheet({
             >
               {t("library.preferences.check_now")}
             </button>
-          ) : (
-            <div>
-              <p>{t("library.preferences.manual_app_updates")}</p>
-              <RepositoryLink url="https://github.com/RookieZoe/skill-man/releases" />
-            </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <CommunityUpdateControl check={() => client.checkCommunityUpdate()} />
+        )}
         {warning ? (
           <div className="activation-warning" role="status">
             <strong>{t("library.preferences.applied_warning")}</strong>
@@ -2461,8 +2465,13 @@ function RemoveSheet({
               <p>{t("library.remove.complete_body")}</p>
             </div>
             <div className="activation-sheet-actions">
-              <button ref={confirmButton} type="button" onClick={onClose}>
-                {t("library.remove.close")}
+              <button
+                ref={confirmButton}
+                type="button"
+                className="activation-confirm-button"
+                onClick={onClose}
+              >
+                {t("library.preferences.done")}
               </button>
             </div>
           </>
@@ -2679,8 +2688,12 @@ function RelocateSheet({
               </div>
             </dl>
             <div className="activation-sheet-actions">
-              <button type="button" onClick={onClose}>
-                {t("library.relocate.close")}
+              <button
+                type="button"
+                className="activation-confirm-button"
+                onClick={onClose}
+              >
+                {t("library.preferences.done")}
               </button>
             </div>
           </>

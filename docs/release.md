@@ -2,28 +2,28 @@
 
 本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md)：Skill Man 只发布 Apple Silicon / macOS 13+ 版本。两条工作流都由维护者手动触发，只创建 Draft；核对后才发布。
 
-## 无 Apple 凭据的社区 Pre-release
+## 无 Apple 凭据的社区 Release
 
-此通道不需要 Apple 或 updater secrets。先公开仓库、检查提交历史中的敏感内容，确认 README、MIT LICENSE、截图和 `docs/releases/vX.Y.Z.md` 已提交。基础 Tauri 配置必须保留 `signingIdentity: "-"`、`createUpdaterArtifacts: false` 和 updater 公钥 sentinel，原生应用使用手动更新。
+此通道不需要 Apple 或 updater secrets。先公开仓库、检查提交历史中的敏感内容，确认 README、MIT LICENSE、截图和 `docs/releases/vX.Y.Z.md` 已提交。基础 Tauri 配置必须保留 `signingIdentity: "-"`、`createUpdaterArtifacts: false` 和 updater 公钥 sentinel，原生应用使用手动更新。设置中的“检查更新”仅查询公开 GitHub Release 元数据（包含预发布版本），发现新版后打开对应 Release 页面；不会下载或安装更新，也不使用 updater 公钥。
 
 1. 在 Apple Silicon Mac 上运行 `npm run ci:local`，确认通过并提交发布改动。
 2. 同步 main 后，在该 commit 创建并推送严格的 `vX.Y.Z` tag。版本字段必须与 tag 一致。
-3. 从 main 手动触发 Community Pre-release：
+3. 从 main 手动触发 Community Release：
 
    ```sh
-   gh workflow run prerelease.yml --ref main -f tag=v0.1.0
+   gh workflow run prerelease.yml --ref main -f tag=v0.1.0 -f prerelease=false -f replace_existing=true
    ```
 
-4. 工作流在 macOS runner 上跑完整验证、构建 Ad-hoc app 和 DMG、验证签名完整性和 arm64 架构，挂载 DMG 比对包内可执行文件，生成校验和，再创建 Draft Pre-release。
-5. 下载 Draft 的 DMG 和 SHA256SUMS，执行 `shasum -a 256 -c SHA256SUMS`，确认包内版本与签名正确。工作流不会自动覆盖已有 Release；失败后先检查现有 Draft 的资产状态。
-6. 核对发布说明中的未公证、手动更新和人工验收限制，发布为 Pre-release，保持非 Latest。只能有 DMG 和 SHA256SUMS 两个附件，不上传 latest.json 或 updater 包。
+4. 工作流在 macOS runner 上跑完整验证、构建 Ad-hoc app 和 DMG、验证签名完整性和 arm64 架构，挂载 DMG 比对包内可执行文件，生成校验和，再创建 Draft Release。
+5. 下载 Draft 的 DMG 和 SHA256SUMS，执行 `shasum -a 256 -c SHA256SUMS`，确认包内版本与签名正确。默认不会覆盖已有 Release。维护者明确要求重发同一 tag 时，可传 `replace_existing=true`；工作流只在构建和验证成功后将原 Release 转为 Draft，再替换两个附件，等待审核。
+6. 核对发布说明中的未公证、手动更新和人工验收限制，预发布保持非 Latest；正式社区版使用 `prerelease=false` 构建，审核附件后执行 `gh release edit vX.Y.Z --draft=false --prerelease=false --latest`。只能有 DMG 和 SHA256SUMS 两个附件，不上传 latest.json 或 updater 包。
 7. 未登录 GitHub 下载公开附件并再次校验。干净 macOS 用户或 VM 的浏览器下载、首次启动、手动放行与基本功能验收由维护者完成并记录；未完成时必须在 Release notes 明示，不能宣称已通过普通 Release 门禁。
 
 用户首次打开可能需要在「系统设置 → 隐私与安全性」中选择「仍要打开」，见 [Apple 官方说明](https://support.apple.com/en-us/102445)。不建议关闭整个 Gatekeeper。公司管理的 Mac 可能禁止手动放行。
 
 ## 普通 Release：签名与公证
 
-以下门禁适用于未来具有 Developer ID 签名、公证和 updater 的普通 Release，社区测试版不替代这些证据。
+以下门禁适用于未来具有 Developer ID 签名、公证和 updater 的普通 Release，社区版（包括正式版）不替代这些证据。
 
 ## 一次性准备
 
@@ -123,7 +123,7 @@ CI runner 上从 DMG 复制到临时 Applications 目录后直接启动的 app �
 
 回到 GitHub Draft 页面，再次确认未勾选 Prerelease，点击 **Publish release**，并把该版本设为 Latest。不要用自动 Publish workflow 绕过这一步。
 
-Publish 后，从未登录 GitHub的环境读取固定入口，确认返回本次版本：
+Publish 后，从未登录 GitHub 的环境读取固定入口，确认返回本次版本：
 
 ```bash
 curl --fail --location \

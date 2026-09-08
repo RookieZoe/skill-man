@@ -54,6 +54,7 @@ export function LocalMigrationDialog({
     }
   }
   const modalRef = useModalFocus<HTMLElement>({
+    focusKey: result !== null,
     busy,
     onClose: () => void close(),
   });
@@ -210,9 +211,11 @@ export function LocalMigrationDialog({
           )}
         </div>
         <footer className="activation-sheet-actions">
-          <button type="button" disabled={busy} onClick={() => void close()}>
-            {result ? t("scan.migration.close") : t("agents.sheet.cancel")}
-          </button>
+          {!result && (
+            <button type="button" disabled={busy} onClick={() => void close()}>
+              {t("agents.sheet.cancel")}
+            </button>
+          )}
           {!result &&
             (!plan ? (
               <button
@@ -235,6 +238,17 @@ export function LocalMigrationDialog({
           {result?.undoAvailable && !undone && (
             <button type="button" disabled={busy} onClick={() => void undo()}>
               {t("scan.ledger.adoptUndo")}
+            </button>
+          )}
+          {result && (
+            <button
+              data-initial-focus
+              type="button"
+              className="activation-confirm-button"
+              disabled={busy}
+              onClick={() => void close()}
+            >
+              {t("library.preferences.done")}
             </button>
           )}
         </footer>

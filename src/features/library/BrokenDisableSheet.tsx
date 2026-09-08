@@ -258,7 +258,7 @@ export function BrokenDisableSheet({
                 className="activation-confirm-button"
                 onClick={handleClose}
               >
-                {t("enable.broken.close")}
+                {t("library.preferences.done")}
               </button>
             </div>
           </div>

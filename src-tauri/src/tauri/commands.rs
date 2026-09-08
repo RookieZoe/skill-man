@@ -1244,3 +1244,27 @@ pub fn finalize_project_enable(
     }
     result
 }
+
+#[tauri::command]
+pub async fn check_community_update(
+    app: tauri::AppHandle,
+) -> Result<Option<crate::core::community_update::CommunityUpdate>, String> {
+    crate::adapters::community_release_source::check(&app.package_info().version.to_string()).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppAppearance {
+    System,
+    Light,
+    Dark,
+}
+
+#[tauri::command]
+pub fn set_app_appearance(app: tauri::AppHandle, appearance: AppAppearance) {
+    app.set_theme(match appearance {
+        AppAppearance::System => None,
+        AppAppearance::Light => Some(tauri::Theme::Light),
+        AppAppearance::Dark => Some(tauri::Theme::Dark),
+    });
+}

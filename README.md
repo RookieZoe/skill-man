@@ -29,6 +29,14 @@ Global distribution is tracked per target. Project distribution is a one-time op
 
 ![Git repository management in dark mode](docs/screenshots/repositories.png)
 
+### Appearance and app updates
+
+![Appearance and app updates in dark mode](docs/screenshots/settings-dark.png)
+
+### Import from Git
+
+![Git import in dark mode](docs/screenshots/import-dark.png)
+
 ### Agents
 
 ![Agent configuration in light mode](docs/screenshots/agents.png)
@@ -39,7 +47,7 @@ Screenshots show the native macOS app with an existing Library. Skills shown bel
 
 Download the Apple Silicon DMG from [GitHub Releases](https://github.com/RookieZoe/skill-man/releases), open it, and drag Skill Man to Applications.
 
-Community pre-releases use ad-hoc signing and are **not notarized by Apple**. If macOS blocks the first launch, verify the download source, then follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445). These builds use manual downloads for app updates. Each release includes SHA256SUMS and its remaining testing limitations.
+Community releases use ad-hoc signing and are **not notarized by Apple**. If macOS blocks the first launch, verify the download source, then follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445). Use **Check now** in Settings to find a newer release, then open its release page to download it. Each release includes SHA256SUMS and its remaining testing limitations.
 
 ## Develop
 
@@ -50,7 +58,7 @@ npm ci
 npm run tauri dev
 ```
 
-For the browser demo, run `npm run dev`. It uses sample data; use the native app to work with real Skills.
+For the browser demo, run `npm run dev`. Open `http://localhost:1420/?fixture=enable` for sample data; use the native app to work with real Skills.
 
 ```sh
 npm run ci:local

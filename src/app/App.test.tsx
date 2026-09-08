@@ -200,7 +200,7 @@ test("Git import refreshes members and repository grouping before returning to L
   await user.click(
     await screen.findByRole("button", { name: "Install all 12 Skills" }),
   );
-  await user.click(await screen.findByRole("button", { name: "Close" }));
+  await user.click(await screen.findByRole("button", { name: "Done" }));
   const group = await screen.findByRole("button", {
     name: "example/media-skills 1",
   });
@@ -1621,7 +1621,7 @@ test("Broken Link detail offers Relocate and restores health after preview confi
     }),
   ).toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "Close" }));
+  await user.click(screen.getByRole("button", { name: "Done" }));
   expect(screen.getByText("Healthy")).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Relocate…" }),
@@ -1652,7 +1652,7 @@ test("removes a Managed Skill after preview confirmation", async () => {
     }),
   ).toBeInTheDocument();
 
-  await user.click(screen.getByRole("button", { name: "Close" }));
+  await user.click(screen.getByRole("button", { name: "Done" }));
   expect(
     screen.queryByRole("heading", { name: "skill-authoring" }),
   ).not.toBeInTheDocument();
@@ -2015,7 +2015,7 @@ test("Global single-skill Adopt hands off to the ledger lifecycle", async () => 
   await user.click(planAdopt);
   await user.click(await screen.findByRole("button", { name: "Apply" }));
   await screen.findByText("Adopted prompt-linter");
-  await user.click(screen.getByRole("button", { name: "Finalize" }));
+  await user.click(screen.getByRole("button", { name: "Done" }));
   await waitFor(() => expect(finalized).toBe(true));
 });
 
@@ -2069,22 +2069,10 @@ test("manual-update builds ignore persisted update checks and show the release l
     expect(
       screen.queryByRole("switch", { name: "Check for app updates" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check now" })).toBeEnabled();
     expect(
-      screen.queryByRole("button", { name: "Check now" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "This build uses manual updates. Download new versions from GitHub Releases.",
-      ),
+      screen.getByText("Download updates from GitHub Releases."),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", {
-        name: "https://github.com/RookieZoe/skill-man/releases",
-      }),
-    ).toHaveAttribute(
-      "href",
-      "https://github.com/RookieZoe/skill-man/releases",
-    );
     expect(client.checkAppUpdate).not.toHaveBeenCalled();
   } finally {
     availability.mockRestore();

@@ -182,7 +182,7 @@ describe("BrokenDisableSheet", () => {
     });
 
     // Close
-    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalled();
   });
 

@@ -342,8 +342,6 @@ export function ProjectEnableSheet({
               result={result}
               undoResult={undoResult}
               plan={plan}
-              onUndo={() => void onUndo()}
-              undoDisabled={busy || undoFinished}
               onRetry={() => void onRetry()}
               busy={busy}
             />
@@ -429,14 +427,25 @@ export function ProjectEnableSheet({
           )}
 
           {step === "result" && (
-            <button
-              type="button"
-              className="toolbar-button primary"
-              disabled={busy}
-              onClick={() => void onCloseWithFinalize()}
-            >
-              {t("enable.project.close")}
-            </button>
+            <>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={busy || undoFinished}
+                onClick={() => void onUndo()}
+              >
+                {t("enable.project.undoOperation")}
+              </button>
+              <button
+                data-initial-focus
+                type="button"
+                className="toolbar-button primary"
+                disabled={busy}
+                onClick={() => void onCloseWithFinalize()}
+              >
+                {t("library.preferences.done")}
+              </button>
+            </>
           )}
         </div>
       </section>
@@ -856,16 +865,12 @@ function ProjectResultStep({
   result,
   undoResult,
   plan,
-  onUndo,
-  undoDisabled,
   onRetry,
   busy,
 }: {
   result: EnableResult;
   undoResult: EnableUndoResult | null;
   plan: EnablePlan | null;
-  onUndo: () => void;
-  undoDisabled: boolean;
   onRetry: () => void;
   busy: boolean;
 }) {
@@ -958,14 +963,6 @@ function ProjectResultStep({
       )}
 
       <div className="result-undo-section">
-        <button
-          type="button"
-          className="toolbar-button"
-          onClick={onUndo}
-          disabled={undoDisabled}
-        >
-          {t("enable.project.undoOperation")}
-        </button>
         <button
           type="button"
           className="toolbar-button"

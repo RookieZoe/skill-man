@@ -1,3 +1,4 @@
+import { AppearanceProvider } from "../features/appearance/AppearanceProvider";
 import { useCallback, useEffect, useState } from "react";
 
 import type {
@@ -60,14 +61,16 @@ export function BootstrapApp({ client, pickDirectory }: BootstrapAppProps) {
 
   return (
     <LocaleProvider client={client}>
-      <BootstrapRoutes
-        client={client}
-        snapshot={snapshot}
-        loadFailed={loadFailed}
-        onRetry={refresh}
-        onSnapshot={setSnapshot}
-        pickDirectory={pickDirectory}
-      />
+      <AppearanceProvider>
+        <BootstrapRoutes
+          client={client}
+          snapshot={snapshot}
+          loadFailed={loadFailed}
+          onRetry={refresh}
+          onSnapshot={setSnapshot}
+          pickDirectory={pickDirectory}
+        />
+      </AppearanceProvider>
     </LocaleProvider>
   );
 }

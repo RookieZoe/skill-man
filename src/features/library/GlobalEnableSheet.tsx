@@ -329,11 +329,7 @@ export function GlobalEnableSheet({
           )}
 
           {step === "result" && result !== null && (
-            <ResultStep
-              result={result}
-              busy={busy}
-              onUndo={() => void onUndo()}
-            />
+            <ResultStep result={result} />
           )}
 
           {error !== null && (
@@ -390,14 +386,25 @@ export function GlobalEnableSheet({
             </>
           )}
           {step === "result" && (
-            <button
-              type="button"
-              className="toolbar-button primary"
-              disabled={busy}
-              onClick={() => void onCloseWithFinalize()}
-            >
-              {t("enable.global.close")}
-            </button>
+            <>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={busy}
+                onClick={() => void onUndo()}
+              >
+                {t("enable.global.undoOperation")}
+              </button>
+              <button
+                data-initial-focus
+                type="button"
+                className="toolbar-button primary"
+                disabled={busy}
+                onClick={() => void onCloseWithFinalize()}
+              >
+                {t("library.preferences.done")}
+              </button>
+            </>
           )}
         </div>
       </section>
@@ -655,15 +662,7 @@ function blockedReasonLabel(
   }
 }
 
-function ResultStep({
-  result,
-  busy,
-  onUndo,
-}: {
-  result: EnableResult;
-  busy: boolean;
-  onUndo: () => void;
-}) {
+function ResultStep({ result }: { result: EnableResult }) {
   const { t } = useLocale();
   const succeeded = result.cells.filter(
     (cell) => cell.outcome === "succeeded",
@@ -690,14 +689,6 @@ function ResultStep({
           </li>
         ))}
       </ul>
-      <button
-        type="button"
-        className="toolbar-button"
-        disabled={busy}
-        onClick={onUndo}
-      >
-        {t("enable.global.undoOperation")}
-      </button>
     </div>
   );
 }

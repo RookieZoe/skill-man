@@ -1411,10 +1411,11 @@ export function ScanEvidenceLedger({
               {adoptResult ? (
                 <button
                   type="button"
+                  className="activation-confirm-button"
                   onClick={finalizeOperation}
                   disabled={adoptBusy}
                 >
-                  {t("scan.ledger.adoptFinalize")}
+                  {t("library.preferences.done")}
                 </button>
               ) : null}
             </div>

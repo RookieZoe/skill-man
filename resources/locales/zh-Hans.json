@@ -1429,5 +1429,18 @@
   "enable.project.chooseSource": "为 {name} 选择来源",
   "enable.project.chooseSourceDetail": "所有依赖的智能体共用此项目副本。不选择来源则跳过此名字，其他技能可以继续。",
   "enable.project.skipSource": "跳过此名字",
-  "enable.project.sourceNotSelected": "此项目副本已选择另一来源。"
+  "enable.project.sourceNotSelected": "此项目副本已选择另一来源。",
+  "appearance.title": "配色",
+  "appearance.system": "跟随系统",
+  "appearance.light": "浅色",
+  "appearance.dark": "深色",
+  "appearance.hint": "选择 Skill Man 的显示配色。",
+  "appearance.failed": "无法保存配色，请重试。",
+  "community.current": "当前版本 {version}",
+  "community.hint": "前往 GitHub Releases 下载更新。",
+  "community.checking": "正在检查…",
+  "community.latest": "已是最新版本。",
+  "community.available": "发现新版本 {version}。",
+  "community.open": "查看新版本",
+  "community.failed": "暂时无法检查更新，请重试。"
 }

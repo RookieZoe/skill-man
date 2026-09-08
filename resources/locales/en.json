@@ -1429,5 +1429,18 @@
   "enable.project.chooseSource": "Choose a source for {name}",
   "enable.project.chooseSourceDetail": "All dependent agents use this project copy. Without a source choice, this name is skipped; other skills can continue.",
   "enable.project.skipSource": "Skip this name",
-  "enable.project.sourceNotSelected": "Another source was selected for this project copy."
+  "enable.project.sourceNotSelected": "Another source was selected for this project copy.",
+  "appearance.title": "Appearance",
+  "appearance.system": "Follow system",
+  "appearance.light": "Light",
+  "appearance.dark": "Dark",
+  "appearance.hint": "Choose how Skill Man looks.",
+  "appearance.failed": "Could not save appearance. Try again.",
+  "community.current": "Version {version}",
+  "community.hint": "Download updates from GitHub Releases.",
+  "community.checking": "Checking…",
+  "community.latest": "You’re up to date.",
+  "community.available": "Version {version} is available.",
+  "community.open": "View release",
+  "community.failed": "Could not check for updates. Please try again."
 }

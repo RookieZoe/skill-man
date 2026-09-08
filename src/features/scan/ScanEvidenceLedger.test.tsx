@@ -167,7 +167,7 @@ test("Local Link button plans its candidate directly; confirmation, undo and fin
   await user.click(await screen.findByRole("button", { name: "Local Link" }));
   await user.click(await screen.findByRole("button", { name: "Apply" }));
   await screen.findByText("Adopted prompt-linter");
-  await user.click(screen.getByRole("button", { name: "Finalize" }));
+  await user.click(screen.getByRole("button", { name: "Done" }));
   expect(finalizedOperationId).toBe("fixture-adopt-operation");
   await screen.findByText("Adopt finalized; results can no longer be undone.");
   expect(rescan).not.toHaveBeenCalled();

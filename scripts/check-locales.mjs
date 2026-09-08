@@ -134,6 +134,7 @@ for (const key of usedKeys) {
 // Brand and technical tokens that legitimately stay outside the catalog.
 // UI words are NOT allowed here: any remaining visible copy is a violation.
 const allowlist = new Set([
+  "(prefers-color-scheme: dark)", // CSS media query, not App Copy.
   "Skill Man",
   "Claude Code",
   "Codex",

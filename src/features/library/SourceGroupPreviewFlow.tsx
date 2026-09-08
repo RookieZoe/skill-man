@@ -147,21 +147,22 @@ export function SourceGroupPreviewFlow({
           </p>
         )}
         <div className="activation-sheet-actions">
-          <button type="button" disabled={isBusy} onClick={onClose}>
-            {t("library.source_group.close")}
-          </button>
           {result.undoAvailable ? (
-            <button
-              type="button"
-              className="activation-confirm-button"
-              disabled={isBusy}
-              onClick={onUndo}
-            >
+            <button type="button" disabled={isBusy} onClick={onUndo}>
               {activity === "undoing"
                 ? t("library.source_group.undoing")
                 : t("library.source_group.undo")}
             </button>
           ) : null}
+          <button
+            data-initial-focus
+            type="button"
+            className="activation-confirm-button"
+            disabled={isBusy}
+            onClick={onClose}
+          >
+            {t("library.preferences.done")}
+          </button>
         </div>
       </>
     );

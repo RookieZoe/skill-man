@@ -1,4 +1,4 @@
-name: Community Pre-release
+name: Community Release
 
 on:
   workflow_dispatch:
@@ -7,17 +7,29 @@ on:
         description: Existing vX.Y.Z tag on the selected main commit
         required: true
         type: string
+      prerelease:
+        description: Mark the reviewed release as a pre-release
+        required: true
+        type: boolean
+        default: true
+      replace_existing:
+        description: Replace an existing release with newly built assets in draft state
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: community-prerelease
+  group: community-release
   cancel-in-progress: false
 
 env:
   RELEASE_TAG: ${{ inputs.tag }}
   RELEASE_REPOSITORY: ${{ github.repository }}
+  RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+  REPLACE_EXISTING: ${{ inputs.replace_existing }}
 
 jobs:
   build:
@@ -104,18 +116,40 @@ jobs:
           shasum -a 256 ./*.dmg > SHA256SUMS
           shasum -a 256 -c SHA256SUMS
 
-      - name: Create draft Pre-release for artifact review
+      - name: Prepare draft Release for artifact review
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" \
-            "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
-            "$RUNNER_TEMP/community-release/SHA256SUMS" \
-            --repo "$RELEASE_REPOSITORY" --verify-tag --draft --prerelease --latest=false \
-            --title "Skill Man $RELEASE_TAG · 社区测试版" \
-            --notes-file "docs/releases/$RELEASE_TAG.md"
+          test "$(gh api "repos/$RELEASE_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
+          existing_id="$(gh api "repos/$RELEASE_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
+          title="Skill Man $RELEASE_TAG"
+          if [[ "$RELEASE_PRERELEASE" == true ]]; then
+            title="$title · 社区测试版"
+          fi
+          if [[ -n "$existing_id" ]]; then
+            test "$REPLACE_EXISTING" = true
+            gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
+              --jq '.assets[].name' | sort > "$RUNNER_TEMP/existing-assets.txt"
+            printf '%s\n' SHA256SUMS "Skill-Man-${RELEASE_TAG}-aarch64.dmg" | sort > "$RUNNER_TEMP/expected-assets.txt"
+            diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/existing-assets.txt"
+            gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
+              --draft=true --prerelease="$RELEASE_PRERELEASE" --latest=false \
+              --title "$title" --notes-file "docs/releases/$RELEASE_TAG.md"
+            gh release upload "$RELEASE_TAG" \
+              "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
+              "$RUNNER_TEMP/community-release/SHA256SUMS" \
+              --repo "$RELEASE_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
+              "$RUNNER_TEMP/community-release/SHA256SUMS" \
+              --repo "$RELEASE_REPOSITORY" --verify-tag --draft --prerelease="$RELEASE_PRERELEASE" --latest=false \
+              --title "$title" --notes-file "docs/releases/$RELEASE_TAG.md"
+          fi
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
-            --json isDraft,isPrerelease,assets \
-            --jq 'if .isDraft and .isPrerelease and (.assets | length == 2) then . else error("Unexpected release state") end'
+            --json isDraft,isPrerelease,assets > "$RUNNER_TEMP/release-readback.json"
+          jq -e --argjson prerelease "$RELEASE_PRERELEASE" \
+            '.isDraft == true and .isPrerelease == $prerelease and (.assets | length == 2)' \
+            "$RUNNER_TEMP/release-readback.json"

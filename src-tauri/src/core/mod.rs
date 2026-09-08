@@ -29,3 +29,5 @@ pub mod source_update;
 pub mod startup;
 pub mod update;
 pub mod write_gate;
+
+pub mod community_update;

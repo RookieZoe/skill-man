@@ -1,5 +1,15 @@
 :root {
   color-scheme: light;
+  --dialog-footer: var(--surface-muted);
+  --dialog-button-background: var(--surface-raised);
+  --dialog-button-hover: var(--surface-raised);
+  --dialog-button-shadow:
+    0 1px 2px oklch(20% 0.02 250 / 0.12),
+    inset 0 0 0 1px oklch(20% 0.02 250 / 0.08);
+  --dialog-outline: transparent;
+  --dialog-backdrop: oklch(22% 0.015 250 / 0.22);
+  --dialog-shadow:
+    0 24px 70px oklch(20% 0.02 250 / 0.26), 0 2px 8px oklch(20% 0.02 250 / 0.14);
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Helvetica Neue", sans-serif;
@@ -49,9 +59,54 @@
   --space-10: 40px;
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --dialog-button-background: oklch(34% 0.008 250);
+  --dialog-button-hover: oklch(39% 0.008 250);
+  --dialog-button-shadow:
+    0 1px 2px oklch(0% 0 0 / 0.24), inset 0 0 0 1px oklch(80% 0.006 250 / 0.3);
+  --dialog-footer: var(--surface-raised);
+  --dialog-outline: oklch(80% 0.006 250 / 0.28);
+  --dialog-backdrop: oklch(0% 0 0 / 0.56);
+  --dialog-shadow:
+    0 24px 70px oklch(0% 0 0 / 0.55), 0 4px 16px oklch(0% 0 0 / 0.35);
+  --canvas: oklch(17% 0.006 250);
+  --surface: oklch(21% 0.006 250);
+  --surface-raised: oklch(27% 0.008 250);
+  --surface-muted: oklch(24% 0.008 250);
+  --sidebar: oklch(18% 0.007 250);
+  --inspector: oklch(23% 0.008 250);
+  --text: oklch(92% 0.005 250);
+  --text-secondary: oklch(77% 0.01 250);
+  --text-tertiary: oklch(69% 0.01 250);
+  --divider: oklch(55% 0.01 250 / 0.45);
+  --accent: oklch(60% 0.17 250);
+  --accent-strong: oklch(78% 0.11 250);
+  --accent-soft: oklch(33% 0.06 250);
+  --healthy: oklch(74% 0.15 145);
+  --broken: oklch(61% 0.19 27);
+  --modified: oklch(78% 0.14 72);
+  --switch-track: oklch(46% 0.01 250);
+  --danger: oklch(80% 0.11 27);
+  --danger-soft: oklch(29% 0.055 27);
+  --warning: oklch(83% 0.1 82);
+  --warning-soft: oklch(29% 0.04 82);
+  --success: oklch(81% 0.11 145);
+  --success-soft: oklch(29% 0.04 145);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     color-scheme: dark;
+    --dialog-button-background: oklch(34% 0.008 250);
+    --dialog-button-hover: oklch(39% 0.008 250);
+    --dialog-button-shadow:
+      0 1px 2px oklch(0% 0 0 / 0.24), inset 0 0 0 1px oklch(80% 0.006 250 / 0.3);
+    --dialog-footer: var(--surface-raised);
+    --dialog-outline: oklch(80% 0.006 250 / 0.28);
+    --dialog-backdrop: oklch(0% 0 0 / 0.56);
+    --dialog-shadow:
+      0 24px 70px oklch(0% 0 0 / 0.55), 0 4px 16px oklch(0% 0 0 / 0.35);
     --canvas: oklch(17% 0.006 250);
     --surface: oklch(21% 0.006 250);
     --surface-raised: oklch(27% 0.008 250);
@@ -1883,7 +1938,7 @@ button:active:not(:disabled) {
   padding: 72px var(--space-4) var(--space-4);
   overflow: auto;
   overscroll-behavior: contain;
-  background: oklch(22% 0.015 250 / 0.22);
+  background: var(--dialog-backdrop);
 }
 
 .activation-sheet {
@@ -1891,9 +1946,8 @@ button:active:not(:disabled) {
   overflow: hidden;
   background: var(--surface-raised);
   border-radius: var(--radius-lg);
-  box-shadow:
-    0 24px 70px oklch(20% 0.02 250 / 0.26),
-    0 2px 8px oklch(20% 0.02 250 / 0.14);
+  border: 1px solid var(--dialog-outline);
+  box-shadow: var(--dialog-shadow);
 }
 
 .activation-sheet-heading {
@@ -2650,7 +2704,7 @@ button:active:not(:disabled) {
   gap: var(--space-2);
   margin-top: var(--space-3);
   padding: var(--space-4) var(--space-6) var(--space-5);
-  background: var(--surface-muted);
+  background: var(--dialog-footer);
   border-top: 1px solid var(--divider);
 }
 
@@ -5717,7 +5771,7 @@ details[open] > .source-group-summary::before {
   justify-content: flex-end;
   padding: var(--space-4) var(--space-6);
   border-top: 1px solid var(--divider);
-  background: var(--surface-muted);
+  background: var(--dialog-footer);
 }
 .enable-sheet .primary {
   color: white;
@@ -6035,4 +6089,66 @@ details[open] > .source-group-summary::before {
   align-items: center;
   gap: var(--space-3);
   padding-bottom: var(--space-3);
+}
+
+.preferences-sheet {
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+}
+.preferences-sheet .activation-sheet-actions {
+  position: sticky;
+  bottom: 0;
+  flex-shrink: 0;
+}
+.community-update {
+  flex-wrap: wrap;
+}
+.community-update > span {
+  flex: 1;
+  min-width: 180px;
+}
+.community-update .repository-link {
+  font-size: 12px;
+}
+.community-update-status {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.scan-ledger-adopt-actions .activation-confirm-button {
+  color: white;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.preferences-backdrop {
+  padding: 24px var(--space-4);
+  align-items: center;
+}
+.preferences-sheet .language-control-hint {
+  margin: 0;
+}
+
+/* Secondary dialog actions retain a visible control surface on dark footers. */
+.activation-sheet-actions
+  button:not(:is(.activation-confirm-button, .danger-button)),
+.activation-sheet
+  .toolbar-button:not(
+    :is(.primary, .primary-button, .activation-confirm-button, .danger-button)
+  ) {
+  background: var(--dialog-button-background);
+  box-shadow: var(--dialog-button-shadow);
+}
+.activation-sheet-actions
+  button:not(:is(.activation-confirm-button, .danger-button)):hover:not(
+    :disabled
+  ),
+.activation-sheet
+  .toolbar-button:not(
+    :is(.primary, .primary-button, .activation-confirm-button, .danger-button)
+  ):hover:not(:disabled) {
+  background: var(--dialog-button-hover);
 }

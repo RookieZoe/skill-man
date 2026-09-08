@@ -19,3 +19,5 @@ pub mod system_locale;
 pub mod tauri_app_updater;
 pub mod volume_identity;
 pub mod zip_extract;
+
+pub mod community_release_source;

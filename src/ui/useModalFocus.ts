@@ -58,8 +58,11 @@ export function useModalFocus<T extends HTMLElement>({
       body.scrollTop = 0;
       body.scrollLeft = 0;
     });
-    const [first] = focusableElements(root);
-    (first ?? root).focus({ preventScroll: true });
+    const focusable = focusableElements(root);
+    const preferred = focusable.find((element) =>
+      element.hasAttribute("data-initial-focus"),
+    );
+    (preferred ?? focusable[0] ?? root).focus({ preventScroll: true });
   }, [focusKey]);
 
   useEffect(() => {

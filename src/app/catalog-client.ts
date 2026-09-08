@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type CatalogFilter =
@@ -1657,7 +1657,13 @@ export interface AdoptUndoResult {
   snapshotVersion: number;
 }
 
+export interface CommunityUpdate {
+  version: string;
+  releaseUrl: string;
+}
+
 export interface CatalogClient {
+  checkCommunityUpdate(): Promise<CommunityUpdate | null>;
   getBootstrapSnapshot(): Promise<BootstrapSnapshot>;
   prepareHome(path: string): Promise<HomeCandidate>;
   prepareExistingHomeRecovery(path: string): Promise<ExistingHomeRecoveryPlan>;
@@ -1847,6 +1853,9 @@ export interface CatalogClient {
 }
 
 const tauriCatalogClient: CatalogClient = {
+  checkCommunityUpdate() {
+    return invoke<CommunityUpdate | null>("check_community_update");
+  },
   getBootstrapSnapshot() {
     return invoke<BootstrapSnapshot>("get_bootstrap_snapshot");
   },
@@ -2338,5 +2347,13 @@ function createClosedBootstrapClient(): CatalogClient {
     diagnostic: null,
   });
   client.listenLocaleChanged = async () => () => {};
+  client.checkCommunityUpdate = async () => null;
   return client;
+}
+
+/** Apply only the app's native chrome appearance; never changes macOS settings. */
+export async function applyAppAppearance(
+  appearance: "system" | "light" | "dark",
+): Promise<void> {
+  if (isTauri()) await invoke<void>("set_app_appearance", { appearance });
 }

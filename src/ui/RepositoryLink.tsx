@@ -3,7 +3,13 @@ import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useLocale } from "../features/locale/LocaleProvider";
 
-export function RepositoryLink({ url }: { url: string }) {
+export function RepositoryLink({
+  url,
+  label,
+}: {
+  url: string;
+  label?: string;
+}) {
   const [failed, setFailed] = useState(false);
   const { t } = useLocale();
   let safe = false;
@@ -32,7 +38,7 @@ export function RepositoryLink({ url }: { url: string }) {
           void openUrl(url).catch(() => setFailed(true));
         }}
       >
-        {url}
+        {label ?? url}
       </a>
       {failed && <span role="alert">{t("repository.open_failed")}</span>}
     </>

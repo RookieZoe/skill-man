@@ -408,6 +408,9 @@ export function createFixtureCatalogClient(
     async listenBootstrapChanged() {
       return () => {};
     },
+    async checkCommunityUpdate() {
+      return null;
+    },
     async getLocaleSnapshot() {
       return {
         selection: localeSelection,

@@ -709,6 +709,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
+            crate::tauri_adapter::commands::check_community_update,
+            crate::tauri_adapter::commands::set_app_appearance,
             prepare_home,
             prepare_existing_home_recovery,
             cancel_existing_home_recovery,

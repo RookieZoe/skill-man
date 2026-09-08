@@ -15,3 +15,14 @@ Object.defineProperty(window, "innerHeight", {
 });
 
 afterEach(cleanup);
+
+Object.defineProperty(window, "matchMedia", {
+  configurable: true,
+  writable: true,
+  value: (media: string) => ({
+    matches: false,
+    media,
+    addEventListener() {},
+    removeEventListener() {},
+  }),
+});

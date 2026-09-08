@@ -24,3 +24,17 @@ test("changing steps resets both dialog and nested body scrolling", () => {
   expect(body.scrollTop).toBe(0);
   expect(screen.getByRole("button", { name: "result" })).toHaveFocus();
 });
+
+function ResultSheet() {
+  const ref = useModalFocus({ focusKey: "result", onClose() {} });
+  return (
+    <section ref={ref} role="dialog">
+      <button>Undo</button>
+      <button data-initial-focus>Done</button>
+    </section>
+  );
+}
+test("result completion receives initial focus instead of Undo", () => {
+  render(<ResultSheet />);
+  expect(screen.getByRole("button", { name: "Done" })).toHaveFocus();
+});
