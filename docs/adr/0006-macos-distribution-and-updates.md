@@ -1,5 +1,7 @@
 # macOS 签名、公证、发布与应用更新策略
 
+> 2026-09-08：社区正式版、无 Apple 凭据的 Tauri 更新通道及其验收边界已由 [ADR-0026](0026-community-app-updates.md) 明确修订。下文保留历史决策；社区版仅 Pre-release、禁止 updater 及其与 Apple 凭据绑定的限制不再适用。Apple 签名通道自身的门禁仍有效。
+
 Skill Man 通过 **GitHub Releases** 分发 macOS 应用。社区测试版采用 Ad-hoc 签名和手动更新；Developer ID 签名、公证版本使用 Tauri v2 官方 updater。首个公开测试版前开源，采用 **MIT** 许可证。永久 Bundle Identifier 为 `io.github.rookiezoe.skillman`。
 
 ## 社区测试版通道（2026-09-08 修订）

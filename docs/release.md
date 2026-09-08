@@ -1,5 +1,7 @@
 # Skill Man 发布手册
 
+> 社区更新的新决策见 [ADR-0026](adr/0026-community-app-updates.md)：#106 将启用无 Apple 凭据的 Tauri 更新通道，#107 验收真实升级和手动回滚；目前尚未完成。下文“无 Apple 凭据的社区 Release”仍描述当前手动更新工作流，其禁止 updater 产物的约束由 #106 实施时调整。Apple 签名通道独立保留，由 #105 暂缓跟踪。
+
 本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md)：Skill Man 只发布 Apple Silicon / macOS 13+ 版本。两条工作流都由维护者手动触发，只创建 Draft；核对后才发布。
 
 ## 无 Apple 凭据的社区 Release

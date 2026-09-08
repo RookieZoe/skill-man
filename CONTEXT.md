@@ -4,6 +4,14 @@
 
 ## Language
 
+**App Update（应用更新）**:
+将 Skill Man 应用自身升级到较新版本的操作，与 Library 中 Skill 内容的版本更新独立。
+_Avoid_: Source Transition, Skill Update
+
+**Manual App Rollback（手动应用回滚）**:
+由用户重新安装与当前数据格式兼容的旧版 Skill Man 应用。它不恢复 Library 或 Home 的历史数据，也不表示 Skill 内容的 Undo。
+_Avoid_: Source Undo, Home Recovery, 数据回滚
+
 ### Localized display terms
 
 | Stable domain term | English UI | 简体中文 UI |
