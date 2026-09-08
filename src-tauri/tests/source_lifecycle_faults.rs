@@ -579,10 +579,32 @@ fn remove_source_rolls_back_isolation_when_the_catalog_commit_fails() {
 }
 
 #[test]
+fn successful_source_remove_cleans_its_staging_directory() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let result = fixture
+        .lifecycle
+        .remove_source(&remote_id)
+        .expect("remove source");
+    assert!(
+        !fixture
+            .library
+            .join("staging")
+            .join(&result.operation_id)
+            .exists(),
+        "successful Remove must clean its staging directory"
+    );
+}
+
+#[test]
 fn remove_source_recovers_forward_from_a_catalog_committed_journal() {
     let fixture = fixture();
     let remote_id = confirm_transition(&fixture);
     let operation_id = "source-transition-remove-crash-1";
+    let fingerprint = fixture
+        .filesystem
+        .create_adopt_staging_operation(&fixture.library, operation_id)
+        .expect("create Remove staging before crash");
 
     // Freeze the crash state: members isolated (namespaces moved aside),
     // journal at CatalogCommitted, Catalog row still present.
@@ -637,7 +659,7 @@ fn remove_source_recovers_forward_from_a_catalog_committed_journal() {
                 remote_id: remote_id.clone(),
                 canonical_url: FIXTURE_URL.into(),
                 staging_operation_root: fixture.library.join("staging").join(operation_id),
-                staging_fingerprint: None,
+                staging_fingerprint: Some(fingerprint),
                 members,
                 activations,
             }),
@@ -649,6 +671,10 @@ fn remove_source_recovers_forward_from_a_catalog_committed_journal() {
         .recover_lifecycle(&fixture.library)
         .expect("roll forward");
 
+    assert!(
+        !fixture.library.join("staging").join(operation_id).exists(),
+        "roll-forward must clean Remove staging"
+    );
     let connection = open_catalog(&fixture);
     assert_eq!(count(&connection, "git_repository_sources"), 0);
     assert_eq!(count(&connection, "git_source_members"), 0);

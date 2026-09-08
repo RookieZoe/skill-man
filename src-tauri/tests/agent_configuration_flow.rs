@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, params};
 use skill_man_lib::adapters::agent_configuration_fs::MacOsAgentConfigurationFileSystem;
+use skill_man_lib::adapters::catalog_probe::SqliteCatalogProbe;
 use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
 use skill_man_lib::core::agent_configuration::{
     AgentConfigurationDraft, AgentConfigurationError, AgentConfigurationService, AgentRootDraft,
@@ -13,6 +14,7 @@ use skill_man_lib::core::write_gate::{WriteGate, WriteGateState};
 use skill_man_lib::seams::agent_configuration_store::{
     AgentConfigurationStore, RecentProjectFolder,
 };
+use skill_man_lib::seams::catalog_probe::CatalogProbe;
 
 fn open_service(
     home: &std::path::Path,
@@ -390,6 +392,34 @@ fn shared_target_detach_preserves_activations_and_last_reference_is_blocked() {
         )
         .expect("retained history");
     assert_eq!(retained, 1, "keep disabled history and its target root");
+    let probe = SqliteCatalogProbe::new();
+    assert!(
+        probe
+            .probe_recovery_profile(&catalog_path)
+            .expect("inspect Recovery Profile after deleting the last consumer")
+            .required_capabilities,
+        "disabled history must not block Home recovery after deleting its Agent"
+    );
+    // An enabled Activation without a configured target remains invalid.
+    connection
+        .execute(
+            "UPDATE activations SET desired_enabled = 1 WHERE skill_id = 'skill-1'",
+            [],
+        )
+        .expect("simulate an enabled orphan Activation");
+    assert!(
+        !probe
+            .probe_recovery_profile(&catalog_path)
+            .expect("inspect invalid Recovery Profile")
+            .required_capabilities,
+        "enabled orphan Activations must still block Home recovery"
+    );
+    connection
+        .execute(
+            "UPDATE activations SET desired_enabled = 0 WHERE skill_id = 'skill-1'",
+            [],
+        )
+        .expect("restore disabled history");
     let current = _sqlite
         .agent_configuration_snapshot()
         .expect("current scan scope");

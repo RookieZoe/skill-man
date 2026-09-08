@@ -714,10 +714,14 @@ fn agent_configuration_rows_are_complete(connection: &Connection) -> bool {
         [],
         |row| row.get::<_, i64>(0),
     );
+    // Deleting the last Agent Configuration retains disabled Activation
+    // history and its Root. Only enabled Activations still require a consumer,
+    // matching the configuration store's guard_removed_target contract.
     let orphan_activation_targets = connection.query_row(
         "SELECT COUNT(*)
          FROM activations activation
-         WHERE NOT EXISTS (
+         WHERE activation.desired_enabled = 1
+           AND NOT EXISTS (
             SELECT 1
             FROM agent_global_roots membership
             WHERE membership.root_id = activation.target_root_id

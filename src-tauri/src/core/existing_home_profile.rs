@@ -175,7 +175,12 @@ impl ExistingHomeRecoveryProfile {
                 Ok(true) => self
                     .filesystem
                     .list_directory(&root)
-                    .map(|entries| !entries.is_empty())
+                    .map(|entries| {
+                        entries.iter().any(|entry| {
+                            // Finder metadata is not an unfinished operation.
+                            entry.name != ".DS_Store" || entry.is_directory
+                        })
+                    })
                     .unwrap_or(true),
                 Err(_) => true,
             }

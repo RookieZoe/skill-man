@@ -158,6 +158,54 @@ fn lost_locator_can_preview_a_complete_custom_existing_home_without_writes() {
         state_before
     );
     std::fs::create_dir(home_path.join("cache")).expect("restore required cache root");
+    // Finder metadata anywhere in the Home must not affect eligibility.
+    // Include nested content roots as well as the operation guard roots.
+    let metadata_directories = [
+        "",
+        "skills",
+        "skills/local/example/nested",
+        "remotes",
+        "remotes/example/nested",
+        "cache",
+        "cache/nested",
+        "operation-history",
+        "operation-history/nested",
+        "staging",
+        "operations",
+    ];
+    for directory in metadata_directories {
+        std::fs::create_dir_all(home_path.join(directory)).unwrap();
+        std::fs::write(
+            home_path.join(directory).join(".DS_Store"),
+            b"Finder metadata",
+        )
+        .expect("write Finder metadata");
+    }
+    let metadata_plan = service
+        .prepare(&home_path)
+        .expect("Finder metadata is harmless");
+    service
+        .cancel(&metadata_plan.plan_token)
+        .expect("cancel metadata preview");
+    for directory in metadata_directories {
+        assert_eq!(
+            std::fs::read(home_path.join(directory).join(".DS_Store")).unwrap(),
+            b"Finder metadata",
+            "recovery preview must preserve metadata at {directory}"
+        );
+    }
+    for directory in ["staging", "operations"] {
+        let metadata = home_path.join(directory).join(".DS_Store");
+        assert_eq!(std::fs::read(&metadata).unwrap(), b"Finder metadata");
+        std::fs::remove_file(&metadata).unwrap();
+        std::fs::create_dir(&metadata).unwrap();
+        assert!(matches!(service.prepare(&home_path),
+            Err(skill_man_lib::core::existing_home_recovery::ExistingHomeRecoveryError::ProfileRejected {
+                reason: skill_man_lib::core::existing_home_recovery::RecoveryProfileRejection::OperationRecoveryRequired,
+            })));
+        std::fs::remove_dir(&metadata).unwrap();
+        std::fs::write(&metadata, b"Finder metadata").unwrap();
+    }
     let confirmation_plan = service
         .prepare(&home_path)
         .expect("complete Home can be prepared again for confirmation");

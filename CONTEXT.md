@@ -155,7 +155,7 @@ _Avoid_: ReadOnly, RecoveryRequired
 _Avoid_: First Run, 首次运行
 
 **Recovery Profile**:
-用于 Recover Existing Home 的只读结构证明:以 Home marker 与 Catalog 的逻辑 home_id、一致的创建时间、Catalog 完整性/外键检查，以及当前产品所需的真实目录、表、列和约束为准，而非以可编辑的 schema_version 或 Home 所在卷的 UUID 为准。SQLite WAL/SHM 的存在本身不构成失败;但未完成的 operation journal 或未归属 staging 内容必须转入操作恢复，不能直接恢复既有 Home。缺少任何必需能力时拒绝恢复并保持零写入。
+用于 Recover Existing Home 的只读结构证明:以 Home marker 与 Catalog 的逻辑 home_id、一致的创建时间、Catalog 完整性/外键检查，以及当前产品所需的真实目录、表、列和约束为准，而非以可编辑的 schema_version 或 Home 所在卷的 UUID 为准。SQLite WAL/SHM 的存在本身不构成失败;但未完成的 operation journal 或未归属 staging 内容必须转入操作恢复，不能直接恢复既有 Home。缺少任何必需能力时拒绝恢复并保持零写入。 恢复资格检查忽略 Home 任意位置的 `.DS_Store` 文件，且不删除或改写它们；此规则不豁免其所在目录中的未完成操作、未归属 staging 目录或其他内容。
 _Avoid_: schema version gate, volume identity proof
 
 **Existing Home Recovery Plan**:

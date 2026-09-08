@@ -1530,7 +1530,7 @@ impl SourceLifecycleService {
 
     fn cleanup_remove_source(
         &self,
-        _library_root: &Path,
+        library_root: &Path,
         journal: &RemoveSourceJournal,
     ) -> Result<(), SourceLifecycleError> {
         for member in &journal.members {
@@ -1540,6 +1540,11 @@ impl SourceLifecycleService {
                 self.filesystem.discard_isolated_source(isolated)?;
             }
         }
+        self.filesystem.discard_staging(
+            &journal.staging_operation_root,
+            library_root,
+            journal.staging_fingerprint.as_ref(),
+        )?;
         Ok(())
     }
 
@@ -1589,7 +1594,7 @@ impl SourceLifecycleService {
 
     fn roll_forward_remove_source(
         &self,
-        _library_root: &Path,
+        library_root: &Path,
         journal: &RemoveSourceJournal,
     ) -> Result<(), SourceLifecycleError> {
         if !self
@@ -1601,15 +1606,9 @@ impl SourceLifecycleService {
                 .update_store_handle()
                 .commit_remove_source(&journal.remote_id)?;
         }
-        for member in &journal.members {
-            if let Some(isolated) = &member.isolated_path
-                && self.filesystem.path_is_directory(isolated)?
-            {
-                self.filesystem.discard_isolated_source(isolated)?;
-            }
-        }
+        self.cleanup_remove_source(library_root, journal)?;
         self.filesystem
-            .finish_source_lifecycle_journal(_library_root, &journal.operation_id)?;
+            .finish_source_lifecycle_journal(library_root, &journal.operation_id)?;
         Ok(())
     }
 
