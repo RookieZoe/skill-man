@@ -1,4 +1,6 @@
 import { useScanOperation } from "../../ui/useScanOperation";
+import { LocalMigrationDialog } from "./LocalMigrationDialog";
+import { defaultCopyDestinationPicker } from "../library/GitSourceCapabilityNotice";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type {
@@ -266,6 +268,10 @@ function adoptErrorText(
     diagnostic?: { message?: string };
   };
   if (failure?.error?.code === "adopt_eligibility") {
+    if (failure.error.closedCode === "migration_destination_exists")
+      return t("scan.migration.occupied");
+    if (failure.error.closedCode === "migration_destination_protected")
+      return t("scan.migration.protected");
     return t("scan.ledger.adoptBlocked", {
       code: failure.error.closedCode ?? "",
       detail:
@@ -288,8 +294,10 @@ export function ScanEvidenceLedger({
   expanded = true,
   onExpandedChange,
   onOpenScanSetup,
+  pickMigrationDirectory = defaultCopyDestinationPicker,
 }: {
   client: CatalogClient;
+  pickMigrationDirectory?: () => Promise<string | null>;
   onCatalogChanged?: () => Promise<void>;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
@@ -313,12 +321,46 @@ export function ScanEvidenceLedger({
 }) {
   const { t } = useLocale();
   const ledgerRef = useRef<HTMLElement | null>(null);
+  const adoptShelfRef = useRef<HTMLDivElement | null>(null);
   const [observation, setObservation] =
     useState<ObservationAndScanSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
+  const [migration, setMigration] = useState<{
+    entityRef: string;
+    name: string;
+    generation: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sections, setSections] =
+  const [reportSections, setSections] =
     useState<Record<ScanReportSection, SectionState>>(EMPTY_SECTIONS);
+  // A report remains immutable. Successful commands only overlay its presentation.
+  const [resolved, setResolved] = useState<
+    Record<string, "ignored" | "already_managed">
+  >({});
+  const sections = { ...reportSections };
+  const resolvedRows: ScanReportRow[] = [];
+  for (const section of CANDIDATE_SECTIONS) {
+    if (section === "excluded") continue;
+    sections[section] = {
+      ...reportSections[section],
+      rows: reportSections[section].rows.filter((row) => {
+        if (row.kind !== "source_verdict" || !resolved[row.entityRef])
+          return true;
+        const reason = resolved[row.entityRef];
+        resolvedRows.push({
+          ...row,
+          verdict: reason === "ignored" ? "excluded" : "already_managed",
+          reasonKind: reason,
+          operations: [],
+        });
+        return false;
+      }),
+    };
+  }
+  sections.excluded = {
+    ...reportSections.excluded,
+    rows: [...reportSections.excluded.rows, ...resolvedRows],
+  };
   const lastReportIdentity = useRef<string | null>(null);
   // §8.1: every candidate selection defaults empty; the draft is presentation
   // state only. Reset when the Report identity changes.
@@ -347,6 +389,7 @@ export function ScanEvidenceLedger({
     if (identity !== lastReportIdentity.current) {
       lastReportIdentity.current = identity;
       setSections(EMPTY_SECTIONS);
+      setResolved({});
       setSelected({});
       setWinners({});
       setAdoptPlan(null);
@@ -525,8 +568,22 @@ export function ScanEvidenceLedger({
         summary.generation,
         entitySeq,
       );
-      setSelected({});
-      setObservation(await client.startRescan("manual"));
+      const row = reportSections.local_candidates.rows.find(
+        (row) => row.kind === "source_verdict" && row.entitySeq === entitySeq,
+      );
+      if (
+        lastReportIdentity.current === summary.contentIdentity &&
+        row?.kind === "source_verdict"
+      ) {
+        setResolved((previous) => ({
+          ...previous,
+          [row.entityRef]: "ignored",
+        }));
+        setSelected((previous) => ({
+          ...previous,
+          [candidateKey(row)]: false,
+        }));
+      }
     } catch (reason) {
       setError(commandErrorMessage(reason, t));
     } finally {
@@ -621,9 +678,8 @@ export function ScanEvidenceLedger({
     return selections;
   }
 
-  async function planAdopt() {
-    if (!summary || adoptBusy) return;
-    const selections = buildSelections();
+  async function planAdopt(selections = buildSelections()) {
+    if (!summary || adoptBusy || busy || runActive || stale) return;
     if (selections.length === 0) return;
     setAdoptBusy(true);
     setAdoptMessage(null);
@@ -637,15 +693,51 @@ export function ScanEvidenceLedger({
       setAdoptPlan(null);
     } finally {
       setAdoptBusy(false);
+      adoptShelfRef.current?.scrollIntoView?.({ block: "nearest" });
+      adoptShelfRef.current?.focus();
     }
+  }
+
+  async function planLocal(
+    row: Extract<ScanReportRow, { kind: "source_verdict" }>,
+    operation: string,
+  ) {
+    if (operation === "local_link")
+      return planAdopt([{ entityRef: row.entityRef, action: "local_link" }]);
+    if (summary)
+      setMigration({
+        entityRef: row.entityRef,
+        name: row.directoryNames[0] ?? "",
+        generation: summary.generation,
+      });
   }
 
   async function applyPlan() {
     if (!adoptPlan || adoptBusy) return;
+    const identity = lastReportIdentity.current;
     setAdoptBusy(true);
     setAdoptMessage(null);
     try {
-      setAdoptResult(await client.applyAdopt(adoptPlan.planToken));
+      const result = await client.applyAdopt(adoptPlan.planToken);
+      if (identity !== lastReportIdentity.current) {
+        await onCatalogChanged?.();
+        return;
+      }
+      setAdoptResult(result);
+      setResolved((previous) => {
+        const next = { ...previous };
+        for (const item of adoptPlan.items) {
+          if (
+            result.items.some(
+              (result) =>
+                result.directoryName === item.directoryName && result.adopted,
+            )
+          ) {
+            next[item.entityRef] = "already_managed";
+          }
+        }
+        return next;
+      });
       await onCatalogChanged?.();
     } catch (reason) {
       setAdoptMessage(adoptErrorText(reason, t));
@@ -656,10 +748,28 @@ export function ScanEvidenceLedger({
 
   async function undoOperation() {
     if (!adoptResult?.operationId || adoptBusy) return;
+    const identity = lastReportIdentity.current;
     setAdoptBusy(true);
     setAdoptMessage(null);
     try {
       const undo = await client.undoAdopt(adoptResult.operationId);
+      if (identity !== lastReportIdentity.current) {
+        await onCatalogChanged?.();
+        return;
+      }
+      setResolved((previous) => {
+        const next = { ...previous };
+        for (const item of adoptPlan?.items ?? []) {
+          if (
+            undo.items.some(
+              (result) =>
+                result.directoryName === item.directoryName && result.undone,
+            )
+          )
+            delete next[item.entityRef];
+        }
+        return next;
+      });
       setAdoptUndo(undo);
       setAdoptResult(null);
       setAdoptPlan(null);
@@ -704,6 +814,24 @@ export function ScanEvidenceLedger({
         runActive ? "running" : (run?.state ?? (hasReport ? "report" : "none"))
       }
     >
+      {migration && (
+        <LocalMigrationDialog
+          client={client}
+          {...migration}
+          pickDirectory={pickMigrationDirectory}
+          formatError={(reason) => adoptErrorText(reason, t)}
+          onClose={() => setMigration(null)}
+          onResolved={(managed) => {
+            setResolved((previous) => {
+              const next = { ...previous };
+              if (managed) next[migration.entityRef] = "already_managed";
+              else delete next[migration.entityRef];
+              return next;
+            });
+            void onCatalogChanged?.();
+          }}
+        />
+      )}
       <div className="scan-ledger-bar">
         <div className="scan-ledger-status" role="status" aria-live="polite">
           <span className="scan-ledger-state">
@@ -824,7 +952,22 @@ export function ScanEvidenceLedger({
               className="scan-summary-cards"
               aria-label={t("scan.summary.cards.label")}
             >
-              {countCards(summary).map((card) => (
+              {countCards({
+                ...summary,
+                sourceCounts: {
+                  ...summary.sourceCounts,
+                  localCandidates: Math.max(
+                    0,
+                    summary.sourceCounts.localCandidates -
+                      resolvedRows.filter(
+                        (row) =>
+                          row.kind === "source_verdict" &&
+                          row.conflictSetSeq === null,
+                      ).length,
+                  ),
+                  excluded: summary.sourceCounts.excluded + resolvedRows.length,
+                },
+              }).map((card) => (
                 <li key={card.key} aria-label={t(card.key)}>
                   <span className="scan-summary-card-value">{card.value}</span>
                   <span className="scan-summary-card-label">{t(card.key)}</span>
@@ -940,7 +1083,7 @@ export function ScanEvidenceLedger({
               >
                 <h4>{t(sectionKey(section))}</h4>
                 <ul className="scan-summary-rows">
-                  {sections[section].rows.map((row, index) => {
+                  {sections[section].rows.map((row) => {
                     if (
                       row.kind === "source_verdict" &&
                       row.reasonKind === "ignored"
@@ -954,7 +1097,7 @@ export function ScanEvidenceLedger({
                     const clearable = operations.length > 0;
                     return (
                       <li
-                        key={index}
+                        key={key}
                         className={`scan-summary-row scan-summary-row-${row.kind}`}
                       >
                         <div className="scan-summary-row-destination">
@@ -1025,22 +1168,39 @@ export function ScanEvidenceLedger({
                             ) : (
                               operations.map((op) =>
                                 op.allowed ? (
-                                  <label
-                                    key={op.operation}
-                                    className="scan-summary-row-op"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={selected[key] ?? false}
-                                      onChange={(event) =>
-                                        setSelected((prev) => ({
-                                          ...prev,
-                                          [key]: event.target.checked,
-                                        }))
+                                  row.kind === "source_verdict" &&
+                                  (op.operation === "local_link" ||
+                                    op.operation === "local_link_with_move") ? (
+                                    <button
+                                      key={op.operation}
+                                      type="button"
+                                      disabled={
+                                        busy || runActive || adoptBusy || stale
                                       }
-                                    />
-                                    {t(operationKey(op.operation))}
-                                  </label>
+                                      onClick={() =>
+                                        void planLocal(row, op.operation)
+                                      }
+                                    >
+                                      {t(operationKey(op.operation))}
+                                    </button>
+                                  ) : (
+                                    <label
+                                      key={op.operation}
+                                      className="scan-summary-row-op"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selected[key] ?? false}
+                                        onChange={(event) =>
+                                          setSelected((prev) => ({
+                                            ...prev,
+                                            [key]: event.target.checked,
+                                          }))
+                                        }
+                                      />
+                                      {t(operationKey(op.operation))}
+                                    </label>
+                                  )
                                 ) : (
                                   <span
                                     key={op.operation}
@@ -1197,16 +1357,24 @@ export function ScanEvidenceLedger({
           state until the Core validates the Report (any staleness is a
           typed PlanStale, never a silent fallback). */}
         {summary && !runActive && !idle ? (
-          <div className="scan-ledger-adopt-shelf">
+          <div
+            className="scan-ledger-adopt-shelf"
+            ref={adoptShelfRef}
+            tabIndex={-1}
+          >
             <div className="scan-ledger-adopt-actions">
-              <button
-                type="button"
-                onClick={planAdopt}
-                disabled={adoptBusy || stale || buildSelections().length === 0}
-              >
-                {t("scan.ledger.adoptPlan")}
-              </button>
-              {adoptPlan ? (
+              {buildSelections().length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void planAdopt()}
+                  disabled={
+                    adoptBusy || stale || buildSelections().length === 0
+                  }
+                >
+                  {t("scan.ledger.adoptPlan")}
+                </button>
+              ) : null}
+              {adoptPlan && !adoptResult ? (
                 <button
                   type="button"
                   onClick={applyPlan}
@@ -1215,11 +1383,27 @@ export function ScanEvidenceLedger({
                   {t("scan.ledger.adoptApply")}
                 </button>
               ) : null}
+              {adoptPlan && !adoptResult ? (
+                <button
+                  type="button"
+                  disabled={adoptBusy}
+                  onClick={async () => {
+                    try {
+                      await client.cancelAdopt(adoptPlan.planToken);
+                      setAdoptPlan(null);
+                    } catch (reason) {
+                      setAdoptMessage(commandErrorMessage(reason, t));
+                    }
+                  }}
+                >
+                  {t("agents.sheet.cancel")}
+                </button>
+              ) : null}
               {adoptResult?.undoAvailable ? (
                 <button
                   type="button"
                   onClick={undoOperation}
-                  disabled={adoptBusy || stale}
+                  disabled={adoptBusy}
                 >
                   {t("scan.ledger.adoptUndo")}
                 </button>
@@ -1241,6 +1425,36 @@ export function ScanEvidenceLedger({
                 })}
               </p>
             ) : null}
+            {adoptPlan && !adoptResult
+              ? adoptPlan.items.map((item) => (
+                  <div key={item.entityRef} className="scan-migration-preview">
+                    <strong>{item.directoryName}</strong>
+                    <dl>
+                      <dt>{t("scan.migration.source")}</dt>
+                      <dd>
+                        <code>{item.canonicalEntity}</code>
+                      </dd>
+                      <dt>{t("scan.migration.destination")}</dt>
+                      <dd>
+                        <code>{item.finalEntityPath}</code>
+                      </dd>
+                      <dt>{t("scan.migration.links")}</dt>
+                      <dd>
+                        {item.activations.map((activation) => (
+                          <div key={activation.entryPath}>
+                            <code>
+                              {activation.entryPath} → {activation.targetPath}
+                            </code>
+                          </div>
+                        ))}
+                      </dd>
+                    </dl>
+                    {item.action === "local_link_with_move" ? (
+                      <p>{t("scan.migration.confirm")}</p>
+                    ) : null}
+                  </div>
+                ))
+              : null}
             {adoptResult ? (
               <ul className="scan-ledger-adopt-results">
                 {adoptResult.items.map((item) => (

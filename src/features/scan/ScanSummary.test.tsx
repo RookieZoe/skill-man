@@ -128,6 +128,79 @@ const LOCAL_MOVE_ROW: ScanReportRow = {
   ],
 };
 
+test("move-required local candidates use a direct plan button, not a checkbox", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient();
+  const plan = vi.spyOn(client, "planAdopt").mockResolvedValue({
+    planToken: "move-plan",
+    reportGeneration: COMPLETE_SUMMARY.generation,
+    items: [
+      {
+        entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@3",
+        action: "local_link_with_move",
+        directoryName: "relocate-me",
+        canonicalEntity: "/Users/test/.agents/skills/relocate-me",
+        finalEntityPath: "/Users/test/Skills/relocate-me",
+        appearances: [],
+        activations: [],
+        applyable: true,
+        error: null,
+      },
+    ],
+    canApply: true,
+  });
+  const apply = vi.spyOn(client, "applyAdopt");
+  const cancel = vi.spyOn(client, "cancelAdopt").mockResolvedValue(true);
+  render(
+    <ScanEvidenceLedger
+      client={client}
+      pickMigrationDirectory={async () => "/Users/test/Skills"}
+    />,
+  );
+  publish(client, COMPLETE_SUMMARY, {
+    local_candidates: [
+      {
+        ...LOCAL_MOVE_ROW,
+        operations: [
+          {
+            operation: "local_link_with_move",
+            allowed: true,
+            closedReason: null,
+          },
+        ],
+      },
+    ],
+  });
+  const region = await screen.findByRole("region", { name: "Local sources" });
+  await user.click(await within(region).findByRole("button", { name: /Move/ }));
+  expect(within(region).queryByRole("checkbox")).not.toBeInTheDocument();
+  const dialog = screen.getByRole("dialog");
+  expect(plan).not.toHaveBeenCalled();
+  await user.click(
+    within(dialog).getByRole("button", { name: /Choose folder/ }),
+  );
+  expect(plan).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole("button", { name: /Plan Adopt/ }));
+  expect(plan).toHaveBeenCalledWith(COMPLETE_SUMMARY.generation, [
+    {
+      entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@3",
+      action: "local_link_with_move",
+      destinationParent: "/Users/test/Skills",
+    },
+  ]);
+  expect(apply).not.toHaveBeenCalled();
+  expect(
+    screen.getByText("/Users/test/.agents/skills/relocate-me"),
+  ).toBeVisible();
+  expect(screen.getByText("/Users/test/Skills/relocate-me")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: /^Cancel$/ }));
+  expect(cancel).toHaveBeenCalledWith("move-plan");
+  expect(apply).not.toHaveBeenCalled();
+  expect(
+    screen.queryByText("/Users/test/Skills/relocate-me"),
+  ).not.toBeInTheDocument();
+});
+
 const ATTENTION_ROW: ScanReportRow = {
   kind: "source_verdict",
   entityRef: "scan-report-v1:home:fixture-report-4:4:complete@4@4",
@@ -253,7 +326,7 @@ test("classified summary shows the funnel and the four count cards", async () =>
   }
 });
 
-test("Ignore saves the exact Local candidate then rescans and separates ignored from managed", async () => {
+test("Ignore updates only the candidate in the current report without rescanning", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   const ignore = vi.spyOn(client, "ignoreScanLocalCandidate");
@@ -269,23 +342,7 @@ test("Ignore saves the exact Local candidate then rescans and separates ignored 
     COMPLETE_SUMMARY.generation,
     2,
   );
-  expect(rescan).toHaveBeenCalledWith("manual");
-  publish(
-    client,
-    { ...COMPLETE_SUMMARY, generation: 5, contentIdentity: "next-report" },
-    {
-      local_candidates: [],
-      excluded: [
-        EXCLUDED_ROW,
-        {
-          ...LOCAL_ROW,
-          verdict: "excluded",
-          reasonKind: "ignored",
-          operations: [],
-        },
-      ],
-    },
-  );
+  expect(rescan).not.toHaveBeenCalled();
   const ignored = await screen.findByRole("region", {
     name: "Excluded · Ignored",
   });
@@ -326,7 +383,6 @@ test("an Ignore write failure keeps the candidate and does not start a scan", as
 });
 
 test("candidate blocks render in the fixed §8.1 order with default-empty selections", async () => {
-  const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   render(<ScanEvidenceLedger client={client} />);
   publish(client, COMPLETE_SUMMARY, {
@@ -352,16 +408,15 @@ test("candidate blocks render in the fixed §8.1 order with default-empty select
   expect(attentionIndex).toBeLessThan(gitIndex);
   expect(gitIndex).toBeLessThan(localIndex);
   expect(localIndex).toBeLessThan(excludedIndex);
-  // Local Link stays selectable; its checkbox starts unchecked (default empty).
+  // Local migration is a direct action, not a selection checkbox.
   const localRegion = await screen.findByRole("region", {
     name: "Local sources",
   });
-  const localLink = await within(localRegion).findByRole("checkbox", {
+  const localLink = await within(localRegion).findByRole("button", {
     name: "Local Link",
   });
-  expect(localLink).not.toBeChecked();
-  await user.click(localLink);
-  expect(localLink).toBeChecked();
+  expect(localLink).toBeEnabled();
+  expect(within(localRegion).queryByRole("checkbox")).not.toBeInTheDocument();
   // Blocked/Deferred candidates carry no selection control.
   const attentionRegion = screen.getByRole("region", {
     name: "Needs attention",
@@ -405,7 +460,7 @@ test("incomplete report disables destructive eligibility with the Core closed re
   expect(
     screen.getAllByText(/Root identity changed before walking/).length,
   ).toBeGreaterThanOrEqual(1);
-  const move = within(localRegion).queryByRole("checkbox", {
+  const move = within(localRegion).queryByRole("button", {
     name: /Move/,
   });
   expect(move).not.toBeInTheDocument();

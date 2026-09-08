@@ -2,8 +2,8 @@
 //! longer enumerates Roots and holds no in-memory report. It consumes the
 //! terminal Scan Report of the Observation and Scan Module — generation-bound
 //! pages plus per-entity evidence — and turns explicit selections into a
-//! read-only plan: stable Local Link Include and an explicit Conflict Set
-//! winner. Git Repository Source candidates are handoff-only: their
+//! read-only plan: stable Local Link, explicit external Link migration, or a
+//! Conflict Set winner. Git Repository Source candidates are handoff-only: their
 //! generation-bound evidence is handed to the Source modules (ADR-0018
 //! Source Tracking Policy + immutable Source Transition, #92); no worktree
 //! HEAD, dirty bytes, old lock `skillPath`/hash/ref/anchor ever synthesize a
@@ -14,7 +14,8 @@
 //! - `plan_report` accepts only the current Open Home's non-Stale Complete/
 //!   Incomplete Report; a running Scan, a cross-startup cache, a
 //!   cancelled/superseded Run or an old generation all return `PlanStale`;
-//! - the closed action vocabulary is `local_link` | `conflict_winner`; any
+//! - the closed action vocabulary is `local_link` | `local_link_with_move` |
+//!   `conflict_winner`; any
 //!   entity move, deletion, replacement or external-ownership release
 //!   returns the typed `scan_coverage_incomplete` closed reason while the
 //!   Report is Incomplete and never issues a plan token;
@@ -34,8 +35,8 @@ use super::{
 };
 use crate::core::domain::AgentId;
 use crate::core::scan::classification::{
-    OP_CONFLICT_WINNER, OP_LOCAL_LINK, VERDICT_ALREADY_MANAGED, VERDICT_BLOCKED,
-    VERDICT_CONFLICT_SET, VERDICT_DEFERRED, VERDICT_EXCLUDED, VERDICT_GIT,
+    OP_CONFLICT_WINNER, OP_LOCAL_LINK, OP_LOCAL_LINK_WITH_MOVE, VERDICT_ALREADY_MANAGED,
+    VERDICT_BLOCKED, VERDICT_CONFLICT_SET, VERDICT_DEFERRED, VERDICT_EXCLUDED, VERDICT_GIT,
     VERDICT_IDENTITY_CONFLICT, VERDICT_LOCAL,
 };
 use crate::core::scan::{ReportFreshness, ScanCoordinator, ScanEntityEvidence};
@@ -44,6 +45,7 @@ use crate::seams::scan_evidence_store::ScanSourceVerdictRecord;
 
 /// Closed Adopt actions (spec §4.6; §8.1 "viewing is never selecting").
 pub const ACTION_LOCAL_LINK: &str = "local_link";
+pub const ACTION_LOCAL_LINK_WITH_MOVE: &str = "local_link_with_move";
 pub const ACTION_CONFLICT_WINNER: &str = "conflict_winner";
 
 /// Typed eligibility closed codes of the report plan surface.
@@ -110,6 +112,7 @@ impl AdoptEntityRef {
 pub struct AdoptReportSelection {
     pub entity_ref: String,
     pub action: String,
+    pub destination_parent: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,10 +207,17 @@ impl AdoptService {
             // selection never issues a plan token.
             let (action, is_conflict_winner) = match selection.action.as_str() {
                 ACTION_LOCAL_LINK => (ACTION_LOCAL_LINK, false),
+                ACTION_LOCAL_LINK_WITH_MOVE => (ACTION_LOCAL_LINK_WITH_MOVE, false),
                 ACTION_CONFLICT_WINNER => (ACTION_CONFLICT_WINNER, true),
                 _ => return Err(AdoptError::Validation("unknown Adopt action".into())),
             };
             self.verify_selection_eligibility(&evidence, action, is_conflict_winner, &context)?;
+            if coordinator
+                .is_ignored_local_entity(&evidence.entity.canonical_path)
+                .map_err(|_| AdoptError::PlanStale)?
+            {
+                return Err(self.eligibility("ignored", entity_ref.entity_seq, None));
+            }
             if is_conflict_winner {
                 let set_seq = evidence.verdict.conflict_set_seq.ok_or_else(|| {
                     AdoptError::Internal("a conflict set member has no set".into())
@@ -225,8 +235,12 @@ impl AdoptService {
             // Freeze the world read-only: any change since the scan is a
             // stale plan (spec §4.6, §11).
             let frozen = self.freeze_report_entity(&evidence)?;
-            let (appearances, appearance_evidence, activations) =
-                self.build_appearance_inputs(&evidence, &agents_by_id)?;
+            let (appearances, appearance_evidence, mut activations) = self
+                .build_appearance_inputs(
+                    &evidence,
+                    &agents_by_id,
+                    action == ACTION_LOCAL_LINK_WITH_MOVE,
+                )?;
             let directory_name = evidence
                 .verdict
                 .directory_names
@@ -240,6 +254,47 @@ impl AdoptService {
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default()
                 });
+            let final_entity_path = if action == ACTION_LOCAL_LINK_WITH_MOVE {
+                let parent = selection
+                    .destination_parent
+                    .as_ref()
+                    .ok_or_else(|| AdoptError::Validation("Choose a destination folder".into()))?;
+                let parent = self
+                    .filesystem
+                    .directory_fingerprint(parent)?
+                    .canonical_path;
+                coordinator
+                    .validate_local_destination(&parent)
+                    .map_err(|error| {
+                        self.eligibility(
+                            "migration_destination_protected",
+                            entity_ref.entity_seq,
+                            Some(error.to_string()),
+                        )
+                    })?;
+                let destination = parent.join(&directory_name);
+                if !matches!(
+                    self.filesystem.activation_snapshot(&destination)?,
+                    crate::seams::filesystem::ActivationEntrySnapshot::Missing
+                ) {
+                    return Err(self.eligibility(
+                        "migration_destination_exists",
+                        entity_ref.entity_seq,
+                        None,
+                    ));
+                }
+                for activation in &mut activations {
+                    activation.target_path = destination.clone();
+                }
+                destination
+            } else {
+                if selection.destination_parent.is_some() {
+                    return Err(AdoptError::Validation(
+                        "Only migration accepts a destination".into(),
+                    ));
+                }
+                evidence.entity.canonical_path.clone()
+            };
             let activation_pairs = activations
                 .iter()
                 .map(|step| (step.entry_path.clone(), step.target_path.clone()))
@@ -249,7 +304,7 @@ impl AdoptService {
                 action: action.to_owned(),
                 directory_name: directory_name.clone(),
                 canonical_entity: evidence.entity.canonical_path.clone(),
-                final_entity_path: evidence.entity.canonical_path.clone(),
+                final_entity_path: final_entity_path.clone(),
                 appearances: appearance_evidence,
                 activations: activation_pairs,
                 applyable: true,
@@ -257,9 +312,13 @@ impl AdoptService {
             });
             inputs.push(PlanInputItem {
                 directory_name: directory_name.clone(),
-                kind: super::AdoptPlanKind::Link,
+                kind: if action == ACTION_LOCAL_LINK_WITH_MOVE {
+                    super::AdoptPlanKind::MoveLink
+                } else {
+                    super::AdoptPlanKind::Link
+                },
                 canonical_entity: evidence.entity.canonical_path.clone(),
-                final_entity_path: evidence.entity.canonical_path.clone(),
+                final_entity_path,
                 appearances,
                 activations,
                 frozen,
@@ -373,7 +432,15 @@ impl AdoptService {
             }
             return Ok(());
         }
-        if verdict.verdict != VERDICT_LOCAL || !allowed(OP_LOCAL_LINK) {
+        let operation = if action == ACTION_LOCAL_LINK_WITH_MOVE {
+            OP_LOCAL_LINK_WITH_MOVE
+        } else {
+            OP_LOCAL_LINK
+        };
+        if verdict.verdict != VERDICT_LOCAL
+            || !allowed(operation)
+            || (action == ACTION_LOCAL_LINK_WITH_MOVE && context.incomplete)
+        {
             let code = eligibility_code(verdict, action, context.incomplete);
             return Err(self.eligibility(&code, verdict.entity_seq, Some(verdict_detail(verdict))));
         }
@@ -414,8 +481,9 @@ impl AdoptService {
         }
         let current_tree = self
             .filesystem
-            .tree_hash(&entity.canonical_path)
-            .map_err(|_| AdoptError::PlanStale)?;
+            .skill_observation_snapshot(&entity.canonical_path)
+            .map_err(|_| AdoptError::PlanStale)?
+            .content_hash;
         if current_tree != tree_hash {
             return Err(AdoptError::PlanStale);
         }
@@ -500,7 +568,11 @@ impl AdoptService {
                 frozen.entity_seq,
             )
             .map_err(|_| AdoptError::PlanStale)?;
-        if evidence.entity.canonical_path != frozen.canonical_entity {
+        if coordinator
+            .is_ignored_local_entity(&frozen.canonical_entity)
+            .map_err(|_| AdoptError::PlanStale)?
+            || evidence.entity.canonical_path != frozen.canonical_entity
+        {
             return Err(AdoptError::PlanStale);
         }
         let fingerprint = self
@@ -512,8 +584,9 @@ impl AdoptService {
         }
         let current_tree = self
             .filesystem
-            .tree_hash(&frozen.canonical_entity)
-            .map_err(|_| AdoptError::PlanStale)?;
+            .skill_observation_snapshot(&frozen.canonical_entity)
+            .map_err(|_| AdoptError::PlanStale)?
+            .content_hash;
         if current_tree != frozen.tree_hash {
             return Err(AdoptError::PlanStale);
         }
@@ -569,6 +642,7 @@ impl AdoptService {
         &self,
         evidence: &ScanEntityEvidence,
         agents_by_id: &HashMap<AgentId, crate::seams::adopt_store::AdoptAgent>,
+        moving: bool,
     ) -> Result<AppearanceInputs, AdoptError> {
         let entity = &evidence.entity;
         let mut appearances = Vec::with_capacity(evidence.appearances.len());
@@ -599,7 +673,7 @@ impl AdoptService {
                 kind: kind.clone(),
                 chain,
             });
-            if appearance.entry_kind == "symlink" {
+            if moving || appearance.entry_kind == "symlink" {
                 let root = evidence
                     .roots
                     .iter()
@@ -619,6 +693,18 @@ impl AdoptService {
                         }
                     }
                 }
+            }
+            if moving
+                && !activations
+                    .iter()
+                    .any(|step| step.entry_path == appearance.entry_path)
+            {
+                // Preserve scanned non-target entries as links without inventing Catalog distribution records.
+                activations.push(crate::seams::filesystem::AdoptActivationStep {
+                    target_root_id: String::new(),
+                    entry_path: appearance.entry_path.clone(),
+                    target_path: entity.canonical_path.clone(),
+                });
             }
         }
         Ok((appearances, evidence_rows, activations))

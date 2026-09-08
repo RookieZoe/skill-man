@@ -26,7 +26,7 @@ pub mod mutation;
 pub mod plan;
 pub mod qualifier;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -640,6 +640,54 @@ impl ScanCoordinator {
 
     /// Persist only a Local candidate selected from the current immutable Report.
     /// The caller supplies evidence identity, never a writable filesystem path.
+    /// A migration must leave every ownership/control zone, including aliases.
+    pub fn validate_local_destination(&self, parent: &Path) -> Result<(), ScanError> {
+        let home = self
+            .write_gate
+            .bound_home()
+            .map_err(|e| ScanError::NotWritable(e.to_string()))?;
+        let agents = self
+            .agent_store
+            .agent_configuration_snapshot()
+            .map_err(|e| ScanError::StoreUnavailable(e.to_string()))?;
+        let locks = self
+            .lock_store
+            .discover()
+            .map_err(|e| ScanError::StoreUnavailable(e.to_string()))?;
+        let mut zones = vec![home.path.clone(), self.app_state_path.clone()];
+        zones.extend(agents.roots.iter().map(|root| root.configured_path.clone()));
+        zones.extend(
+            locks
+                .iter()
+                .filter_map(|report| report.path.parent().map(Path::to_path_buf)),
+        );
+        for zone in zones {
+            let zone = self
+                .filesystem
+                .normalize_configured_path(&zone)
+                .map_err(|e| ScanError::StoreUnavailable(e.to_string()))?;
+            if parent.starts_with(&zone) || zone.starts_with(parent) {
+                return Err(ScanError::NotWritable(
+                    "Choose a folder outside Home, Agent and installer directories".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_ignored_local_entity(&self, path: &Path) -> Result<bool, ScanError> {
+        let bound = self.report_read_home()?;
+        let store = self
+            .factory
+            .store_for(&bound)
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;
+        Ok(store
+            .ignored_paths()
+            .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?
+            .iter()
+            .any(|ignored| ignored == path))
+    }
+
     pub fn ignore_local_candidate(
         &self,
         report_content_identity: &str,
@@ -673,9 +721,8 @@ impl ScanCoordinator {
         let path = evidence.verdict.canonical_path;
         if !paths.contains(&path) {
             paths.push(path);
-            // A parent fsync failure can occur after atomic replacement;
-            // conservatively invalidate old Adopt evidence before attempting the write.
-            self.mutation.bump();
+            // Ignore is a preference, not a mutation of scanned Skill files.
+            // Adopt checks this durable list again at plan and apply time.
             store
                 .write_ignored_paths(&paths)
                 .map_err(|error| ScanError::StoreUnavailable(error.to_string()))?;

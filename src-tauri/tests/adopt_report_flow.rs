@@ -245,6 +245,7 @@ fn plan_request(
         selections: vec![AdoptReportSelection {
             entity_ref,
             action: action.into(),
+            destination_parent: None,
         }],
     }
 }
@@ -319,6 +320,220 @@ fn plan_without_a_report_is_stale() {
         plan_service_err(&service),
         Err(AdoptError::PlanStale)
     ));
+}
+
+#[test]
+fn controlled_local_migration_previews_without_writes_then_moves_links_and_undoes() {
+    let home = BoundTestHome::new();
+    let (coordinator, agent) = setup_standard(&home);
+    let original = agent.root.join("relocate-me");
+    write_external_entity(&original, "Relocate");
+    for dependency in [".venv", "scripts/venv", "node_modules"] {
+        std::fs::create_dir_all(original.join(dependency)).unwrap();
+        std::fs::write(
+            original.join(dependency).join("installed.txt"),
+            "before preview",
+        )
+        .unwrap();
+    }
+    std::os::unix::fs::symlink("/usr/bin/python3", original.join(".venv/python")).unwrap();
+    write_external_entity(&agent.root.join("ignore-me"), "Ignore");
+    let original = canonical(&original);
+    let parent = home.path().join("Projects");
+    std::fs::create_dir_all(&parent).unwrap();
+    let parent = canonical(&parent);
+    let destination = parent.join("relocate-me");
+    let service = adopt_service(&home, coordinator.clone());
+    let summary = scan_and_wait(&coordinator);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
+    let verdict = rows
+        .iter()
+        .find_map(|row| match row {
+            ScanReportRow::SourceVerdict(row) if row.directory_names == ["relocate-me"] => {
+                Some(row)
+            }
+            _ => None,
+        })
+        .expect("migration candidate");
+    let ignored = rows
+        .iter()
+        .find_map(|row| match row {
+            ScanReportRow::SourceVerdict(row) if row.directory_names == ["ignore-me"] => Some(row),
+            _ => None,
+        })
+        .expect("ignored candidate");
+    let mut ignored_request = plan_request(
+        &summary,
+        entity_ref(&summary, ignored.entity_seq),
+        "local_link_with_move",
+    );
+    ignored_request.selections[0].destination_parent = Some(parent.clone());
+    let old_plan = service.plan_report(&ignored_request).unwrap();
+    coordinator
+        .ignore_local_candidate(
+            &summary.content_identity,
+            summary.generation,
+            ignored.entity_seq,
+        )
+        .unwrap();
+    assert!(
+        service.apply(&old_plan.plan_token).is_err(),
+        "an ignored item cannot execute an old plan"
+    );
+    assert!(
+        service.plan_report(&ignored_request).is_err(),
+        "an ignored item cannot create a new plan"
+    );
+    let mut request = plan_request(
+        &summary,
+        entity_ref(&summary, verdict.entity_seq),
+        "local_link_with_move",
+    );
+    request.selections[0].destination_parent = Some(parent);
+    let cancelled = service.plan_report(&request).expect("migration preview");
+    assert_eq!(cancelled.items[0].final_entity_path, destination);
+    assert_eq!(cancelled.items[0].activations[0].1, destination);
+    assert!(original.is_dir());
+    assert!(!destination.exists());
+    service.cancel(&cancelled.plan_token).unwrap();
+    assert!(original.is_dir());
+    let changed_plan = service.plan_report(&request).unwrap();
+    std::fs::write(original.join("SKILL.md"), "# Changed content\n").unwrap();
+    assert!(matches!(
+        service.apply(&changed_plan.plan_token),
+        Err(AdoptError::PlanStale)
+    ));
+    assert!(!destination.exists());
+    std::fs::write(original.join("SKILL.md"), "# Relocate\n").unwrap();
+    let plan = service.plan_report(&request).unwrap();
+    std::fs::write(original.join(".venv/installed.txt"), "after preview").unwrap();
+    let result = service.apply(&plan.plan_token).expect("apply migration");
+    assert!(result.items[0].adopted, "{:?}", result.items);
+    assert_eq!(std::fs::read_link(&original).unwrap(), destination);
+    assert_eq!(
+        std::fs::read_to_string(destination.join(".venv/installed.txt")).unwrap(),
+        "after preview"
+    );
+    assert_eq!(
+        std::fs::read_link(destination.join(".venv/python")).unwrap(),
+        PathBuf::from("/usr/bin/python3")
+    );
+    assert!(destination.join("scripts/venv/installed.txt").exists());
+    assert!(destination.join("node_modules/installed.txt").exists());
+    assert_eq!(
+        std::fs::read(destination.join("SKILL.md")).unwrap(),
+        b"# Relocate\n"
+    );
+    home.with_sql("verify Local Link", |connection| {
+        let kind: String = connection
+            .query_row(
+                "SELECT source_kind FROM skills WHERE directory_name = 'relocate-me'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "link");
+    });
+    let undo = service.undo(&result.operation_id).expect("undo");
+    assert!(undo.items[0].undone, "{:?}", undo.items);
+    assert!(
+        !std::fs::symlink_metadata(&original)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(original.join("SKILL.md").exists());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn migration_rejects_occupied_destination_and_rechecks_after_preview() {
+    let home = BoundTestHome::new();
+    let (coordinator, agent) = setup_standard(&home);
+    let original = agent.root.join("relocate-me");
+    write_external_entity(&original, "Relocate");
+    let parent = home.path().join("Projects");
+    std::fs::create_dir_all(&parent).unwrap();
+    let destination = parent.join("relocate-me");
+    let service = adopt_service(&home, coordinator.clone());
+    let summary = scan_and_wait(&coordinator);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
+    let ScanReportRow::SourceVerdict(verdict) = &rows[0] else {
+        panic!("candidate");
+    };
+    let mut request = plan_request(
+        &summary,
+        entity_ref(&summary, verdict.entity_seq),
+        "local_link_with_move",
+    );
+    request.selections[0].destination_parent = Some(parent);
+    let mut forbidden = request.clone();
+    forbidden.selections[0].destination_parent = Some(agent.root.clone());
+    assert!(service.plan_report(&forbidden).is_err());
+    forbidden.selections[0].destination_parent = Some(home.library_root.clone());
+    assert!(service.plan_report(&forbidden).is_err());
+    let plan = service.plan_report(&request).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("sentinel"), "preserve").unwrap();
+    assert!(service.plan_report(&request).is_err());
+    assert!(service.apply(&plan.plan_token).is_err());
+    assert_eq!(
+        std::fs::read_to_string(destination.join("sentinel")).unwrap(),
+        "preserve"
+    );
+    assert!(original.join("SKILL.md").exists());
+}
+
+#[test]
+fn migration_rolls_back_after_catalog_refuses_registration() {
+    let home = BoundTestHome::new();
+    let (coordinator, agent) = setup_standard(&home);
+    let original = agent.root.join("relocate-me");
+    write_external_entity(&original, "Relocate");
+    let parent = home.path().join("Projects");
+    std::fs::create_dir_all(&parent).unwrap();
+    let destination = parent.join("relocate-me");
+    let service = adopt_service(&home, coordinator.clone());
+    let summary = scan_and_wait(&coordinator);
+    let (rows, _) = page_section(
+        &coordinator,
+        &summary,
+        ScanReportSection::LocalCandidates,
+        64,
+    );
+    let ScanReportRow::SourceVerdict(verdict) = &rows[0] else {
+        panic!("candidate");
+    };
+    let mut request = plan_request(
+        &summary,
+        entity_ref(&summary, verdict.entity_seq),
+        "local_link_with_move",
+    );
+    request.selections[0].destination_parent = Some(parent);
+    let plan = service.plan_report(&request).unwrap();
+    home.with_sql("reject registration", |connection| {
+        connection.execute_batch("CREATE TRIGGER reject_migration BEFORE INSERT ON skills BEGIN SELECT RAISE(ABORT, 'injected catalog failure'); END;").unwrap();
+    });
+    let result = service.apply(&plan.plan_token).unwrap();
+    assert!(!result.items[0].adopted);
+    assert!(original.join("SKILL.md").exists());
+    assert!(
+        !std::fs::symlink_metadata(&original)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!destination.exists());
 }
 
 #[test]
@@ -676,6 +891,15 @@ fn incomplete_report_allows_only_keep_in_place_local_links() {
     // The controlled-zone entity requires a deliberate move-eligibility
     // intent: the plan surface refuses it with the Core closed reason.
     let move_seq = move_seq.expect("move-required candidate");
+    let mut migration = plan_request(
+        &summary,
+        entity_ref(&summary, move_seq),
+        "local_link_with_move",
+    );
+    migration.selections[0].destination_parent = Some(home.path().join("Projects"));
+    assert!(
+        matches!(service.plan_report(&migration), Err(AdoptError::Eligibility { code, .. }) if code == "scan_coverage_incomplete")
+    );
     let err = service
         .plan_report(&plan_request(
             &summary,
@@ -979,10 +1203,12 @@ fn conflict_set_requires_exactly_one_explicit_winner() {
             AdoptReportSelection {
                 entity_ref: entity_ref(&summary, member_seqs[0]),
                 action: ACTION_CONFLICT_WINNER.into(),
+                destination_parent: None,
             },
             AdoptReportSelection {
                 entity_ref: entity_ref(&summary, member_seqs[1]),
                 action: ACTION_CONFLICT_WINNER.into(),
+                destination_parent: None,
             },
         ],
     };
@@ -1058,10 +1284,12 @@ fn failed_item_is_isolated_from_successful_siblings() {
             AdoptReportSelection {
                 entity_ref: entity_ref(&summary, alpha_seq),
                 action: ACTION_LOCAL_LINK.into(),
+                destination_parent: None,
             },
             AdoptReportSelection {
                 entity_ref: entity_ref(&summary, beta_seq),
                 action: ACTION_LOCAL_LINK.into(),
+                destination_parent: None,
             },
         ],
     };

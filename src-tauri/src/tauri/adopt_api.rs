@@ -29,6 +29,7 @@ impl AdoptApi {
                     .map(|selection| crate::core::adopt::AdoptReportSelection {
                         entity_ref: selection.entity_ref,
                         action: selection.action,
+                        destination_parent: selection.destination_parent,
                     })
                     .collect(),
             })
@@ -129,6 +130,7 @@ mod tests {
             selections: vec![crate::tauri_adapter::dto::AdoptReportSelectionDto {
                 entity_ref: entity_ref.clone(),
                 action: "local_link".into(),
+                destination_parent: None,
             }],
         };
         let core = AdoptReportPlanRequest {
@@ -139,6 +141,7 @@ mod tests {
                 .map(|selection| AdoptReportSelection {
                     entity_ref: selection.entity_ref,
                     action: selection.action,
+                    destination_parent: selection.destination_parent,
                 })
                 .collect(),
         };

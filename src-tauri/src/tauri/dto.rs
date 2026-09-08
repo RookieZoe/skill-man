@@ -3586,6 +3586,8 @@ pub struct AdoptReportSelectionDto {
     #[serde(rename = "entityRef")]
     pub entity_ref: String,
     pub action: String,
+    #[serde(default)]
+    pub destination_parent: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

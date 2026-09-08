@@ -174,7 +174,7 @@ impl MacOsFileSystem {
         operation_id: &str,
         item: &AdoptJournalItem,
     ) -> Result<(), FileSystemError> {
-        if !matches!(item.kind, AdoptJournalKind::Migrate) {
+        if matches!(item.kind, AdoptJournalKind::Link) {
             return self.restore_uncommitted_adopt_appearances(item);
         }
         let original_path = item
@@ -301,6 +301,16 @@ impl MacOsFileSystem {
         ));
         let staged_exists = real_directory_exists(&item.staged_root)?;
         let final_exists = real_directory_exists(&item.final_entity_path)?;
+        if matches!(item.kind, AdoptJournalKind::MoveLink)
+            && final_exists
+            && item.installed_fingerprint.is_none()
+        {
+            return Err(FileSystemError::RecoveryRequired {
+                operation: "restore interrupted external Link migration",
+                path: item.final_entity_path.clone(),
+                message: "the destination exists without a durable installed identity; preserve both copies for recovery".into(),
+            });
+        }
         let temporary_exists = real_directory_exists(&temporary_path)?;
         let (source, expected_identity) = if item.installed_fingerprint.is_some() && final_exists {
             (&item.final_entity_path, item.installed_fingerprint.as_ref())
@@ -1544,6 +1554,13 @@ impl FileSystem for MacOsFileSystem {
 
     fn staged_tree_snapshot(&self, path: &Path) -> Result<StagedTreeSnapshot, FileSystemError> {
         staged_tree_snapshot_at(path)
+    }
+
+    fn skill_observation_snapshot(
+        &self,
+        path: &Path,
+    ) -> Result<StagedTreeSnapshot, FileSystemError> {
+        staged_tree_snapshot_with_policy(path, &[], true)
     }
 
     fn available_space(&self, path: &Path) -> Result<u64, FileSystemError> {
@@ -4432,7 +4449,8 @@ impl FileSystem for MacOsFileSystem {
                         let catalog_committed = adopted_entities.iter().any(|entity| {
                             entity.skill_id == item.skill_id
                                 && entity.final_entity_path == item.final_entity_path
-                                && (item.recorded_content_hash.is_empty()
+                                && (matches!(item.kind, AdoptJournalKind::MoveLink)
+                                    || item.recorded_content_hash.is_empty()
                                     || baselines.iter().any(|baseline| {
                                         baseline.skill_id == item.skill_id
                                             && baseline.recorded_content_hash
@@ -6199,12 +6217,12 @@ fn tree_hash_at(root: &Path) -> Result<String, FileSystemError> {
     Ok(staged_tree_snapshot_at(root)?.content_hash)
 }
 
-/// Streaming Scan Run tree walk (spec §3.6): mirrors `tree_hash_at`'s
-/// deterministic rules — each directory level is sorted by relative-path
+/// Streaming Scan Run observation: mirrors the observation snapshot's
+/// deterministic rules — entries are globally sorted by relative-path
 /// bytes, symlink targets are hashed raw and never followed, file lengths
 /// and contents are hashed with the same field framing and the same
 /// TOCTOU checks — while never materialising the full listing. The visitor
-/// sees every child entry; returning `false` stops the walk and yields a
+/// sees every non-dependency entry; returning `false` stops the walk and yields a
 /// partial hash (`None`) so the entity record carries a hash fault instead
 /// of pretending completeness.
 fn scan_tree_statistics_at(
@@ -6272,31 +6290,11 @@ fn scan_tree_walk(
     visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
     stopped: &mut bool,
 ) -> Result<(), FileSystemError> {
-    let mut children: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|source| FileSystemError::Io {
-        operation: "enumerate Scan tree",
-        path: directory.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| FileSystemError::Io {
-            operation: "enumerate Scan tree",
-            path: directory.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|source| FileSystemError::Io {
-            operation: "inspect Scan tree entry",
-            path: path.clone(),
-            source,
-        })?;
-        children.push((path, metadata));
-    }
-    children.sort_by(|(left, _), (right, _)| {
-        left.as_os_str()
-            .as_bytes()
-            .cmp(right.as_os_str().as_bytes())
-    });
-    for (path, metadata) in children {
+    // A byte-ordered frontier matches the full snapshot's global path order.
+    // Depth-first order differs for siblings such as `pkg` and `pkg-1`.
+    let mut pending = std::collections::BTreeMap::new();
+    enqueue_scan_children(directory, &mut pending)?;
+    while let Some((_, (path, metadata))) = pending.pop_first() {
         let relative = path
             .strip_prefix(root)
             .expect("walked entries remain inside their root")
@@ -6336,12 +6334,7 @@ fn scan_tree_walk(
             TreeScanEntryKind::Directory => {
                 hash_field(hasher, b"directory");
                 hash_field(hasher, relative.as_os_str().as_bytes());
-                scan_tree_walk(
-                    root, &path, hasher, file_count, byte_count, visitor, stopped,
-                )?;
-                if *stopped {
-                    return Ok(());
-                }
+                enqueue_scan_children(&path, &mut pending)?;
             }
             TreeScanEntryKind::Symlink { target } => {
                 hash_field(hasher, b"symlink");
@@ -6401,6 +6394,43 @@ fn scan_tree_walk(
     Ok(())
 }
 
+fn is_skill_dependency(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    // Never follow links to decide whether an entry is a dependency tree.
+    // Regular files with these names remain observable Skill content.
+    (metadata.is_dir() || metadata.file_type().is_symlink())
+        && matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".venv" | "venv" | "node_modules")
+        )
+}
+
+fn enqueue_scan_children(
+    directory: &Path,
+    pending: &mut std::collections::BTreeMap<Vec<u8>, (PathBuf, std::fs::Metadata)>,
+) -> Result<(), FileSystemError> {
+    for entry in fs::read_dir(directory).map_err(|source| FileSystemError::Io {
+        operation: "enumerate Scan tree",
+        path: directory.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| FileSystemError::Io {
+            operation: "enumerate Scan tree",
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|source| FileSystemError::Io {
+            operation: "inspect Scan tree entry",
+            path: path.clone(),
+            source,
+        })?;
+        if !is_skill_dependency(&path, &metadata) {
+            pending.insert(path.as_os_str().as_bytes().to_vec(), (path, metadata));
+        }
+    }
+    Ok(())
+}
+
 /// Tree hash that skips files whose name is in `excluded` (SQLite WAL/SHM
 /// sidecars are derived artifacts — the recovery manifest must not depend on
 /// whether a read-only probe recreated them). Directories and symlinks are
@@ -6416,6 +6446,14 @@ fn staged_tree_snapshot_at(root: &Path) -> Result<StagedTreeSnapshot, FileSystem
 fn staged_tree_snapshot_at_filtered(
     root: &Path,
     excluded: &[String],
+) -> Result<StagedTreeSnapshot, FileSystemError> {
+    staged_tree_snapshot_with_policy(root, excluded, false)
+}
+
+fn staged_tree_snapshot_with_policy(
+    root: &Path,
+    excluded: &[String],
+    observe_skill: bool,
 ) -> Result<StagedTreeSnapshot, FileSystemError> {
     let original_root = root.to_path_buf();
     let root_metadata = fs::symlink_metadata(root).map_err(|source| FileSystemError::Io {
@@ -6434,7 +6472,7 @@ fn staged_tree_snapshot_at_filtered(
         source,
     })?;
     let mut entries = Vec::new();
-    collect_tree_entries(&root, &root, &mut entries)?;
+    collect_tree_entries(&root, &root, &mut entries, observe_skill)?;
     entries.sort_by(|left, right| {
         left.as_os_str()
             .as_bytes()
@@ -6613,6 +6651,7 @@ fn collect_tree_entries(
     root: &Path,
     directory: &Path,
     entries: &mut Vec<PathBuf>,
+    observe_skill: bool,
 ) -> Result<(), FileSystemError> {
     for entry in fs::read_dir(directory).map_err(|source| FileSystemError::Io {
         operation: "enumerate Skill tree hash",
@@ -6634,9 +6673,12 @@ fn collect_tree_entries(
             path: path.clone(),
             source,
         })?;
+        if observe_skill && is_skill_dependency(&path, &metadata) {
+            continue;
+        }
         entries.push(relative);
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            collect_tree_entries(root, &path, entries)?;
+            collect_tree_entries(root, &path, entries, observe_skill)?;
         }
     }
     Ok(())

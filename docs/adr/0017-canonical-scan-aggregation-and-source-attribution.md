@@ -56,4 +56,14 @@ onboarding 与手动 Rescan 共用同一 Scan Report contract。onboarding 在 A
 
 ## Consequences
 
+### 显式迁移到外部 Local Link
+
+本地内容观察排除任意层级的 `.venv`、`venv`、`node_modules` 目录/符号链接子树，排除发生在下降和读取内容之前；同名普通文件仍计入。来源探测只使用 Skill 自身入口及向上探测，不从依赖子树发现来源。扫描统计与 Local Adopt 预览/执行复查采用同一个观察策略，哈希顺序为全局相对路径字节序，而非逐目录深度优先。Scan Store schema 4 使旧观察结果失效。
+
+观察快照与物理迁移快照分离：前者判断 Skill 是否变化；后者完整包含依赖，在执行前冻结并写入 Journal，以校验实际传输及回滚/恢复。预览到确认期间只有依赖内容变化不使本地迁移计划过期；真正 Skill 内容、入口身份、目标父目录及写入门禁仍复查。依赖符号链接按原始目标字符串保留，不跟随复制。复制进行中的物理数据不一致仍拒绝，不能以忽略规则掩盖数据损坏。
+
+`local_link_with_move` 与原地 `local_link` 是不同的计划操作。用户先选择稳定外部父目录；预览只读展示原路径、目标路径和受影响入口，取消不移动文件。目标不得位于 Bound Home、App state、Agent 或 installer 控制目录中，也不得覆盖已有同名目录。只有完整扫描覆盖才能生成迁移计划。
+
+确认时重新验证源实体、目标父目录身份和目标不存在，再通过持久化 journal 暂存原实体、验证复制内容、登记外部 Link 并替换原入口。新目录不成为 Home 内的 File Install。失败回滚；撤销须验证内容与对象身份，发生外部修改或中断身份不明时保留数据并进入 RecoveryRequired，不覆盖用户文件。成功后界面局部更新当前报告，不自动重新扫描；扫描事实与操作结果投影保持分离。
+
 扫描 DTO 必须区分 Root、appearance、canonical entity、source group、source member 与 conflict set，不能继续用一张逐路径候选表承担全部层级。对象 identity 只在 generation 内有效，Catalog 仍以稳定 Skill、Source 与路径事实为权威。部分扫描提高了健康 Root 的可用性，但所有会破坏未知 appearance 的操作都必须等待完整 coverage；这是局部继续与 fail-closed 所有权之间的明确取舍。

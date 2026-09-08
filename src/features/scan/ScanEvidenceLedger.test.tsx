@@ -1,7 +1,7 @@
 import { BackgroundOperations } from "../../ui/BackgroundOperations";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { createFixtureCatalogClient } from "../../test-fixtures/catalog";
 import { ScanEvidenceLedger } from "./ScanEvidenceLedger";
@@ -78,7 +78,10 @@ test("Rescan explains a closed write gate instead of reporting an internal error
   );
 });
 
-test("Local Link draft plans and applies; the batch stays undoable and finalizable", async () => {
+test("Local Link button plans its candidate directly; confirmation, undo and finalize remain separate", async () => {
+  if (LOCAL_CANDIDATE_ROW.kind !== "source_verdict")
+    throw new Error("Expected source verdict fixture");
+  const candidate = LOCAL_CANDIDATE_ROW;
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   const planned: Array<{ entityRef: string; action: string }> = [];
@@ -91,7 +94,19 @@ test("Local Link draft plans and applies; the batch stays undoable and finalizab
     return {
       planToken: "fixture-adopt-plan",
       reportGeneration,
-      items: [],
+      items: [
+        {
+          entityRef: candidate.entityRef,
+          action: "local_link",
+          directoryName: "prompt-linter",
+          canonicalEntity: candidate.canonicalPath,
+          finalEntityPath: "/managed/prompt-linter",
+          appearances: [],
+          activations: [],
+          applyable: true,
+          error: null,
+        },
+      ],
       canApply: true,
     };
   };
@@ -116,14 +131,18 @@ test("Local Link draft plans and applies; the batch stays undoable and finalizab
   client.finalizeAdopt = async (operationId) => {
     finalizedOperationId = operationId;
   };
+  const apply = vi.spyOn(client, "applyAdopt");
+  const rescan = vi.spyOn(client, "startRescan");
 
   render(<ScanEvidenceLedger client={client} />);
   await screen.findByText("Complete");
-  const include = await screen.findByRole("checkbox", { name: "Local Link" });
-  expect(screen.getByRole("button", { name: "Plan Adopt" })).toBeDisabled();
+  const include = await screen.findByRole("button", { name: "Local Link" });
+  expect(
+    screen.queryByRole("button", { name: "Plan Adopt" }),
+  ).not.toBeInTheDocument();
   await user.click(include);
-  await user.click(screen.getByRole("button", { name: "Plan Adopt" }));
-  await screen.findByText("Planned 0 Skill(s)");
+  await screen.findByText("Planned 1 Skill(s)");
+  expect(apply).not.toHaveBeenCalled();
   expect(planned).toEqual([
     {
       entityRef: "scan-report-v1:home:fixture-report-5:5:complete@5@1",
@@ -132,9 +151,26 @@ test("Local Link draft plans and applies; the batch stays undoable and finalizab
   ]);
   await user.click(screen.getByRole("button", { name: "Apply" }));
   await screen.findByText("Adopted prompt-linter");
+  expect(
+    within(screen.getByRole("region", { name: "Local sources" })).queryByRole(
+      "button",
+      { name: "Local Link" },
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(
+      screen.getByRole("region", { name: "Excluded · already managed" }),
+    ).getByText("prompt-linter"),
+  ).toBeInTheDocument();
+  expect(rescan).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Undo" }));
+  await user.click(await screen.findByRole("button", { name: "Local Link" }));
+  await user.click(await screen.findByRole("button", { name: "Apply" }));
+  await screen.findByText("Adopted prompt-linter");
   await user.click(screen.getByRole("button", { name: "Finalize" }));
   expect(finalizedOperationId).toBe("fixture-adopt-operation");
   await screen.findByText("Adopt finalized; results can no longer be undone.");
+  expect(rescan).not.toHaveBeenCalled();
 });
 
 test("typed eligibility refusal is rendered from the closed code", async () => {
@@ -156,8 +192,7 @@ test("typed eligibility refusal is rendered from the closed code", async () => {
   };
   render(<ScanEvidenceLedger client={client} />);
   await screen.findByText("Complete");
-  await user.click(await screen.findByRole("checkbox", { name: "Local Link" }));
-  await user.click(screen.getByRole("button", { name: "Plan Adopt" }));
+  await user.click(await screen.findByRole("button", { name: "Local Link" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Cannot adopt: scan_coverage_incomplete — a failed root left coverage incomplete",
   );

@@ -72,6 +72,8 @@ pub enum AdoptPlanKind {
     /// spec §8.2 controlled-zone move path; the report plan surface never
     /// produces it.
     Migrate,
+    /// Move to a user-selected external directory, then register a Local Link.
+    MoveLink,
     /// The entity stays outside; the Library records a pointer (Link).
     Link,
 }
@@ -145,6 +147,7 @@ struct PlannedAdoptItem {
     staged_root: PathBuf,
     source_snapshot: StagedTreeSnapshot,
     staged_snapshot: Option<StagedTreeSnapshot>,
+    destination_parent: Option<DirectoryFingerprint>,
     appearances: Vec<AdoptAppearance>,
     activations: Vec<AdoptActivationStep>,
     journal: AdoptJournalItem,
@@ -321,16 +324,22 @@ impl AdoptService {
         let mut planned_items = Vec::with_capacity(items.len());
         for item in items {
             let final_entity_path = match item.kind {
-                AdoptPlanKind::Link => item.final_entity_path.clone(),
+                AdoptPlanKind::Link | AdoptPlanKind::MoveLink => item.final_entity_path.clone(),
                 AdoptPlanKind::Migrate => self
                     .library_root_for_context(&write_context)?
                     .join("skills")
                     .join(&item.directory_name),
             };
-            let source_snapshot = self
-                .filesystem
-                .staged_tree_snapshot(&item.canonical_entity)?;
-            if matches!(item.kind, AdoptPlanKind::Migrate) {
+            let source_snapshot = if matches!(item.kind, AdoptPlanKind::Migrate) {
+                self.filesystem
+                    .staged_tree_snapshot(&item.canonical_entity)?
+            } else {
+                // Preview observes Skill content, not a changing installed
+                // environment. Freeze the full transfer payload at execution.
+                self.filesystem
+                    .skill_observation_snapshot(&item.canonical_entity)?
+            };
+            if !matches!(item.kind, AdoptPlanKind::Link) {
                 crate::core::import::validate_staged_tree(
                     self.filesystem.as_ref(),
                     &source_snapshot,
@@ -356,7 +365,7 @@ impl AdoptService {
                     )),
                 });
             }
-            if matches!(item.kind, AdoptPlanKind::Migrate) {
+            if !matches!(item.kind, AdoptPlanKind::Link) {
                 let required_space = source_snapshot
                     .total_file_bytes
                     .saturating_mul(2)
@@ -375,12 +384,12 @@ impl AdoptService {
                 self.clock.unix_epoch_nanos(),
                 self.next_skill_id.fetch_add(1, Ordering::Relaxed)
             ));
-            let recorded_content_hash = if matches!(item.kind, AdoptPlanKind::Migrate) {
+            let recorded_content_hash = if !matches!(item.kind, AdoptPlanKind::Link) {
                 source_snapshot.content_hash.clone()
             } else {
                 String::new()
             };
-            let staged_root = if matches!(item.kind, AdoptPlanKind::Migrate) {
+            let staged_root = if !matches!(item.kind, AdoptPlanKind::Link) {
                 staging_operation_root.join(&item.directory_name)
             } else {
                 PathBuf::new()
@@ -388,13 +397,15 @@ impl AdoptService {
             let journal = AdoptJournalItem {
                 skill_id: skill_id.0.clone(),
                 directory_name: item.directory_name.clone(),
-                kind: if matches!(item.kind, AdoptPlanKind::Migrate) {
+                kind: if matches!(item.kind, AdoptPlanKind::MoveLink) {
+                    AdoptJournalKind::MoveLink
+                } else if matches!(item.kind, AdoptPlanKind::Migrate) {
                     AdoptJournalKind::Migrate
                 } else {
                     AdoptJournalKind::Link
                 },
                 staged_root: staged_root.clone(),
-                source_fingerprint: matches!(item.kind, AdoptPlanKind::Migrate)
+                source_fingerprint: (!matches!(item.kind, AdoptPlanKind::Link))
                     .then_some(source_snapshot.root.clone()),
                 staged_fingerprint: source_snapshot.root.clone(),
                 final_entity_path: final_entity_path.clone(),
@@ -422,6 +433,13 @@ impl AdoptService {
                 phase: AdoptItemPhase::Planned,
                 installed_fingerprint: None,
             };
+            let destination_parent = if matches!(item.kind, AdoptPlanKind::MoveLink) {
+                Some(self.filesystem.directory_fingerprint(
+                    final_entity_path.parent().ok_or(AdoptError::PlanStale)?,
+                )?)
+            } else {
+                None
+            };
             let planned_item = PlannedAdoptItem {
                 skill_id: skill_id.clone(),
                 directory_name: item.directory_name.clone(),
@@ -437,6 +455,7 @@ impl AdoptService {
                 staged_root,
                 source_snapshot,
                 staged_snapshot: None,
+                destination_parent,
                 appearances: item.appearances,
                 activations: item.activations,
                 journal,
@@ -517,7 +536,7 @@ impl AdoptService {
         let write_context = batch.write_context.clone();
         let _write_guard = self.acquire_write_guard(&write_context)?;
         self.verify_report_plan(&batch.frozen_report, &batch.items)?;
-        self.preflight_batch(&batch)?;
+        self.preflight_batch(&mut batch)?;
         let mut journal = batch.journal.clone();
         let has_adopt_items = !journal.items.is_empty();
         if has_adopt_items {
@@ -632,17 +651,81 @@ impl AdoptService {
         })
     }
 
-    fn preflight_batch(&self, batch: &PlannedAdoptBatch) -> Result<(), AdoptError> {
-        for item in &batch.items {
-            let current = self
+    fn preflight_batch(&self, batch: &mut PlannedAdoptBatch) -> Result<(), AdoptError> {
+        for (index, item) in batch.items.iter_mut().enumerate() {
+            let observation = self
                 .filesystem
-                .staged_tree_snapshot(&item.canonical_entity)
-                .map_err(|_| AdoptError::PlanStale)?;
-            if current != item.source_snapshot {
+                .skill_observation_snapshot(&item.canonical_entity)?;
+            let current = if matches!(item.kind, AdoptPlanKind::Link) {
+                observation.clone()
+            } else {
+                self.filesystem
+                    .staged_tree_snapshot(&item.canonical_entity)
+                    .map_err(|_| AdoptError::PlanStale)?
+            };
+            // Re-observe after reading the physical payload as well: a real
+            // Skill edit during that read must not be adopted as dependency churn.
+            let observation = if matches!(item.kind, AdoptPlanKind::Link) {
+                observation
+            } else {
+                self.filesystem
+                    .skill_observation_snapshot(&item.canonical_entity)?
+            };
+            if current.root != item.source_snapshot.root {
                 return Err(AdoptError::PlanStale);
             }
-            if matches!(item.kind, AdoptPlanKind::Migrate) {
-                crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &current)
+            if matches!(item.kind, AdoptPlanKind::Migrate) && current != item.source_snapshot {
+                return Err(AdoptError::PlanStale);
+            }
+            if observation.content_hash != item.frozen.tree_hash {
+                return Err(AdoptError::PlanStale);
+            }
+            // Freeze the complete physical payload only at execution. Dependency
+            // churn since preview is not a Skill change, but every transferred
+            // byte is still verified and recorded for rollback/recovery.
+            item.source_snapshot = current.clone();
+            if !matches!(item.kind, AdoptPlanKind::Link) {
+                batch.journal.items[index].recorded_content_hash = current.content_hash.clone();
+                let required = current
+                    .total_file_bytes
+                    .saturating_mul(2)
+                    .saturating_add(100 * 1024 * 1024);
+                if self
+                    .filesystem
+                    .available_space(&self.active_library_root()?)?
+                    < required
+                {
+                    return Err(AdoptError::Validation(
+                        "Insufficient free space for the complete migration payload".into(),
+                    ));
+                }
+            }
+            if let Some(parent) = &item.destination_parent {
+                if self
+                    .filesystem
+                    .directory_fingerprint(&parent.canonical_path)?
+                    != *parent
+                    || !matches!(
+                        self.filesystem
+                            .activation_snapshot(&item.final_entity_path)?,
+                        ActivationEntrySnapshot::Missing
+                    )
+                {
+                    return Err(AdoptError::PlanStale);
+                }
+                self.scan_coordinator
+                    .as_ref()
+                    .ok_or(AdoptError::PlanStale)?
+                    .validate_local_destination(&parent.canonical_path)
+                    .map_err(|_| AdoptError::PlanStale)?;
+            }
+            if !matches!(item.kind, AdoptPlanKind::Link) {
+                let validation = if matches!(item.kind, AdoptPlanKind::MoveLink) {
+                    &observation
+                } else {
+                    &current
+                };
+                crate::core::import::validate_staged_tree(self.filesystem.as_ref(), validation)
                     .map_err(adopt_validation)?;
             }
         }
@@ -658,9 +741,11 @@ impl AdoptService {
         if matches!(item.kind, AdoptPlanKind::Link) {
             let current = self
                 .filesystem
-                .staged_tree_snapshot(&item.canonical_entity)
+                .skill_observation_snapshot(&item.canonical_entity)
                 .map_err(|_| AdoptError::PlanStale)?;
-            if current != item.source_snapshot {
+            if current.root != item.source_snapshot.root
+                || current.content_hash != item.frozen.tree_hash
+            {
                 return Err(AdoptError::PlanStale);
             }
             journal.items[index].phase = AdoptItemPhase::Staged;
@@ -690,7 +775,13 @@ impl AdoptService {
         {
             return Err(AdoptError::PlanStale);
         }
-        crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &staged_snapshot)
+        let validation = if matches!(item.kind, AdoptPlanKind::MoveLink) {
+            self.filesystem
+                .skill_observation_snapshot(&item.staged_root)?
+        } else {
+            staged_snapshot.clone()
+        };
+        crate::core::import::validate_staged_tree(self.filesystem.as_ref(), &validation)
             .map_err(adopt_validation)?;
         item.staged_snapshot = Some(staged_snapshot);
         Ok(())
@@ -703,13 +794,35 @@ impl AdoptService {
         item: &PlannedAdoptItem,
     ) -> Result<u64, AdoptError> {
         if let Some(snapshot) = &item.staged_snapshot {
-            let fingerprint = self.filesystem.install_staged_skill(
-                &item.staged_root,
-                &item.final_entity_path,
-                &self.active_library_root()?,
-                &journal.operation_id,
-                snapshot,
-            )?;
+            let fingerprint = if let Some(parent) = &item.destination_parent {
+                self.filesystem.copy_tree_verified_nofollow(
+                    &item.staged_root,
+                    &item.final_entity_path,
+                    parent,
+                )?;
+                if self
+                    .filesystem
+                    .directory_fingerprint(&parent.canonical_path)?
+                    != *parent
+                {
+                    return Err(AdoptError::PlanStale);
+                }
+                let installed = self
+                    .filesystem
+                    .staged_tree_snapshot(&item.final_entity_path)?;
+                if installed.content_hash != snapshot.content_hash {
+                    return Err(AdoptError::PlanStale);
+                }
+                installed.root
+            } else {
+                self.filesystem.install_staged_skill(
+                    &item.staged_root,
+                    &item.final_entity_path,
+                    &self.active_library_root()?,
+                    &journal.operation_id,
+                    snapshot,
+                )?
+            };
             let entry = &mut journal.items[index];
             entry.installed_fingerprint = Some(fingerprint);
             entry.phase = AdoptItemPhase::EntityInstalled;
@@ -725,20 +838,24 @@ impl AdoptService {
             library_entry_path: item
                 .staged_snapshot
                 .as_ref()
+                .filter(|_| matches!(item.kind, AdoptPlanKind::Migrate))
                 .map(|_| item.final_entity_path.clone()),
             final_entity_path: item.final_entity_path.clone(),
             recorded_content_hash: item
                 .staged_snapshot
                 .as_ref()
+                .filter(|_| matches!(item.kind, AdoptPlanKind::Migrate))
                 .map(|snapshot| snapshot.content_hash.clone()),
             original_path: item
                 .staged_snapshot
                 .as_ref()
+                .filter(|_| matches!(item.kind, AdoptPlanKind::Migrate))
                 .map(|_| item.canonical_entity.clone()),
             original_filename: item.directory_name.clone(),
             activations: item
                 .activations
                 .iter()
+                .filter(|activation| !activation.target_root_id.is_empty())
                 .map(|activation| AdoptedActivation {
                     target_root_id: activation.target_root_id.clone(),
                     expected_entry_path: activation.entry_path.clone(),
@@ -818,7 +935,7 @@ impl AdoptService {
         journal_item: &AdoptJournalItem,
         operation_id: &str,
     ) -> Result<(), AdoptError> {
-        if matches!(item.kind, AdoptPlanKind::Migrate) {
+        if !matches!(item.kind, AdoptPlanKind::Link) {
             match self.real_tree_snapshot(&item.canonical_entity)? {
                 Some(snapshot) if snapshot.content_hash == item.source_snapshot.content_hash => {}
                 Some(_) => {
@@ -999,7 +1116,7 @@ impl AdoptService {
     /// original path is a normal per-item skip; missing or changed managed
     /// content requires journal recovery and must stop the write session.
     fn preflight_undo_item(&self, item: &PlannedAdoptItem) -> Result<(), AdoptError> {
-        if matches!(item.kind, AdoptPlanKind::Migrate) {
+        if !matches!(item.kind, AdoptPlanKind::Link) {
             let snapshot = self
                 .real_tree_snapshot(&item.final_entity_path)?
                 .ok_or_else(|| {

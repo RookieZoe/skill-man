@@ -5216,7 +5216,6 @@ details[open] > .source-group-summary::before {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-top: 1px solid var(--border, oklch(0.86 0.01 250));
   background: color-mix(
     in oklab,
     var(--panel, oklch(0.99 0.003 250)) 92%,
@@ -5224,6 +5223,10 @@ details[open] > .source-group-summary::before {
   );
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.scan-evidence-ledger[data-expanded="false"] {
+  border-top: 1px solid var(--border, oklch(0.86 0.01 250));
 }
 
 .scan-ledger-bar {
@@ -5315,6 +5318,52 @@ details[open] > .source-group-summary::before {
   gap: var(--space-1);
   flex: 1 1 260px;
   min-width: 0;
+}
+
+.scan-migration-preview {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--divider);
+  overflow-wrap: anywhere;
+}
+
+.scan-migration-preview dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+
+.scan-migration-preview dt {
+  color: var(--text-secondary);
+}
+
+.local-migration-dialog {
+  width: min(100%, 640px);
+  max-height: calc(100dvh - 104px);
+  display: flex;
+  flex-direction: column;
+}
+
+.local-migration-dialog .enable-sheet-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-6) var(--space-5);
+}
+
+.local-migration-dialog > header,
+.local-migration-dialog > footer {
+  flex-shrink: 0;
+}
+
+.local-migration-dialog .import-source-field {
+  padding: var(--space-3) 0;
+}
+
+.scan-migration-preview dd {
+  margin: 0;
+  font-family: var(--font-mono);
 }
 
 .scan-summary-row-text {

@@ -35,13 +35,15 @@ use thiserror::Error;
 
 use crate::core::home::BoundHome;
 
-/// v3: the Report carries source classification (§8.2/§8.1, ADR-0017) —
+/// v4: observation hashes prune dependency subtrees and use global path-byte
+/// ordering. Pre-v4 evidence must not be reused for local migration plans.
+/// Since v3 the Report carries source classification (§8.2/§8.1, ADR-0017) —
 /// Local candidates, aggregated Git Repository Source hints, Local↔Local
 /// Conflict Sets, typed attention items, Excluded/already-Managed rows and
 /// per-candidate typed operation eligibility, plus the consumer Agents of
-/// every Root coverage row. A v2 artifact fails closed as `No cached
+/// every Root coverage row. An older artifact fails closed as `No cached
 /// report`.
-pub const SCAN_STORE_SCHEMA_VERSION: u32 = 3;
+pub const SCAN_STORE_SCHEMA_VERSION: u32 = 4;
 pub const SCAN_ARTIFACT_VERSION_PREFIX: &str = "scan-artifact-v1";
 
 /// Generation-bound file-system object identity (vol/device + inode,

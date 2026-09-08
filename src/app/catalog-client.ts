@@ -1588,15 +1588,17 @@ export interface AdoptActivation {
 
 /**
  * Closed Adopt actions (spec §4.6): the only planable operations of the
- * terminal Scan Report surface are the keep-in-place Local Link and an
- * explicit Conflict Set winner.
+ * terminal Scan Report surface are keep-in-place Local Link, explicitly
+ * confirmed external Link migration, and an explicit Conflict Set winner.
  */
-export type AdoptAction = "local_link" | "conflict_winner";
+export type AdoptAction =
+  "local_link" | "local_link_with_move" | "conflict_winner";
 
 /** One explicit selection of the report plan request. */
 export interface AdoptReportSelection {
   entityRef: string;
   action: AdoptAction;
+  destinationParent?: string;
 }
 
 export interface AdoptPlanItem {

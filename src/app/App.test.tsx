@@ -255,8 +255,7 @@ test("scan Adopt and Undo refresh the Library without navigation", async () => {
   await screen.findByRole("heading", { name: "skill-authoring" });
   await expandLibrary();
   await user.click(await screen.findByRole("button", { name: "Scan report" }));
-  await user.click(await screen.findByRole("checkbox", { name: "Local Link" }));
-  await user.click(screen.getByRole("button", { name: "Plan Adopt" }));
+  await user.click(await screen.findByRole("button", { name: "Local Link" }));
   await user.click(await screen.findByRole("button", { name: "Apply" }));
   await waitFor(() =>
     expect(
@@ -1117,7 +1116,7 @@ test("scan summary Git source group hands the group to source management", async
     name: "Fetch Latest and Manage",
   });
   expect(
-    screen.queryByRole("checkbox", { name: /Local Link/ }),
+    screen.queryByRole("button", { name: /Local Link/ }),
   ).not.toBeInTheDocument();
   await user.click(manage);
   expect(

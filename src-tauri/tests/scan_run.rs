@@ -662,10 +662,14 @@ fn ignoring_a_local_candidate_persists_and_excludes_only_that_entity() {
             candidate.entity_seq,
         )
         .unwrap();
-    assert_eq!(mutation.generation(), 1);
+    assert_eq!(
+        mutation.generation(),
+        0,
+        "ignoring a candidate does not change Skill files"
+    );
     assert_eq!(
         coordinator.snapshot().current_report.freshness,
-        ReportFreshness::Stale
+        ReportFreshness::Current
     );
     // A new store instance reads the durable choice, not process-local state.
     let bound = home.write_gate.bound_home().unwrap();

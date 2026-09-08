@@ -80,6 +80,14 @@ export function createScanPreviewClient() {
     entitySeq: index + 1,
     canonicalPath: `/dev/projects/team-shared-agent-skills/long-directory-for-layout-verification/skill-${index + 1}`,
     directoryNames: [`skill-${index + 1}`],
+    // Cover both local operation variants in the visible preview.
+    operations: [
+      {
+        operation: index === 0 ? "local_link_with_move" : "local_link",
+        allowed: true,
+        closedReason: null,
+      },
+    ],
   }));
   client.publishScanReport(
     {

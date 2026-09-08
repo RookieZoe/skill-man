@@ -14,6 +14,49 @@ const showLayoutMatrixFrame =
 const root = createRoot(document.getElementById("root")!);
 
 async function renderApplication() {
+  if (import.meta.env.DEV && params.get("fixture") === "migration") {
+    const { LocalMigrationDialog } =
+      await import("./features/scan/LocalMigrationDialog");
+    const { createFixtureCatalogClient } =
+      await import("./test-fixtures/catalog");
+    const client = createFixtureCatalogClient();
+    client.planAdopt = async () => ({
+      planToken: "preview",
+      reportGeneration: 1,
+      canApply: true,
+      items: [
+        {
+          entityRef: "preview",
+          action: "local_link_with_move",
+          directoryName: "example-skill",
+          canonicalEntity: "/Users/example/.agents/skills/example-skill",
+          finalEntityPath: "/Users/example/Codes/local-skills/example-skill",
+          appearances: [],
+          activations: [
+            {
+              entryPath: "/Users/example/.agents/skills/example-skill",
+              targetPath: "/Users/example/Codes/local-skills/example-skill",
+            },
+          ],
+          applyable: true,
+          error: null,
+        },
+      ],
+    });
+    root.render(
+      <LocalMigrationDialog
+        client={client}
+        entityRef="preview"
+        generation={1}
+        name="example-skill"
+        pickDirectory={async () => "/Users/example/Codes/local-skills"}
+        formatError={String}
+        onResolved={() => {}}
+        onClose={() => root.render(null)}
+      />,
+    );
+    return;
+  }
   if (
     import.meta.env.DEV &&
     params.has("fixture") &&

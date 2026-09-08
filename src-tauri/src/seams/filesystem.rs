@@ -383,6 +383,8 @@ pub struct RelocateJournal {
 pub enum AdoptJournalKind {
     /// The entity was moved into the Library (file Install).
     Migrate,
+    /// Relocated to a user-owned external directory and registered as Link.
+    MoveLink,
     /// The entity stays outside; the Library records a pointer (Link).
     Link,
 }
@@ -2054,22 +2056,29 @@ pub trait FileSystem: Send + Sync {
         Ok(())
     }
 
-    /// Stream the full tree of one entity for a Scan Run (spec §3.6
-    /// "unlimited streaming evidence"): yields every child entry with the
-    /// same rules as `staged_tree_snapshot` (targets never followed),
-    /// accumulates the identical `tree-sha256-v1` content hash and the
-    /// file/byte counts, and never requires the whole listing in memory.
-    /// The visitor returns `false` to stop the walk (cancel/supersede),
-    /// yielding a partial hash (`None`) so the entity record carries a hash
-    /// fault instead of pretending completeness. The default implementation
-    /// buffers through `staged_tree_snapshot` for test stubs; the system
-    /// adapter walks the tree level by level.
+    /// Logical local Skill evidence: prune exact `.venv`, `venv` and
+    /// `node_modules` directory/link subtrees at any depth, without following
+    /// links. Same-named regular files remain content. This is NOT a transfer
+    /// snapshot: migrations, Git releases and recovery retain full snapshots.
+    /// The default is for dependency-free test stubs; system adapters must
+    /// implement pruning before descending or reading dependency contents.
+    fn skill_observation_snapshot(
+        &self,
+        path: &Path,
+    ) -> Result<StagedTreeSnapshot, FileSystemError> {
+        self.staged_tree_snapshot(path)
+    }
+
+    /// Stream the same observation policy/hash as `skill_observation_snapshot`,
+    /// in globally sorted relative path byte order. Returning false stops the
+    /// visitor and produces no complete hash. The default buffers for stubs;
+    /// the system adapter retains only the traversal frontier and a read buffer.
     fn scan_tree_statistics(
         &self,
         path: &Path,
         visitor: &mut dyn FnMut(&TreeScanEntry) -> Result<bool, FileSystemError>,
     ) -> Result<TreeScanStatistics, FileSystemError> {
-        let snapshot = self.staged_tree_snapshot(path)?;
+        let snapshot = self.skill_observation_snapshot(path)?;
         let mut file_count = 0_u64;
         let mut byte_count = 0_u64;
         for entry in &snapshot.entries {
