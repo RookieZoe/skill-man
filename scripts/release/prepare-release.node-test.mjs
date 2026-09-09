@@ -26,9 +26,12 @@ test("prepare-release creates deterministic updater metadata and checksums", asy
   assert.deepEqual(JSON.parse(first.stdout), {
     tag: "v0.1.0",
     version: "0.1.0",
-    dmg: fixture.dmgPath,
-    updater: fixture.updaterPath,
-    signature: fixture.signaturePath,
+    dmg: join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.dmg"),
+    updater: join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.app.tar.gz"),
+    signature: join(
+      fixture.outputDir,
+      "Skill-Man-v0.1.0-aarch64.app.tar.gz.sig",
+    ),
     latestJson: join(fixture.outputDir, "latest.json"),
     checksums: join(fixture.outputDir, "SHA256SUMS"),
   });
@@ -40,30 +43,50 @@ test("prepare-release creates deterministic updater metadata and checksums", asy
       download_size: 20,
       platforms: {
         "darwin-aarch64": {
-          signature: "trusted-signature",
-          url: "https://github.com/RookieZoe/skill-man/releases/download/v0.1.0/Skill%20Man.app.tar.gz",
+          signature: (await readFile(fixture.signaturePath, "utf8")).trim(),
+          url: "https://github.com/RookieZoe/skill-man/releases/download/v0.1.0/Skill-Man-v0.1.0-aarch64.app.tar.gz",
         },
       },
     },
     null,
     2,
   )}\n`;
-  const expectedChecksums = [
-    "a6efebc25a28594915378dea13438990b454b9371de2ea8e43f8ef0ccfba0d59  Skill Man.app.tar.gz",
-    "6b607348036613db98866fe3382e91f6b74129ef58cc976238e9be3383579360  Skill Man.app.tar.gz.sig",
-    "64f4c937b90fbaa324986081a85fab50d886b86f6fd3a03b23926cfefe0b5c83  Skill Man_0.1.0_aarch64.dmg",
-    "ef1a242eefae3a56963bc47795f982576550167c4127d4ace36ea681f6184810  latest.json",
-    "",
-  ].join("\n");
 
   assert.equal(
     await readFile(join(fixture.outputDir, "latest.json"), "utf8"),
     expectedLatest,
   );
-  assert.equal(
-    await readFile(join(fixture.outputDir, "SHA256SUMS"), "utf8"),
-    expectedChecksums,
+  const checksums = await readFile(
+    join(fixture.outputDir, "SHA256SUMS"),
+    "utf8",
   );
+  assert.match(
+    checksums,
+    /a6efebc25a28594915378dea13438990b454b9371de2ea8e43f8ef0ccfba0d59 {2}Skill-Man-v0.1.0-aarch64.app.tar.gz/,
+  );
+  assert.match(
+    checksums,
+    /64f4c937b90fbaa324986081a85fab50d886b86f6fd3a03b23926cfefe0b5c83 {2}Skill-Man-v0.1.0-aarch64.dmg/,
+  );
+  const checkRoot = join(fixture.root, "checksum-check");
+  await mkdir(checkRoot);
+  for (const path of [
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.app.tar.gz"),
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.app.tar.gz.sig"),
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.dmg"),
+    join(fixture.outputDir, "latest.json"),
+    join(fixture.outputDir, "SHA256SUMS"),
+  ]) {
+    await writeFile(
+      join(checkRoot, path.split("/").at(-1)),
+      await readFile(path),
+    );
+  }
+  const verified = spawnSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], {
+    cwd: checkRoot,
+    encoding: "utf8",
+  });
+  assert.equal(verified.status, 0, verified.stderr);
 
   const second = runCli(fixture);
   assert.equal(second.status, 0, second.stderr);
@@ -73,8 +96,17 @@ test("prepare-release creates deterministic updater metadata and checksums", asy
   );
   assert.equal(
     await readFile(join(fixture.outputDir, "SHA256SUMS"), "utf8"),
-    expectedChecksums,
+    checksums,
   );
+});
+
+test("prepare-release rejects an archive changed after Tauri signing", async (t) => {
+  const fixture = await createReleaseFixture(t);
+  await writeFile(fixture.updaterPath, "tampered updater");
+  const result = runCli(fixture);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /signature/i);
+  await assert.rejects(readFile(join(fixture.outputDir, "latest.json")));
 });
 
 test("prepare-release validates synchronized versions before artifacts exist", async (t) => {
@@ -211,6 +243,7 @@ async function createReleaseFixture(t, { version = "0.1.0" } = {}) {
     "First signed release.\n",
   );
 
+  await signFixture(root, updaterPath, version);
   return {
     root,
     outputDir: join(root, "prepared"),
@@ -261,3 +294,89 @@ async function writeText(root, relativePath, value) {
   await writeFile(path, value);
   return path;
 }
+
+async function signFixture(root, updaterPath, version) {
+  const keyPath = join(root, "test.key");
+  const signer = fileURLToPath(
+    new URL("../../node_modules/.bin/tauri", import.meta.url),
+  );
+  const generated = spawnSync(
+    signer,
+    ["signer", "generate", "--ci", "-p", "", "-w", keyPath],
+    { encoding: "utf8" },
+  );
+  assert.equal(generated.status, 0, "test key generation failed");
+  const signed = spawnSync(
+    signer,
+    ["signer", "sign", "-f", keyPath, "-p", "", updaterPath],
+    { encoding: "utf8" },
+  );
+  assert.equal(signed.status, 0, "test artifact signing failed");
+  await writeFixture(root, "src-tauri/tauri.conf.json", {
+    version,
+    plugins: {
+      updater: { pubkey: (await readFile(`${keyPath}.pub`, "utf8")).trim() },
+    },
+  });
+}
+
+test("release read-back rejects metadata pointing at a different archive", async (t) => {
+  const fixture = await createReleaseFixture(t);
+  const prepared = runCli(fixture);
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const files = [
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.app.tar.gz"),
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.app.tar.gz.sig"),
+    join(fixture.outputDir, "Skill-Man-v0.1.0-aarch64.dmg"),
+    join(fixture.outputDir, "latest.json"),
+    join(fixture.outputDir, "SHA256SUMS"),
+  ];
+  const assetsDir = join(fixture.root, "readback");
+  await mkdir(assetsDir);
+  const assets = [];
+  for (const file of files) {
+    const name = file.split("/").at(-1);
+    const bytes = await readFile(file);
+    await writeFile(join(assetsDir, name), bytes);
+    assets.push({
+      name,
+      size: bytes.length,
+      browser_download_url: `https://github.com/RookieZoe/skill-man/releases/download/v0.1.0/${encodeURIComponent(name)}`,
+    });
+  }
+  const releasePath = join(fixture.root, "release.json");
+  await writeFile(
+    releasePath,
+    JSON.stringify({
+      tag_name: "v0.1.0",
+      draft: true,
+      prerelease: false,
+      body: "First signed release.",
+      assets,
+    }),
+  );
+  const cli = fileURLToPath(new URL("./verify-release.mjs", import.meta.url));
+  const args = [
+    cli,
+    "--repo-root",
+    fixture.root,
+    "--tag",
+    "v0.1.0",
+    "--repository",
+    "RookieZoe/skill-man",
+    "--assets-dir",
+    assetsDir,
+    "--release-json",
+    releasePath,
+  ];
+  const good = spawnSync(process.execPath, args, { encoding: "utf8" });
+  assert.equal(good.status, 0, good.stderr);
+  const metadata = JSON.parse(
+    await readFile(join(assetsDir, "latest.json"), "utf8"),
+  );
+  metadata.platforms["darwin-aarch64"].url =
+    "https://example.com/unreviewed.app.tar.gz";
+  await writeFile(join(assetsDir, "latest.json"), JSON.stringify(metadata));
+  const bad = spawnSync(process.execPath, args, { encoding: "utf8" });
+  assert.equal(bad.status, 1);
+});

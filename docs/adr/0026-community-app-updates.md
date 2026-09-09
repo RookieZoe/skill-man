@@ -7,7 +7,7 @@
 ## 状态与承接
 
 - 已实现：v0.1.0 为正式社区版，Ad-hoc 签名，当前仍通过 Release 页面手动下载更新。维护者已确认干净 macOS 环境的社区版安装、首次启动及手动放行路径通过。
-- 已决策、待实施：[#106](https://github.com/RookieZoe/skill-man/issues/106) 启用社区 Tauri 更新密钥和签名更新包通道。
+- 通道实施与证据：[#106](https://github.com/RookieZoe/skill-man/issues/106) 承接社区 Tauri 密钥、签名构建、Draft 附件回读及公开 Latest 校验。代码就绪不等于真实 Actions 构建、维护者密钥备份和公开附件验收完成；各项证据以票据记录为准。
 - 待原生验收：[#107](https://github.com/RookieZoe/skill-man/issues/107) 依赖 #106，验证两个真实版本间的升级、重启和手动回滚。
 - 暂缓：[#105](https://github.com/RookieZoe/skill-man/issues/105) 以 needs-info 跟踪 Developer ID 签名、公证及 Apple 凭据，不阻塞上述社区通道。
 

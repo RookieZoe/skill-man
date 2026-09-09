@@ -4,19 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing vX.Y.Z tag on the selected main commit
+        description: Existing vX.Y.Z tag; dispatch on the same tag (must be on main)
         required: true
         type: string
-      prerelease:
-        description: Mark the reviewed release as a pre-release
-        required: true
-        type: boolean
-        default: true
-      replace_existing:
-        description: Replace an existing release with newly built assets in draft state
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -28,18 +18,14 @@ concurrency:
 env:
   RELEASE_TAG: ${{ inputs.tag }}
   RELEASE_REPOSITORY: ${{ github.repository }}
-  RELEASE_PRERELEASE: ${{ inputs.prerelease }}
-  REPLACE_EXISTING: ${{ inputs.replace_existing }}
 
 jobs:
-  build:
-    if: github.ref == 'refs/heads/main'
+  verify:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
     timeout-minutes: 90
-    permissions:
-      contents: write
     steps:
-      - name: Check out selected main commit
+      - name: Check out selected tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -64,18 +50,26 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/release/prepare-release.mjs --repo-root . --tag "$RELEASE_TAG" --check-version-only
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
           test "$(gh api "repos/$RELEASE_REPOSITORY" --jq .visibility)" = public
           test -s LICENSE
           test -s "docs/releases/$RELEASE_TAG.md"
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
           const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-          if (config.bundle.macOS.signingIdentity !== '-' || config.bundle.createUpdaterArtifacts !== false) {
-            throw new Error('Community builds require ad-hoc signing and no updater artifacts');
+          const release = JSON.parse(readFileSync('src-tauri/tauri.release.conf.json', 'utf8'));
+          if (config.bundle.macOS.signingIdentity !== '-' || release.bundle.createUpdaterArtifacts !== true) {
+            throw new Error('Community releases require ad-hoc signing and updater artifacts');
           }
-          if (config.plugins.updater.pubkey !== 'UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE') {
-            throw new Error('Community builds require manual updates');
+          const key = config.plugins.updater.pubkey.trim();
+          if (!key || key === 'UPDATER_PUBLIC_KEY_REQUIRED_FOR_RELEASE' || release.plugins?.updater?.pubkey) {
+            throw new Error('A real updater public key must live in the base configuration only');
+          }
+          const endpoint = `https://github.com/${process.env.RELEASE_REPOSITORY}/releases/latest/download/latest.json`;
+          if (JSON.stringify(config.plugins.updater.endpoints) !== JSON.stringify([endpoint])) {
+            throw new Error('Community updates require the single Latest endpoint');
           }
           NODE
 
@@ -85,10 +79,57 @@ jobs:
       - name: Run full verification
         run: npm run ci:local
 
-      - name: Build ad-hoc Apple Silicon app and DMG
-        run: npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg
+  build:
+    needs: verify
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment:
+      name: community-release
+    permissions:
+      contents: write
+    steps:
+      - name: Check out verified tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Verify packaged application and prepare checksums
+      - name: Revalidate checkout before accessing signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          node scripts/release/prepare-release.mjs --repo-root . --tag "$RELEASE_TAG" --check-version-only
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-05
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build ad-hoc app and signed updater archive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+
+      - name: Verify packaged application and updater contents
         shell: bash
         run: |
           set -euo pipefail
@@ -98,6 +139,7 @@ jobs:
           codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
           test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${RELEASE_TAG#v}"
           dmg_files=("$bundle/dmg/"*.dmg)
           test "${#dmg_files[@]}" = 1
           test -f "${dmg_files[0]}"
@@ -107,49 +149,51 @@ jobs:
           hdiutil attach "${dmg_files[0]}" -nobrowse -readonly -mountpoint "$mount_point"
           mounted_app="$mount_point/Skill Man.app"
           codesign --verify --deep --strict --verbose=2 "$mounted_app"
-          cmp "$app/Contents/MacOS/$executable" "$mounted_app/Contents/MacOS/$executable"
+          diff -qr "$app" "$mounted_app"
           hdiutil detach "$mount_point"
           trap - EXIT
-          mkdir -p "$RUNNER_TEMP/community-release"
-          cp "${dmg_files[0]}" "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg"
-          cd "$RUNNER_TEMP/community-release"
-          shasum -a 256 ./*.dmg > SHA256SUMS
-          shasum -a 256 -c SHA256SUMS
+          archive_root="$(mktemp -d "$RUNNER_TEMP/skill-man-updater.XXXXXX")"
+          tar -xzf "$bundle/macos/Skill Man.app.tar.gz" -C "$archive_root"
+          codesign --verify --deep --strict --verbose=2 "$archive_root/Skill Man.app"
+          diff -qr "$app" "$archive_root/Skill Man.app"
 
-      - name: Prepare draft Release for artifact review
+      - name: Verify updater signature and prepare metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/prepare-release.mjs \
+            --repo-root . --tag "$RELEASE_TAG" --repository "$RELEASE_REPOSITORY" \
+            --artifacts-dir src-tauri/target/aarch64-apple-darwin/release/bundle \
+            --release-notes "docs/releases/$RELEASE_TAG.md" \
+            --output-dir "$RUNNER_TEMP/community-release" > "$RUNNER_TEMP/release-manifest.json"
+
+      - name: Create formal Draft Release for artifact review
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(gh api "repos/$RELEASE_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$GITHUB_SHA"
-          existing_id="$(gh api "repos/$RELEASE_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
-          title="Skill Man $RELEASE_TAG"
-          if [[ "$RELEASE_PRERELEASE" == true ]]; then
-            title="$title · 社区测试版"
-          fi
-          if [[ -n "$existing_id" ]]; then
-            test "$REPLACE_EXISTING" = true
-            gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
-              --jq '.assets[].name' | sort > "$RUNNER_TEMP/existing-assets.txt"
-            printf '%s\n' SHA256SUMS "Skill-Man-${RELEASE_TAG}-aarch64.dmg" | sort > "$RUNNER_TEMP/expected-assets.txt"
-            diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/existing-assets.txt"
-            gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
-              --draft=true --prerelease="$RELEASE_PRERELEASE" --latest=false \
-              --title "$title" --notes-file "docs/releases/$RELEASE_TAG.md"
-            gh release upload "$RELEASE_TAG" \
-              "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
-              "$RUNNER_TEMP/community-release/SHA256SUMS" \
-              --repo "$RELEASE_REPOSITORY" --clobber
-          else
-            gh release create "$RELEASE_TAG" \
-              "$RUNNER_TEMP/community-release/Skill-Man-${RELEASE_TAG}-aarch64.dmg" \
-              "$RUNNER_TEMP/community-release/SHA256SUMS" \
-              --repo "$RELEASE_REPOSITORY" --verify-tag --draft --prerelease="$RELEASE_PRERELEASE" --latest=false \
-              --title "$title" --notes-file "docs/releases/$RELEASE_TAG.md"
-          fi
-          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
-            --json isDraft,isPrerelease,assets > "$RUNNER_TEMP/release-readback.json"
-          jq -e --argjson prerelease "$RELEASE_PRERELEASE" \
-            '.isDraft == true and .isPrerelease == $prerelease and (.assets | length == 2)' \
-            "$RUNNER_TEMP/release-readback.json"
+          manifest="$RUNNER_TEMP/release-manifest.json"
+          gh release create "$RELEASE_TAG" \
+            "$(jq -er .dmg "$manifest")" \
+            "$(jq -er .updater "$manifest")" \
+            "$(jq -er .signature "$manifest")" \
+            "$(jq -er .latestJson "$manifest")" \
+            "$(jq -er .checksums "$manifest")" \
+            --repo "$RELEASE_REPOSITORY" --verify-tag --draft --prerelease=false --latest=false \
+            --title "Skill Man $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md"
+
+      - name: Read back every Draft attachment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          jq -e '.draft == true and .prerelease == false and (.assets | length == 5)' "$RUNNER_TEMP/release.json"
+          downloaded="$RUNNER_TEMP/draft-readback"
+          mkdir -p "$downloaded"
+          gh release download "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --dir "$downloaded"
+          node scripts/release/verify-release.mjs --repo-root . --tag "$RELEASE_TAG" \
+            --repository "$RELEASE_REPOSITORY" --assets-dir "$downloaded" --release-json "$RUNNER_TEMP/release.json"

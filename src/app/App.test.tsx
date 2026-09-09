@@ -1228,6 +1228,14 @@ test("downloads an available app update before asking to install and restart", a
   expect(dialog).toHaveTextContent("Current version 0.1.0");
   expect(dialog).toHaveTextContent("Adds signed, verified app updates.");
   expect(dialog).toHaveTextContent("12 MB");
+  expect(dialog).toHaveTextContent("Open Anyway");
+  expect(
+    within(dialog).getByRole("link", { name: "Download manually" }),
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/RookieZoe/skill-man/releases/latest",
+  );
+  expect(finishDownload).toBeUndefined();
 
   await user.click(
     within(dialog).getByRole("button", { name: "Download update" }),
@@ -1502,6 +1510,10 @@ test("closes the app update sheet with Escape and restores background focus", as
     name: "Download update",
   });
   expect(downloadButton).toHaveFocus();
+  await user.tab();
+  expect(
+    within(dialog).getByRole("link", { name: "Download manually" }),
+  ).toHaveFocus();
   await user.tab();
   expect(within(dialog).getByRole("button", { name: "Not now" })).toHaveFocus();
   await user.tab();

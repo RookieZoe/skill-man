@@ -2,9 +2,17 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import process from "node:process";
+import { verifyUpdaterSignature } from "./updater-signature.mjs";
 
 try {
   const options = parseArguments(process.argv.slice(2));
@@ -60,9 +68,23 @@ async function prepareRelease(options) {
   if (signature.length === 0) {
     throw new Error("updater signature must not be empty");
   }
+  const config = await readJson(
+    join(options.repoRoot, "src-tauri", "tauri.conf.json"),
+  );
+  await verifyUpdaterSignature(
+    updaterPath,
+    signature,
+    config.plugins?.updater?.pubkey?.trim(),
+  );
 
   const updaterSize = (await stat(updaterPath)).size;
-  const updaterName = basename(updaterPath);
+  // GitHub normalizes spaces and special characters on upload. Publish
+  // deterministic safe names while preserving the signed archive bytes.
+  const artifactStem = `Skill-Man-${options.tag}-aarch64`;
+  const updaterName = `${artifactStem}.app.tar.gz`;
+  const preparedUpdater = join(options.outputDir, updaterName);
+  const preparedSignature = `${preparedUpdater}.sig`;
+  const preparedDmg = join(options.outputDir, `${artifactStem}.dmg`);
   const latest = {
     version,
     notes,
@@ -77,14 +99,17 @@ async function prepareRelease(options) {
   const latestContent = `${JSON.stringify(latest, null, 2)}\n`;
 
   await mkdir(options.outputDir, { recursive: true });
+  await copyFile(updaterPath, preparedUpdater);
+  await copyFile(signaturePath, preparedSignature);
+  await copyFile(dmgPath, preparedDmg);
   const latestPath = join(options.outputDir, "latest.json");
   const checksumsPath = join(options.outputDir, "SHA256SUMS");
   await writeFile(latestPath, latestContent);
 
   const checksumEntries = [
-    [basename(updaterPath), await sha256File(updaterPath)],
-    [basename(signaturePath), await sha256File(signaturePath)],
-    [basename(dmgPath), await sha256File(dmgPath)],
+    [basename(preparedUpdater), await sha256File(preparedUpdater)],
+    [basename(preparedSignature), await sha256File(preparedSignature)],
+    [basename(preparedDmg), await sha256File(preparedDmg)],
     ["latest.json", sha256(latestContent)],
   ].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   const checksums = `${checksumEntries
@@ -95,9 +120,9 @@ async function prepareRelease(options) {
   return {
     tag: options.tag,
     version,
-    dmg: dmgPath,
-    updater: updaterPath,
-    signature: signaturePath,
+    dmg: preparedDmg,
+    updater: preparedUpdater,
+    signature: preparedSignature,
     latestJson: latestPath,
     checksums: checksumsPath,
   };

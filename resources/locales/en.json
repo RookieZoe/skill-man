@@ -771,6 +771,8 @@
   "library.app_update.no_notes": "No release notes provided.",
   "library.app_update.downloading": "Downloading and verifying the signed archive…",
   "library.app_update.ready": "Download verified. Install and restart Skill Man now?",
+  "library.app_update.gatekeeper": "After updating, macOS may ask you to allow Skill Man again. In System Settings → Privacy & Security, choose Open Anyway, then reopen the app. If updating fails, download and install the release manually.",
+  "library.app_update.manual_download": "Download manually",
   "library.app_update.failed": "App update failed",
   "library.app_update.cancelling": "Cancelling…",
   "library.app_update.cancel_download": "Cancel download",

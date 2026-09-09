@@ -771,6 +771,8 @@
   "library.app_update.no_notes": "未提供发布说明。",
   "library.app_update.downloading": "正在下载并验证已签名归档…",
   "library.app_update.ready": "下载已验证。现在安装并重新启动 Skill Man？",
+  "library.app_update.gatekeeper": "更新后，macOS 可能要求再次放行 Skill Man。请在「系统设置 → 隐私与安全性」中选择「仍要打开」，然后重新打开应用。若更新失败，可手动下载并安装正式版本。",
+  "library.app_update.manual_download": "手动下载",
   "library.app_update.failed": "应用更新失败",
   "library.app_update.cancelling": "正在取消…",
   "library.app_update.cancel_download": "取消下载",

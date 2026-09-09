@@ -1,27 +1,58 @@
 # Skill Man 发布手册
 
-> 社区更新的新决策见 [ADR-0026](adr/0026-community-app-updates.md)：#106 将启用无 Apple 凭据的 Tauri 更新通道，#107 验收真实升级和手动回滚；目前尚未完成。下文“无 Apple 凭据的社区 Release”仍描述当前手动更新工作流，其禁止 updater 产物的约束由 #106 实施时调整。Apple 签名通道独立保留，由 #105 暂缓跟踪。
+本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md) 与 [ADR-0026](adr/0026-community-app-updates.md)。仅支持 Apple Silicon / macOS 13+。社区通道使用 Ad-hoc App 签名和独立的 Tauri 更新包签名；Developer ID 通道另需 Apple 凭据。两个工作流均手动触发、只创建 Draft，维护者核对后才 Publish。
 
-本手册落实 [ADR-0006](adr/0006-macos-distribution-and-updates.md)：Skill Man 只发布 Apple Silicon / macOS 13+ 版本。两条工作流都由维护者手动触发，只创建 Draft；核对后才发布。
+v0.1.0 已发布产物没有 updater 公钥，继续通过 Release 页面手动下载。仓库新增的社区签名通道不改变该历史产物；首次接入必须手动安装带公钥的较新基线版。#106 的真实 Actions 构建、发布附件校验和维护者备份确认，以及 #107 的升级验收，必须分别记录，不能由代码或本地 CI 推断完成。
 
-## 无 Apple 凭据的社区 Release
+## 社区签名更新通道
 
-此通道不需要 Apple 或 updater secrets。先公开仓库、检查提交历史中的敏感内容，确认 README、MIT LICENSE、截图和 `docs/releases/vX.Y.Z.md` 已提交。基础 Tauri 配置必须保留 `signingIdentity: "-"`、`createUpdaterArtifacts: false` 和 updater 公钥 sentinel，原生应用使用手动更新。设置中的“检查更新”仅查询公开 GitHub Release 元数据（包含预发布版本），发现新版后打开对应 Release 页面；不会下载或安装更新，也不使用 updater 公钥。
+### 密钥与受保护环境
 
-1. 在 Apple Silicon Mac 上运行 `npm run ci:local`，确认通过并提交发布改动。
-2. 同步 main 后，在该 commit 创建并推送严格的 `vX.Y.Z` tag。版本字段必须与 tag 一致。
-3. 从 main 手动触发 Community Release：
+- 长期 Tauri updater 公钥仅写入基础 `src-tauri/tauri.conf.json`，供前端构建和原生 adapter 使用同一来源。`tauri.release.conf.json` 只开启更新包产物，不覆盖公钥；本地普通开发构建不要求私钥。
+- 加密私钥与密码存入 `community-release` Environment 的 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，不使用普通仓库 Secrets，不提交或输出私钥。
+- Environment 必须配置维护者 required reviewer，Deployment branches and tags 只允许 `v*` **tag**。单维护者仓库可由维护者本人审核；保留这项现实限制，不声称阻止自审。禁止绕过审核。
+- 维护者另把加密私钥、公钥和密码保存到受控离线加密介质或密码管理器，检查可恢复性并确认。仅有本机副本、Secrets 名称或 CI 成功不算备份完成。私钥丢失不得关闭验签；轮换需先用旧密钥发布可信过渡版本。
+- 无需 Apple Developer ID、公证或 Apple secrets。Apple 通道仍由 #105 独立跟踪。
+
+### 构建与 Draft 审阅
+
+1. 在 Apple Silicon Mac 运行 `npm run ci:local` 并提交；日常验证不运行 GitHub Actions。正式发布时，先同步所有版本字段、准备 `docs/releases/vX.Y.Z.md`，再推送 main 与相同 commit 的严格 `vX.Y.Z` tag。首次带公钥基线版本必须高于已公开的 v0.1.0，不覆盖历史 tag 或公开 Release。
+2. 在该 **tag** 上明确触发发布构建：
 
    ```sh
-   gh workflow run prerelease.yml --ref main -f tag=v0.1.0 -f prerelease=false -f replace_existing=true
+   gh workflow run prerelease.yml --ref vX.Y.Z -f tag=vX.Y.Z
    ```
 
-4. 工作流在 macOS runner 上跑完整验证、构建 Ad-hoc app 和 DMG、验证签名完整性和 arm64 架构，挂载 DMG 比对包内可执行文件，生成校验和，再创建 Draft Release。
-5. 下载 Draft 的 DMG 和 SHA256SUMS，执行 `shasum -a 256 -c SHA256SUMS`，确认包内版本与签名正确。默认不会覆盖已有 Release。维护者明确要求重发同一 tag 时，可传 `replace_existing=true`；工作流只在构建和验证成功后将原 Release 转为 Draft，再替换两个附件，等待审核。
-6. 核对发布说明中的未公证、手动更新和人工验收限制，预发布保持非 Latest；正式社区版使用 `prerelease=false` 构建，审核附件后执行 `gh release edit vX.Y.Z --draft=false --prerelease=false --latest`。只能有 DMG 和 SHA256SUMS 两个附件，不上传 latest.json 或 updater 包。
-7. 未登录 GitHub 下载公开附件并再次校验。干净 macOS 用户或 VM 的浏览器下载、首次启动、手动放行与基本功能验收由维护者完成并记录；未完成时必须在 Release notes 明示，不能宣称已通过普通 Release 门禁。
+   文件名沿用 `prerelease.yml`，工作流名为 Community Release。它校验 dispatch ref、实际 checkout、tag、main ancestry 和各版本字段；先在不接触 Secrets 的 job 验证，再等待 `community-release` 人工审核后构建。
+3. 构建 Ad-hoc App、DMG、签名 `.app.tar.gz` 与 `.sig`。验证 arm64、版本和 codesign，比较 DMG／更新包内 App 与原构建内容。`prepare-release.mjs` 用基础配置中的公钥验证真实签名，再生成 `latest.json` 和 SHA256SUMS。
+4. 创建 `draft=true`、`prerelease=false`、尚非 Latest 的 Release，一次上传五件附件。工作流不覆盖已有 Release；失败 Draft 需维护者先检查再明确删除重跑。不会自动 Publish。
+5. 工作流下载所有 Draft 附件，通过 `verify-release.mjs` 核对完整集合、Release notes、版本、URL、包大小、签名和校验和；仅比较 metadata 字节不足以替代附件回读。
+6. 维护者审核五件附件、App 内容和发布说明，并完成适用的干净环境验收。社区发布说明须包含下节用户说明及未完成的原生验收项。审核完成后才发布为正式 Latest：
 
-用户首次打开可能需要在「系统设置 → 隐私与安全性」中选择「仍要打开」，见 [Apple 官方说明](https://support.apple.com/en-us/102445)。不建议关闭整个 Gatekeeper。公司管理的 Mac 可能禁止手动放行。
+   ```sh
+   gh release edit vX.Y.Z --draft=false --prerelease=false --latest
+   node scripts/release/verify-release.mjs --repo-root . --repository RookieZoe/skill-man --tag vX.Y.Z --public
+   ```
+
+   在对应 tag checkout 运行校验；`--public` 不携带 GitHub token，读取 Latest、下载全部附件并验证固定 metadata 入口。校验失败时该发布不能视为更新通道就绪，需先停止推广并调查。Draft 审阅前的本地校验可以使用下载目录和 GitHub REST Release JSON：
+
+   ```sh
+   node scripts/release/verify-release.mjs --repo-root . --repository RookieZoe/skill-man --tag vX.Y.Z --assets-dir /path/to/assets --release-json /path/to/release.json
+   ```
+
+### 用户说明与恢复
+
+只接收正式 Latest，排除 Draft 和 Pre-release。应用保留每日检查冷却与偏好，下载前确认，完整验签后再次确认安装重启；不自动下载或强制安装。取消或验签失败不会进入安装。
+
+社区 App 尚未经 Apple 公证。首次安装或更新后，macOS 可能要求在「系统设置 → 隐私与安全性」中选择「仍要打开」，随后重新打开应用；见 [Apple 说明](https://support.apple.com/en-us/102445)。不关闭 Gatekeeper，也不自动移除 quarantine。受管理的 Mac 可能禁止放行，不能承诺所有 macOS 免提示。
+
+下载、验签或安装失败时保留应用内错误及[正式 Release 手动下载入口](https://github.com/RookieZoe/skill-man/releases/latest)。先按说明恢复启动；若需要 Manual App Rollback，只能手动安装与现有数据格式兼容的上一版，不降级数据库或恢复 Home 数据快照。
+
+### 两个真实版本的验收方法（#107）
+
+先发布并手动安装带同一公钥的基线版，再按相同步骤发布版本严格递增、数据兼容的目标版。例如未来可用 v0.1.1 → v0.1.2；这是版本安排示例，不表示这两个版本已发布或兼容性已验收。
+
+使用真实 GitHub Latest 链完成下载确认、取消、错误签名、二次安装确认、重启和兼容版本手动回滚。错误产物只用于受控测试，不污染公开 Latest。保留浏览器下载 quarantine，记录机型、macOS、安装目录权限、两个 commit／产物校验和、Library／Home 绑定／设置前后状态，以及是否出现管理员授权或再次放行。实际结果由 #107 承接，v0.1.0 → 带公钥基线版的手动安装不算自动更新通过。
 
 ## 普通 Release：签名与公证
 
@@ -89,7 +120,7 @@ git push origin v0.1.0
 - `latest.json`；
 - `SHA256SUMS`。
 
-`prepare-release.mjs` 对产物树中的符号链接、缺失/重复/额外架构产物、空签名、空 release notes 和任一版本漂移都 fail closed。其输出不含时间戳，因此同一组输入会生成相同的 metadata 与 checksums。
+`prepare-release.mjs` 对产物树中的符号链接、缺失/重复/额外架构产物、无效或不匹配签名、空 release notes 和任一版本漂移都 fail closed。三个输入产物会以 `Skill-Man-vX.Y.Z-aarch64` 为前缀复制到输出目录；上传使用返回的路径，避免 GitHub 规范化空格导致文件名漂移。复制不改变已签名的 archive 字节。其输出不含时间戳，因此同一组输入会生成相同的 metadata 与 checksums。
 
 `latest.json` 只包含 `darwin-aarch64` 通道。顶层 `download_size` 是 `.app.tar.gz` 的精确字节数，供更新确认界面在开始下载前展示；`notes` 与 Draft Release notes 使用同一份生成结果。固定入口是：
 
@@ -97,7 +128,7 @@ git push origin v0.1.0
 https://github.com/RookieZoe/skill-man/releases/latest/download/latest.json
 ```
 
-GitHub 的 `latest` 不包含 Draft 或 Prerelease。因此需要接入 updater 的 0.x 签名测试版必须发布为普通 Release，不能勾选 “This is a pre-release”；社区测试版不接入该通道。
+GitHub 的 `latest` 不包含 Draft 或 Prerelease。因此需要接入 updater 的 0.x 签名测试版必须发布为普通 Release，不能勾选 “This is a pre-release”；社区正式版使用同一 Latest 通道。
 
 ## 人工 Publish Gate
 

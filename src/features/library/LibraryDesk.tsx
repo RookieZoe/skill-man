@@ -2251,6 +2251,7 @@ function PreferencesSheet({
         ) : (
           <CommunityUpdateControl check={() => client.checkCommunityUpdate()} />
         )}
+        {appUpdatesAvailable() ? <AppUpdateHelp /> : null}
         {warning ? (
           <div
             className="activation-warning operation-message operation-message--warning"
@@ -2279,6 +2280,19 @@ function PreferencesSheet({
   );
 }
 
+function AppUpdateHelp() {
+  const { t } = useLocale();
+  return (
+    <div className="community-update-status">
+      <p>{t("library.app_update.gatekeeper")}</p>
+      <RepositoryLink
+        url="https://github.com/RookieZoe/skill-man/releases/latest"
+        label={t("library.app_update.manual_download")}
+      />
+    </div>
+  );
+}
+
 function AppUpdateSheet({
   panel,
   onDownload,
@@ -2291,6 +2305,7 @@ function AppUpdateSheet({
   onClose: () => void;
 }) {
   const { t, locale } = useLocale();
+  const sheetRef = useRef<HTMLElement>(null);
   const cancelButton = useRef<HTMLButtonElement>(null);
   const primaryButton = useRef<HTMLButtonElement>(null);
   const update = panel.update;
@@ -2318,20 +2333,19 @@ function AppUpdateSheet({
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape" && !blocksDismissal) onClose();
-      if (
-        event.key === "Tab" &&
-        !event.shiftKey &&
-        document.activeElement === primaryButton.current
-      ) {
-        event.preventDefault();
-        cancelButton.current?.focus();
-      } else if (
-        event.key === "Tab" &&
-        event.shiftKey &&
-        document.activeElement === cancelButton.current
-      ) {
-        event.preventDefault();
-        primaryButton.current?.focus();
+      if (event.key === "Tab") {
+        const controls = sheetRef.current?.querySelectorAll<HTMLElement>(
+          "a[href],button:not([disabled])",
+        );
+        const first = controls?.[0];
+        const last = controls?.[controls.length - 1];
+        if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        }
       }
     }
     document.addEventListener("keydown", handleKeyDown);
@@ -2348,6 +2362,7 @@ function AppUpdateSheet({
       }}
     >
       <section
+        ref={sheetRef}
         className="activation-sheet app-update-sheet"
         role="dialog"
         aria-modal="true"
@@ -2385,6 +2400,7 @@ function AppUpdateSheet({
             <dd>{update.releaseNotes || t("library.app_update.no_notes")}</dd>
           </div>
         </dl>
+        <AppUpdateHelp />
         {isReady ? (
           <div
             className="app-update-ready operation-message operation-message--success"

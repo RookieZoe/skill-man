@@ -1,22 +1,21 @@
 # macOS 签名、公证、发布与应用更新策略
 
-> 2026-09-08：社区正式版、无 Apple 凭据的 Tauri 更新通道及其验收边界已由 [ADR-0026](0026-community-app-updates.md) 明确修订。下文保留历史决策；社区版仅 Pre-release、禁止 updater 及其与 Apple 凭据绑定的限制不再适用。Apple 签名通道自身的门禁仍有效。
+Skill Man 通过 **GitHub Releases** 分发 macOS 应用，采用 **MIT** 许可证。永久 Bundle Identifier 为 `io.github.rookiezoe.skillman`。
 
-Skill Man 通过 **GitHub Releases** 分发 macOS 应用。社区测试版采用 Ad-hoc 签名和手动更新；Developer ID 签名、公证版本使用 Tauri v2 官方 updater。首个公开测试版前开源，采用 **MIT** 许可证。永久 Bundle Identifier 为 `io.github.rookiezoe.skillman`。
+## 社区正式版通道（ADR-0026 修订）
 
-## 社区测试版通道（2026-09-08 修订）
+无 Apple Developer 凭据时，社区版可用 Ad-hoc 签名发布正式 Latest。更新包使用独立的 Tauri 密钥签名；App 的 Ad-hoc 签名不等于 Developer ID 签名或公证。
 
-维护者尚无 Apple Developer 账号或 Developer ID Application 证书时，允许公开发布 Ad-hoc 签名、未经 Apple 公证的社区测试版。该决定替代本 ADR 原先对公开测试版也强制要求 Apple 凭据的限制。
+- 只发布 Apple Silicon / macOS 13+ DMG、签名 `.app.tar.gz`、`.sig`、`latest.json` 和 SHA256SUMS。
+- 只消费正式 Latest；Draft 和 Pre-release 不进入更新通道。
+- 公钥在基础 Tauri 配置中，前后端可用性使用同一来源。缺失公钥的历史版本继续手动更新，不伪装成 updater 可用。
+- 私钥及密码只进入受保护的 `community-release` Environment，要求维护者审核和发布 tag 限制；由维护者保留离线恢复副本。与 Apple credentials 独立。
+- 明确触发 tag 发布构建，验证实际 checkout、main ancestry 和严格版本一致性；验签并回读五件附件后保留 Draft，维护者审核再 Publish。
+- 日常 CI 使用 `npm run ci:local`；GitHub 托管构建用于明确触发的真实发布。
+- v0.1.0 没有公钥，不能自举更新。先手动安装带公钥的基线版，再验证两个严格递增、数据兼容版本之间的更新。
+- 允许 macOS 更新后再次要求「仍要打开」，必须预先提示、给出操作说明及手动下载兜底；不关闭 Gatekeeper 或自动清除 quarantine。
 
-- 只发布 Apple Silicon / macOS 13+ DMG 和 SHA256SUMS，不发布 updater 包或 latest.json。
-- 使用 GitHub Pre-release，不设为 Latest；应用版本仍使用 X.Y.Z。
-- GitHub Actions 的 Community Pre-release 工作流由维护者手动触发，先验证选定 main commit 与已有 tag 完全一致，跑完整 CI，再构建并创建 Draft。
-- 核对 Actions 结果、下载附件并验证校验和与包内应用后，可以发布为 Pre-release；发布说明必须列明未公证、手动更新，以及仍待人工完成的干净用户首次启动验收。
-- 原生应用在公钥缺失或为 sentinel 时不自动检查应用更新，设置显示手动下载入口；生产 updater adapter 同时阻止网络检查。浏览器 fixture 可以继续演示更新流程。
-- 已保存的更新偏好不被修改，未来配置真实公钥后恢复原有偏好。公钥必须保存在基础 Tauri 配置中，与前端构建使用同一来源。
-- GitHub 托管构建仅用于明确触发的发布；日常 CI 仍使用本地 ci:local。
-
-下文的 Developer ID、公证和真实 updater 升级门禁继续适用于普通 Release，社区测试版不能作为这些门禁已通过的证据。
+完整社区合同见 [ADR-0026](0026-community-app-updates.md)，操作步骤见[发布手册](../release.md)。#106 的通道与产物证据、#107 的真实升级和 Manual App Rollback 证据分别记录。以下 Apple 身份、公证与免手动放行门禁仅适用于 Developer ID 通道。
 
 ## 平台与产物
 
@@ -26,9 +25,9 @@ GitHub Releases 是唯一权威发布源。所有 updater 可接收的 0.x 公�
 
 ## Apple 身份与 Release Gate
 
-当前维护者尚未加入 Apple Developer Program。开发阶段不因此受阻：本地使用未签名或 ad-hoc 构建，普通 CI 只运行测试和非发布构建；公开社区测试版须经过上述专用通道。
+当前维护者尚未加入 Apple Developer Program。开发阶段不因此受阻：本地使用未签名或 ad-hoc 构建，普通 CI 只运行测试和非发布构建；公开社区正式版须经过上述专用通道。
 
-**首个普通 Release 的 Release Gate** 是：
+**Developer ID 通道首个 Release 的 Release Gate** 是：
 
 1. Apple Developer Program 会员已激活（当前官方费用为 $99/年）；
 2. 创建 `Developer ID Application` 证书并导出带私钥的 `.p12`；
@@ -36,7 +35,7 @@ GitHub Releases 是唯一权威发布源。所有 updater 可接收的 0.x 公�
 4. 把证书、密码、Issuer ID、Key ID 与 `.p8` 配置到受保护的 GitHub release Environment Secrets；
 5. 完成一次签名、公证、staple、Gatekeeper 验证与 updater 安装演练。
 
-Release Gate 未全部通过时，release workflow 必须失败并且不能产生公开 Release。普通 Release 不提供未签名/未公证的降级路径；社区测试版使用上述独立通道。Apple 官方要求见 [Developer Program](https://developer.apple.com/programs/)、[Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 与 [Notarizing macOS software](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
+Release Gate 未全部通过时，release workflow 必须失败并且不能产生公开 Release。Developer ID 通道不提供未签名/未公证的降级路径；社区版使用上述独立通道。Apple 官方要求见 [Developer Program](https://developer.apple.com/programs/)、[Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 与 [Notarizing macOS software](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
 
 ## 签名、公证与密钥
 
