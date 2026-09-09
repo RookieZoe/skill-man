@@ -2283,7 +2283,7 @@ function PreferencesSheet({
 function AppUpdateHelp() {
   const { t } = useLocale();
   return (
-    <div className="community-update-status">
+    <div className="app-update-help">
       <p>{t("library.app_update.gatekeeper")}</p>
       <RepositoryLink
         url="https://github.com/RookieZoe/skill-man/releases/latest"
