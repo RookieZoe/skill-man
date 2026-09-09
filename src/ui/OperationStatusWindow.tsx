@@ -66,7 +66,11 @@ export function OperationStatusWindow({
               <span aria-hidden="true" />
               <h2>{operation.title}</h2>
             </div>
-            <p>{operation.detail}</p>
+            <p
+              className={`operation-message operation-message--${operation.state === "failed" ? "error" : operation.state === "completed" ? "success" : operation.state === "partial" || operation.state === "cancelled" ? "warning" : "info"}`}
+            >
+              {operation.detail}
+            </p>
             {!operation.state || operation.state === "running" ? (
               <IndeterminateProgress label={operation.title} />
             ) : onDismiss ? (

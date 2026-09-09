@@ -102,10 +102,10 @@ pub fn run() {
         plan_restore, plan_skill_updates, prepare_existing_home_recovery, prepare_home,
         preview_source_promotion, preview_source_update, reconnect_same_home,
         refresh_activation_health, refresh_detection, refresh_startup_probe,
-        refresh_system_languages, relocate_link, remove_git_source, restore_current_source_release,
-        restore_eligibility, run_activation_health_check, set_locale_selection, start_rescan,
-        startup_info, undo_adopt, undo_global_enable, undo_project_enable, undo_source_transition,
-        undo_source_update, update_preferences,
+        refresh_system_languages, relocate_link, remove_git_source, remove_recent_project_folder,
+        restore_current_source_release, restore_eligibility, run_activation_health_check,
+        set_locale_selection, start_rescan, startup_info, undo_adopt, undo_global_enable,
+        undo_project_enable, undo_source_transition, undo_source_update, update_preferences,
     };
     use crate::tauri_adapter::enable_api::EnableApi;
     use crate::tauri_adapter::existing_home_recovery_api::ExistingHomeRecoveryApi;
@@ -795,7 +795,7 @@ pub fn run() {
             undo_global_enable,
             finalize_global_enable,
             list_recent_project_folders,
-            clear_recent_project_folders,
+            clear_recent_project_folders, remove_recent_project_folder,
             plan_project_enable,
             apply_project_enable,
             undo_project_enable,

@@ -1182,6 +1182,13 @@ mod tests {
             unreachable!("observation never records project folders")
         }
 
+        fn remove_recent_project_folder(
+            &self,
+            _canonical_path_key: &str,
+        ) -> Result<(), AgentConfigurationStoreError> {
+            unreachable!("observation never clears project folders")
+        }
+
         fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
             unreachable!("observation never clears project folders")
         }

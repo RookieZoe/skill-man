@@ -489,6 +489,29 @@ fn recent_project_folders_keep_only_ten_most_recent_entries() {
         PathBuf::from("/project-01")
     );
     sqlite
+        .remove_recent_project_folder("project-01")
+        .expect("remove one recent project");
+    sqlite
+        .remove_recent_project_folder("missing")
+        .expect("missing history is a no-op");
+    let remaining = sqlite
+        .list_recent_project_folders()
+        .expect("remaining history");
+    assert_eq!(remaining.len(), 9);
+    assert!(
+        remaining
+            .iter()
+            .all(|folder| folder.canonical_path_key != "project-01")
+    );
+    assert_eq!(remaining[0].canonical_path_key, "project-10");
+    let (_, reopened, _) = open_service(&home);
+    assert_eq!(
+        reopened
+            .list_recent_project_folders()
+            .expect("persisted history"),
+        remaining
+    );
+    sqlite
         .clear_recent_project_folders()
         .expect("clear recent projects");
     assert!(

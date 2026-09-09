@@ -218,6 +218,17 @@ export function ProjectEnableSheet({
     }
   }
 
+  async function onRemoveRecent(key: string) {
+    try {
+      await client.removeRecentProjectFolder(key);
+      setRecentFolders((items) =>
+        items.filter((item) => item.canonicalPathKey !== key),
+      );
+    } catch (cause) {
+      setError(commandErrorMessage(cause, t));
+    }
+  }
+
   async function onClearRecent() {
     try {
       await client.clearRecentProjectFolders();
@@ -288,6 +299,7 @@ export function ProjectEnableSheet({
               onSelectFolder={(selected) => setFolder(selected)}
               onFolderChange={(next) => setFolder(next)}
               onClearRecent={onClearRecent}
+              onRemoveRecent={onRemoveRecent}
             />
           )}
 
@@ -348,7 +360,10 @@ export function ProjectEnableSheet({
           )}
 
           {error !== null && (
-            <p className="enable-sheet-error" role="alert">
+            <p
+              className="enable-sheet-error operation-message operation-message--error"
+              role="alert"
+            >
               {error}
             </p>
           )}
@@ -463,12 +478,14 @@ function FolderStep({
   onSelectFolder,
   onFolderChange,
   onClearRecent,
+  onRemoveRecent,
 }: {
   folder: string;
   recentFolders: RecentProjectFolder[];
   onSelectFolder: (path: string) => void;
   onFolderChange: (path: string) => void;
   onClearRecent: () => void;
+  onRemoveRecent: (key: string) => void;
 }) {
   const { t } = useLocale();
 
@@ -497,6 +514,32 @@ function FolderStep({
                   <span className="recent-folder-path">
                     {item.canonicalPath}
                   </span>
+                </button>
+                <button
+                  type="button"
+                  className="recent-folder-remove"
+                  aria-label={t("enable.project.removeRecentFolder", {
+                    path: item.canonicalPath,
+                  })}
+                  title={t("enable.project.removeRecentFolder", {
+                    path: item.canonicalPath,
+                  })}
+                  onClick={() => onRemoveRecent(item.canonicalPathKey)}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="m4 4 8 8M12 4l-8 8"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
                 </button>
               </li>
             ))}
@@ -724,7 +767,7 @@ function ProjectPreviewCell({
   const blockedReasonText = blockedReasonLabel(cell, t);
 
   return (
-    <div className="project-cell-card">
+    <div className="project-cell-card operation-details">
       <div className="project-cell-header">
         <div className="resolved-group-info">
           <h4>
@@ -882,11 +925,14 @@ function ProjectResultStep({
 
   return (
     <div className="project-result-panel">
-      <div className="project-warning-banner" role="alert">
+      <div
+        className="project-warning-banner operation-message operation-message--warning"
+        role="alert"
+      >
         <strong>{t("enable.project.noProjectRecordWarning")}</strong>
       </div>
 
-      <p className="result-summary-text">
+      <p className="result-summary-text operation-message operation-message--info">
         {t("enable.project.resultSummary", {
           succeeded: succeededCount,
           total: result.cells.length,

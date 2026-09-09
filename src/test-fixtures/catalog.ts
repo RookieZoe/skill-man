@@ -779,6 +779,12 @@ export function createFixtureCatalogClient(
     async listRecentProjectFolders() {
       return [...recentProjectFolders];
     },
+    async removeRecentProjectFolder(canonicalPathKey) {
+      const index = recentProjectFolders.findIndex(
+        (item) => item.canonicalPathKey === canonicalPathKey,
+      );
+      if (index >= 0) recentProjectFolders.splice(index, 1);
+    },
     async clearRecentProjectFolders() {
       recentProjectFolders.length = 0;
     },

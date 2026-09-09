@@ -251,6 +251,36 @@ impl AgentConfigurationStore for SqliteCatalogStore {
         transaction.commit().map_err(sqlite_error)
     }
 
+    fn remove_recent_project_folder(
+        &self,
+        canonical_path_key: &str,
+    ) -> Result<(), AgentConfigurationStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| unavailable("SQLite lock poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM recent_project_folders WHERE canonical_path_key = ?1",
+                [canonical_path_key],
+            )
+            .map_err(sqlite_error)?;
+        if changed != 0 {
+            transaction
+                .execute(
+                    "UPDATE catalog_meta
+                     SET snapshot_version = snapshot_version + 1
+                     WHERE singleton = 1",
+                    [],
+                )
+                .map_err(sqlite_error)?;
+        }
+        transaction.commit().map_err(sqlite_error)
+    }
+
     fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
         let mut connection = self
             .connection

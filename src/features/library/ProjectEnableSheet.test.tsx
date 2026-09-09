@@ -153,6 +153,42 @@ test("recent project folders candidate selection and clear", async () => {
   });
 });
 
+test("removing one recent folder persists without changing the selected path", async () => {
+  const user = userEvent.setup();
+  const client = createFixtureCatalogClient({
+    recentProjectFolders: ["/projects/first", "/projects/second"].map(
+      (path) => ({
+        canonicalPathKey: path,
+        canonicalPath: path,
+        lastUsedAt: "2026-09-09T00:00:00Z",
+      }),
+    ),
+  });
+  renderSheet(client);
+  await user.click(
+    await screen.findByRole("button", { name: "/projects/first" }),
+  );
+  await user.click(
+    screen.getByRole("button", {
+      name: "Remove recent record: /projects/first",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: "/projects/first" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.getByRole("button", { name: "/projects/second" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("textbox", { name: "Project folder path" }),
+  ).toHaveValue("/projects/first");
+  expect(
+    (await client.listRecentProjectFolders()).map((item) => item.canonicalPath),
+  ).toEqual(["/projects/second"]);
+});
+
 test("invalid base copies never offer replacement", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();

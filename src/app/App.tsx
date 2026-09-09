@@ -644,6 +644,14 @@ function AppContent({ client }: AppProps) {
   }
 
   async function previewSourceUpdate(remoteId: string) {
+    const source = gitSourceCapability?.sources.find(
+      (item) => item.remoteId === remoteId,
+    );
+    if (source) {
+      setSourceGroupUrl(source.canonicalUrl);
+      setSourceGroupPolicyMode(source.trackingMode ?? "auto_release_tag_head");
+      setSourceGroupPolicyValue(source.trackingValue ?? "");
+    }
     const runId = ++sourceGroupRunId.current;
     linkImportRunId.current += 1;
     setLinkImportPreview(null);

@@ -42,6 +42,7 @@ function selectionKindLabel(
 
 export function SourceGroupPreviewFlow({
   sourceUrl,
+  sourceReadOnly = false,
   policyMode,
   policyValue,
   outcome,
@@ -61,6 +62,7 @@ export function SourceGroupPreviewFlow({
 }: {
   sourceType: GitRepositorySourceType;
   sourceUrl: string;
+  sourceReadOnly?: boolean;
   policyMode: string;
   policyValue: string;
   outcome: SourceGroupPreviewOutcome | null;
@@ -117,7 +119,10 @@ export function SourceGroupPreviewFlow({
           {result.undoAvailable && <p>{t("library.source_group.undo_hint")}</p>}
         </div>
         {forceRequired && (
-          <div className="source-ownership-note" role="status">
+          <div
+            className="source-ownership-note operation-message operation-message--warning"
+            role="status"
+          >
             <strong>{t("library.source_group.force_complete")}</strong>
             <span>
               {t("library.source_group.force_removed", {
@@ -142,7 +147,10 @@ export function SourceGroupPreviewFlow({
           </div>
         </dl>
         {error && (
-          <p className="activation-error" role="alert">
+          <p
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             {error}
           </p>
         )}
@@ -208,7 +216,10 @@ export function SourceGroupPreviewFlow({
         </dl>
         <PromotionManifest draft={promotionDraft} />
         {error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <strong>{t("library.import.source_unavailable")}</strong>
             <span>{error}</span>
           </div>
@@ -270,10 +281,18 @@ export function SourceGroupPreviewFlow({
           </PluginGroups>
         </section>
         {updateDraft.alreadyCurrent ? (
-          <p role="status">{t("library.source_group.already_current")}</p>
+          <p
+            className="operation-message operation-message--success"
+            role="status"
+          >
+            {t("library.source_group.already_current")}
+          </p>
         ) : null}
         {error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <strong>{t("library.import.source_unavailable")}</strong>
             <span>{error}</span>
           </div>
@@ -396,7 +415,7 @@ export function SourceGroupPreviewFlow({
         <ExternalClaims claims={preview.externalOwnershipClaims} />
         {forceRequired ? (
           <section
-            className="source-ownership-note"
+            className="source-ownership-note operation-message operation-message--warning"
             aria-label={t("library.source_group.force_title")}
           >
             <strong>{t("library.source_group.force_title")}</strong>
@@ -436,7 +455,10 @@ export function SourceGroupPreviewFlow({
             </label>
           </section>
         ) : preview.externalOwnershipClaims.length > 0 ? (
-          <div className="source-ownership-note" role="note">
+          <div
+            className="source-ownership-note operation-message operation-message--warning"
+            role="note"
+          >
             <strong>{t("library.source_group.incomplete_claims_title")}</strong>
             <span>
               {t("library.source_group.incomplete_claims_body", {
@@ -447,7 +469,10 @@ export function SourceGroupPreviewFlow({
           </div>
         ) : null}
         {error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <strong>{t("library.import.source_unavailable")}</strong>
             <span>{error}</span>
           </div>
@@ -572,7 +597,10 @@ export function SourceGroupPreviewFlow({
         ? promotionOutcome.conflict
         : null;
     return (
-      <div className="activation-error" role="alert">
+      <div
+        className="activation-error operation-message operation-message--error"
+        role="alert"
+      >
         <strong>
           {conflict
             ? t("library.source_group.ref_conflict_title")
@@ -602,7 +630,8 @@ export function SourceGroupPreviewFlow({
           id="git-repository-url"
           type="text"
           value={sourceUrl}
-          disabled={isBusy}
+          readOnly={sourceReadOnly}
+          disabled={isBusy && !sourceReadOnly}
           onChange={(event) => onSourceUrlChange(event.currentTarget.value)}
           placeholder={t("library.source_group.address_placeholder")}
           aria-invalid={!!sourceUrl.trim() && !parseRepositoryInput(sourceUrl)}
@@ -620,7 +649,7 @@ export function SourceGroupPreviewFlow({
         <span>{t("library.source_group.policy_mode")}</span>
         <select
           value={policyMode}
-          disabled={isBusy}
+          disabled={isBusy || sourceReadOnly}
           onChange={(event) =>
             onSourceGroupPolicyChange(
               event.currentTarget.value,
@@ -660,7 +689,10 @@ export function SourceGroupPreviewFlow({
         </label>
       ) : null}
       {error ? (
-        <div className="activation-error" role="alert">
+        <div
+          className="activation-error operation-message operation-message--error"
+          role="alert"
+        >
           <strong>{t("library.import.source_unavailable")}</strong>
           <span>{error}</span>
         </div>

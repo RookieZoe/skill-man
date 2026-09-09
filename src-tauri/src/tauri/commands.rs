@@ -1187,6 +1187,19 @@ pub fn list_recent_project_folders(
 }
 
 #[tauri::command]
+pub fn remove_recent_project_folder(
+    state: State<'_, EnableApi>,
+    mutation: State<'_, Arc<ScanMutationCoordinator>>,
+    canonical_path_key: String,
+) -> Result<(), CommandFailureDto> {
+    let result = state.remove_recent_project_folder(&canonical_path_key);
+    if result.is_ok() {
+        mutation.bump();
+    }
+    result
+}
+
+#[tauri::command]
 pub fn clear_recent_project_folders(
     state: State<'_, EnableApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,

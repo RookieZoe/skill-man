@@ -733,7 +733,10 @@ function AgentList({
         ) : null}
       </header>
       {error ? (
-        <div className="agents-inline-error" role="alert">
+        <div
+          className="agents-inline-error operation-message operation-message--error"
+          role="alert"
+        >
           {error}
         </div>
       ) : null}
@@ -1267,7 +1270,10 @@ function AgentConfigurationSheet({
                 </p>
               ) : null}
               {blockers.length > 0 ? (
-                <div className="agent-plan-blockers" role="alert">
+                <div
+                  className="agent-plan-blockers operation-message operation-message--error"
+                  role="alert"
+                >
                   <strong>{t("agents.sheet.blocked_title")}</strong>
                   <p>{t("agents.sheet.blocked_body")}</p>
                   <ul>
@@ -1302,7 +1308,10 @@ function AgentConfigurationSheet({
           ) : null}
 
           {error ? (
-            <div className="agents-inline-error" role="alert">
+            <div
+              className="agents-inline-error operation-message operation-message--error"
+              role="alert"
+            >
               {error}
             </div>
           ) : null}

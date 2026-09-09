@@ -20,7 +20,7 @@ export function OperationNotice({
       <IndeterminateProgress
         label={label ?? t("operation.foreground.working")}
       />
-      <p>
+      <p className="operation-message">
         {cancelHint ??
           t(
             cancellable

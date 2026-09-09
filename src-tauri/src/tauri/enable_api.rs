@@ -113,6 +113,15 @@ impl EnableApi {
             .map_err(command_error)
     }
 
+    pub fn remove_recent_project_folder(
+        &self,
+        canonical_path_key: &str,
+    ) -> Result<(), CommandFailureDto> {
+        self.service
+            .remove_recent_project_folder(canonical_path_key)
+            .map_err(command_error)
+    }
+
     pub fn clear_recent_project_folders(&self) -> Result<(), CommandFailureDto> {
         self.service
             .clear_recent_project_folders()

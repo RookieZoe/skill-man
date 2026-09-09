@@ -89,7 +89,10 @@ export function AbandonFlow({ client, onSnapshot, onClose }: AbandonFlowProps) {
         {error ? (
           <>
             <h2 id="abandon-title">{t("lifecycle.abandon_failed")}</h2>
-            <p className="recovery-notice recovery-notice--error" role="alert">
+            <p
+              className="recovery-notice recovery-notice--error operation-message operation-message--error"
+              role="alert"
+            >
               {t(
                 errorMessageKey(error.error.code),
                 errorMessageParams(error.error),

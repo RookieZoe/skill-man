@@ -2386,6 +2386,17 @@ impl EnableService {
         Ok(self.agent_store.list_recent_project_folders()?)
     }
 
+    pub fn remove_recent_project_folder(
+        &self,
+        canonical_path_key: &str,
+    ) -> Result<(), EnableError> {
+        let context = self.capture_write_context()?;
+        let _write_guard = self.acquire_write_guard(&context)?;
+        Ok(self
+            .agent_store
+            .remove_recent_project_folder(canonical_path_key)?)
+    }
+
     pub fn clear_recent_project_folders(&self) -> Result<(), EnableError> {
         let context = self.capture_write_context()?;
         let _write_guard = self.acquire_write_guard(&context)?;

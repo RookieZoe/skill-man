@@ -140,7 +140,10 @@ export function BrokenDisableSheet({
         </div>
 
         {error ? (
-          <p className="activation-error" role="alert">
+          <p
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             {error}
           </p>
         ) : null}
@@ -157,7 +160,10 @@ export function BrokenDisableSheet({
               </p>
             </div>
 
-            <div className="broken-notice" role="status">
+            <div
+              className="broken-notice operation-message operation-message--warning"
+              role="status"
+            >
               <p>{t("enable.broken.reappearNotice")}</p>
             </div>
 

@@ -139,7 +139,10 @@ export function RestoreView({ client, onSnapshot, onBack }: RestoreViewProps) {
       )}
 
       {error ? (
-        <div className="recovery-notice recovery-notice--error" role="alert">
+        <div
+          className="recovery-notice recovery-notice--error operation-message operation-message--error"
+          role="alert"
+        >
           <p>
             {t(
               errorMessageKey(error.error.code),
@@ -160,7 +163,10 @@ export function RestoreView({ client, onSnapshot, onBack }: RestoreViewProps) {
         </div>
       ) : null}
       {notice ? (
-        <div className="recovery-notice" role="status">
+        <div
+          className="recovery-notice operation-message operation-message--info"
+          role="status"
+        >
           <p>{notice}</p>
         </div>
       ) : null}

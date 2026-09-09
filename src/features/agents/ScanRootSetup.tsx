@@ -171,7 +171,7 @@ export function ScanRootSetup({
       {snapshot?.configurations.length ? (
         <>
           <h3>{t("scan.setup.configured")}</h3>
-          <ul className="scan-root-list">
+          <ul className="scan-root-list operation-details">
             {snapshot.configurations.map((item) => (
               <li key={item.agentId}>
                 <strong>{item.name}</strong>
@@ -188,7 +188,7 @@ export function ScanRootSetup({
       {review ? (
         <>
           <h3>{t("scan.setup.review")}</h3>
-          <ul className="scan-root-list">
+          <ul className="scan-root-list operation-details">
             {review.map(({ preset, plan }) => (
               <li key={preset.presetKey}>
                 <strong>{plan.configuration?.name}</strong>
@@ -236,7 +236,7 @@ export function ScanRootSetup({
       ) : (
         <>
           <h3>{t("scan.setup.presets")}</h3>
-          <ul className="scan-root-list">
+          <ul className="scan-root-list operation-details">
             {snapshot?.presets
               .filter(
                 (preset) =>
@@ -287,7 +287,10 @@ export function ScanRootSetup({
         </>
       )}
       {error && (
-        <div role="alert">
+        <div
+          className="operation-message operation-message--error"
+          role="alert"
+        >
           <p>{error}</p>
           <p>{t("scan.setup.partial")}</p>
           <button

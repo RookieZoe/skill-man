@@ -1700,6 +1700,7 @@ function LinkImportSheet({
           <SourceGroupPreviewFlow
             sourceType={sourceGroupType}
             sourceUrl={sourceGroupUrl}
+            sourceReadOnly={sourcePromotionActive}
             policyMode={sourceGroupPolicyMode}
             policyValue={sourceGroupPolicyValue}
             outcome={sourceGroupOutcome}
@@ -1791,7 +1792,10 @@ function LinkImportSheet({
                 <dd>{t("library.import.pointer_only")}</dd>
               </div>
             </dl>
-            <div className="activation-warning import-risk" role="status">
+            <div
+              className="activation-warning import-risk operation-message operation-message--warning"
+              role="status"
+            >
               <strong>{t("library.import.review_instructions")}</strong>
               <span>{t("library.import.review_link_body")}</span>
             </div>
@@ -1806,7 +1810,10 @@ function LinkImportSheet({
               </div>
             ) : null}
             {error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.import.unchanged")}</strong>
                 <span>{error}</span>
               </div>
@@ -1862,10 +1869,20 @@ function LinkImportSheet({
                   {t("library.import.choose_directory")}
                 </button>
               </div>
-              {directoryError && <span role="alert">{directoryError}</span>}
+              {directoryError && (
+                <span
+                  className="operation-message operation-message--error"
+                  role="alert"
+                >
+                  {directoryError}
+                </span>
+              )}
             </div>
             {error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.import.source_unavailable")}</strong>
                 <span>{error}</span>
               </div>
@@ -2051,13 +2068,18 @@ function OnboardingSheet({
           <div className="onboarding-scan">
             {!isScanning && scanCount !== null ? (
               <>
-                <p role="status">{tPlural("scan.setup.entities", scanCount)}</p>
+                <p className="operation-message" role="status">
+                  {tPlural("scan.setup.entities", scanCount)}
+                </p>
               </>
             ) : null}
           </div>
         ) : null}
         {error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <span>{error}</span>
           </div>
         ) : null}
@@ -2230,13 +2252,19 @@ function PreferencesSheet({
           <CommunityUpdateControl check={() => client.checkCommunityUpdate()} />
         )}
         {warning ? (
-          <div className="activation-warning" role="status">
+          <div
+            className="activation-warning operation-message operation-message--warning"
+            role="status"
+          >
             <strong>{t("library.preferences.applied_warning")}</strong>
             <span>{preferencesWarningText(t, warning)}</span>
           </div>
         ) : null}
         {error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <strong>{t("library.preferences.unchanged")}</strong>
             <span>{error}</span>
           </div>
@@ -2358,12 +2386,18 @@ function AppUpdateSheet({
           </div>
         </dl>
         {isReady ? (
-          <div className="app-update-ready" role="status">
+          <div
+            className="app-update-ready operation-message operation-message--success"
+            role="status"
+          >
             {t("library.app_update.ready")}
           </div>
         ) : null}
         {panel.error ? (
-          <div className="activation-error" role="alert">
+          <div
+            className="activation-error operation-message operation-message--error"
+            role="alert"
+          >
             <strong>{t("library.app_update.failed")}</strong>
             <span>{panel.error}</span>
           </div>
@@ -2508,12 +2542,18 @@ function RemoveSheet({
                 <dd>{preview.activationCount}</dd>
               </div>
             </dl>
-            <div className="activation-warning" role="status">
+            <div
+              className="activation-warning operation-message operation-message--warning"
+              role="status"
+            >
               <strong>{t("library.remove.no_undo")}</strong>
               <span>{t("library.remove.no_undo_body")}</span>
             </div>
             {panel.error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.remove.unchanged")}</strong>
                 <span>{panel.error}</span>
               </div>
@@ -2540,7 +2580,10 @@ function RemoveSheet({
         ) : (
           <>
             {panel.error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.remove.unavailable")}</strong>
                 <span>{panel.error}</span>
               </div>
@@ -2725,7 +2768,10 @@ function RelocateSheet({
               </div>
             </dl>
             {panel.error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.relocate.unchanged")}</strong>
                 <span>{panel.error}</span>
               </div>
@@ -2769,7 +2815,10 @@ function RelocateSheet({
               />
             </label>
             {panel.error ? (
-              <div className="activation-error" role="alert">
+              <div
+                className="activation-error operation-message operation-message--error"
+                role="alert"
+              >
                 <strong>{t("library.relocate.rejected")}</strong>
                 <span>{panel.error}</span>
               </div>

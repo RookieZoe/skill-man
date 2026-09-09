@@ -1287,6 +1287,7 @@
   "enable.project.stepResult": "结果",
   "enable.project.recentFolders": "最近使用的项目文件夹",
   "enable.project.noRecentFolders": "无最近使用的项目文件夹。",
+  "enable.project.removeRecentFolder": "移除最近记录：{path}",
   "enable.project.clearRecentFolders": "清除最近记录",
   "enable.project.folderLabel": "项目文件夹路径",
   "enable.project.folderPlaceholder": "/path/to/project",

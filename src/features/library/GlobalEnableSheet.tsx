@@ -333,7 +333,10 @@ export function GlobalEnableSheet({
           )}
 
           {error !== null && (
-            <p className="enable-sheet-error" role="alert">
+            <p
+              className="enable-sheet-error operation-message operation-message--error"
+              role="alert"
+            >
               {error}
             </p>
           )}
@@ -503,7 +506,7 @@ function PreviewMatrixStep({
 }) {
   const { t } = useLocale();
   return (
-    <div className="enable-preview-matrix" role="table">
+    <div className="enable-preview-matrix operation-details" role="table">
       <div className="enable-matrix-head" role="row">
         <span role="columnheader">{t("enable.global.stepPreviewMatrix")}</span>
       </div>
@@ -669,7 +672,7 @@ function ResultStep({ result }: { result: EnableResult }) {
   ).length;
   return (
     <div className="enable-result">
-      <p>
+      <p className="operation-message">
         {t("enable.global.resultSummary", {
           succeeded,
           total: result.cells.length,

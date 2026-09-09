@@ -1714,6 +1714,7 @@ export interface CatalogClient {
   undoGlobalEnable(operationId: string): Promise<EnableUndoResult>;
   finalizeGlobalEnable(operationId: string): Promise<void>;
   listRecentProjectFolders(): Promise<RecentProjectFolder[]>;
+  removeRecentProjectFolder(canonicalPathKey: string): Promise<void>;
   clearRecentProjectFolders(): Promise<void>;
   planProjectEnable(
     skillIds: string[],
@@ -2052,6 +2053,9 @@ const tauriCatalogClient: CatalogClient = {
   },
   listRecentProjectFolders() {
     return invoke<RecentProjectFolder[]>("list_recent_project_folders");
+  },
+  removeRecentProjectFolder(canonicalPathKey) {
+    return invoke<void>("remove_recent_project_folder", { canonicalPathKey });
   },
   clearRecentProjectFolders() {
     return invoke<void>("clear_recent_project_folders");

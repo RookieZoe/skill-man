@@ -522,7 +522,9 @@ impl SourceLifecycleService {
                 SourceLifecycleJournal::Restore(restore)
                     if matches!(
                         restore.phase,
-                        RestoreSourcePhase::Restored | RestoreSourcePhase::Committed
+                        RestoreSourcePhase::Restored
+                            | RestoreSourcePhase::Committed
+                            | RestoreSourcePhase::Finalized
                     ) =>
                 {
                     self.finish_restore_after_crash(library_root, restore)?;

@@ -1813,32 +1813,39 @@ test.each(["updated", "preview-current", "confirm-current"])(
     let confirmed = false;
     let undone: string | undefined;
     client.getGitSourceCapability = async () => ({ sources: [source] });
-    client.previewSourceUpdate = async () => ({
-      alreadyCurrent: outcome === "preview-current",
-      remoteId: source.remoteId,
-      provider: source.provider,
-      sourceUrl: source.canonicalUrl,
-      aliases: [],
-      policy: {
-        mode: "branch",
-        value: "main",
-        selectionKind: "branch",
-        selectedRef: "main",
-        resolvedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      },
-      members: [
-        {
-          skillId: "skill-authoring",
-          skillPath: "skills/authoring",
-          directoryName: "skill-authoring",
-          directoryIdentityKey: "skill-authoring",
-          displayName: "Skill authoring",
-          description: "Updated",
-          treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
-          state: "current",
-        },
-      ],
+    let releasePreview!: () => void;
+    const previewReady = new Promise<void>((resolve) => {
+      releasePreview = resolve;
     });
+    client.previewSourceUpdate = async () => {
+      await previewReady;
+      return {
+        alreadyCurrent: outcome === "preview-current",
+        remoteId: source.remoteId,
+        provider: source.provider,
+        sourceUrl: source.canonicalUrl,
+        aliases: [],
+        policy: {
+          mode: "branch",
+          value: "main",
+          selectionKind: "branch",
+          selectedRef: "main",
+          resolvedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+        members: [
+          {
+            skillId: "skill-authoring",
+            skillPath: "skills/authoring",
+            directoryName: "skill-authoring",
+            directoryIdentityKey: "skill-authoring",
+            displayName: "Skill authoring",
+            description: "Updated",
+            treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
+            state: "current",
+          },
+        ],
+      };
+    };
     client.confirmSourceUpdate = async (request) => {
       confirmed = true;
       if (outcome === "confirm-current") return null;
@@ -1865,6 +1872,13 @@ test.each(["updated", "preview-current", "confirm-current"])(
       }),
     );
     await user.click(await screen.findByRole("button", { name: "Update" }));
+    const repositoryInput = screen.getByRole("textbox", {
+      name: "Repository URL",
+    });
+    expect(repositoryInput).toHaveValue(source.canonicalUrl);
+    expect(repositoryInput).toHaveAttribute("readonly");
+    expect(repositoryInput).toBeEnabled();
+    releasePreview();
     await screen.findByRole("heading", {
       name: "Complete Source Release Update",
     });

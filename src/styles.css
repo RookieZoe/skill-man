@@ -6152,3 +6152,218 @@ details[open] > .source-group-summary::before {
   ):hover:not(:disabled) {
   background: var(--dialog-button-hover);
 }
+
+/* Shared operation feedback: small, selectable logs rather than body copy. */
+.operation-message.operation-message {
+  --message-color: var(--accent-strong);
+  --message-background: var(--accent-soft);
+  display: block;
+  min-width: 0;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--message-color) 28%, var(--divider));
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  background: var(--message-background);
+  color: var(--message-color);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.operation-message.operation-message--success {
+  --message-color: var(--success);
+  --message-background: var(--success-soft);
+}
+
+.operation-message.operation-message--warning {
+  --message-color: var(--warning);
+  --message-background: var(--warning-soft);
+}
+
+.operation-message.operation-message--error {
+  --message-color: var(--danger);
+  --message-background: var(--danger-soft);
+}
+
+.operation-message :is(p, span, strong, small, code, pre) {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.operation-message > :is(p, pre) {
+  margin: 0;
+}
+
+.operation-message > :is(strong, span) {
+  display: block;
+}
+
+.activation-sheet > .operation-message {
+  margin: 0 24px 16px;
+}
+
+.import-source-field input[readonly] {
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  cursor: text;
+}
+
+/* Structured operation details retain list, table and form semantics. */
+.operation-details.operation-details {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--divider));
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.operation-details :is(p, h4, strong, small, code, span, label, select) {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.operation-details :is(p, h4, ul) {
+  margin-block: 4px;
+}
+
+.scan-root-list.operation-details {
+  gap: 0;
+}
+
+.scan-root-list.operation-details > li {
+  gap: 2px;
+  padding: 8px 0;
+}
+
+.scan-root-list.operation-details > li + li {
+  border-top: 1px solid var(--divider);
+}
+
+.scan-root-list.operation-details label > span {
+  gap: 2px;
+}
+
+.scan-root-list.operation-details input {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+.operation-details .project-cell-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.operation-details .resolved-group-info {
+  min-width: 0;
+}
+
+.operation-details .project-evidence-box {
+  margin-block: 8px;
+  padding-block: 8px;
+  border-block: 1px solid var(--divider);
+}
+
+.operation-details .enable-matrix-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.operation-details .enable-matrix-eligibility {
+  white-space: nowrap;
+}
+
+.operation-details .enable-matrix-note,
+.operation-details .enable-matrix-agents {
+  grid-column: 1 / -1;
+}
+
+.operation-details .enable-resolution-select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* One width contract for modal sheets, drawers and confirmation popovers. */
+[role="dialog"][role="dialog"] {
+  width: min(100%, 640px);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.recent-folder-list > li {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recent-folder-list .recent-folder-item {
+  padding: 10px 44px 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.recent-folder-remove {
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+  cursor: pointer;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.recent-folder-list > li:hover .recent-folder-remove,
+.recent-folder-list > li:focus-within .recent-folder-remove {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.recent-folder-remove:hover {
+  background: transparent;
+  color: var(--danger);
+}
+
+.recent-folder-list .recent-folder-item:hover,
+.recent-folder-list .recent-folder-item.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.recent-folder-remove:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.96);
+}

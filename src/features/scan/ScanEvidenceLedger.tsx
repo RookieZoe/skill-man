@@ -881,7 +881,10 @@ export function ScanEvidenceLedger({
         </div>
       </div>
       {error && !expanded ? (
-        <p className="scan-ledger-error" role="alert">
+        <p
+          className="scan-ledger-error operation-message operation-message--error"
+          role="alert"
+        >
           {error}
         </p>
       ) : null}
@@ -975,7 +978,10 @@ export function ScanEvidenceLedger({
               ))}
             </ul>
             {summary.incomplete ? (
-              <p className="scan-ledger-slow" role="alert">
+              <p
+                className="scan-ledger-slow operation-message operation-message--warning"
+                role="alert"
+              >
                 {t("scan.summary.incompleteDestructiveDisabled")}
               </p>
             ) : null}
@@ -1018,21 +1024,32 @@ export function ScanEvidenceLedger({
           </p>
         ) : null}
         {run?.slow ? (
-          <p className="scan-ledger-slow">{t("scan.ledger.slow")}</p>
+          <p className="scan-ledger-slow operation-message operation-message--warning">
+            {t("scan.ledger.slow")}
+          </p>
         ) : null}
         {run?.diagnostic ? (
-          <details className="scan-ledger-diagnostic" role="alert">
+          <details
+            className="scan-ledger-diagnostic operation-message operation-message--error"
+            role="alert"
+          >
             <summary>{t("bootstrap.technical_details")}</summary>
             <p>{run.diagnostic}</p>
           </details>
         ) : null}
         {error ? (
-          <p className="scan-ledger-error" role="alert">
+          <p
+            className="scan-ledger-error operation-message operation-message--error"
+            role="alert"
+          >
             {error}
           </p>
         ) : null}
         {adoptHandoff && !summary ? (
-          <p className="scan-ledger-error" role="alert">
+          <p
+            className="scan-ledger-error operation-message operation-message--error"
+            role="alert"
+          >
             {t("scan.ledger.adoptHandoffNeedsReport")}
           </p>
         ) : null}
@@ -1485,7 +1502,10 @@ export function ScanEvidenceLedger({
               </ul>
             ) : null}
             {adoptMessage ? (
-              <p className="scan-ledger-error" role="alert">
+              <p
+                className="scan-ledger-error operation-message operation-message--error"
+                role="alert"
+              >
                 {adoptMessage}
               </p>
             ) : null}

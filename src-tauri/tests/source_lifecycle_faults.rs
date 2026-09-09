@@ -1649,3 +1649,98 @@ fn confirming_the_current_release_is_a_successful_noop() {
         snapshot_version
     );
 }
+
+#[test]
+fn finalized_restore_recovery_preserves_installed_bytes_after_backup_cleanup() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let alpha = member_namespace(&fixture, &remote_id, "skills/alpha");
+    let current = read_current(&fixture, &remote_id);
+    let member = current
+        .members
+        .iter()
+        .find(|member| member.skill_path == "skills/alpha")
+        .expect("alpha member")
+        .clone();
+    let alpha_id = member.skill_id.0.clone();
+    // Cleanup removed the backup, but the finalized journal survived a crash.
+    // Recovery must preserve the installed release, never roll it back.
+    fixture
+        .catalog
+        .set_source_member_health(
+            &remote_id,
+            &[(SkillId(alpha_id.clone()), Health::SourceSnapshotMismatch)],
+        )
+        .expect("health mismatch");
+    let operation_id = "source-transition-restore-crash-1";
+    let staging_operation_root = fixture.library.join("staging").join(operation_id);
+    let fingerprint = fixture
+        .filesystem
+        .create_adopt_staging_operation(&fixture.library, operation_id)
+        .expect("staging operation");
+    let release_hash = stored_tree_hash(&fixture, &remote_id, "skills/alpha");
+    fixture
+        .filesystem
+        .write_source_lifecycle_journal(
+            &fixture.library,
+            &SourceLifecycleJournal::Restore(RestoreSourceJournal {
+                version: 1,
+                operation_id: operation_id.into(),
+                phase: RestoreSourcePhase::Finalized,
+                remote_id: remote_id.clone(),
+                release_id: current.current_release_id.clone(),
+                resolved_commit: current.resolved_commit.clone(),
+                staging_operation_root,
+                staging_fingerprint: Some(fingerprint),
+                members: vec![RestoreSourceMember {
+                    skill_id: alpha_id.clone(),
+                    directory_name: member.directory_name.clone(),
+                    skill_path: member.skill_path.clone(),
+                    namespace_path: alpha.clone(),
+                    staged_root: fixture
+                        .library
+                        .join("staging")
+                        .join(operation_id)
+                        .join(&member.directory_name),
+                    release_tree_hash: release_hash,
+                    observed_tree_hash: "mismatch-observed".into(),
+                    staged_snapshot: None,
+                    backup_path: Some(
+                        fixture
+                            .filesystem
+                            .normalize_configured_path(&alpha)
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join(format!(
+                                ".skill-man-source-transition-{operation_id}-{alpha_id}"
+                            )),
+                    ),
+                    restored: true,
+                }],
+            }),
+        )
+        .expect("freeze restored journal");
+    fixture
+        .lifecycle
+        .recover_lifecycle(&fixture.library)
+        .expect("Finalized-phase crash rolls forward");
+    assert!(alpha.join("SKILL.md").is_file());
+    assert!(
+        fixture
+            .filesystem
+            .list_source_lifecycle_journals(&fixture.library)
+            .unwrap()
+            .is_empty()
+    );
+    let (_, health) = fixture
+        .catalog
+        .member_health(&SkillId(alpha_id))
+        .expect("member health")
+        .expect("alpha health");
+    assert_eq!(
+        health,
+        Health::Healthy,
+        "roll-forward also commits the catalog health flip"
+    );
+}

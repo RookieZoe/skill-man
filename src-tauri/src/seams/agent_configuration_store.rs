@@ -127,5 +127,10 @@ pub trait AgentConfigurationStore: Send + Sync {
         folder: RecentProjectFolder,
     ) -> Result<(), AgentConfigurationStoreError>;
 
+    fn remove_recent_project_folder(
+        &self,
+        canonical_path_key: &str,
+    ) -> Result<(), AgentConfigurationStoreError>;
+
     fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError>;
 }

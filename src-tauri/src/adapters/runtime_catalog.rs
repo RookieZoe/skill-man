@@ -517,6 +517,16 @@ impl AgentConfigurationStore for RuntimeCatalogStore {
         sqlite.record_recent_project_folder(folder)
     }
 
+    fn remove_recent_project_folder(
+        &self,
+        canonical_path_key: &str,
+    ) -> Result<(), AgentConfigurationStoreError> {
+        let sqlite = self.writable_store_or(|| {
+            AgentConfigurationStoreError::Unavailable("catalog startup is read-only".into())
+        })?;
+        sqlite.remove_recent_project_folder(canonical_path_key)
+    }
+
     fn clear_recent_project_folders(&self) -> Result<(), AgentConfigurationStoreError> {
         let sqlite = self.writable_store_or(|| {
             AgentConfigurationStoreError::Unavailable("catalog startup is read-only".into())

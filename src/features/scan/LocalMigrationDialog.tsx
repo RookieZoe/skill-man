@@ -186,7 +186,7 @@ export function LocalMigrationDialog({
               </div>
             ))}
           {result && (
-            <div role="status">
+            <div className="operation-message" role="status">
               {undone
                 ? t("scan.ledger.adoptUndone", { name })
                 : result.items.map((item) => (
@@ -205,7 +205,10 @@ export function LocalMigrationDialog({
             </div>
           )}
           {error && (
-            <p role="alert" className="scan-ledger-error">
+            <p
+              role="alert"
+              className="scan-ledger-error operation-message operation-message--error"
+            >
               {error}
             </p>
           )}

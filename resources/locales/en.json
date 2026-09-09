@@ -1287,6 +1287,7 @@
   "enable.project.stepResult": "Result",
   "enable.project.recentFolders": "Recent project folders",
   "enable.project.noRecentFolders": "No recent project folders.",
+  "enable.project.removeRecentFolder": "Remove recent record: {path}",
   "enable.project.clearRecentFolders": "Clear recent",
   "enable.project.folderLabel": "Project folder path",
   "enable.project.folderPlaceholder": "/path/to/project",

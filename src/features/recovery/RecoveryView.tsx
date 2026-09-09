@@ -283,7 +283,10 @@ function ErrorNotice({ error }: { error: CommandFailure }) {
       ? t("recovery.step.rolled_back")
       : (error.diagnostic?.message ?? t("recovery.command_failed"));
   return (
-    <div className="recovery-notice recovery-notice--error" role="alert">
+    <div
+      className="recovery-notice recovery-notice--error operation-message operation-message--error"
+      role="alert"
+    >
       <p>{message}</p>
       {error.diagnostic?.code ? (
         <p className="recovery-diagnostic">
@@ -297,7 +300,10 @@ function ErrorNotice({ error }: { error: CommandFailure }) {
 
 function Notice({ message }: { message: string }) {
   return (
-    <div className="recovery-notice" role="status">
+    <div
+      className="recovery-notice operation-message operation-message--info"
+      role="status"
+    >
       <p>{message}</p>
     </div>
   );
