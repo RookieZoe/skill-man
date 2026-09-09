@@ -190,7 +190,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          # The tag endpoint only returns published releases, not Drafts.
+          gh api --paginate --slurp "repos/$RELEASE_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          jq -e --arg tag "$RELEASE_TAG" \
+            'add | map(select(.tag_name == $tag)) | if length == 1 then .[0] else error("Expected exactly one release for tag") end' \
+            "$RUNNER_TEMP/releases.json" > "$RUNNER_TEMP/release.json"
           jq -e '.draft == true and .prerelease == false and (.assets | length == 5)' "$RUNNER_TEMP/release.json"
           downloaded="$RUNNER_TEMP/draft-readback"
           mkdir -p "$downloaded"

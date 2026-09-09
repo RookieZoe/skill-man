@@ -320,7 +320,7 @@ async function signFixture(root, updaterPath, version) {
   });
 }
 
-test("release read-back rejects metadata pointing at a different archive", async (t) => {
+test("release read-back validates Draft transport URLs and published metadata", async (t) => {
   const fixture = await createReleaseFixture(t);
   const prepared = runCli(fixture);
   assert.equal(prepared.status, 0, prepared.stderr);
@@ -341,20 +341,20 @@ test("release read-back rejects metadata pointing at a different archive", async
     assets.push({
       name,
       size: bytes.length,
-      browser_download_url: `https://github.com/RookieZoe/skill-man/releases/download/v0.1.0/${encodeURIComponent(name)}`,
+      browser_download_url: `https://github.com/RookieZoe/skill-man/releases/download/untagged-5c521b9040dc96aac628/${encodeURIComponent(name)}`,
     });
   }
   const releasePath = join(fixture.root, "release.json");
-  await writeFile(
-    releasePath,
-    JSON.stringify({
-      tag_name: "v0.1.0",
-      draft: true,
-      prerelease: false,
-      body: "First signed release.",
-      assets,
-    }),
-  );
+  const release = {
+    tag_name: "v0.1.0",
+    html_url:
+      "https://github.com/RookieZoe/skill-man/releases/tag/untagged-5c521b9040dc96aac628",
+    draft: true,
+    prerelease: false,
+    body: "First signed release.",
+    assets,
+  };
+  await writeFile(releasePath, JSON.stringify(release));
   const cli = fileURLToPath(new URL("./verify-release.mjs", import.meta.url));
   const args = [
     cli,
@@ -371,6 +371,21 @@ test("release read-back rejects metadata pointing at a different archive", async
   ];
   const good = spawnSync(process.execPath, args, { encoding: "utf8" });
   assert.equal(good.status, 0, good.stderr);
+  release.draft = false;
+  await writeFile(releasePath, JSON.stringify(release));
+  const unpublishedUrls = spawnSync(process.execPath, args, {
+    encoding: "utf8",
+  });
+  assert.equal(unpublishedUrls.status, 1);
+  assert.match(unpublishedUrls.stderr, /asset URL/);
+  release.html_url =
+    "https://github.com/RookieZoe/skill-man/releases/tag/v0.1.0";
+  for (const asset of release.assets) {
+    asset.browser_download_url = `https://github.com/RookieZoe/skill-man/releases/download/v0.1.0/${encodeURIComponent(asset.name)}`;
+  }
+  await writeFile(releasePath, JSON.stringify(release));
+  const published = spawnSync(process.execPath, args, { encoding: "utf8" });
+  assert.equal(published.status, 0, published.stderr);
   const metadata = JSON.parse(
     await readFile(join(assetsDir, "latest.json"), "utf8"),
   );

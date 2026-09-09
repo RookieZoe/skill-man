@@ -26,7 +26,7 @@ v0.1.0 已发布产物没有 updater 公钥，继续通过 Release 页面手动�
    文件名沿用 `prerelease.yml`，工作流名为 Community Release。它校验 dispatch ref、实际 checkout、tag、main ancestry 和各版本字段；先在不接触 Secrets 的 job 验证，再等待 `community-release` 人工审核后构建。
 3. 构建 Ad-hoc App、DMG、签名 `.app.tar.gz` 与 `.sig`。验证 arm64、版本和 codesign，比较 DMG／更新包内 App 与原构建内容。`prepare-release.mjs` 用基础配置中的公钥验证真实签名，再生成 `latest.json` 和 SHA256SUMS。
 4. 创建 `draft=true`、`prerelease=false`、尚非 Latest 的 Release，一次上传五件附件。工作流不覆盖已有 Release；失败 Draft 需维护者先检查再明确删除重跑。不会自动 Publish。
-5. 工作流下载所有 Draft 附件，通过 `verify-release.mjs` 核对完整集合、Release notes、版本、URL、包大小、签名和校验和；仅比较 metadata 字节不足以替代附件回读。
+5. 工作流从有权限读取 Draft 的 Release 列表按 tag 唯一定位，再下载所有附件，通过 `verify-release.mjs` 核对完整集合、Release notes、版本、URL、包大小、签名和校验和。GitHub 的按 tag 查询接口只返回已发布版本；Draft 附件可使用临时 `untagged-…` 路径，而 updater metadata 必须始终使用正式 tag 路径。Publish 后只接受正式路径。仅比较 metadata 字节不足以替代附件回读。
 6. 维护者审核五件附件、App 内容和发布说明，并完成适用的干净环境验收。社区发布说明须包含下节用户说明及未完成的原生验收项。审核完成后才发布为正式 Latest：
 
    ```sh
@@ -50,7 +50,7 @@ v0.1.0 已发布产物没有 updater 公钥，继续通过 Release 页面手动�
 
 ### 两个真实版本的验收方法（#107）
 
-先发布并手动安装带同一公钥的基线版，再按相同步骤发布版本严格递增、数据兼容的目标版。例如未来可用 v0.1.1 → v0.1.2；这是版本安排示例，不表示这两个版本已发布或兼容性已验收。
+先发布并手动安装带同一公钥的基线版，再按相同步骤发布版本严格递增、数据兼容的目标版。例如可用 v0.1.2 → v0.1.3；这是版本安排示例，不表示这两个版本已发布或兼容性已验收。
 
 使用真实 GitHub Latest 链完成下载确认、取消、错误签名、二次安装确认、重启和兼容版本手动回滚。错误产物只用于受控测试，不污染公开 Latest。保留浏览器下载 quarantine，记录机型、macOS、安装目录权限、两个 commit／产物校验和、Library／Home 绑定／设置前后状态，以及是否出现管理员授权或再次放行。实际结果由 #107 承接，v0.1.0 → 带公钥基线版的手动安装不算自动更新通过。
 

@@ -83,8 +83,19 @@ try {
     const { mkdir } = await import("node:fs/promises");
     await mkdir(assetsDir);
   }
+  // GitHub gives Draft attachments a temporary ref until Publish. This is
+  // only their transport location; updater metadata must still use the tag.
+  let downloadRef = tag;
+  if (release.draft) {
+    const prefix = `https://github.com/${repo}/releases/tag/`;
+    if (!release.html_url?.startsWith(prefix))
+      throw new Error("invalid Draft release URL");
+    downloadRef = release.html_url.slice(prefix.length);
+    if (downloadRef !== tag && !/^untagged-[a-f0-9]+$/.test(downloadRef))
+      throw new Error("invalid Draft release ref");
+  }
   for (const asset of release.assets) {
-    const expectedUrl = `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(asset.name)}`;
+    const expectedUrl = `https://github.com/${repo}/releases/download/${downloadRef}/${encodeURIComponent(asset.name)}`;
     if (
       asset.browser_download_url !== expectedUrl ||
       !Number.isSafeInteger(asset.size) ||
