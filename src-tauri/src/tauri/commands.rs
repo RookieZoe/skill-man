@@ -249,7 +249,7 @@ pub async fn confirm_source_update(
     state: State<'_, SourceUpdateApi>,
     mutation: State<'_, Arc<ScanMutationCoordinator>>,
     request: crate::tauri_adapter::dto::SourceUpdateConfirmRequestDto,
-) -> Result<SourcePromotionResultDto, CommandFailureDto> {
+) -> Result<Option<SourcePromotionResultDto>, CommandFailureDto> {
     let api = state.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || api.confirm(request))
         .await
@@ -257,7 +257,7 @@ pub async fn confirm_source_update(
             error: PublicErrorDto::Internal,
             diagnostic: None,
         })?;
-    if result.is_ok() {
+    if matches!(&result, Ok(Some(_))) {
         mutation.bump();
     }
     result

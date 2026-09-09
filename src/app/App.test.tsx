@@ -1788,91 +1788,117 @@ test("Source Promotion confirms with the draft provider and executes Undo", asyn
   await waitFor(() => expect(undone).toBe("promotion-operation-1"));
 });
 
-test("Source Update exposes an executable Undo window", async () => {
-  const user = userEvent.setup();
-  const client = createFixtureCatalogClient();
-  const source = {
-    remoteId: "managed-source",
-    canonicalUrl: "https://github.com/acme/managed",
-    kind: "git_repository_source" as const,
-    provider: "github",
-    trackingMode: "auto_release_tag_head",
-    trackingValue: null,
-    selectedRef: "main",
-    resolvedCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    members: [
-      {
-        skillId: "skill-authoring",
-        skillPath: "skills/authoring",
-        presence: true,
-      },
-    ],
-  };
-  let confirmed = false;
-  let undone: string | undefined;
-  client.getGitSourceCapability = async () => ({ sources: [source] });
-  client.previewSourceUpdate = async () => ({
-    remoteId: source.remoteId,
-    provider: source.provider,
-    sourceUrl: source.canonicalUrl,
-    aliases: [],
-    policy: {
-      mode: "branch",
-      value: "main",
-      selectionKind: "branch",
+test.each(["updated", "preview-current", "confirm-current"])(
+  "Source Update handles %s without a false Undo window",
+  async (outcome) => {
+    const user = userEvent.setup();
+    const client = createFixtureCatalogClient();
+    const source = {
+      remoteId: "managed-source",
+      canonicalUrl: "https://github.com/acme/managed",
+      kind: "git_repository_source" as const,
+      provider: "github",
+      trackingMode: "auto_release_tag_head",
+      trackingValue: null,
       selectedRef: "main",
-      resolvedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    },
-    members: [
-      {
-        skillId: "skill-authoring",
-        skillPath: "skills/authoring",
-        directoryName: "skill-authoring",
-        directoryIdentityKey: "skill-authoring",
-        displayName: "Skill authoring",
-        description: "Updated",
-        treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
-        state: "current",
-      },
-    ],
-  });
-  client.confirmSourceUpdate = async (request) => {
-    confirmed = true;
-    return {
-      operationId: "update-operation-1",
-      remoteId: request.remoteId,
-      releaseId: "source-release-2",
-      resolvedCommit: request.expectedResolvedCommit,
-      memberCount: 1,
-      snapshotVersion: 12,
-      undoAvailable: true,
+      resolvedCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      members: [
+        {
+          skillId: "skill-authoring",
+          skillPath: "skills/authoring",
+          presence: true,
+        },
+      ],
     };
-  };
-  client.undoSourceUpdate = async (operationId) => {
-    undone = operationId;
-    return { operationId, memberCount: 1, snapshotVersion: 13 };
-  };
+    let confirmed = false;
+    let undone: string | undefined;
+    client.getGitSourceCapability = async () => ({ sources: [source] });
+    client.previewSourceUpdate = async () => ({
+      alreadyCurrent: outcome === "preview-current",
+      remoteId: source.remoteId,
+      provider: source.provider,
+      sourceUrl: source.canonicalUrl,
+      aliases: [],
+      policy: {
+        mode: "branch",
+        value: "main",
+        selectionKind: "branch",
+        selectedRef: "main",
+        resolvedCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      },
+      members: [
+        {
+          skillId: "skill-authoring",
+          skillPath: "skills/authoring",
+          directoryName: "skill-authoring",
+          directoryIdentityKey: "skill-authoring",
+          displayName: "Skill authoring",
+          description: "Updated",
+          treeSummary: "cccccccccccccccccccccccccccccccccccccccc",
+          state: "current",
+        },
+      ],
+    });
+    client.confirmSourceUpdate = async (request) => {
+      confirmed = true;
+      if (outcome === "confirm-current") return null;
+      return {
+        operationId: "update-operation-1",
+        remoteId: request.remoteId,
+        releaseId: "source-release-2",
+        resolvedCommit: request.expectedResolvedCommit,
+        memberCount: 1,
+        snapshotVersion: 12,
+        undoAvailable: true,
+      };
+    };
+    client.undoSourceUpdate = async (operationId) => {
+      undone = operationId;
+      return { operationId, memberCount: 1, snapshotVersion: 13 };
+    };
 
-  render(<App client={client} />);
-  await user.click(screen.getByRole("tab", { name: "Repositories" }));
-  await user.click(
+    render(<App client={client} />);
+    await user.click(screen.getByRole("tab", { name: "Repositories" }));
+    await user.click(
+      await screen.findByRole("heading", {
+        name: "https://github.com/acme/managed",
+      }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Update" }));
     await screen.findByRole("heading", {
-      name: "https://github.com/acme/managed",
-    }),
-  );
-  await user.click(await screen.findByRole("button", { name: "Update" }));
-  await screen.findByRole("heading", {
-    name: "Complete Source Release Update",
-  });
-  await user.click(
-    screen.getByRole("button", { name: "Update complete source" }),
-  );
-  await screen.findByText("Whole Source Release is managed");
-  expect(confirmed).toBe(true);
-  expect(screen.getByRole("button", { name: "Source Undo" })).toBeEnabled();
-  await user.click(screen.getByRole("button", { name: "Source Undo" }));
-  await waitFor(() => expect(undone).toBe("update-operation-1"));
-});
+      name: "Complete Source Release Update",
+    });
+    if (outcome === "preview-current") {
+      expect(
+        screen.getByText("Already up to date. No source changes are needed."),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Update complete source" }),
+      ).toBeDisabled();
+      expect(confirmed).toBe(false);
+      return;
+    }
+    await user.click(
+      screen.getByRole("button", { name: "Update complete source" }),
+    );
+    if (outcome === "confirm-current") {
+      await screen.findByText(
+        "Already up to date. No source changes are needed.",
+      );
+      expect(
+        screen.queryByRole("button", { name: "Source Undo" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      return;
+    }
+
+    await screen.findByText("Whole Source Release is managed");
+    expect(confirmed).toBe(true);
+    expect(screen.getByRole("button", { name: "Source Undo" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Source Undo" }));
+    await waitFor(() => expect(undone).toBe("update-operation-1"));
+  },
+);
 
 test("Global single-skill Adopt hands off to the ledger lifecycle", async () => {
   const user = userEvent.setup();

@@ -1199,6 +1199,7 @@
   "library.source_group.member_current": "当前",
   "library.source_group.member_removed": "移除",
   "library.source_group.update_eyebrow": "来源 Update 预览",
+  "library.source_group.already_current": "已是最新版本，无需更新来源。",
   "library.source_group.update_title": "完整 Source Release Update",
   "library.source_group.update_confirm": "更新完整来源",
   "library.source_group.updating": "正在更新来源…",

@@ -683,11 +683,19 @@ function AppContent({ client }: AppProps) {
     try {
       let result: SourcePromotionResult;
       if (sourceUpdateActive) {
-        result = await client.confirmSourceUpdate({
+        const updateResult = await client.confirmSourceUpdate({
           remoteId: draft.remoteId,
           expectedSelectedRef: draft.policy.selectedRef,
           expectedResolvedCommit: draft.policy.resolvedCommit,
         });
+        if (runId !== sourceGroupRunId.current) return;
+        if (updateResult === null) {
+          setSourceUpdateDraft((current) =>
+            current ? { ...current, alreadyCurrent: true } : null,
+          );
+          return;
+        }
+        result = updateResult;
       } else {
         const sourceType = sourceTypeFromProvider(draft.provider);
         if (!sourceType) {

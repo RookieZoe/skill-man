@@ -269,6 +269,9 @@ export function SourceGroupPreviewFlow({
             )}
           </PluginGroups>
         </section>
+        {updateDraft.alreadyCurrent ? (
+          <p role="status">{t("library.source_group.already_current")}</p>
+        ) : null}
         {error ? (
           <div className="activation-error" role="alert">
             <strong>{t("library.import.source_unavailable")}</strong>
@@ -282,7 +285,7 @@ export function SourceGroupPreviewFlow({
           <button
             type="button"
             className="activation-confirm-button"
-            disabled={isBusy}
+            disabled={isBusy || updateDraft.alreadyCurrent}
             onClick={onConfirmPromotion}
           >
             {isBusy

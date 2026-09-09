@@ -54,6 +54,7 @@ pub struct SourceUpdateDraftMember {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceUpdateDraft {
+    pub already_current: bool,
     pub remote_id: String,
     pub provider: String,
     pub source_url: String,
@@ -250,6 +251,10 @@ impl SourceUpdateService {
         }
         members.sort_by(|left, right| left.skill_path.cmp(&right.skill_path));
         Ok(SourceUpdateDraft {
+            already_current: current.selected_ref == preview.policy.selected_ref
+                && current.resolved_commit == preview.policy.resolved_commit
+                && current.tracking_mode == preview.policy.mode
+                && current.tracking_value == preview.policy.value,
             remote_id: remote_id.into(),
             provider: preview.provider,
             source_url: preview.source_url,

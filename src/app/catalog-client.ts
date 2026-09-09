@@ -1470,6 +1470,7 @@ export interface SourceUpdateDraftMember {
 }
 
 export interface SourceUpdateDraft {
+  alreadyCurrent: boolean;
   remoteId: string;
   provider: string;
   sourceUrl: string;
@@ -1485,7 +1486,7 @@ export interface ConfirmSourceUpdateRequest {
   expectedResolvedCommit: string;
 }
 
-export type SourceUpdateResult = SourcePromotionResult;
+export type SourceUpdateResult = SourcePromotionResult | null;
 
 export interface SourceRestoreResult {
   remoteId: string;

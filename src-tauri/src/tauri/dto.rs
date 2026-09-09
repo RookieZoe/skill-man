@@ -669,6 +669,7 @@ pub struct SourceUpdateDraftMemberDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceUpdateDraftDto {
+    pub already_current: bool,
     pub remote_id: String,
     pub provider: String,
     pub source_url: String,
@@ -680,6 +681,7 @@ pub struct SourceUpdateDraftDto {
 impl From<crate::core::source_update::SourceUpdateDraft> for SourceUpdateDraftDto {
     fn from(value: crate::core::source_update::SourceUpdateDraft) -> Self {
         Self {
+            already_current: value.already_current,
             remote_id: value.remote_id,
             provider: value.provider,
             source_url: value.source_url,

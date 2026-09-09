@@ -145,6 +145,8 @@ pub struct SourceUndoResult {
 
 #[derive(Debug, Error)]
 pub enum SourceTransitionError {
+    #[error("the source already has the selected release and tracking policy")]
+    AlreadyCurrent,
     #[error("{0}")]
     Validation(String),
     #[error("the Source Group Draft is stale; Fetch Latest and Manage again before confirming")]
@@ -716,6 +718,17 @@ impl SourceTransitionService {
             || preview.policy.resolved_commit != request.expected_resolved_commit
         {
             return Err(SourceTransitionError::PreviewStale);
+        }
+        if current.selected_ref == preview.policy.selected_ref
+            && current.resolved_commit == preview.policy.resolved_commit
+            && current.tracking_mode == preview.policy.mode
+            && current.tracking_value == preview.policy.value
+        {
+            let _write_guard = self.acquire_write_guard(&write_context)?;
+            if self.update_store.read_current(&request.remote_id)?.as_ref() != Some(&current) {
+                return Err(SourceTransitionError::PreviewStale);
+            }
+            return Err(SourceTransitionError::AlreadyCurrent);
         }
         let operation_id = self.next_operation_id();
         let release_id = format!("source-release-{operation_id}");

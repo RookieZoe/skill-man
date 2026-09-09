@@ -1609,3 +1609,43 @@ fn restore_roll_forward_commits_member_health_after_a_restored_phase_crash() {
         "roll-forward also commits the catalog health flip"
     );
 }
+
+#[test]
+fn confirming_the_current_release_is_a_successful_noop() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    let before = read_current(&fixture, &remote_id);
+    let release_count = count(&open_catalog(&fixture), "git_source_releases");
+    let snapshot_version: i64 = open_catalog(&fixture)
+        .query_row("SELECT snapshot_version FROM catalog_meta", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let draft = fixture.update.preview(&remote_id, None).expect("preview");
+    assert!(draft.already_current);
+    let api = skill_man_lib::tauri_adapter::source_update_api::SourceUpdateApi::new(
+        fixture.update.clone(),
+    );
+    let result = api.confirm(
+        skill_man_lib::tauri_adapter::dto::SourceUpdateConfirmRequestDto {
+            remote_id: remote_id.clone(),
+            expected_selected_ref: draft.policy.selected_ref,
+            expected_resolved_commit: draft.policy.resolved_commit,
+        },
+    );
+    assert!(result.expect("current release must not fail").is_none());
+    assert_eq!(read_current(&fixture, &remote_id), before);
+    assert_eq!(
+        count(&open_catalog(&fixture), "git_source_releases"),
+        release_count
+    );
+    assert_eq!(
+        open_catalog(&fixture)
+            .query_row("SELECT snapshot_version FROM catalog_meta", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        snapshot_version
+    );
+}

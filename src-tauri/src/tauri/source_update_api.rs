@@ -45,16 +45,19 @@ impl SourceUpdateApi {
     pub fn confirm(
         &self,
         request: SourceUpdateConfirmRequestDto,
-    ) -> Result<SourcePromotionResultDto, CommandFailureDto> {
-        self.update
-            .confirm(
-                &request.remote_id,
-                None,
-                request.expected_selected_ref,
-                request.expected_resolved_commit,
-            )
-            .map(Into::into)
-            .map_err(update_error)
+    ) -> Result<Option<SourcePromotionResultDto>, CommandFailureDto> {
+        match self.update.confirm(
+            &request.remote_id,
+            None,
+            request.expected_selected_ref,
+            request.expected_resolved_commit,
+        ) {
+            Ok(result) => Ok(Some(result.into())),
+            Err(SourceUpdateError::Transition(
+                crate::core::source_transition::SourceTransitionError::AlreadyCurrent,
+            )) => Ok(None),
+            Err(error) => Err(update_error(error)),
+        }
     }
 
     pub fn undo(

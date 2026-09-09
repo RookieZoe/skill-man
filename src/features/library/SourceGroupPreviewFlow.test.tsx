@@ -316,6 +316,7 @@ test("Source Update preview exposes confirm and keeps the result undoable", asyn
   const user = userEvent.setup();
   const onConfirm = vi.fn();
   const updateDraft: SourceUpdateDraft = {
+    alreadyCurrent: false,
     remoteId: "remote-1",
     provider: "gitlab",
     sourceUrl: "https://gitlab.com/acme/repository",

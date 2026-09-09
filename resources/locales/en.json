@@ -1199,6 +1199,7 @@
   "library.source_group.member_current": "current",
   "library.source_group.member_removed": "removed",
   "library.source_group.update_eyebrow": "Source Update Preview",
+  "library.source_group.already_current": "Already up to date. No source changes are needed.",
   "library.source_group.update_title": "Complete Source Release Update",
   "library.source_group.update_confirm": "Update complete source",
   "library.source_group.updating": "Updating source…",
