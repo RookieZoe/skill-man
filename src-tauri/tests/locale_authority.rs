@@ -170,6 +170,7 @@ fn dto_serialization_contract_is_camel_case_and_closed() {
     // SkillDetailDto: the native-composed sourceLabel is gone; the raw
     // Source Content path is a standalone field (spec §4.7).
     let detail = serde_json::to_value(SkillDetailDto {
+        document_available: true,
         id: "skill-authoring".into(),
         directory_name: "skill-authoring".into(),
         display_name: "Skill authoring".into(),

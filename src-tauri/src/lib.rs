@@ -136,6 +136,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_window_state::Builder::default()
             .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+            .with_denylist(&["tray-panel"])
             .build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -667,48 +668,33 @@ pub fn run() {
             }
 
             // Menu-bar tray: resident for the whole app lifetime (spec §9.4).
-            let initial_recent = catalog_store
-                .recently_enabled(tray::TRAY_SKILL_LIMIT)
-                .unwrap_or_default();
-            let tray_menu = tray::build_tray_menu(app.handle(), &initial_recent, initial_locale)?;
             // Always use the monochrome template, not the colored app icon.
             // macOS chooses its tint from the menu bar's effective appearance.
             let icon = tauri::image::Image::new(include_bytes!("../icons/tray.rgba"), 18, 18);
             let tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .menu(&tray_menu)
                 .icon(icon)
                 .icon_as_template(true);
             tray_builder
-                .show_menu_on_left_click(true)
-                .on_menu_event(tray::handle_tray_menu_event)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(crate::tauri_adapter::tray_panel::handle_icon)
                 .build(app)?;
 
-            // Keep the tray's recent list honest after every catalog write.
             let handle = app.handle().clone();
-            let listener_handle = handle.clone();
-            let tray_store = catalog_store.clone();
-            let listener_locale = locale_service.clone();
-            handle.listen(tray::CATALOG_CHANGED_EVENT, move |_| {
-                let locale = listener_locale.snapshot().effective_locale;
-                tray::refresh_tray(&listener_handle, tray_store.as_ref(), locale);
-            });
-
             // The locale changed: React, tray and the native menu follow the
             // same generation (ADR-0011). The catalog is never reloaded and
             // no sheet is remounted — only presentation surfaces refresh.
             let locale_menu_handle = app.handle().clone();
-            let locale_listener_handle = app.handle().clone();
-            let locale_tray_store = catalog_store.clone();
             let locale_service_for_event = locale_service.clone();
             handle.listen(LOCALE_CHANGED_EVENT, move |_| {
                 let locale = locale_service_for_event.snapshot().effective_locale;
                 menu::apply_app_menu(&locale_menu_handle, locale);
-                tray::refresh_tray(&locale_listener_handle, locale_tray_store.as_ref(), locale);
             });
 
             Ok(())
         })
         .invoke_handler(::tauri::generate_handler![
+            crate::tauri_adapter::tray_panel::tray_panel_ready,
+            crate::tauri_adapter::tray_panel::tray_panel_action,
             crate::tauri_adapter::commands::check_community_update,
             crate::tauri_adapter::commands::set_app_appearance,
             prepare_home,
@@ -819,10 +805,6 @@ pub fn run() {
         .expect("Skill Man runtime failed");
 
     app.run(move |app_handle, event| {
-        // Tray store for the focus-driven refresh (the catalog-changed
-        // listener in setup covers command writes; the run loop covers the
-        // rest). Absent outside Bound: the tray keeps its last good menu.
-        let tray_store = app_handle.try_state::<Arc<dyn CatalogStore>>();
         match event {
             // Programmatic restoration can bypass macOS interactive size limits.
             // Reuse the configured logical minimum, converted for the current display.
@@ -879,20 +861,12 @@ pub fn run() {
                 }
                 show_main_window(app_handle);
             }
-            // Refreshing the tray on focus keeps the recent list honest even if
-            // a catalog event was missed.
             RunEvent::WindowEvent {
                 label,
-                event: WindowEvent::Focused(true),
+                event: WindowEvent::Focused(false),
                 ..
-            } if label == "main" => {
-                if let Some(store) = tray_store {
-                    let locale = app_handle
-                        .try_state::<Arc<LocaleService>>()
-                        .map(|service| service.snapshot().effective_locale)
-                        .unwrap_or(crate::seams::locale_store::EffectiveLocale::En);
-                    tray::refresh_tray(app_handle, store.as_ref(), locale);
-                }
+            } if label == "tray-panel" => {
+                crate::tauri_adapter::tray_panel::dismiss_on_blur(app_handle);
             }
             _ => {}
         }

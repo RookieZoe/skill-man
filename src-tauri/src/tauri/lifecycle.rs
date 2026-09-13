@@ -7,6 +7,7 @@ use tauri::{ActivationPolicy, AppHandle, Manager};
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
 pub fn show_main_window(app: &AppHandle) {
+    crate::tauri_adapter::tray_panel::dismiss(app);
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.show();
         let _ = window.unminimize();

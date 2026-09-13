@@ -61,13 +61,19 @@ export function LocaleProvider({
 }) {
   const [snapshot, setSnapshot] = useState<LocaleSnapshot | null>(null);
 
+  const acceptSnapshot = useCallback((next: LocaleSnapshot) => {
+    setSnapshot((previous) =>
+      previous && previous.generation > next.generation ? previous : next,
+    );
+  }, []);
+
   useEffect(() => {
     let current = true;
     let unlisten: (() => void) | null = null;
     client
       .getLocaleSnapshot()
       .then((next) => {
-        if (current) setSnapshot(next);
+        if (current) acceptSnapshot(next);
       })
       .catch(() => {
         // The authority is unreachable; the English baseline keeps every
@@ -76,7 +82,7 @@ export function LocaleProvider({
       });
     client
       .listenLocaleChanged((payload) => {
-        setSnapshot(payload);
+        if (current) acceptSnapshot(payload);
       })
       .then((stop) => {
         if (current) unlisten = stop;
@@ -86,7 +92,7 @@ export function LocaleProvider({
       current = false;
       unlisten?.();
     };
-  }, [client]);
+  }, [client, acceptSnapshot]);
 
   const locale: EffectiveLocale = snapshot?.effectiveLocale ?? "en";
 
@@ -99,15 +105,15 @@ export function LocaleProvider({
   const setSelection = useCallback(
     async (selection: LocaleSelection) => {
       const next = await client.setLocaleSelection(selection);
-      setSnapshot(next);
+      acceptSnapshot(next);
     },
-    [client],
+    [client, acceptSnapshot],
   );
 
   const refreshSystemLanguages = useCallback(async () => {
     const next = await client.refreshSystemLanguages();
-    setSnapshot(next);
-  }, [client]);
+    acceptSnapshot(next);
+  }, [client, acceptSnapshot]);
 
   const value = useMemo<LocaleContextValue>(
     () => ({

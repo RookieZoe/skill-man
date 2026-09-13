@@ -14,6 +14,11 @@ const showLayoutMatrixFrame =
 const root = createRoot(document.getElementById("root")!);
 
 async function renderApplication() {
+  if (params.get("surface") === "tray") {
+    const { NativeTrayPanel } = await import("./features/tray/NativeTrayPanel");
+    root.render(<NativeTrayPanel client={createCatalogClient()} />);
+    return;
+  }
   if (import.meta.env.DEV && params.get("fixture") === "migration") {
     const { LocalMigrationDialog } =
       await import("./features/scan/LocalMigrationDialog");

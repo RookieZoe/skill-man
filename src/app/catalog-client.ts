@@ -422,6 +422,7 @@ export interface SkillDetail extends SkillSummary {
   frontmatterName: string | null;
   lastActivityAt: string;
   skillMarkdown: string;
+  documentAvailable: boolean;
 }
 
 // -- Global Enable (spec §4.9; ADR-0019) --
@@ -1690,6 +1691,7 @@ export interface CatalogClient {
   listenLocaleChanged(
     callback: (payload: LocaleSnapshot) => void,
   ): Promise<() => void>;
+  listenCatalogChanged(callback: () => void): Promise<() => void>;
   listSkills(filter: CatalogFilter): Promise<CatalogList>;
   /** Read-only Source Capability Scan (ADR-0014, spec §8.3). */
   getGitSourceCapability(): Promise<GitSourceCapabilityReport>;
@@ -1939,6 +1941,9 @@ const tauriCatalogClient: CatalogClient = {
         callback(event.payload);
       },
     );
+  },
+  listenCatalogChanged(callback) {
+    return listen("catalog-changed", callback);
   },
   listSkills(filter) {
     return invoke<CatalogList>("list_skills", { request: { filter } });
@@ -2333,6 +2338,7 @@ function createClosedBootstrapClient(): CatalogClient {
     },
   });
   client.listenBootstrapChanged = async () => () => {};
+  client.listenCatalogChanged = async () => () => {};
   client.getLocaleSnapshot = async () => ({
     selection: "system",
     effectiveLocale: "en",

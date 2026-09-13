@@ -1446,5 +1446,21 @@
   "community.latest": "已是最新版本。",
   "community.available": "发现新版本 {version}。",
   "community.open": "查看新版本",
-  "community.failed": "暂时无法检查更新，请重试。"
+  "community.failed": "暂时无法检查更新，请重试。",
+  "tray.panel.search": "搜索技能",
+  "tray.panel.skills": "技能",
+  "tray.panel.no_results": "没有匹配的技能",
+  "tray.panel.close": "收起面板",
+  "tray.panel.back": "返回",
+  "tray.panel.copy": "复制 Markdown",
+  "tray.panel.copied": "已复制",
+  "tray.panel.copy_failed": "无法复制 Markdown",
+  "tray.panel.read_failed": "技能不可读或已移除，请返回列表继续浏览。",
+  "tray.panel.loading": "正在加载…",
+  "tray.panel.home_unavailable": "主目录不可用",
+  "tray.panel.identity_mismatch": "主目录身份不匹配",
+  "tray.panel.unavailable": "技能库不可读，请打开主窗口查看访问或恢复状态。",
+  "tray.panel.empty": "技能库为空",
+  "tray.panel.clear": "清空搜索",
+  "tray.panel.window_failed": "无法完成窗口操作，请重试。"
 }

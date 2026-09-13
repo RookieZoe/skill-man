@@ -1446,5 +1446,21 @@
   "community.latest": "You’re up to date.",
   "community.available": "Version {version} is available.",
   "community.open": "View release",
-  "community.failed": "Could not check for updates. Please try again."
+  "community.failed": "Could not check for updates. Please try again.",
+  "tray.panel.search": "Search skills",
+  "tray.panel.skills": "Skills",
+  "tray.panel.no_results": "No matching skills",
+  "tray.panel.close": "Close panel",
+  "tray.panel.back": "Back",
+  "tray.panel.copy": "Copy Markdown",
+  "tray.panel.copied": "Copied",
+  "tray.panel.copy_failed": "Could not copy Markdown",
+  "tray.panel.read_failed": "Skill unavailable or removed. Return to the list to continue.",
+  "tray.panel.loading": "Loading…",
+  "tray.panel.home_unavailable": "Home unavailable",
+  "tray.panel.identity_mismatch": "Home identity mismatch",
+  "tray.panel.unavailable": "Library unavailable. Open the main window to resolve its access or recovery state.",
+  "tray.panel.empty": "Your Library is empty",
+  "tray.panel.clear": "Clear search",
+  "tray.panel.window_failed": "Could not complete the window action. Try again."
 }

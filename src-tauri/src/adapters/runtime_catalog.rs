@@ -381,15 +381,15 @@ impl CatalogStore for RuntimeCatalogStore {
         let Some(persisted) = catalog.persisted_skill_detail(skill_id)? else {
             return Ok(None);
         };
-        let skill_markdown = match self
+        let (skill_markdown, document_available) = match self
             .filesystem
             .read_skill_document(&persisted.final_entity_path)
         {
-            Ok(markdown) => markdown,
+            Ok(markdown) => (markdown, true),
             // A Broken Skill (missing entity or SKILL.md) must stay viewable:
             // the detail panel presents the notice and repair entry instead of
             // failing the whole inspection.
-            Err(_) if persisted.summary.health == Health::Broken => String::new(),
+            Err(_) if persisted.summary.health == Health::Broken => (String::new(), false),
             Err(error) => {
                 return Err(CatalogStoreError::Unavailable(error.to_string()));
             }
@@ -402,6 +402,7 @@ impl CatalogStore for RuntimeCatalogStore {
             frontmatter_name: metadata.name,
             last_activity_at: persisted.updated_at,
             skill_markdown,
+            document_available,
         }))
     }
 
