@@ -2773,8 +2773,7 @@ button:active:not(:disabled) {
 }
 
 .onboarding-sheet,
-.broken-disable-sheet,
-.app-update-sheet {
+.broken-disable-sheet {
   max-height: calc(100dvh - 88px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -3486,7 +3485,8 @@ button:active:not(:disabled) {
   padding: 0 var(--space-6);
 }
 
-.app-update-details div {
+.app-update-details > div {
+  min-width: 0;
   padding: var(--space-3) var(--space-4);
   background: var(--surface-muted);
   border-radius: var(--radius-sm);
@@ -3506,7 +3506,7 @@ button:active:not(:disabled) {
   overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.5;
-  white-space: pre-wrap;
+  white-space: normal;
 }
 
 @media (max-width: 430px) {
@@ -6379,4 +6379,47 @@ details[open] > .source-group-summary::before {
 
 .recent-folder-remove:active:not(:disabled) {
   transform: translateY(-50%) scale(0.96);
+}
+
+/* App Update keeps status and actions visible while long notes scroll inside. */
+.app-update-backdrop {
+  align-items: center;
+  padding: var(--space-4);
+  overflow: hidden;
+}
+.app-update-sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: min(680px, calc(100dvh - 32px));
+  overflow: hidden;
+}
+.app-update-sheet > :not(.app-update-body) {
+  flex-shrink: 0;
+}
+.app-update-sheet > .operation-notice {
+  position: static;
+}
+.app-update-sheet .activation-sheet-heading {
+  padding-bottom: var(--space-3);
+}
+.app-update-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 0 var(--space-6) var(--space-3);
+}
+.app-update-body .app-update-details {
+  padding: 0;
+}
+.app-update-body .app-update-help {
+  margin: var(--space-3) 0 0;
+  padding: 0 var(--space-4);
+}
+.app-update-details .markdown-body {
+  padding: 0;
+  white-space: normal;
+}
+.app-update-sheet .activation-sheet-actions {
+  margin-top: 0;
 }

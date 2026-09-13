@@ -93,19 +93,23 @@ async function renderApplication() {
     <StrictMode>
       <BootstrapApp
         client={
-          import.meta.env.DEV && params.get("fixture") === "scan"
+          import.meta.env.DEV && params.get("fixture") === "app-update"
             ? (
-                await import("./test-fixtures/scan-report")
-              ).createScanPreviewClient()
-            : import.meta.env.DEV && params.get("fixture") === "git-preview"
+                await import("./test-fixtures/app-update")
+              ).createAppUpdatePreviewClient()
+            : import.meta.env.DEV && params.get("fixture") === "scan"
               ? (
-                  await import("./test-fixtures/git-preview")
-                ).createGitPreviewClient(params.get("removed") === "true")
-              : import.meta.env.DEV && params.get("fixture") === "enable"
+                  await import("./test-fixtures/scan-report")
+                ).createScanPreviewClient()
+              : import.meta.env.DEV && params.get("fixture") === "git-preview"
                 ? (
-                    await import("./test-fixtures/catalog")
-                  ).createFixtureCatalogClient()
-                : createCatalogClient()
+                    await import("./test-fixtures/git-preview")
+                  ).createGitPreviewClient(params.get("removed") === "true")
+                : import.meta.env.DEV && params.get("fixture") === "enable"
+                  ? (
+                      await import("./test-fixtures/catalog")
+                    ).createFixtureCatalogClient()
+                  : createCatalogClient()
         }
       />
     </StrictMode>,

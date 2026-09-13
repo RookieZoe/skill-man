@@ -1,6 +1,5 @@
 import { useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownContent } from "../../ui/MarkdownContent";
 import { useLocale } from "../locale/LocaleProvider";
 
 /** Only the reading view omits metadata; RAW preserves the original bytes. */
@@ -33,24 +32,7 @@ export function SkillDocument({ markdown }: { markdown: string }) {
         <pre>{markdown}</pre>
       ) : (
         <div className="markdown-body">
-          <Markdown
-            remarkPlugins={[remarkGfm]}
-            skipHtml
-            components={{
-              // Source content must not load remote tracking images or local files.
-              img: ({ alt }) => <span>{alt}</span>,
-              a: ({ href, children }) =>
-                href && /^https?:\/\//i.test(href) ? (
-                  <a href={href} target="_blank" rel="noopener noreferrer">
-                    {children}
-                  </a>
-                ) : (
-                  <span>{children}</span>
-                ),
-            }}
-          >
-            {body}
-          </Markdown>
+          <MarkdownContent markdown={body} />
         </div>
       )}
     </section>

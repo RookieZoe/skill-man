@@ -1201,7 +1201,8 @@ test("downloads an available app update before asking to install and restart", a
     status: "available",
     version: "0.2.0",
     currentVersion: "0.1.0",
-    releaseNotes: "Adds signed, verified app updates.",
+    releaseNotes:
+      "# Release notes\n\nAdds signed, verified app updates.\n\n- **Verified** archive\n\n[Release](https://example.com/release)\n\n```sh\nshasum -a 256\n```\n\n![Tracking](https://example.com/pixel.png)\n\n[Unsafe](javascript:alert(1))",
     downloadSizeBytes: 12 * 1024 * 1024,
     updateId: "fixture-update-1",
   });
@@ -1227,6 +1228,21 @@ test("downloads an available app update before asking to install and restart", a
   expect(dialog).toHaveTextContent("0.2.0");
   expect(dialog).toHaveTextContent("Current version 0.1.0");
   expect(dialog).toHaveTextContent("Adds signed, verified app updates.");
+  expect(
+    within(dialog).getByRole("heading", { name: "Release notes" }),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByRole("list")).toHaveTextContent(
+    "Verified archive",
+  );
+  expect(within(dialog).getByRole("link", { name: "Release" })).toHaveAttribute(
+    "href",
+    "https://example.com/release",
+  );
+  expect(dialog.querySelector("pre code")).toHaveTextContent("shasum -a 256");
+  expect(dialog.querySelector("img")).toBeNull();
+  expect(
+    within(dialog).queryByRole("link", { name: "Unsafe" }),
+  ).not.toBeInTheDocument();
   expect(dialog).toHaveTextContent("12 MB");
   expect(dialog).toHaveTextContent("Open Anyway");
   expect(
@@ -1510,6 +1526,10 @@ test("closes the app update sheet with Escape and restores background focus", as
     name: "Download update",
   });
   expect(downloadButton).toHaveFocus();
+  await user.tab();
+  expect(
+    within(dialog).getByRole("region", { name: "Release notes" }),
+  ).toHaveFocus();
   await user.tab();
   expect(
     within(dialog).getByRole("link", { name: "Download manually" }),

@@ -1,3 +1,4 @@
+import { MarkdownContent } from "../../ui/MarkdownContent";
 import { AppearanceControl } from "../appearance/AppearanceProvider";
 import { CommunityUpdateControl } from "./CommunityUpdateControl";
 import { appUpdatesAvailable } from "../../app/app-update-availability";
@@ -2335,7 +2336,7 @@ function AppUpdateSheet({
       if (event.key === "Escape" && !blocksDismissal) onClose();
       if (event.key === "Tab") {
         const controls = sheetRef.current?.querySelectorAll<HTMLElement>(
-          "a[href],button:not([disabled])",
+          'a[href],button:not([disabled]),[tabindex="0"]',
         );
         const first = controls?.[0];
         const last = controls?.[controls.length - 1];
@@ -2356,7 +2357,7 @@ function AppUpdateSheet({
 
   return (
     <div
-      className="activation-sheet-backdrop"
+      className="activation-sheet-backdrop app-update-backdrop"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target && !blocksDismissal) onClose();
       }}
@@ -2368,17 +2369,6 @@ function AppUpdateSheet({
         aria-modal="true"
         aria-label={t("library.app_update.dialog")}
       >
-        <OperationNotice
-          busy={panel.activity === "downloading" || blocksDismissal}
-          cancellable={panel.activity === "downloading"}
-          label={t(
-            isInstalling
-              ? "library.app_update.installing"
-              : isCancelling
-                ? "library.app_update.cancelling"
-                : "library.app_update.downloading",
-          )}
-        />
         <div className="activation-sheet-heading">
           <span className="eyebrow">{t("library.app_update.eyebrow")}</span>
           <h2>
@@ -2390,17 +2380,41 @@ function AppUpdateSheet({
             })}
           </p>
         </div>
-        <dl className="app-update-details">
-          <div>
-            <dt>{t("library.app_update.archive_size")}</dt>
-            <dd>{formatByteSize(locale, update.downloadSizeBytes)}</dd>
-          </div>
-          <div>
-            <dt>{t("library.app_update.release_notes")}</dt>
-            <dd>{update.releaseNotes || t("library.app_update.no_notes")}</dd>
-          </div>
-        </dl>
-        <AppUpdateHelp />
+        <OperationNotice
+          busy={panel.activity === "downloading" || blocksDismissal}
+          cancellable={panel.activity === "downloading"}
+          label={t(
+            isInstalling
+              ? "library.app_update.installing"
+              : isCancelling
+                ? "library.app_update.cancelling"
+                : "library.app_update.downloading",
+          )}
+        />
+        <div
+          className="app-update-body"
+          tabIndex={0}
+          role="region"
+          aria-label={t("library.app_update.release_notes")}
+        >
+          <dl className="app-update-details">
+            <div>
+              <dt>{t("library.app_update.archive_size")}</dt>
+              <dd>{formatByteSize(locale, update.downloadSizeBytes)}</dd>
+            </div>
+            <div>
+              <dt>{t("library.app_update.release_notes")}</dt>
+              <dd className="markdown-body">
+                <MarkdownContent
+                  markdown={
+                    update.releaseNotes || t("library.app_update.no_notes")
+                  }
+                />
+              </dd>
+            </div>
+          </dl>
+          <AppUpdateHelp />
+        </div>
         {isReady ? (
           <div
             className="app-update-ready operation-message operation-message--success"
