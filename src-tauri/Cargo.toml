@@ -48,3 +48,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 [[test]]
 name = "native_branding"
 harness = false
+
+[[test]]
+name = "native_menu"
+harness = false
