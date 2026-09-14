@@ -54,13 +54,12 @@ pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             )?)?,
             NativeEntry::About => {
                 let title = text(Key::TrayAbout);
-                menu.append(&PredefinedMenuItem::about(
+                menu.append(&MenuItem::with_id(
                     app,
-                    Some(&title),
-                    Some(crate::tauri_adapter::menu::about_metadata(
-                        app,
-                        locale.effective_locale,
-                    )),
+                    "tray-about",
+                    title,
+                    true,
+                    None::<&str>,
                 )?)?;
             }
             NativeEntry::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
@@ -146,6 +145,7 @@ pub fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let mut failed = None;
     match id {
         "open-window" => crate::tauri_adapter::lifecycle::show_main_window(app),
+        "tray-about" => super::about::show(app),
         "feedback" => {
             if app
                 .opener()

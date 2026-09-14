@@ -1452,6 +1452,6 @@
   "library.app_update.unsupported": "当前构建不支持应用内更新。请从发布页下载最新版本。",
   "tray.feedback": "问题反馈",
   "tray.feedback_failed": "无法打开问题反馈页面，请重试。",
-  "app.about.credits": "作者：{author}\n项目地址：{url}",
+  "app.about.credits": "作者：{author}\n{url}",
   "app.update.native_offer": "Skill Man {version} 可用（当前：{current}）。\n下载大小：{size} MB\n\n{notes}"
 }

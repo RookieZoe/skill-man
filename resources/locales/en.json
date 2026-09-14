@@ -1452,6 +1452,6 @@
   "library.app_update.unsupported": "This build does not support in-app updates. Download the latest version from the releases page.",
   "tray.feedback": "Report an Issue",
   "tray.feedback_failed": "Could not open the issue page. Please try again.",
-  "app.about.credits": "Author: {author}\nProject: {url}",
+  "app.about.credits": "By {author}\n{url}",
   "app.update.native_offer": "Skill Man {version} is available (current: {current}).\nDownload: {size} MB\n\n{notes}"
 }

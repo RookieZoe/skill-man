@@ -1,3 +1,4 @@
+pub mod about;
 pub mod adopt_api;
 pub mod agent_configuration_api;
 pub mod app_update_api;

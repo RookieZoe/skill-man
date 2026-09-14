@@ -51,3 +51,13 @@ NativeAppUpdate 统一接收托盘及设置页的手动检查与自动检查，�
 ## Spec review
 
 最终复核通过，无剩余可操作问题。自动检查被手动请求提升为可见进度；取消后新的请求保留；下载和安装仍分别确认。原生验收范围以以上实际证据为准。
+
+## About 文字修整（2026-09-14）
+
+用户截图中，作者和完整 URL 使用默认大字号且左对齐，与居中的应用名称/版本不协调，网址折为两行，版本重复显示。现在两个菜单入口共用标准 About panel 的 attributed credits：11 pt 系统字体、次要文字颜色、居中段落、5 pt 段后间距；网址显示为 `github.com/RookieZoe/skill-man`，链接目标保留 HTTPS 完整地址。显式清空 build version 字段，运行版本只显示一次。Logo 继续取运行 App 的原生图标。
+
+已通过原生 App 菜单打开新面板并截图验证：网址从 2 行变为 1 行，版本从 2 次变为 1 次。原截图为 578×464 px，CUA 截图为 284×209 px，两者采集比例不同，不直接用像素差计算字号变化。新截图为 `.scratch/native-menu-113/native-about-typography.jpg`。AX 可访问树识别项目地址为 link；未将浏览器导航 readback 记为通过。
+
+checked 1 / changed 2 / left 1：App 菜单入口已实测，App 菜单和托盘两个入口已改用同一实现，托盘图标入口仍待原生复查。
+
+本轮 `npm run ci:local` 通过（退出码 0，日志 `/tmp/skillman-about-polish-ci.log`），`.app` 构建成功。Standards 与 Spec 两路静态复核均无剩余问题。
