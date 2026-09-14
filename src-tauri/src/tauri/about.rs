@@ -70,7 +70,8 @@ pub fn show(app: &tauri::AppHandle) {
                 NSString::from_str("").into_super().into_super(),
                 credits.into_super().into_super().into_super(),
             ];
-            let options = NSDictionary::from_retained_objects(
+            let options = super::native_branding::about_options(
+                mtm,
                 &[
                     NSAboutPanelOptionApplicationName,
                     NSAboutPanelOptionApplicationVersion,

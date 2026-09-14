@@ -61,3 +61,11 @@ NativeAppUpdate 统一接收托盘及设置页的手动检查与自动检查，�
 checked 1 / changed 2 / left 1：App 菜单入口已实测，App 菜单和托盘两个入口已改用同一实现，托盘图标入口仍待原生复查。
 
 本轮 `npm run ci:local` 通过（退出码 0，日志 `/tmp/skillman-about-polish-ci.log`），`.app` 构建成功。Standards 与 Spec 两路静态复核均无剩余问题。
+
+## 原生 Logo 修复（2026-09-14）
+
+用户随后截图显示 About 与更新结果为文件夹图标。前轮仅验证打包 App，依赖运行 App 的默认图标，未覆盖开发/未打包运行。现将现有 `icons/icon.icns` 嵌入可执行文件，显式设置 About 的 `ApplicationIcon` 和共享 `NSAlert.icon`，不依赖 App Bundle；原文字版式保持不变。所有更新结果、错误、下载/安装确认以及复用该弹窗的菜单错误提示均覆盖。
+
+新增 `native_branding` 原生回归程序，在真正的进程主线程创建 Cocoa 对象，比较 About 选项及 NSAlert 中的实际图像数据与嵌入 Logo。修复前两处均失败（`About=false, alert=false`），修复后通过；日志为 `/tmp/skillman-branding-red.log` 和 `/tmp/skillman-branding-green.log`。CUA 无法将未打包 `target/debug/skill-man` 识别为 App，因此本轮未取得该开发进程的新窗口截图，不以旧打包截图替代此项证据。Standards 与 Spec 复核均无可操作问题。
+
+本轮 `npm run ci:local` 通过（退出码 0，日志 `/tmp/skillman-branding-ci.log`），包括上述原生回归、完整测试及 aarch64 原生构建。

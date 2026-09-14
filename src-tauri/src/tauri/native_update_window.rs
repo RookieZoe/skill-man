@@ -9,8 +9,8 @@ use objc2::{
     DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::ProtocolObject,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSBackingStoreType, NSProgressIndicator,
-    NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSAlertFirstButtonReturn, NSApplication, NSBackingStoreType, NSProgressIndicator, NSTextField,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -214,7 +214,7 @@ pub async fn prompt(
             // The alert is created, run and released on the main thread.
             // runModal owns the nested AppKit event loop until the user responds.
             let result = {
-                let alert = NSAlert::new(mtm);
+                let alert = super::native_branding::message_alert(mtm);
                 alert.setMessageText(&NSString::from_str(&title));
                 alert.setInformativeText(&NSString::from_str(&message));
                 alert.addButtonWithTitle(&NSString::from_str(&accept));

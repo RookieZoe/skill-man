@@ -31,3 +31,6 @@ pub mod source_update_api;
 pub mod startup_api;
 pub mod tray;
 pub mod update_api;
+
+#[cfg(target_os = "macos")]
+pub mod native_branding;
