@@ -69,3 +69,20 @@ checked 1 / changed 2 / left 1：App 菜单入口已实测，App 菜单和托盘
 新增 `native_branding` 原生回归程序，在真正的进程主线程创建 Cocoa 对象，比较 About 选项及 NSAlert 中的实际图像数据与嵌入 Logo。修复前两处均失败（`About=false, alert=false`），修复后通过；日志为 `/tmp/skillman-branding-red.log` 和 `/tmp/skillman-branding-green.log`。CUA 无法将未打包 `target/debug/skill-man` 识别为 App，因此本轮未取得该开发进程的新窗口截图，不以旧打包截图替代此项证据。Standards 与 Spec 复核均无可操作问题。
 
 本轮 `npm run ci:local` 通过（退出码 0，日志 `/tmp/skillman-branding-ci.log`），包括上述原生回归、完整测试及 aarch64 原生构建。
+
+
+## 规格同步与原生冒烟补测（2026-09-14）
+
+已同步 #108、#113、#112 及 #114 的 canonical resolution：七项菜单、问题反馈、About 内容与排版、独立原生 App Update、启动/重新打开置前及无省略号；保留原验收要求，不因自动化限制删减门禁。
+
+测试代码为 main `4b0bcb2`，本轮重新构建 Skill Man 0.1.3 App Bundle 成功（日志 `/tmp/skillman-native-smoke-build.log`）。机器连接 DELL U2720QM（主屏，60 Hz）与 M27P20P（144 Hz），两者报告的逻辑分辨率均为 2560×1440，渲染像素 5120×2880，非镜像。显示器清单仅证明环境，不能替代跨屏交互证据。
+
+| 项目 | 本轮结果 | 证据与限制 |
+| --- | --- | --- |
+| Dock 偏好开启 | 部分通过 | 从 off 切至 on；⌘Q 后确认测试进程退出，重启设置仍为 on；关闭主窗口后进程 65956 继续驻留，CUA 重新访问 App 可恢复同一设置页。未验证 Dock 图标本身与通过 Dock 点击重新打开。 |
+| Dock 偏好关闭 | 部分通过 | 从 on 切回 off；⌘Q 后进程退出，重启仍为 off；关闭主窗口后进程 65989 继续驻留，CUA 重新访问 App 可恢复设置页。最终保持原 off 偏好，截图 `.scratch/native-menu-113/dock-off-restored.jpg`。未验证 Dock 图标消失。 |
+| 托盘左/右键 | 未验证 | App AX 仅暴露主窗口及 App/Edit/Window/Help 菜单，不含状态栏入口；CUA 访问 SystemUIServer 超时，键盘尝试未产生状态变化。 |
+| 托盘子菜单、Esc、外部点击 | 未验证 | 缺少可操作的托盘入口，不能用应用菜单或源码推断通过。 |
+| 多屏与屏幕边缘菜单 | 未验证 | 双屏已连接；工具未提供可操作的两屏状态栏或全桌面坐标视图，未完成跨屏触发、子菜单可达性与边缘定位。 |
+
+CUA 访问 Dock 同样超时。已请求用户协助实测工具无法覆盖的托盘及双屏项目，尚未收到结果。#113 / #112 继续保持打开，组合验收复选框不勾选；本轮没有发现新的产品缺陷，也没有足够证据认定上述未验证项通过。
