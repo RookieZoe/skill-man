@@ -149,7 +149,6 @@ impl From<FixtureSkill> for SkillDetail {
             frontmatter_name: value.frontmatter_name,
             last_activity_at: value.last_activity_at,
             skill_markdown: value.skill_markdown,
-            document_available: true,
         }
     }
 }

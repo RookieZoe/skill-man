@@ -1041,7 +1041,6 @@ pub struct SkillDetailDto {
     pub frontmatter_name: Option<String>,
     pub last_activity_at: String,
     pub skill_markdown: String,
-    pub document_available: bool,
 }
 
 impl From<SkillDetail> for SkillDetailDto {
@@ -1060,7 +1059,6 @@ impl From<SkillDetail> for SkillDetailDto {
             frontmatter_name: value.frontmatter_name,
             last_activity_at: value.last_activity_at,
             skill_markdown: value.skill_markdown,
-            document_available: value.document_available,
         }
     }
 }

@@ -160,7 +160,6 @@ pub struct SkillDetail {
     pub frontmatter_name: Option<String>,
     pub last_activity_at: String,
     pub skill_markdown: String,
-    pub document_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,6 +1,8 @@
 import { appUpdatesAvailable } from "./app-update-availability";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { listen } from "@tauri-apps/api/event";
+
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import { parseRepositoryInput } from "../features/library/git-repository-input";
 import {
@@ -230,6 +232,22 @@ function AppContent({ client }: AppProps) {
       current = false;
     };
   }, [client]);
+
+  // Tray quick view: clicking a recently enabled Skill opens its detail
+  // (spec §9.4). Native-only; the preview fixture has no event bus.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ skillId: string }>("tray-open-skill", (event) => {
+      setFilter("all");
+      setSelectedId(event.payload.skillId);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [setSelectedId]);
 
   useEffect(() => {
     if (!appUpdatesAvailable() || preferences?.checkAppUpdates !== true) return;

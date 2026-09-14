@@ -32,7 +32,7 @@ import type {
 
 type FixtureSkill = Omit<
   SkillDetail,
-  "enabledAgentCount" | "fileSourceOriginalPath" | "documentAvailable"
+  "enabledAgentCount" | "fileSourceOriginalPath"
 > & {
   fileSourceOriginalPath?: string | null;
 };
@@ -222,7 +222,6 @@ export function createFixtureCatalogClient(
     ).length;
     return {
       ...skill,
-      documentAvailable: true,
       enabledAgentCount,
       fileSourceOriginalPath: skill.fileSourceOriginalPath ?? null,
     };
@@ -405,9 +404,6 @@ export function createFixtureCatalogClient(
         catalogReadonlyReason: null,
         snapshotVersion,
       };
-    },
-    async listenCatalogChanged() {
-      return () => {};
     },
     async listenBootstrapChanged() {
       return () => {};

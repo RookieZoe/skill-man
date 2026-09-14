@@ -26,5 +26,3 @@ pub mod source_update_api;
 pub mod startup_api;
 pub mod tray;
 pub mod update_api;
-
-pub mod tray_panel;

@@ -8,11 +8,14 @@ use rusqlite::Connection;
 
 use skill_man_lib::adapters::runtime_catalog::RuntimeCatalogStore;
 use skill_man_lib::adapters::sqlite::SqliteCatalogStore;
+use skill_man_lib::core::domain::Health;
 use skill_man_lib::core::preferences::PreferencesService;
 use skill_man_lib::core::startup::StartupService;
 use skill_man_lib::core::write_gate::WriteGate;
 use skill_man_lib::seams::catalog_store::CatalogStore;
+use skill_man_lib::seams::locale_store::EffectiveLocale;
 use skill_man_lib::seams::preferences_store::{AppPreferences, PreferenceUpdates};
+use skill_man_lib::tauri_adapter::tray::tray_skill_label;
 
 mod common;
 use common::BoundTestHome;
@@ -164,6 +167,43 @@ fn recently_enabled_orders_by_last_enable_and_limits() {
     assert_eq!(recent[1].enabled_agent_count, 2);
 
     let _ = first_id;
+}
+
+#[test]
+fn tray_labels_show_agent_counts_and_health_suffixes() {
+    let healthy = skill_man_lib::core::domain::SkillSummary {
+        id: skill_man_lib::core::domain::SkillId("s1".into()),
+        directory_name: "media-xray".into(),
+        display_name: "Media X-Ray".into(),
+        description: String::new(),
+        source_kind: skill_man_lib::core::domain::SourceKind::FileInstall,
+        health: Health::Healthy,
+        enabled_agent_count: 1,
+    };
+    assert_eq!(
+        tray_skill_label(&healthy, EffectiveLocale::En),
+        "media-xray · 1 Agent"
+    );
+
+    let broken = skill_man_lib::core::domain::SkillSummary {
+        enabled_agent_count: 2,
+        health: Health::Broken,
+        ..healthy.clone()
+    };
+    assert_eq!(
+        tray_skill_label(&broken, EffectiveLocale::En),
+        "media-xray · 2 Agents · broken"
+    );
+
+    let modified = skill_man_lib::core::domain::SkillSummary {
+        enabled_agent_count: 0,
+        health: Health::Modified,
+        ..healthy.clone()
+    };
+    assert_eq!(
+        tray_skill_label(&modified, EffectiveLocale::En),
+        "media-xray · 0 Agents · modified"
+    );
 }
 
 #[test]
