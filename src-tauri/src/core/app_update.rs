@@ -91,10 +91,15 @@ impl AppUpdateService {
     }
 
     pub async fn check(&self, force: bool) -> Result<AppUpdateCheck, AppUpdateError> {
-        let write_context = self
-            .write_gate
-            .capture_open_context()
-            .map_err(|_| AppUpdateError::WriteGateClosed)?;
+        let write_context = if force {
+            self.write_gate.capture_open_context().ok()
+        } else {
+            Some(
+                self.write_gate
+                    .capture_open_context()
+                    .map_err(|_| AppUpdateError::WriteGateClosed)?,
+            )
+        };
         let previous_phase = {
             let mut phase = self.phase()?;
             match &*phase {
@@ -107,7 +112,11 @@ impl AppUpdateService {
             }
         };
         let now = i64::try_from(self.clock.unix_epoch_nanos() / 1_000_000_000).unwrap_or(i64::MAX);
-        let last_checked_at = match self.preferences.last_app_update_check_at() {
+        let last_checked_at = match if force {
+            Ok(None)
+        } else {
+            self.preferences.last_app_update_check_at()
+        } {
             Ok(last_checked_at) => last_checked_at,
             Err(error) => {
                 *self.phase()? = previous_phase;
@@ -142,11 +151,20 @@ impl AppUpdateService {
             }
         };
         drop(phase);
-        let _write_guard = self
-            .write_gate
-            .acquire_product_write(&write_context)
-            .map_err(|_| AppUpdateError::WriteGateClosed)?;
-        self.preferences.record_app_update_check_at(now)?;
+        // Explicit checks remain App-level even if Home closes while awaiting
+        // the network. Only record Home-local cooldown while its gate is valid.
+        if let Some(context) = write_context {
+            match self.write_gate.acquire_product_write(&context) {
+                Ok(_guard) => {
+                    let recorded = self.preferences.record_app_update_check_at(now);
+                    if !force {
+                        recorded?;
+                    }
+                }
+                Err(_) if force => {}
+                Err(_) => return Err(AppUpdateError::WriteGateClosed),
+            }
+        }
         Ok(check)
     }
 

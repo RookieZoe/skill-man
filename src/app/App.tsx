@@ -1,7 +1,5 @@
-import { appUpdatesAvailable } from "./app-update-availability";
+import { AppUpdateProvider, useAppUpdate } from "./AppUpdateProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-import { listen } from "@tauri-apps/api/event";
 
 import { LibraryDesk } from "../features/library/LibraryDesk";
 import { parseRepositoryInput } from "../features/library/git-repository-input";
@@ -19,7 +17,6 @@ import {
 } from "../features/locale/messages";
 import type {
   AppPreferences,
-  AvailableAppUpdate,
   CatalogClient,
   CatalogFilter,
   FetchLatestAndManageRequest,
@@ -67,24 +64,12 @@ export interface RemovePanelState {
   error: string | null;
 }
 
-export interface AppUpdatePanelState {
-  activity:
-    | "idle"
-    | "checking"
-    | "available"
-    | "downloading"
-    | "ready"
-    | "cancelling"
-    | "installing";
-  update: AvailableAppUpdate | null;
-  checkStatus: "up_to_date" | "skipped" | null;
-  error: string | null;
-}
-
 export function App(props: AppProps) {
   return (
     <BackgroundOperations>
-      <AppContent {...props} />
+      <AppUpdateProvider client={props.client}>
+        <AppContent {...props} />
+      </AppUpdateProvider>
     </BackgroundOperations>
   );
 }
@@ -121,13 +106,9 @@ function AppContent({ client }: AppProps) {
     useState<PreferencesWarning | null>(null);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
-  const [appUpdatePanel, setAppUpdatePanel] = useState<AppUpdatePanelState>({
-    activity: "idle",
-    update: null,
-    checkStatus: null,
-    error: null,
-  });
-  const appUpdateCheckRunId = useRef(0);
+  const { appUpdatePanel, checkAppUpdate, checkAutomatically } = useAppUpdate();
+  const automaticCheckRef = useRef(checkAutomatically);
+  automaticCheckRef.current = checkAutomatically;
   const [onboardingLibraryPath, setOnboardingLibraryPath] = useState<
     string | null
   >(null);
@@ -233,49 +214,9 @@ function AppContent({ client }: AppProps) {
     };
   }, [client]);
 
-  // Tray quick view: clicking a recently enabled Skill opens its detail
-  // (spec §9.4). Native-only; the preview fixture has no event bus.
   useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    let unlisten: (() => void) | undefined;
-    listen<{ skillId: string }>("tray-open-skill", (event) => {
-      setFilter("all");
-      setSelectedId(event.payload.skillId);
-    }).then((dispose) => {
-      unlisten = dispose;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, [setSelectedId]);
-
-  useEffect(() => {
-    if (!appUpdatesAvailable() || preferences?.checkAppUpdates !== true) return;
-    let current = true;
-    const runId = ++appUpdateCheckRunId.current;
-    client
-      .checkAppUpdate(false)
-      .then((result) => {
-        if (
-          current &&
-          runId === appUpdateCheckRunId.current &&
-          result.status === "available"
-        ) {
-          setAppUpdatePanel({
-            activity: "available",
-            update: result,
-            checkStatus: null,
-            error: null,
-          });
-        }
-      })
-      .catch(() => {
-        // Background and offline checks are intentionally silent.
-      });
-    return () => {
-      current = false;
-    };
-  }, [client, preferences?.checkAppUpdates]);
+    if (preferences?.checkAppUpdates) void automaticCheckRef.current();
+  }, [preferences?.checkAppUpdates]);
 
   useEffect(() => {
     let current = true;
@@ -1065,163 +1006,6 @@ function AppContent({ client }: AppProps) {
     }
   }
 
-  async function checkAppUpdate() {
-    if (!appUpdatesAvailable()) return;
-    const noticeId = notifications.begin({
-      title: t("library.preferences.checking"),
-      detail: t("operation.background.working"),
-    });
-    const runId = ++appUpdateCheckRunId.current;
-    setAppUpdatePanel({
-      activity: "checking",
-      update: null,
-      checkStatus: null,
-      error: null,
-    });
-    try {
-      const result = await client.checkAppUpdate(true);
-      notifications.finish(noticeId, {
-        title: t("operation.background.done"),
-        detail: t(
-          result.status === "available"
-            ? "operation.background.update_available"
-            : result.status === "up_to_date"
-              ? "operation.background.update_current"
-              : "operation.background.update_skipped",
-        ),
-      });
-      if (runId !== appUpdateCheckRunId.current) return;
-      if (result.status === "available") {
-        setAppUpdatePanel({
-          activity: "available",
-          update: result,
-          checkStatus: null,
-          error: null,
-        });
-        setIsPreferencesOpen(false);
-      } else {
-        setAppUpdatePanel({
-          activity: "idle",
-          update: null,
-          checkStatus: result.status,
-          error: null,
-        });
-      }
-    } catch (reason) {
-      notifications.finish(noticeId, {
-        title: t("operation.background.failed"),
-        detail: readAppUpdateError(reason, t),
-        state: "failed",
-      });
-      if (runId !== appUpdateCheckRunId.current) return;
-      setAppUpdatePanel({
-        activity: "idle",
-        update: null,
-        checkStatus: null,
-        error: readAppUpdateError(reason, t),
-      });
-    }
-  }
-
-  async function downloadAppUpdate() {
-    const update = appUpdatePanel.update;
-    if (!update || appUpdatePanel.activity !== "available") return;
-    setAppUpdatePanel((state) => ({
-      ...state,
-      activity: "downloading",
-      error: null,
-    }));
-    try {
-      await client.downloadAppUpdate(update.updateId);
-      setAppUpdatePanel((state) =>
-        state.update?.updateId === update.updateId
-          ? { ...state, activity: "ready", error: null }
-          : state,
-      );
-    } catch (reason) {
-      setAppUpdatePanel((state) =>
-        state.update?.updateId === update.updateId
-          ? readCommandError(reason, t).code === "update_cancelled" ||
-            state.activity === "cancelling"
-            ? state
-            : {
-                ...state,
-                activity: "available",
-                error: readAppUpdateError(reason, t),
-              }
-          : state,
-      );
-    }
-  }
-
-  async function installAppUpdate() {
-    const update = appUpdatePanel.update;
-    if (!update || appUpdatePanel.activity !== "ready") return;
-    setAppUpdatePanel((state) => ({
-      ...state,
-      activity: "installing",
-      error: null,
-    }));
-    try {
-      await client.installAppUpdate(update.updateId);
-      setAppUpdatePanel({
-        activity: "idle",
-        update: null,
-        checkStatus: null,
-        error: null,
-      });
-    } catch (reason) {
-      setAppUpdatePanel((state) =>
-        state.update?.updateId === update.updateId
-          ? {
-              ...state,
-              activity: "ready",
-              error: readAppUpdateError(reason, t),
-            }
-          : state,
-      );
-    }
-  }
-
-  async function closeAppUpdate() {
-    const update = appUpdatePanel.update;
-    if (
-      !update ||
-      appUpdatePanel.activity === "cancelling" ||
-      appUpdatePanel.activity === "installing"
-    )
-      return;
-    const previousActivity = appUpdatePanel.activity;
-    setAppUpdatePanel((state) => ({
-      ...state,
-      activity: "cancelling",
-      error: null,
-    }));
-    try {
-      await client.cancelAppUpdate(update.updateId);
-      setAppUpdatePanel((state) =>
-        state.update?.updateId === update.updateId
-          ? {
-              activity: "idle",
-              update: null,
-              checkStatus: null,
-              error: null,
-            }
-          : state,
-      );
-    } catch (reason) {
-      setAppUpdatePanel((state) =>
-        state.update?.updateId === update.updateId
-          ? {
-              ...state,
-              activity: previousActivity,
-              error: readAppUpdateError(reason, t),
-            }
-          : state,
-      );
-    }
-  }
-
   // -- First-run onboarding (spec §8.7, three skippable steps) --
 
   async function completeOnboarding() {
@@ -1405,10 +1189,10 @@ function AppContent({ client }: AppProps) {
         onOpenPreferences={() => setIsPreferencesOpen(true)}
         onClosePreferences={() => setIsPreferencesOpen(false)}
         onTogglePreference={togglePreference}
-        onCheckAppUpdate={checkAppUpdate}
-        onDownloadAppUpdate={downloadAppUpdate}
-        onInstallAppUpdate={installAppUpdate}
-        onCloseAppUpdate={closeAppUpdate}
+        onCheckAppUpdate={() => {
+          setIsPreferencesOpen(false);
+          void checkAppUpdate();
+        }}
         onCompleteOnboarding={completeOnboarding}
         onAdvanceOnboarding={advanceOnboarding}
         onOpenScanSetup={() => {
@@ -1492,37 +1276,4 @@ function readDiagnostic(
     code: diagnostic.code,
     message: diagnostic.message,
   });
-}
-
-function readCommandError(reason: unknown, t: LocaleContextValue["t"]) {
-  return {
-    code:
-      typeof reason === "object" &&
-      reason !== null &&
-      "code" in reason &&
-      typeof reason.code === "string"
-        ? reason.code
-        : "internal",
-    message: readError(reason, t),
-  };
-}
-
-function readAppUpdateError(reason: unknown, t: LocaleContextValue["t"]) {
-  const { code } = readCommandError(reason, t);
-  switch (code) {
-    case "source_unavailable":
-      return t("app.update_error.source_unavailable");
-    case "state_unavailable":
-      return t("app.update_error.state_unavailable");
-    case "stale_update":
-      return t("app.update_error.stale_update");
-    case "download_failed":
-      return t("app.update_error.download_failed");
-    case "install_failed":
-      return t("app.update_error.install_failed");
-    case "update_cancelled":
-      return t("app.update_error.cancelled");
-    default:
-      return t("app.update_error.generic");
-  }
 }

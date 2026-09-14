@@ -1464,7 +1464,7 @@ test("keeps a failed offline startup update check silent", async () => {
   ).not.toBeInTheDocument();
 });
 
-test("shows manual app update failures only in background feedback", async () => {
+test("shows manual app update failures in the shared App-level dialog", async () => {
   const user = userEvent.setup();
   const client = createFixtureCatalogClient();
   client.loadPreferences = async () => ({
@@ -1484,13 +1484,11 @@ test("shows manual app update failures only in background feedback", async () =>
   await user.click(await screen.findByRole("button", { name: "Preferences" }));
   await user.click(screen.getByRole("button", { name: "Check now" }));
 
-  expect(
-    await screen.findByRole("region", { name: "Current activity" }),
-  ).toHaveTextContent(
+  expect(await screen.findByRole("alert")).toHaveTextContent(
     "Unable to reach the update service. Check your network and retry.",
   );
   expect(
-    screen.getByRole("dialog", { name: "Preferences" }),
+    screen.getByRole("dialog", { name: "App updates" }),
   ).toBeInTheDocument();
 });
 

@@ -161,14 +161,15 @@ impl LocaleService {
     /// persist returns an error and changes nothing — selection, effective
     /// locale, generation and all visible surfaces keep their old values.
     pub fn set_selection(&self, selection: LocaleSelection) -> Result<LocaleSnapshot, LocaleError> {
-        self.store.store_selection(selection)?;
         let mut state = self.state.lock().expect("locale state lock");
+        self.store.store_selection(selection)?;
         state.selection = selection;
         state.effective_locale = effective_for(selection, &self.system.preferred_language_tags());
         state.generation += 1;
         // A successful persist proves the store is healthy; the fallback
         // diagnostic no longer applies.
         state.diagnostic = None;
+        state.store_unavailable = false;
         Ok(snapshot_from(&state))
     }
 

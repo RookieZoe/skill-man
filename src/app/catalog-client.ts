@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type CatalogFilter =
@@ -2354,11 +2354,4 @@ function createClosedBootstrapClient(): CatalogClient {
   client.listenLocaleChanged = async () => () => {};
   client.checkCommunityUpdate = async () => null;
   return client;
-}
-
-/** Apply only the app's native chrome appearance; never changes macOS settings. */
-export async function applyAppAppearance(
-  appearance: "system" | "light" | "dark",
-): Promise<void> {
-  if (isTauri()) await invoke<void>("set_app_appearance", { appearance });
 }

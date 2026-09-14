@@ -1,6 +1,7 @@
 pub mod adopt_api;
 pub mod agent_configuration_api;
 pub mod app_update_api;
+pub mod appearance_api;
 pub mod bootstrap_api;
 pub mod catalog_api;
 pub mod commands;
@@ -16,7 +17,10 @@ pub mod import_api;
 pub mod lifecycle;
 pub mod locale_api;
 pub mod menu;
+pub mod native_app_update;
 pub mod native_message;
+#[cfg(target_os = "macos")]
+mod native_update_window;
 pub mod observation_api;
 pub mod source_group_preview_api;
 pub mod source_lifecycle_api;

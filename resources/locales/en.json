@@ -136,8 +136,8 @@
   "error.internal": "An internal error occurred. Try again.",
   "tray.recent": "Recently enabled",
   "tray.empty": "No recently enabled Skills",
-  "tray.open_window": "Open main window",
-  "tray.quit": "Quit",
+  "tray.open_window": "Open Skill Man",
+  "tray.quit": "Quit Skill Man",
   "tray.agent_count_one": "{count} Agent",
   "tray.agent_count_other": "{count} Agents",
   "tray.health.broken": " · broken",
@@ -1446,5 +1446,12 @@
   "community.latest": "You’re up to date.",
   "community.available": "Version {version} is available.",
   "community.open": "View release",
-  "community.failed": "Could not check for updates. Please try again."
+  "community.failed": "Could not check for updates. Please try again.",
+  "tray.about": "About Skill Man",
+  "tray.check_update": "Check for Updates",
+  "library.app_update.unsupported": "This build does not support in-app updates. Download the latest version from the releases page.",
+  "tray.feedback": "Report an Issue",
+  "tray.feedback_failed": "Could not open the issue page. Please try again.",
+  "app.about.credits": "Author: {author}\nProject: {url}",
+  "app.update.native_offer": "Skill Man {version} is available (current: {current}).\nDownload: {size} MB\n\n{notes}"
 }

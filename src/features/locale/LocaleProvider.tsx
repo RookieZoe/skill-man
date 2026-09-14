@@ -61,32 +61,36 @@ export function LocaleProvider({
 }) {
   const [snapshot, setSnapshot] = useState<LocaleSnapshot | null>(null);
 
+  const accept = useCallback((next: LocaleSnapshot) => {
+    setSnapshot((old) =>
+      !old || next.generation >= old.generation ? next : old,
+    );
+  }, []);
+
   useEffect(() => {
     let current = true;
     let unlisten: (() => void) | null = null;
-    client
-      .getLocaleSnapshot()
-      .then((next) => {
-        if (current) setSnapshot(next);
+    void client
+      .listenLocaleChanged((payload) => {
+        if (current) accept(payload);
+      })
+      .then(async (stop) => {
+        if (!current) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        const next = await client.getLocaleSnapshot();
+        if (current) accept(next);
       })
       .catch(() => {
-        // The authority is unreachable; the English baseline keeps every
-        // surface non-blank and the persisted selection is retried on the
-        // next `locale://changed` event.
-      });
-    client
-      .listenLocaleChanged((payload) => {
-        setSnapshot(payload);
-      })
-      .then((stop) => {
-        if (current) unlisten = stop;
-        else stop();
+        // The next event or remount retries the authority without mixed copy.
       });
     return () => {
       current = false;
       unlisten?.();
     };
-  }, [client]);
+  }, [client, accept]);
 
   const locale: EffectiveLocale = snapshot?.effectiveLocale ?? "en";
 
@@ -99,15 +103,15 @@ export function LocaleProvider({
   const setSelection = useCallback(
     async (selection: LocaleSelection) => {
       const next = await client.setLocaleSelection(selection);
-      setSnapshot(next);
+      accept(next);
     },
-    [client],
+    [client, accept],
   );
 
   const refreshSystemLanguages = useCallback(async () => {
     const next = await client.refreshSystemLanguages();
-    setSnapshot(next);
-  }, [client]);
+    accept(next);
+  }, [client, accept]);
 
   const value = useMemo<LocaleContextValue>(
     () => ({

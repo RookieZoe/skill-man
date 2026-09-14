@@ -290,3 +290,42 @@ test("the Language control renders in the Unconfigured bootstrap shell", async (
   ).toBeChecked();
 });
 import { expandLibrary } from "../../test-fixtures/expand-library";
+
+test("a late locale query cannot undo a newer native selection", async () => {
+  const client = createFixtureCatalogClient();
+  let resolve!: (
+    snapshot: import("../../app/catalog-client").LocaleSnapshot,
+  ) => void;
+  let publish!: (
+    snapshot: import("../../app/catalog-client").LocaleSnapshot,
+  ) => void;
+  client.getLocaleSnapshot = () =>
+    new Promise((done) => {
+      resolve = done;
+    });
+  client.listenLocaleChanged = async (callback) => {
+    publish = callback;
+    return () => {};
+  };
+  renderWithLocale(client, <LanguageControl />);
+  const { act } = await import("@testing-library/react");
+  await waitFor(() => expect(publish).toBeTypeOf("function"));
+  act(() =>
+    publish({
+      selection: "zh-Hans",
+      effectiveLocale: "zh-Hans",
+      generation: 2,
+      diagnostic: null,
+    }),
+  );
+  await act(async () =>
+    resolve({
+      selection: "en",
+      effectiveLocale: "en",
+      generation: 1,
+      diagnostic: null,
+    }),
+  );
+  expect(document.documentElement.lang).toBe("zh-Hans");
+  expect(screen.getByRole("radio", { name: "简体中文" })).toBeChecked();
+});

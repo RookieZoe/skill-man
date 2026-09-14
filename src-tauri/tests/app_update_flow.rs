@@ -47,6 +47,7 @@ impl Clock for FixedClock {
 struct MemoryPreferences {
     preferences: Mutex<AppPreferences>,
     last_app_update_check_at: Mutex<Option<i64>>,
+    fail_record: AtomicBool,
 }
 
 impl MemoryPreferences {
@@ -54,6 +55,7 @@ impl MemoryPreferences {
         Self {
             preferences: Mutex::new(AppPreferences::default()),
             last_app_update_check_at: Mutex::new(last_app_update_check_at),
+            fail_record: AtomicBool::new(false),
         }
     }
 }
@@ -91,6 +93,11 @@ impl PreferencesStore for MemoryPreferences {
     }
 
     fn record_app_update_check_at(&self, checked_at: i64) -> Result<(), PreferencesStoreError> {
+        if self.fail_record.load(Ordering::SeqCst) {
+            return Err(PreferencesStoreError::Unavailable(
+                "fixture write failure".into(),
+            ));
+        }
         *self
             .last_app_update_check_at
             .lock()
@@ -651,5 +658,40 @@ fn typed_app_update_api_returns_the_cancelled_update_identity() {
         CancelledAppUpdateDto {
             update_id: offer.update_id,
         }
+    );
+}
+
+#[test]
+fn explicit_check_works_with_home_unavailable_without_writing_home_preferences() {
+    use skill_man_lib::core::write_gate::{ClosedReason, WriteGateState};
+    let preferences = Arc::new(MemoryPreferences::new(None));
+    let updater = Arc::new(FakeUpdater::new());
+    let service = AppUpdateService::new(
+        updater.clone(),
+        preferences.clone(),
+        Arc::new(FixedClock { unix_seconds: 200 }),
+        Arc::new(WriteGate::new(WriteGateState::Closed {
+            reason: ClosedReason::HomeUnavailable,
+        })),
+    );
+    let result = tauri::async_runtime::block_on(service.check(true)).unwrap();
+    assert_eq!(result, AppUpdateCheck::UpToDate);
+    assert_eq!(updater.check_calls(), 1);
+    assert_eq!(preferences.last_app_update_check_at().unwrap(), None);
+}
+
+#[test]
+fn explicit_check_result_survives_a_home_cooldown_write_failure() {
+    let preferences = Arc::new(MemoryPreferences::new(None));
+    preferences.fail_record.store(true, Ordering::SeqCst);
+    let service = AppUpdateService::new(
+        Arc::new(FakeUpdater::new()),
+        preferences,
+        Arc::new(FixedClock { unix_seconds: 200 }),
+        test_gate(),
+    );
+    assert_eq!(
+        tauri::async_runtime::block_on(service.check(true)).unwrap(),
+        AppUpdateCheck::UpToDate
     );
 }

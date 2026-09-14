@@ -57,16 +57,20 @@ impl AppUpdater for TauriAppUpdater {
             }
             let update = self
                 .app
-                .updater()
+                .updater_builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
                 .map_err(source_unavailable)?
                 .check()
                 .await
                 .map_err(source_unavailable)?;
-            let Some(update) = update else {
+            let Some(mut update) = update else {
                 *self.pending()? = None;
                 return Ok(None);
             };
 
+            // The archive transfer needs a longer deadline than metadata checks.
+            update.timeout = Some(std::time::Duration::from_secs(600));
             let download_size_bytes = update
                 .raw_json
                 .get("download_size")

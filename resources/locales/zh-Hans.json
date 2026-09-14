@@ -135,8 +135,8 @@
   "error.internal": "发生内部错误。请重试。",
   "tray.recent": "最近启用",
   "tray.empty": "暂无最近启用的技能",
-  "tray.open_window": "打开主窗口",
-  "tray.quit": "退出",
+  "tray.open_window": "打开 Skill Man",
+  "tray.quit": "退出 Skill Man",
   "tray.agent_count_one": "{count} 个智能体",
   "tray.agent_count_other": "{count} 个智能体",
   "tray.health.broken": " · 已失效",
@@ -1446,5 +1446,12 @@
   "community.latest": "已是最新版本。",
   "community.available": "发现新版本 {version}。",
   "community.open": "查看新版本",
-  "community.failed": "暂时无法检查更新，请重试。"
+  "community.failed": "暂时无法检查更新，请重试。",
+  "tray.about": "关于 Skill Man",
+  "tray.check_update": "检查更新",
+  "library.app_update.unsupported": "当前构建不支持应用内更新。请从发布页下载最新版本。",
+  "tray.feedback": "问题反馈",
+  "tray.feedback_failed": "无法打开问题反馈页面，请重试。",
+  "app.about.credits": "作者：{author}\n项目地址：{url}",
+  "app.update.native_offer": "Skill Man {version} 可用（当前：{current}）。\n下载大小：{size} MB\n\n{notes}"
 }

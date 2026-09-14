@@ -3,7 +3,7 @@
 //! locale. Predefined items keep `None` text so macOS renders their
 //! system-localized titles; only Skill Man's own submenu titles are App Copy.
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter};
 
 use crate::seams::locale_store::EffectiveLocale;
@@ -11,6 +11,27 @@ use crate::tauri_adapter::native_message::{NativeMessageKey, native_message};
 
 pub const APP_MENU_AGENTS_EVENT: &str = "menu-open-agents";
 const MENU_ID_OPEN_AGENTS: &str = "open-agents";
+
+/// Both About entry points share the running package's identity.
+/// macOS ignores the authors/website fields, so expose them in credits.
+pub fn about_metadata(app: &AppHandle, locale: EffectiveLocale) -> AboutMetadata<'_> {
+    let package = app.package_info();
+    AboutMetadata {
+        name: Some("Skill Man".into()),
+        version: Some(package.version.to_string()),
+        short_version: Some(package.version.to_string()),
+        icon: app.default_window_icon().cloned(),
+        credits: Some(native_message(
+            locale,
+            NativeMessageKey::AboutCredits,
+            &[
+                ("author", package.authors),
+                ("url", "https://github.com/RookieZoe/skill-man"),
+            ],
+        )),
+        ..Default::default()
+    }
+}
 
 /// Builds the application menu with standard native editing commands and
 /// locale-resolved submenu titles.
@@ -67,7 +88,7 @@ pub fn build_app_menu(app: &AppHandle, locale: EffectiveLocale) -> tauri::Result
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, None, None)?,
+                    &PredefinedMenuItem::about(app, None, Some(about_metadata(app, locale)))?,
                     &PredefinedMenuItem::separator(app)?,
                     &agents,
                     &PredefinedMenuItem::separator(app)?,

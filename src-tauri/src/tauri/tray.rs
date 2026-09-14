@@ -1,131 +1,245 @@
-//! Menu-bar tray (spec §9.4): a native quick view of recently enabled
-//! Skills plus open-main-window and Quit. The tray is rebuilt whenever the
-//! catalog changes (commands emit `catalog-changed`), the main window
-//! regains focus, or the locale changes (`locale://changed`), so both the
-//! recent list and the labels stay honest and localized (ADR-0011).
-
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::{AppHandle, Emitter};
-
-use crate::core::domain::{Health, SkillSummary};
-use crate::seams::catalog_store::CatalogStore;
-use crate::seams::locale_store::EffectiveLocale;
-use crate::tauri_adapter::native_message::{NativeMessageKey, native_message, native_plural};
-
+//! Native App-level operations. Browsing this menu never reads the Catalog.
+use crate::core::locale::LocaleService;
+use crate::seams::locale_store::LocaleSelection;
+use crate::tauri_adapter::native_message::{NativeMessageKey as Key, native_message};
+use crate::tauri_adapter::{
+    appearance_api::{AppearanceApi, AppearanceSelection},
+    locale_api::LocaleApi,
+};
+use std::sync::Arc;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Manager};
 pub const TRAY_ID: &str = "skill-man-tray";
-pub const TRAY_SKILL_LIMIT: u32 = 5;
-pub const TRAY_SKILL_EVENT: &str = "tray-open-skill";
 pub const CATALOG_CHANGED_EVENT: &str = "catalog-changed";
 
-const MENU_ID_OPEN_WINDOW: &str = "open-window";
-const MENU_ID_QUIT: &str = "quit";
-
-#[derive(Clone, serde::Serialize)]
-pub struct TraySkillPayload {
-    pub skill_id: String,
+pub enum NativeEntry {
+    Open,
+    About,
+    Separator,
+    Language(LocaleSelection),
+    Appearance(AppearanceSelection),
+    CheckUpdate,
+    Feedback,
+    Quit,
+}
+pub fn menu_entries(locale: LocaleSelection, appearance: AppearanceSelection) -> Vec<NativeEntry> {
+    use NativeEntry::*;
+    vec![
+        Open,
+        About,
+        Separator,
+        Language(locale),
+        Appearance(appearance),
+        Separator,
+        CheckUpdate,
+        Feedback,
+        Separator,
+        Quit,
+    ]
 }
 
-/// One tray line for a recently enabled Skill: name, enabled-Agent count and
-/// a health suffix, rendered through the effective locale (ADR-0011). Pure so
-/// it is unit-testable without a Tauri runtime.
-pub fn tray_skill_label(summary: &SkillSummary, locale: EffectiveLocale) -> String {
-    let suffix = match summary.health {
-        Health::Healthy => String::new(),
-        Health::Broken => native_message(locale, NativeMessageKey::TrayHealthBroken, &[]),
-        Health::Modified => native_message(locale, NativeMessageKey::TrayHealthModified, &[]),
-        Health::SourceSnapshotMismatch => {
-            native_message(locale, NativeMessageKey::TrayHealthMismatch, &[])
-        }
-    };
-    let agents = native_plural(locale, summary.enabled_agent_count as u64);
-    format!("{} · {}{}", summary.directory_name, agents, suffix)
-}
-
-pub fn build_tray_menu(
-    app: &AppHandle,
-    recent: &[SkillSummary],
-    locale: EffectiveLocale,
-) -> tauri::Result<Menu<tauri::Wry>> {
+pub fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let locale = app.state::<Arc<LocaleService>>().snapshot();
+    let appearance = app.state::<AppearanceApi>().snapshot();
+    let text = |key| native_message(locale.effective_locale, key, &[]);
     let menu = Menu::new(app)?;
-    let header = MenuItem::with_id(
-        app,
-        "recent-header",
-        native_message(locale, NativeMessageKey::TrayRecent, &[]),
-        false,
-        None::<&str>,
-    )?;
-    menu.append(&header)?;
-    if recent.is_empty() {
-        let empty = MenuItem::with_id(
-            app,
-            "recent-empty",
-            native_message(locale, NativeMessageKey::TrayEmpty, &[]),
-            false,
-            None::<&str>,
-        )?;
-        menu.append(&empty)?;
-    } else {
-        for summary in recent {
-            let item = MenuItem::with_id(
+    for entry in menu_entries(locale.selection, appearance.selection) {
+        match entry {
+            NativeEntry::Open => menu.append(&MenuItem::with_id(
                 app,
-                format!("open-skill:{}", summary.id.0),
-                tray_skill_label(summary, locale),
+                "open-window",
+                text(Key::TrayOpenWindow),
                 true,
                 None::<&str>,
-            )?;
-            menu.append(&item)?;
+            )?)?,
+            NativeEntry::About => {
+                let title = text(Key::TrayAbout);
+                menu.append(&PredefinedMenuItem::about(
+                    app,
+                    Some(&title),
+                    Some(crate::tauri_adapter::menu::about_metadata(
+                        app,
+                        locale.effective_locale,
+                    )),
+                )?)?;
+            }
+            NativeEntry::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
+            NativeEntry::Language(selection) => {
+                let submenu = Submenu::new(app, text(Key::Language), true)?;
+                for (value, id, key) in [
+                    (LocaleSelection::System, "locale:system", Key::FollowSystem),
+                    (LocaleSelection::ZhHans, "locale:zh-Hans", Key::Chinese),
+                    (LocaleSelection::En, "locale:en", Key::English),
+                ] {
+                    submenu.append(&CheckMenuItem::with_id(
+                        app,
+                        id,
+                        text(key),
+                        true,
+                        value == selection,
+                        None::<&str>,
+                    )?)?;
+                }
+                menu.append(&submenu)?;
+            }
+            NativeEntry::Appearance(selection) => {
+                let submenu = Submenu::new(app, text(Key::Appearance), true)?;
+                for (value, id, key) in [
+                    (
+                        AppearanceSelection::System,
+                        "appearance:system",
+                        Key::FollowSystem,
+                    ),
+                    (AppearanceSelection::Light, "appearance:light", Key::Light),
+                    (AppearanceSelection::Dark, "appearance:dark", Key::Dark),
+                ] {
+                    submenu.append(&CheckMenuItem::with_id(
+                        app,
+                        id,
+                        text(key),
+                        true,
+                        value == selection,
+                        None::<&str>,
+                    )?)?;
+                }
+                menu.append(&submenu)?;
+            }
+            NativeEntry::CheckUpdate => menu.append(&MenuItem::with_id(
+                app,
+                "check-app-update",
+                text(Key::CheckUpdate),
+                true,
+                None::<&str>,
+            )?)?,
+            NativeEntry::Feedback => menu.append(&MenuItem::with_id(
+                app,
+                "feedback",
+                text(Key::Feedback),
+                true,
+                None::<&str>,
+            )?)?,
+            NativeEntry::Quit => {
+                menu.append(&PredefinedMenuItem::quit(app, Some(&text(Key::TrayQuit)))?)?
+            }
         }
     }
-    let separator = PredefinedMenuItem::separator(app)?;
-    menu.append(&separator)?;
-    let open_window = MenuItem::with_id(
-        app,
-        MENU_ID_OPEN_WINDOW,
-        native_message(locale, NativeMessageKey::TrayOpenWindow, &[]),
-        true,
-        None::<&str>,
-    )?;
-    menu.append(&open_window)?;
-    let quit = MenuItem::with_id(
-        app,
-        MENU_ID_QUIT,
-        native_message(locale, NativeMessageKey::TrayQuit, &[]),
-        true,
-        None::<&str>,
-    )?;
-    menu.append(&quit)?;
     Ok(menu)
 }
 
-/// Rebuild the tray menu from the store's recently-enabled Skills in the
-/// current effective locale. Failures are silent: the tray keeps its last
-/// good menu.
-pub fn refresh_tray(app: &AppHandle, store: &dyn CatalogStore, locale: EffectiveLocale) {
-    let Ok(recent) = store.recently_enabled(TRAY_SKILL_LIMIT) else {
-        return;
-    };
-    let Ok(menu) = build_tray_menu(app, &recent, locale) else {
-        return;
-    };
+pub fn refresh_tray(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_menu(Some(menu));
+        if let Ok(menu) = build_tray_menu(app) {
+            let _ = tray.set_menu(Some(menu));
+        }
     }
 }
 
-/// Handle a tray menu event: open the window, quit, or open a Skill detail.
 pub fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
-    let menu_id = event.id().as_ref();
-    if menu_id == MENU_ID_OPEN_WINDOW {
-        crate::tauri_adapter::lifecycle::show_main_window(app);
-    } else if menu_id == MENU_ID_QUIT {
-        app.exit(0);
-    } else if let Some(skill_id) = menu_id.strip_prefix("open-skill:") {
-        crate::tauri_adapter::lifecycle::show_main_window(app);
-        let _ = app.emit(
-            TRAY_SKILL_EVENT,
-            TraySkillPayload {
-                skill_id: skill_id.to_owned(),
-            },
-        );
+    #[cfg(not(target_os = "macos"))]
+    use tauri_plugin_dialog::DialogExt;
+    use tauri_plugin_opener::OpenerExt;
+    let id = event.id().as_ref();
+    let locale = app
+        .state::<Arc<LocaleService>>()
+        .snapshot()
+        .effective_locale;
+    let mut failed = None;
+    match id {
+        "open-window" => crate::tauri_adapter::lifecycle::show_main_window(app),
+        "feedback" => {
+            if app
+                .opener()
+                .open_url(
+                    "https://github.com/RookieZoe/skill-man/issues/new/choose",
+                    None::<&str>,
+                )
+                .is_err()
+            {
+                failed = Some(Key::FeedbackFailed);
+            }
+        }
+        "check-app-update" => {
+            crate::tauri_adapter::native_app_update::show(app, true);
+        }
+        "locale:system" | "locale:zh-Hans" | "locale:en" => {
+            let selection = match id {
+                "locale:en" => LocaleSelection::En,
+                "locale:zh-Hans" => LocaleSelection::ZhHans,
+                _ => LocaleSelection::System,
+            };
+            if app
+                .state::<LocaleApi>()
+                .set_locale_selection(crate::tauri_adapter::dto::SetLocaleSelectionRequestDto {
+                    selection,
+                })
+                .is_err()
+            {
+                failed = Some(Key::LocaleFailed);
+            }
+        }
+        "appearance:system" | "appearance:light" | "appearance:dark" => {
+            let selection = match id {
+                "appearance:light" => AppearanceSelection::Light,
+                "appearance:dark" => AppearanceSelection::Dark,
+                _ => AppearanceSelection::System,
+            };
+            let api = app.state::<AppearanceApi>();
+            if api.set_selection(selection).is_err() {
+                failed = Some(Key::AppearanceFailed);
+            } else {
+                crate::tauri_adapter::appearance_api::publish(app);
+            }
+        }
+        _ => return,
+    }
+    // CheckMenuItem toggles before dispatch; rebuild even on failure or reselect.
+    refresh_tray(app);
+    if let Some(key) = failed {
+        let message = native_message(locale, key, &[]);
+        #[cfg(target_os = "macos")]
+        {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                super::native_update_window::prompt(
+                    &app,
+                    "Skill Man".into(),
+                    message,
+                    native_message(locale, Key::UpdateDone, &[]),
+                    None,
+                )
+                .await;
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        app.dialog()
+            .message(message)
+            .title("Skill Man")
+            .show(|_| {});
+    }
+}
+
+#[cfg(test)]
+mod native_menu_tests {
+    use super::*;
+    #[test]
+    fn menu_includes_feedback_after_updates_with_single_selected_choices() {
+        let model = menu_entries(LocaleSelection::System, AppearanceSelection::Dark);
+        assert_eq!(model.len(), 10);
+        assert!(matches!(&model[0], NativeEntry::Open));
+        assert!(matches!(&model[1], NativeEntry::About));
+        assert!(matches!(
+            &model[3],
+            NativeEntry::Language(LocaleSelection::System)
+        ));
+        assert!(matches!(
+            &model[4],
+            NativeEntry::Appearance(AppearanceSelection::Dark)
+        ));
+        assert!(matches!(&model[6], NativeEntry::CheckUpdate));
+        assert!(matches!(&model[7], NativeEntry::Feedback));
+        assert!(matches!(&model[9], NativeEntry::Quit));
+        for i in [2, 5, 8] {
+            assert!(matches!(&model[i], NativeEntry::Separator));
+        }
     }
 }
