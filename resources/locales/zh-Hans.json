@@ -1393,6 +1393,8 @@
   "evidenceRail.label": "技能来源与技术详情",
   "evidenceRail.directoryIdentity": "目录名称",
   "evidenceRail.canonicalEntity": "实际路径",
+  "evidenceRail.openDirectory": "在 Finder 中打开",
+  "evidenceRail.openDirectoryFailed": "无法打开 Skill 目录，请检查目录是否仍存在且可访问。",
   "evidenceRail.sourceRelease": "来源版本",
   "evidenceRail.activationEvidence": "分发状态",
   "evidenceRail.toneHealthy": "正常",

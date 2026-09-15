@@ -1372,6 +1372,7 @@ function SkillDetailPanel({
           <details className="detail-evidence" key={detail.id}>
             <summary>{t("library.detail.evidence")}</summary>
             <EvidenceRail
+              skillId={detail.id}
               directoryIdentity={detail.directoryName}
               canonicalEntity={detail.finalEntityPath}
               sourceRelease={sourceReleaseText}

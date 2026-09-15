@@ -1393,6 +1393,8 @@
   "evidenceRail.label": "Skill evidence rail",
   "evidenceRail.directoryIdentity": "Directory identity",
   "evidenceRail.canonicalEntity": "Canonical entity",
+  "evidenceRail.openDirectory": "Open in Finder",
+  "evidenceRail.openDirectoryFailed": "Could not open the Skill directory. Check that it still exists and is accessible.",
   "evidenceRail.sourceRelease": "Source release",
   "evidenceRail.activationEvidence": "Distribution status",
   "evidenceRail.toneHealthy": "Healthy",

@@ -1,5 +1,9 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { invoke } from "@tauri-apps/api/core";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { EvidenceRail } from "./EvidenceRail";
 
@@ -62,7 +66,30 @@ describe("EvidenceRail", () => {
     expect(rail).toHaveAttribute("data-tone", "danger");
   });
 
-  it("is strictly read-only with zero interactive controls", () => {
+  it("opens the selected Skill by ID and reports native failures", async () => {
+    const user = userEvent.setup();
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("missing directory"));
+    render(
+      <EvidenceRail
+        skillId="selected-skill"
+        directoryIdentity="my-skill"
+        canonicalEntity="/Users/test/skills/my-skill"
+        health="healthy"
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Open in Finder" }));
+    expect(invoke).toHaveBeenCalledWith("open_skill_directory", {
+      skillId: "selected-skill",
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not open",
+    );
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole("button", { name: "Open in Finder" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("omits directory navigation when no Skill is provided", () => {
     render(
       <EvidenceRail
         directoryIdentity="read-only-skill"

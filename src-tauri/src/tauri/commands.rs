@@ -511,6 +511,34 @@ pub fn inspect_skill(
     state.inspect_skill(skill_id)
 }
 
+/// Open only a catalog-resolved Skill directory, never a frontend-supplied path.
+#[tauri::command]
+pub fn open_skill_directory(
+    app: AppHandle,
+    state: State<'_, CatalogApi>,
+    skill_id: String,
+) -> Result<(), CommandFailureDto> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let detail = state.inspect_skill(skill_id)?;
+    let path = std::path::Path::new(&detail.final_entity_path);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(CommandFailureDto {
+            error: PublicErrorDto::NotFound,
+            diagnostic: None,
+        });
+    }
+    app.opener()
+        .open_path(detail.final_entity_path, None::<&str>)
+        .map_err(|error| CommandFailureDto {
+            error: PublicErrorDto::CatalogUnavailable,
+            diagnostic: Some(DiagnosticDto {
+                code: "open_skill_directory_failed".into(),
+                message: error.to_string(),
+            }),
+        })
+}
+
 #[tauri::command]
 pub fn get_agent_management_snapshot(
     state: State<'_, AgentConfigurationApi>,

@@ -2355,3 +2355,8 @@ function createClosedBootstrapClient(): CatalogClient {
   client.checkCommunityUpdate = async () => null;
   return client;
 }
+
+/** Opens the current catalog-resolved directory through the native adapter. */
+export function openSkillDirectory(skillId: string): Promise<void> {
+  return invoke<void>("open_skill_directory", { skillId });
+}

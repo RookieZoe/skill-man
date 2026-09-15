@@ -1,8 +1,10 @@
 import type { Health } from "../../app/catalog-client";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { openSkillDirectory } from "../../app/catalog-client";
 import { useLocale } from "../locale/LocaleProvider";
 
 export interface EvidenceRailProps {
+  skillId?: string;
   directoryIdentity: string;
   canonicalEntity: string;
   sourceRelease?: string | null;
@@ -17,9 +19,10 @@ export interface EvidenceRailProps {
  * Canonical entity / Source release / Activation evidence").
  *
  * Source Snapshot Mismatch renders in warning tone, Broken in danger tone.
- * The rail is strictly read-only and carries zero operation controls.
+ * Directory navigation does not mutate Skill or distribution state.
  */
 export function EvidenceRail({
+  skillId,
   directoryIdentity,
   canonicalEntity,
   sourceRelease,
@@ -28,6 +31,8 @@ export function EvidenceRail({
   children,
 }: EvidenceRailProps) {
   const { t } = useLocale();
+  const [opening, setOpening] = useState(false);
+  const [openFailed, setOpenFailed] = useState(false);
   const tone =
     health === "source_snapshot_mismatch"
       ? "warning"
@@ -55,7 +60,40 @@ export function EvidenceRail({
         </span>
         <span className="evidence-rail-value" title={canonicalEntity}>
           {canonicalEntity}
+          {skillId && (
+            <button
+              type="button"
+              className="skill-directory-icon"
+              aria-label={t("evidenceRail.openDirectory")}
+              title={t("evidenceRail.openDirectory")}
+              disabled={opening}
+              onClick={() => {
+                setOpening(true);
+                setOpenFailed(false);
+                void openSkillDirectory(skillId)
+                  .catch(() => setOpenFailed(true))
+                  .finally(() => setOpening(false));
+              }}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 8V6a2 2 0 0 0-2-2h-6l-2-2H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 1.94-1.5L22 10H7l-3 10" />
+              </svg>
+            </button>
+          )}
         </span>
+        {openFailed && (
+          <span role="alert">{t("evidenceRail.openDirectoryFailed")}</span>
+        )}
       </div>
       <div className="evidence-rail-cell">
         <span className="evidence-rail-label">
