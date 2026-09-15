@@ -133,6 +133,35 @@
   }
 }
 
+/* Apply to every scroll container, including the viewport, portals, form
+   controls and horizontal overflow. Width is not inherited, so setting it
+   only on :root would miss nested scrollbars. Keep native rendering and
+   visibility preferences; older WebViews fall back to their native style. */
+:where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-tertiary) transparent;
+}
+
+/* Standard scrollbar styling exposes the container's hover state, not the
+   thumb's. Keep keyboard-focused scroll regions equally easy to locate. */
+@media (hover: hover) {
+  :where(*:hover) {
+    scrollbar-color: var(--text-secondary) transparent;
+  }
+}
+
+:where(*:focus-visible) {
+  scrollbar-color: var(--text-secondary) transparent;
+}
+
+/* Let accessibility preferences restore the system's size and contrast. */
+@media (forced-colors: active), (prefers-contrast: more) {
+  :where(*) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+}
+
 .repository-list {
   min-height: 0;
   padding: var(--space-3);
