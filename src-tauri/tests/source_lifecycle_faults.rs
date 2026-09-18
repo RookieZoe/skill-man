@@ -1744,3 +1744,33 @@ fn finalized_restore_recovery_preserves_installed_bytes_after_backup_cleanup() {
         "roll-forward also commits the catalog health flip"
     );
 }
+
+#[test]
+fn update_draft_reports_ignored_dependency_links_on_the_wire() {
+    let fixture = fixture();
+    let remote_id = confirm_transition(&fixture);
+    std::os::unix::fs::symlink(
+        "/missing/author/environment",
+        fixture.repository.join("skills/alpha/.venv"),
+    )
+    .unwrap();
+    git(&fixture.repository, &["add", "-A"]);
+    git(
+        &fixture.repository,
+        &["commit", "-qm", "external dependency"],
+    );
+    let draft = fixture.update.preview(&remote_id, None).unwrap();
+    let wire =
+        serde_json::to_value(skill_man_lib::tauri_adapter::dto::SourceUpdateDraftDto::from(draft))
+            .unwrap();
+    let alpha = wire["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["skillPath"] == "skills/alpha")
+        .unwrap();
+    assert_eq!(
+        alpha["ignoredDependencyLinks"],
+        serde_json::json!([".venv"])
+    );
+}

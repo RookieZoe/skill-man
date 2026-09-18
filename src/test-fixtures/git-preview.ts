@@ -53,6 +53,8 @@ export function createGitPreviewClient(forceReplacement = false) {
           skillPath: `agent-skills/web-design/example-skill-${index + 1}`,
           treeSummary: "b".repeat(40),
           action: "added",
+          ignoredDependencyLinks:
+            index === 0 ? [".venv", "tools/node_modules"] : [],
         })),
       },
     },

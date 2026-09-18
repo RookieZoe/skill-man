@@ -218,6 +218,7 @@ impl From<SourceGroupMemberAction> for SourceGroupMemberActionDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceGroupMemberDto {
+    pub ignored_dependency_links: Vec<String>,
     pub plugin_name: Option<String>,
     pub directory_name: String,
     pub display_name: String,
@@ -230,6 +231,7 @@ pub struct SourceGroupMemberDto {
 impl From<SourceGroupMember> for SourceGroupMemberDto {
     fn from(value: SourceGroupMember) -> Self {
         Self {
+            ignored_dependency_links: value.ignored_dependency_links,
             plugin_name: value.plugin_name,
             directory_name: value.directory_name,
             display_name: value.display_name,
@@ -395,6 +397,7 @@ impl From<SourcePromotionMemberState> for SourcePromotionMemberStateDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourcePromotionDraftMemberDto {
+    pub ignored_dependency_links: Vec<String>,
     pub plugin_name: Option<String>,
     pub skill_path: String,
     pub directory_name: String,
@@ -445,6 +448,7 @@ impl From<SourcePromotionDraft> for SourcePromotionDraftDto {
                 .members
                 .into_iter()
                 .map(|member| SourcePromotionDraftMemberDto {
+                    ignored_dependency_links: member.ignored_dependency_links,
                     plugin_name: member.plugin_name,
                     skill_path: member.skill_path,
                     directory_name: member.directory_name,
@@ -655,6 +659,7 @@ impl From<crate::core::source_update::SourceUpdateMemberState> for SourceUpdateM
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceUpdateDraftMemberDto {
+    pub ignored_dependency_links: Vec<String>,
     pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
@@ -697,6 +702,7 @@ impl From<crate::core::source_update::SourceUpdateDraft> for SourceUpdateDraftDt
                 .members
                 .into_iter()
                 .map(|member| SourceUpdateDraftMemberDto {
+                    ignored_dependency_links: member.ignored_dependency_links,
                     plugin_name: member.plugin_name,
                     skill_id: member.skill_id,
                     skill_path: member.skill_path,
@@ -4794,6 +4800,7 @@ mod tests {
                     resolved_commit: "a".repeat(40),
                 },
                 members: vec![SourceGroupMember {
+                    ignored_dependency_links: vec![".venv".into()],
                     plugin_name: None,
                     directory_name: "skill-a".into(),
                     directory_identity_key: crate::core::domain::skill_identity_key("skill-a"),
@@ -4850,6 +4857,7 @@ mod tests {
                         "description": "A complete member",
                         "skillPath": "skills/skill-a",
                         "treeSummary": "3 files",
+                        "ignoredDependencyLinks": [".venv"],
                         "action": "added"
                     }],
                     "externalOwnershipClaims": [{

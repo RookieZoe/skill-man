@@ -29,6 +29,24 @@ pub fn extract_zip_archive(
     extraction_root: &Path,
     strip_prefix: Option<&Path>,
 ) -> Result<(), SourceError> {
+    extract_archive(archive_path, extraction_root, strip_prefix, false)
+}
+
+/// Git-only materialization policy; local ZIP imports retain every entry.
+pub(crate) fn extract_git_archive(
+    archive_path: &Path,
+    extraction_root: &Path,
+    strip_prefix: Option<&Path>,
+) -> Result<(), SourceError> {
+    extract_archive(archive_path, extraction_root, strip_prefix, true)
+}
+
+fn extract_archive(
+    archive_path: &Path,
+    extraction_root: &Path,
+    strip_prefix: Option<&Path>,
+    omit_external_dependencies: bool,
+) -> Result<(), SourceError> {
     fs::create_dir(extraction_root).map_err(|source| SourceError::Io {
         operation: "create ZIP extraction root",
         path: extraction_root.to_path_buf(),
@@ -197,6 +215,16 @@ pub fn extract_zip_archive(
                     source,
                 })?;
             let target = PathBuf::from(std::ffi::OsString::from_vec(target));
+            if omit_external_dependencies
+                && crate::core::git_source::is_external_dependency_link(
+                    link_path
+                        .strip_prefix(extraction_root)
+                        .expect("selected entry"),
+                    &target,
+                )
+            {
+                continue;
+            }
             std::os::unix::fs::symlink(&target, &link_path).map_err(|source| SourceError::Io {
                 operation: "create staged ZIP symlink",
                 path: link_path,

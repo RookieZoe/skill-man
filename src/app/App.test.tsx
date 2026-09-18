@@ -2148,3 +2148,27 @@ test("manual-update builds ignore persisted update checks and show the release l
     availability.mockRestore();
   }
 });
+
+test("Git import warns about omitted dependency links without blocking installation", async () => {
+  const user = userEvent.setup();
+  render(<App client={createGitPreviewClient()} />);
+  await screen.findByRole("heading", { name: "skill-authoring" });
+  await user.click(screen.getByRole("button", { name: "Import" }));
+  await user.click(screen.getByRole("button", { name: "Install Git Skills" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Repository URL" }),
+    "example/skills",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Fetch latest preview" }),
+  );
+  expect(
+    await screen.findByText(/may need to rebuild dependencies in a local copy/),
+  ).toBeVisible();
+  expect(
+    screen.getByText("agent-skills/web-design/example-skill-1/.venv"),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Install all 12 Skills" }),
+  ).toBeEnabled();
+});

@@ -214,6 +214,7 @@ export function SourceGroupPreviewFlow({
             </dd>
           </div>
         </dl>
+        <IgnoredDependencyWarning members={promotionDraft.members} />
         <PromotionManifest draft={promotionDraft} />
         {error ? (
           <div
@@ -252,6 +253,7 @@ export function SourceGroupPreviewFlow({
           </span>
           <h2>{t("library.source_group.update_title")}</h2>
         </div>
+        <IgnoredDependencyWarning members={updateDraft.members} />
         <section
           className="source-group-members"
           aria-label={t("library.source_group.members")}
@@ -375,6 +377,7 @@ export function SourceGroupPreviewFlow({
             </div>
           </dl>
         </details>
+        <IgnoredDependencyWarning members={preview.members} />
         <section
           className="source-group-members"
           aria-label={t("library.source_group.members")}
@@ -799,4 +802,30 @@ function ExternalClaims({ claims }: { claims: ExternalOwnershipClaim[] }) {
 
 export function memberActionLabel(member: SourceGroupMember) {
   return member.action;
+}
+
+function IgnoredDependencyWarning({
+  members,
+}: {
+  members: { skillPath: string; ignoredDependencyLinks?: string[] }[];
+}) {
+  const { t } = useLocale();
+  const paths = members.flatMap((member) =>
+    (member.ignoredDependencyLinks ?? []).map((path) =>
+      [member.skillPath, path].filter(Boolean).join("/"),
+    ),
+  );
+  if (!paths.length) return null;
+  return (
+    <div className="operation-message operation-message--warning">
+      <p>{t("library.source_group.ignored_dependencies")}</p>
+      <ul>
+        {paths.map((path) => (
+          <li key={path}>
+            <code>{path}</code>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }

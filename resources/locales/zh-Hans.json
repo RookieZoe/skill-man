@@ -604,6 +604,7 @@
   "library.source_group.source": "来源",
   "library.source_group.tracking_ref": "跟踪引用",
   "library.source_group.resolved_commit": "已解析提交",
+  "library.source_group.ignored_dependencies": "将忽略以下指向技能外部的环境依赖软链。使用前可能需要在本地副本或项目目录中重建依赖环境。",
   "library.source_group.members": "来源成员",
   "library.source_group.tree_summary": "目标树",
   "library.source_group.external_claims": "已有安装记录",

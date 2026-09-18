@@ -25,6 +25,7 @@ use crate::seams::remote_provider::{ProviderReleaseFact, RemoteProvider};
 use crate::seams::source::{GitSource, GitTreeEntryKind, SourceError};
 
 const MAX_SKILL_DOCUMENT_BYTES: usize = 512 * 1024;
+const MAX_DEPENDENCY_SYMLINKS: usize = 256;
 
 pub(crate) fn external_claim_member_path(path: &str) -> &str {
     if path == "SKILL.md" {
@@ -129,6 +130,7 @@ pub enum SourceGroupMemberAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceGroupMember {
+    pub ignored_dependency_links: Vec<String>,
     pub directory_name: String,
     pub directory_identity_key: String,
     pub display_name: String,
@@ -335,11 +337,9 @@ impl SourceGroupPreviewService {
             ));
         }
         let tree_files = tree_entries
-            .into_iter()
-            .filter_map(|entry| {
-                (entry.kind == GitTreeEntryKind::Blob)
-                    .then(|| entry.path.to_string_lossy().into_owned())
-            })
+            .iter()
+            .filter(|entry| entry.kind == GitTreeEntryKind::Blob)
+            .map(|entry| entry.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         let mut read_error = None;
         let discovered =
@@ -366,6 +366,28 @@ impl SourceGroupPreviewService {
             ));
         }
 
+        // Bound the entire repository scan before launching any per-link Git
+        // reads; a per-blob size limit does not bound subprocess work.
+        let mut dependency_links = BTreeSet::new();
+        for entry in &tree_entries {
+            if entry.kind == GitTreeEntryKind::Symlink
+                && entry
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name == ".venv" || name == "venv" || name == "node_modules")
+                && discovered
+                    .iter()
+                    .any(|skill| entry.path.starts_with(&skill.path))
+            {
+                dependency_links.insert(&entry.path);
+                if dependency_links.len() > MAX_DEPENDENCY_SYMLINKS {
+                    return Err(SourceGroupPreviewError::Validation(format!(
+                        "source dependency symlink limit exceeded: at most {MAX_DEPENDENCY_SYMLINKS} dependency symlinks within discovered Skills per repository"
+                    )));
+                }
+            }
+        }
+
         let mut members = Vec::with_capacity(discovered.len());
         for skill in discovered {
             validate_skill_path(&skill.path)
@@ -375,7 +397,31 @@ impl SourceGroupPreviewService {
             } else {
                 skill.path.rsplit('/').next().unwrap().to_owned()
             };
+            let mut ignored_dependency_links = Vec::new();
+            for path in &dependency_links {
+                let Ok(relative) = path.strip_prefix(std::path::Path::new(&skill.path)) else {
+                    continue;
+                };
+                if let Some(bytes) = self.git_source.read_blob(
+                    &mirror,
+                    &resolved.commit,
+                    &path.to_string_lossy(),
+                    4096,
+                )? {
+                    // Invalid UTF-8 remains subject to the existing closed validation.
+                    if let Ok(target) = std::str::from_utf8(&bytes)
+                        && crate::core::git_source::is_external_dependency_link(
+                            relative,
+                            std::path::Path::new(target),
+                        )
+                    {
+                        ignored_dependency_links.push(relative.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            ignored_dependency_links.sort();
             members.push(SourceGroupMember {
+                ignored_dependency_links,
                 directory_identity_key: crate::core::domain::skill_identity_key(&directory_name),
                 display_name: skill.name,
                 description: skill.description,

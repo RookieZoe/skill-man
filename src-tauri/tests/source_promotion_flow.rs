@@ -496,3 +496,43 @@ fn promotion_keeps_the_policy_selection_in_the_manifest() {
     assert_eq!(draft.policy.selection_kind, "head");
     assert_eq!(draft.policy.selected_ref, "HEAD");
 }
+
+#[test]
+fn promotion_draft_reports_ignored_dependency_links_on_the_wire() {
+    let fixture = fixture();
+    let repository = fixture._workspace.path().join("source-repository");
+    std::os::unix::fs::symlink(
+        "/missing/author/environment",
+        repository.join("skills/alpha/.venv"),
+    )
+    .unwrap();
+    git(&repository, &["add", "-A"]);
+    git(&repository, &["commit", "-qm", "external dependency"]);
+    let SourcePromotionDraftOutcome::Draft(draft) = fixture
+        .service
+        .preview(
+            "remote-legacy",
+            Some(SourceTrackingOverride {
+                mode: "branch".into(),
+                value: Some("main".into()),
+            }),
+        )
+        .unwrap()
+    else {
+        panic!("promotion draft");
+    };
+    let wire = serde_json::to_value(
+        skill_man_lib::tauri_adapter::dto::SourcePromotionDraftDto::from(*draft),
+    )
+    .unwrap();
+    let alpha = wire["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["skillPath"] == "skills/alpha")
+        .unwrap();
+    assert_eq!(
+        alpha["ignoredDependencyLinks"],
+        serde_json::json!([".venv"])
+    );
+}

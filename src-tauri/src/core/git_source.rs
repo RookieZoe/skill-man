@@ -15,6 +15,38 @@ use crate::seams::source::{GitFetchReport, GitSource, SourceError};
 
 pub const MAX_SOURCE_SKILLS: usize = 100;
 
+/// Git snapshots omit only named dependency links whose target escapes the
+/// Skill root. This is lexical: never inspect the author's external filesystem.
+/// Callers must first establish that the entry is a symlink.
+pub fn is_external_dependency_link(relative_path: &Path, target: &Path) -> bool {
+    use std::path::Component;
+    if target.to_str().is_none() {
+        return false;
+    }
+    if !relative_path
+        .file_name()
+        .is_some_and(|name| name == ".venv" || name == "venv" || name == "node_modules")
+    {
+        return false;
+    }
+    if target.is_absolute() {
+        return true;
+    }
+    let mut depth = relative_path
+        .parent()
+        .map_or(0, |path| path.components().count());
+    for component in target.components() {
+        match component {
+            Component::ParentDir if depth == 0 => return true,
+            Component::ParentDir => depth -= 1,
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourceSpec {
     /// Normalized clone URL (https, or file:// for local fixtures).

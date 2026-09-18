@@ -59,3 +59,19 @@ Repository-controlled documents are read lazily within existing size limits;
 unused YAML fields are skipped without materializing alias expansions. Plugin
 paths cannot escape the repository. Existing conservative symlink checks remain
 in force.
+
+Git materialization omits symlinks named exactly `.venv`, `venv`, or
+`node_modules` at any depth within a Skill when the target is absolute or
+lexically escapes that Skill's root. No target is followed or copied. Preview
+lists these omitted paths and warns that dependencies may need rebuilding in a
+local copy or project directory. Regular files/directories, internal links and
+other unsafe links retain their existing validation. Local ZIP imports are
+unchanged. Import, Update and Restore use the same Git materialization policy;
+snapshot hashes describe the materialized bytes, while the Git tree summary
+continues to identify the original remote tree. Recovery and Undo use frozen
+snapshots and their hashes without applying new filtering to existing bytes.
+
+Preview checks at most 256 dependency-named symlinks across all discovered Skills
+in a repository. Repositories above this limit are rejected before any dependency
+link target is read; the error names the 256-link limit. Links outside discovered
+Skills do not count. This bounds per-link Git reads independently of blob size.

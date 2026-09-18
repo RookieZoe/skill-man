@@ -41,6 +41,7 @@ pub enum SourceUpdateMemberState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceUpdateDraftMember {
+    pub ignored_dependency_links: Vec<String>,
     pub plugin_name: Option<String>,
     pub skill_id: String,
     pub skill_path: String,
@@ -209,6 +210,7 @@ impl SourceUpdateService {
                     .map(|member| member.skill_id.0.clone())
                     .unwrap_or_default();
                 SourceUpdateDraftMember {
+                    ignored_dependency_links: member.ignored_dependency_links.clone(),
                     plugin_name: member.plugin_name.clone(),
                     skill_id,
                     skill_path: member.skill_path.clone(),
@@ -237,6 +239,7 @@ impl SourceUpdateService {
                 && !discovered_paths.contains(skill_path.as_str())
             {
                 members.push(SourceUpdateDraftMember {
+                    ignored_dependency_links: Vec::new(),
                     plugin_name: None,
                     skill_id: member.skill_id.0.clone(),
                     skill_path: skill_path.clone(),

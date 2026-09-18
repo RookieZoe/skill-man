@@ -477,3 +477,67 @@ test("requires a ref choice before re-fetching a typed ref conflict", async () =
   expect(onPolicyChange).toHaveBeenCalledWith("branch", "release");
   expect(onFetch).toHaveBeenCalledOnce();
 });
+
+test.each(["update", "promotion"] as const)(
+  "%s warns about skipped external dependency links before confirmation",
+  (mode) => {
+    const draft = {
+      remoteId: "remote-1",
+      provider: "github",
+      sourceUrl: "https://github.com/acme/repository",
+      aliases: [],
+      policy: preview.preview.policy,
+      members: [
+        {
+          skillId: "skill-1",
+          skillPath: "skills/root",
+          directoryName: "root",
+          directoryIdentityKey: "root",
+          displayName: "Root Skill",
+          description: "Member",
+          treeSummary: "tree",
+          state: "current" as const,
+          ignoredDependencyLinks: [".venv"],
+        },
+      ],
+    };
+    render(
+      <SourceGroupPreviewFlow
+        sourceType="github"
+        sourceUrl={draft.sourceUrl}
+        policyMode="branch"
+        policyValue="main"
+        outcome={null}
+        promotionDraft={
+          mode === "promotion"
+            ? {
+                ...draft,
+                removedMembers: [],
+                legacyMemberCount: 1,
+                externalOwnershipClaims: [],
+              }
+            : null
+        }
+        promotionOutcome={null}
+        updateDraft={
+          mode === "update" ? { ...draft, alreadyCurrent: false } : null
+        }
+        result={null}
+        error={null}
+        activity="idle"
+        onSourceTypeChange={vi.fn()}
+        onSourceUrlChange={vi.fn()}
+        onSourceGroupPolicyChange={vi.fn()}
+        onFetch={vi.fn()}
+        onConfirm={vi.fn()}
+        onConfirmPromotion={vi.fn()}
+        onUndo={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("skills/root/.venv")).toBeVisible();
+    expect(
+      screen.getByText(/may need to rebuild dependencies in a local copy/),
+    ).toBeVisible();
+  },
+);

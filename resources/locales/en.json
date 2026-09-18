@@ -605,6 +605,7 @@
   "library.source_group.source": "Source",
   "library.source_group.tracking_ref": "Tracking ref",
   "library.source_group.resolved_commit": "Resolved commit",
+  "library.source_group.ignored_dependencies": "These environment dependency symlinks point outside the Skill and will be skipped. You may need to rebuild dependencies in a local copy or project directory before use.",
   "library.source_group.members": "Source Members",
   "library.source_group.tree_summary": "Target tree",
   "library.source_group.external_claims": "Existing installation records",

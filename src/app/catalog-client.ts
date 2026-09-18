@@ -1328,6 +1328,7 @@ export interface ExternalOwnershipClaim {
 export type SourceGroupMemberAction = "added" | "current";
 
 export interface SourceGroupMember {
+  ignoredDependencyLinks?: string[];
   pluginName?: string | null;
   directoryName: string;
   displayName: string;
@@ -1403,6 +1404,7 @@ export interface SourceUndoResult {
 export type SourcePromotionMemberState = "added" | "current";
 
 export interface SourcePromotionDraftMember {
+  ignoredDependencyLinks?: string[];
   pluginName?: string | null;
   skillPath: string;
   directoryName: string;
@@ -1458,6 +1460,7 @@ export interface SourcePromotionResult {
 export type SourceUpdateMemberState = "current" | "added" | "removed";
 
 export interface SourceUpdateDraftMember {
+  ignoredDependencyLinks?: string[];
   pluginName?: string | null;
   skillId: string;
   skillPath: string;

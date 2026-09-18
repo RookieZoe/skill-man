@@ -37,6 +37,7 @@ pub enum SourcePromotionMemberState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourcePromotionDraftMember {
+    pub ignored_dependency_links: Vec<String>,
     pub plugin_name: Option<String>,
     pub skill_path: String,
     pub directory_name: String,
@@ -153,6 +154,7 @@ impl SourcePromotionService {
                     .members
                     .iter()
                     .map(|member| SourcePromotionDraftMember {
+                        ignored_dependency_links: member.ignored_dependency_links.clone(),
                         plugin_name: member.plugin_name.clone(),
                         skill_path: member.skill_path.clone(),
                         directory_name: member.directory_name.clone(),

@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::adapters::zip_extract::{MAX_STAGED_SOURCE_BYTES, extract_zip_archive};
+use crate::adapters::zip_extract::{MAX_STAGED_SOURCE_BYTES, extract_git_archive};
 use crate::seams::source::{
     GitFetchReport, GitSource, GitTreeEntry, GitTreeEntryKind, SourceError,
 };
@@ -576,7 +576,7 @@ impl GitSource for SystemGitSource {
         let result = run_git_to_file(&args, LOCAL_OP_TIMEOUT_SECONDS, archive_cap, &archive_path)
             .map(|_| ())
             .and_then(|()| {
-                extract_zip_archive(
+                extract_git_archive(
                     &archive_path,
                     destination,
                     (!skill_path.is_empty()).then(|| Path::new(skill_path)),

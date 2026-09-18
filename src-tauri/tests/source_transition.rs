@@ -3011,3 +3011,82 @@ fn repository_rename_and_path_aliases_never_move_the_storage_path() {
         "storage paths are exactly skills/git/<remote_id>/<skill_id>"
     );
 }
+
+#[test]
+fn dependency_link_import_preserves_snapshot_integrity_and_undo() {
+    let fixture = fixture();
+    let repository = fixture._workspace.path().join("source-repository");
+    std::os::unix::fs::symlink(
+        "/missing/author/venv",
+        repository.join("skills/source/.venv"),
+    )
+    .unwrap();
+    git(&repository, &["add", "-A"]);
+    git(&repository, &["commit", "-qm", "external dependency"]);
+    let transition = service(&fixture, fixture.catalog.clone());
+    let result = transition
+        .confirm(confirmation(&fixture))
+        .expect("dependency link does not block import");
+    let journals = fixture
+        .filesystem
+        .list_source_transition_journals(&fixture.library)
+        .unwrap();
+    let journal = journals
+        .iter()
+        .find(|j| j.operation_id == result.operation_id)
+        .unwrap();
+    for member in &journal.members {
+        let snapshot = fixture
+            .filesystem
+            .staged_tree_snapshot(&member.namespace_path)
+            .unwrap();
+        assert_eq!(snapshot.content_hash, member.tree_hash);
+        assert!(std::fs::symlink_metadata(member.namespace_path.join(".venv")).is_err());
+        assert!(member.namespace_path.join("SKILL.md").is_file());
+    }
+    transition
+        .undo(&result.operation_id)
+        .expect("undo uses materialized hash");
+    assert!(
+        fixture
+            .home
+            .join(".agents/skills/source/SKILL.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn dependency_link_exception_does_not_allow_other_external_links() {
+    for name in ["external-assets", ".venv-backup", "SKILL.md"] {
+        let fixture = fixture();
+        let repository = fixture._workspace.path().join("source-repository");
+        let path = repository.join("skills/source").join(name);
+        if name == "SKILL.md" {
+            std::fs::remove_file(&path).unwrap();
+        }
+        std::os::unix::fs::symlink("/missing/author/venv", path).unwrap();
+        git(&repository, &["add", "-A"]);
+        git(&repository, &["commit", "-qm", "unsafe link"]);
+        if name == "SKILL.md" {
+            assert!(
+                fixture
+                    .preview
+                    .fetch_latest_and_manage(FetchLatestAndManageRequest {
+                        source_type: "git".into(),
+                        source_url: "https://example.com/acme/source".into(),
+                        tracking_policy: None,
+                    })
+                    .is_err()
+            );
+        } else {
+            let transition = service(&fixture, fixture.catalog.clone());
+            assert!(transition.confirm(confirmation(&fixture)).is_err());
+        }
+        assert!(
+            fixture
+                .home
+                .join(".agents/skills/source/SKILL.md")
+                .is_file()
+        );
+    }
+}

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use skill_man_lib::adapters::git_source::SystemGitSource;
 use skill_man_lib::core::source_group_preview::{
@@ -32,6 +33,7 @@ impl InstallerLockStore for StaticLocks {
 struct FixtureGitSource {
     inner: SystemGitSource,
     fixture_url: String,
+    dependency_blob_reads: AtomicUsize,
 }
 
 impl FixtureGitSource {
@@ -39,6 +41,7 @@ impl FixtureGitSource {
         Self {
             inner: SystemGitSource::new(),
             fixture_url: format!("file://{}", repository.display()),
+            dependency_blob_reads: AtomicUsize::new(0),
         }
     }
 }
@@ -67,6 +70,12 @@ impl GitSource for FixtureGitSource {
         path: &str,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, SourceError> {
+        if Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == ".venv" || name == "venv" || name == "node_modules")
+        {
+            self.dependency_blob_reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.read_blob(mirror_dir, commit, path, max_bytes)
     }
 
@@ -614,4 +623,164 @@ fn prerelease_channel_requires_an_explicit_channel_or_fails_closed() {
     };
     assert_eq!(preview.policy.selection_kind, "prerelease_channel");
     assert_eq!(preview.policy.selected_ref, "v2.0.0-rc.1");
+}
+
+#[test]
+fn external_dependency_links_are_reported_and_omitted_from_git_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = committed_repo(temp.path());
+    let root = repo.join("packages/root");
+    write_file(&root, "assets/data", "preserved");
+    write_file(&root, "real/node_modules/package.json", "{}");
+    write_file(&root, "venv-file", "ordinary file");
+    for (path, target) in [
+        (".venv", "/missing/author/environment"),
+        ("venv", "../../../external"),
+        ("nested/node_modules", "../../external"),
+        ("internal/node_modules", "../assets"),
+        ("assets-link", "assets"),
+        ("other", "/missing/unsafe"),
+    ] {
+        let link = root.join(path);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+    git(&repo, &["add", "-f", "."]);
+    git(&repo, &["commit", "-qm", "dependency links"]);
+    let service = SourceGroupPreviewService::new(
+        Arc::new(FixtureGitSource::new(&repo)),
+        Arc::new(EmptyLocks),
+    );
+    let SourceGroupPreviewOutcome::Preview(preview) = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: None,
+        })
+        .unwrap()
+    else {
+        panic!("preview")
+    };
+    let member = preview
+        .members
+        .iter()
+        .find(|m| m.skill_path == "packages/root")
+        .unwrap();
+    assert_eq!(
+        member.ignored_dependency_links,
+        [".venv", "nested/node_modules", "venv"]
+    );
+    let source = SystemGitSource::new();
+    for skill_path in ["packages/root", ""] {
+        let destination = temp.path().join(if skill_path.is_empty() {
+            "root-snapshot"
+        } else {
+            "snapshot"
+        });
+        source
+            .stage_skill(
+                &repo,
+                &preview.policy.resolved_commit,
+                skill_path,
+                &destination,
+            )
+            .unwrap();
+        let staged = if skill_path.is_empty() {
+            destination.join("packages/root")
+        } else {
+            destination
+        };
+        assert!(std::fs::symlink_metadata(staged.join(".venv")).is_err());
+        assert!(std::fs::symlink_metadata(staged.join("venv")).is_err());
+        // Relative containment is evaluated against each Skill's own root.
+        assert_eq!(
+            staged.join("nested/node_modules").is_symlink(),
+            skill_path.is_empty()
+        );
+        assert!(staged.join("internal/node_modules").is_symlink());
+        assert_eq!(
+            std::fs::read(staged.join("assets-link/data")).unwrap(),
+            b"preserved"
+        );
+        assert_eq!(
+            std::fs::read(staged.join("real/node_modules/package.json")).unwrap(),
+            b"{}"
+        );
+        assert!(
+            staged.join("other").is_symlink(),
+            "other unsafe links must reach normal validation"
+        );
+    }
+}
+
+#[test]
+fn dependency_symlink_budget_is_repository_wide_and_checked_before_blob_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = committed_repo(temp.path());
+    for index in 0..257 {
+        let skill = if index % 2 == 0 { "root" } else { "beta" };
+        let link = repo.join(format!("packages/{skill}/env-{index}/.venv"));
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/missing/author/environment", link).unwrap();
+    }
+    git(&repo, &["add", "-f", "."]);
+    git(&repo, &["commit", "-qm", "too many dependency links"]);
+    let source = Arc::new(FixtureGitSource::new(&repo));
+    let service = SourceGroupPreviewService::new(source.clone(), Arc::new(EmptyLocks));
+    let error = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: None,
+        })
+        .expect_err(
+            "repository-wide dependency symlink budget must reject before scanning targets",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("dependency symlink limit exceeded")
+    );
+    assert!(error.to_string().contains("256"));
+    assert_eq!(source.dependency_blob_reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dependency_symlink_budget_excludes_paths_outside_discovered_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = committed_repo(temp.path());
+    for index in 0..257 {
+        let link = repo.join(format!("unrelated/env-{index}/.venv"));
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/missing/author/environment", link).unwrap();
+    }
+    std::os::unix::fs::symlink(
+        "/missing/author/environment",
+        repo.join("packages/root/.venv"),
+    )
+    .unwrap();
+    git(&repo, &["add", "-f", "."]);
+    git(&repo, &["commit", "-qm", "unrelated dependency links"]);
+    let source = Arc::new(FixtureGitSource::new(&repo));
+    let service = SourceGroupPreviewService::new(source.clone(), Arc::new(EmptyLocks));
+    let SourceGroupPreviewOutcome::Preview(preview) = service
+        .fetch_latest_and_manage(FetchLatestAndManageRequest {
+            source_type: "git".into(),
+            source_url: "https://example.com/acme/source".into(),
+            tracking_policy: None,
+        })
+        .expect("unrelated dependency links must not exhaust the budget")
+    else {
+        panic!("expected preview");
+    };
+    assert_eq!(source.dependency_blob_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        preview
+            .members
+            .iter()
+            .find(|member| member.skill_path == "packages/root")
+            .unwrap()
+            .ignored_dependency_links,
+        [".venv"]
+    );
 }
