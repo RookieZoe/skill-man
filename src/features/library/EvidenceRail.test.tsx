@@ -77,7 +77,7 @@ describe("EvidenceRail", () => {
         health="healthy"
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Open in Finder" }));
+    await user.click(screen.getByRole("button", { name: "Show in Finder" }));
     expect(invoke).toHaveBeenCalledWith("open_skill_directory", {
       skillId: "selected-skill",
     });
@@ -85,7 +85,7 @@ describe("EvidenceRail", () => {
       "Could not open",
     );
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
-    await user.click(screen.getByRole("button", { name: "Open in Finder" }));
+    await user.click(screen.getByRole("button", { name: "Show in Finder" }));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

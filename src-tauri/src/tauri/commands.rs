@@ -514,29 +514,30 @@ pub fn inspect_skill(
 /// Open only a catalog-resolved Skill directory, never a frontend-supplied path.
 #[tauri::command]
 pub fn open_skill_directory(
-    app: AppHandle,
     state: State<'_, CatalogApi>,
     skill_id: String,
 ) -> Result<(), CommandFailureDto> {
-    use tauri_plugin_opener::OpenerExt;
-
     let detail = state.inspect_skill(skill_id)?;
-    let path = std::path::Path::new(&detail.final_entity_path);
+    reveal_skill_directory_path(&detail.final_entity_path)
+}
+
+fn reveal_skill_directory_path(directory: &str) -> Result<(), CommandFailureDto> {
+    let path = std::path::Path::new(directory);
     if !path.is_absolute() || !path.is_dir() {
         return Err(CommandFailureDto {
             error: PublicErrorDto::NotFound,
             diagnostic: None,
         });
     }
-    app.opener()
-        .open_path(detail.final_entity_path, None::<&str>)
-        .map_err(|error| CommandFailureDto {
-            error: PublicErrorDto::CatalogUnavailable,
-            diagnostic: Some(DiagnosticDto {
-                code: "open_skill_directory_failed".into(),
-                message: error.to_string(),
-            }),
-        })
+    // Even opening with Finder can execute .app bundles. Reveal selects the
+    // directory without invoking its default handler or opening its contents.
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| CommandFailureDto {
+        error: PublicErrorDto::CatalogUnavailable,
+        diagnostic: Some(DiagnosticDto {
+            code: "open_skill_directory_failed".into(),
+            message: error.to_string(),
+        }),
+    })
 }
 
 #[tauri::command]
@@ -1291,4 +1292,97 @@ pub async fn check_community_update(
     app: tauri::AppHandle,
 ) -> Result<Option<crate::core::community_update::CommunityUpdate>, String> {
     crate::adapters::community_release_source::check(&app.package_info().version.to_string()).await
+}
+
+#[cfg(test)]
+mod directory_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_directory_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing.app");
+        let file = root.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        for directory in [
+            "relative",
+            missing.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ] {
+            assert_eq!(
+                reveal_skill_directory_path(directory).unwrap_err().error,
+                PublicErrorDto::NotFound
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "opens Finder; requires an interactive macOS session"]
+    fn native_directory_navigation_does_not_execute_app_bundles() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("NavigationFixture.app");
+        let executable = bundle.join("Contents/MacOS/probe");
+        let marker = root.path().join("executed");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\n/usr/bin/touch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>probe</string><key>CFBundleIdentifier</key><string>dev.skill-man.navigation-fixture</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#).unwrap();
+        let unique_id = format!(
+            "dev.skill-man.navigation-fixture-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let info_path = bundle.join("Contents/Info.plist");
+        let info = std::fs::read_to_string(&info_path).unwrap();
+        std::fs::write(
+            &info_path,
+            info.replace("dev.skill-man.navigation-fixture", &unique_id),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("SKILL.md"), "# Navigation fixture").unwrap();
+        // Use a separate bundle for the positive control: LaunchServices may
+        // reuse a recently exited application instead of launching it again.
+        let control = root.path().join("ControlFixture.app");
+        std::fs::create_dir_all(control.join("Contents/MacOS")).unwrap();
+        std::fs::copy(&executable, control.join("Contents/MacOS/probe")).unwrap();
+        let info = std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+        std::fs::write(
+            control.join("Contents/Info.plist"),
+            info.replace("navigation-fixture", "navigation-control"),
+        )
+        .unwrap();
+        // Prove this fixture is executable before testing navigation. A broken
+        // bundle must not turn the negative assertion into a hollow pass.
+        assert!(
+            std::process::Command::new("/usr/bin/open")
+                .arg("-n")
+                .arg("-W")
+                .arg(&control)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            marker.exists(),
+            "fixture must execute through the default handler"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        reveal_skill_directory_path(bundle.to_str().unwrap()).unwrap();
+        let ordinary = root.path().join("ordinary-skill");
+        std::fs::create_dir(&ordinary).unwrap();
+        reveal_skill_directory_path(ordinary.to_str().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(
+            !marker.exists(),
+            "directory navigation executed the app bundle"
+        );
+    }
 }
