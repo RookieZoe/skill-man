@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **Archived / 已归档 — 2026-10-03**
+>
+> Skill Man is archived and is no longer maintained. We recommend [Magpie](https://github.com/yetone/magpie), which shares the same core approach to Skill management: keep Skills in one place and distribute them to the agents you use. Future development of Skill Man has stopped, and all open issues have been closed. The code, releases, and documentation below are retained for historical reference. Thank you for your support!
+>
+> Skill Man 已归档，停止维护。推荐使用 [Magpie](https://github.com/yetone/magpie)，它与本项目有着相同的核心 Skill 管理理念：集中管理 Skills，并分发到你使用的各个 Agent。Skill Man 不再继续开发，所有开放 issue 均已关闭；现有代码、发行版本及下方文档保留供历史参考。感谢大家的使用与支持！
+
 # Skill Man
 
 A macOS app for keeping your AI Agent Skills in one place and distributing them to the agents you use.
@@ -66,8 +73,8 @@ npm run ci:local
 
 Run the full verification gate locally before submitting changes. See [development commands](docs/development.md), the [domain model](CONTEXT.md), the [implementation spec](docs/vnext-implementation-spec.md), and the [release manual](docs/release.md) for details.
 
-## Feedback and license
+## Archive and license
 
-Report bugs and suggest improvements in [Issues](https://github.com/RookieZoe/skill-man/issues). Include the app version, macOS version, and steps to reproduce a bug.
+This repository is read-only. Past discussions remain available in [Issues](https://github.com/RookieZoe/skill-man/issues?q=is%3Aissue+is%3Aclosed).
 
 [MIT](LICENSE) © 2026 RookieZoe
